@@ -1,0 +1,19 @@
+name = "aht-curseforge-proxy"
+main = "curseforge-proxy-worker.js"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+# After deployment:
+# wrangler secret put CURSEFORGE_API_KEY
+# wrangler secret put LAUNCHER_PROOF_SECRET
+# wrangler secret put ADMIN_USERNAME
+# wrangler secret put ADMIN_PASSWORD
+# wrangler secret put ADMIN_TOKEN_SECRET
+
+[[r2_buckets]]
+binding = "AHT_RELEASES"
+bucket_name = "ahtlauncher"
+
+[[r2_buckets]]
+binding = "AHT_DATA"
+bucket_name = "ahtlauncher-data"

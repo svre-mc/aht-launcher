@@ -1,0 +1,625 @@
+import { createWriteStream } from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import AdmZip from 'adm-zip';
+import yauzl from 'yauzl';
+import yazl from 'yazl';
+import {
+  artifactUrl,
+  ensureDir,
+  hashFile,
+  slugify,
+  writeJsonFile
+} from './utils.js';
+
+const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function readManifest(zip) {
+  const entry = zip.getEntry('manifest.json');
+  if (!entry) {
+    throw new Error('ZIP does not contain manifest.json');
+  }
+  return JSON.parse(entry.getData().toString('utf8'));
+}
+
+function manifestFileKey(file) {
+  const projectId = file.projectID ?? file.projectId;
+  const fileId = file.fileID ?? file.fileId;
+  return projectId && fileId ? `${projectId}:${fileId}` : '';
+}
+
+function summarizeOverrides(zip, overridesDir) {
+  const prefix = `${overridesDir.replace(/\/+$/, '')}/`;
+  const files = zip.getEntries().filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix));
+  const embeddedModFiles = files.filter((entry) => entry.entryName.startsWith(`${prefix}mods/`));
+  const groupMap = new Map();
+  for (const entry of files) {
+    const rel = entry.entryName.slice(prefix.length);
+    const group = rel.includes('/') ? rel.slice(0, rel.indexOf('/')) : '(root)';
+    const current = groupMap.get(group) || { count: 0, bytes: 0 };
+    current.count += 1;
+    current.bytes += entry.header.size;
+    groupMap.set(group, current);
+  }
+  const groups = Object.fromEntries([...groupMap.entries()].sort(([a], [b]) => a.localeCompare(b)));
+  return {
+    fileCount: files.length,
+    embeddedModCount: embeddedModFiles.length,
+    embeddedModBytes: embeddedModFiles.reduce((sum, entry) => sum + entry.header.size, 0),
+    embeddedMods: embeddedModFiles.map((entry) => ({
+      path: entry.entryName,
+      size: entry.header.size
+    })),
+    groups
+  };
+}
+
+async function listJarFiles(root, rel = '') {
+  const target = path.join(root, rel);
+  const entries = await fs.readdir(target, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const childRel = rel ? path.join(rel, entry.name) : entry.name;
+    const childAbs = path.join(root, childRel);
+    if (entry.isDirectory()) {
+      files.push(...await listJarFiles(root, childRel));
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jar')) {
+      files.push(childAbs);
+    }
+  }
+  return files;
+}
+
+async function resolveCacheSource(cacheModsDir) {
+  if (!cacheModsDir) {
+    return null;
+  }
+
+  const source = path.resolve(cacheModsDir);
+  const sourceStat = await fs.stat(source);
+  if (!sourceStat.isDirectory()) {
+    throw new Error(`Cache source is not a directory: ${source}`);
+  }
+
+  const directMods = path.basename(source).toLowerCase() === 'mods';
+  const nestedMods = path.join(source, 'mods');
+  if (directMods) {
+    return {
+      modsDir: source,
+      instanceDir: path.dirname(source)
+    };
+  }
+  if (await pathExists(nestedMods)) {
+    return {
+      modsDir: nestedMods,
+      instanceDir: source
+    };
+  }
+
+  return {
+    modsDir: source,
+    instanceDir: path.dirname(source)
+  };
+}
+
+async function readInstanceAddonMap(instanceDir, modsDir) {
+  const addonMap = new Map();
+  const instanceJsonPath = path.join(instanceDir, 'minecraftinstance.json');
+  if (!(await pathExists(instanceJsonPath))) {
+    return { addonMap, instanceJsonPath: null };
+  }
+
+  const instanceJson = JSON.parse(await fs.readFile(instanceJsonPath, 'utf8'));
+  const addons = Array.isArray(instanceJson.installedAddons) ? instanceJson.installedAddons : [];
+  for (const addon of addons) {
+    const installedFile = addon.installedFile || {};
+    const projectId = installedFile.projectId ?? installedFile.projectID ?? addon.addonID ?? addon.projectID ?? addon.projectId;
+    const fileId = installedFile.id ?? installedFile.fileID ?? installedFile.fileId;
+    const key = projectId && fileId ? `${projectId}:${fileId}` : '';
+    if (!key) {
+      continue;
+    }
+
+    const candidates = [
+      ...(Array.isArray(addon.filePaths) ? addon.filePaths : []),
+      addon.fileNameOnDisk ? path.join(modsDir, addon.fileNameOnDisk) : '',
+      installedFile.fileNameOnDisk ? path.join(modsDir, installedFile.fileNameOnDisk) : '',
+      installedFile.fileName ? path.join(modsDir, installedFile.fileName) : ''
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      if (await pathExists(candidate)) {
+        addonMap.set(key, {
+          filePath: candidate,
+          fileName: path.basename(candidate),
+          source: 'curseforge-instance'
+        });
+        break;
+      }
+    }
+  }
+
+  return { addonMap, instanceJsonPath };
+}
+
+async function addCachedJar({ outDir, cacheManifest, sourcePath, key, fileName, source }) {
+  const sha256 = await hashFile(sourcePath, 'sha256');
+  const stats = await fs.stat(sourcePath);
+  const relPath = `cache/files/${sha256}.jar`;
+  const target = path.join(outDir, relPath);
+  if (!(await pathExists(target))) {
+    await ensureDir(path.dirname(target));
+    await fs.copyFile(sourcePath, target);
+  }
+
+  const entry = {
+    fileName: fileName || path.basename(sourcePath),
+    sha256,
+    size: stats.size,
+    url: relPath,
+    redistribution: 'private-cache',
+    source
+  };
+
+  if (key) {
+    cacheManifest.entries[key] = entry;
+  }
+  return entry;
+}
+
+async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir }) {
+  const cacheManifest = {
+    schemaVersion: 1,
+    packId,
+    generatedAt: new Date().toISOString(),
+    note: 'Only upload files you are allowed to redistribute. Cache entries are used after CurseForge download resolution fails.',
+    entries: {}
+  };
+
+  const cacheSummary = {
+    sourceDir: cacheModsDir || '',
+    modsDir: '',
+    minecraftInstanceJson: '',
+    localJarCount: 0,
+    localJarBytes: 0,
+    manifestFileCount: manifestFiles.length,
+    matchedManifestFiles: 0,
+    missingManifestFiles: [],
+    extraLocalFiles: 0,
+    copiedCacheFiles: 0,
+    copiedCacheBytes: 0
+  };
+
+  const cacheSource = await resolveCacheSource(cacheModsDir);
+  if (!cacheSource) {
+    return { cacheManifest, cacheSummary };
+  }
+
+  const { modsDir, instanceDir } = cacheSource;
+  cacheSummary.modsDir = modsDir;
+  const jarFiles = await listJarFiles(modsDir);
+  cacheSummary.localJarCount = jarFiles.length;
+  for (const jarFile of jarFiles) {
+    cacheSummary.localJarBytes += (await fs.stat(jarFile)).size;
+  }
+
+  const { addonMap, instanceJsonPath } = await readInstanceAddonMap(instanceDir, modsDir);
+  cacheSummary.minecraftInstanceJson = instanceJsonPath || '';
+  const jarByName = new Map(jarFiles.map((file) => [path.basename(file).toLowerCase(), file]));
+  const usedLocalFiles = new Set();
+  const copiedUrls = new Set();
+
+  for (const file of manifestFiles) {
+    const key = manifestFileKey(file);
+    if (!key) {
+      continue;
+    }
+
+    const match = addonMap.get(key);
+    const sourcePath = match?.filePath || (file.fileName ? jarByName.get(String(file.fileName).toLowerCase()) : '');
+    if (!sourcePath) {
+      cacheSummary.missingManifestFiles.push(key);
+      continue;
+    }
+
+    const entry = await addCachedJar({
+      outDir,
+      cacheManifest,
+      sourcePath,
+      key,
+      fileName: match?.fileName || path.basename(sourcePath),
+      source: match?.source || 'local-mods'
+    });
+    cacheSummary.matchedManifestFiles += 1;
+    cacheSummary.copiedCacheFiles += copiedUrls.has(entry.url) ? 0 : 1;
+    cacheSummary.copiedCacheBytes += copiedUrls.has(entry.url) ? 0 : entry.size;
+    copiedUrls.add(entry.url);
+    usedLocalFiles.add(path.resolve(sourcePath).toLowerCase());
+  }
+
+  const extraFiles = [];
+  for (const jarFile of jarFiles) {
+    if (usedLocalFiles.has(path.resolve(jarFile).toLowerCase())) {
+      continue;
+    }
+    const entry = await addCachedJar({
+      outDir,
+      cacheManifest,
+      sourcePath: jarFile,
+      key: '',
+      fileName: path.basename(jarFile),
+      source: 'local-mods-extra'
+    });
+    if (!copiedUrls.has(entry.url)) {
+      cacheSummary.copiedCacheFiles += 1;
+      cacheSummary.copiedCacheBytes += entry.size;
+      copiedUrls.add(entry.url);
+    }
+    extraFiles.push(entry);
+  }
+
+  cacheSummary.extraLocalFiles = extraFiles.length;
+  if (extraFiles.length) {
+    cacheManifest.extraFiles = extraFiles;
+  }
+
+  return { cacheManifest, cacheSummary };
+}
+
+async function pathExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function openZipFile(filePath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(filePath, { lazyEntries: true }, (error, zipFile) => {
+      if (error) reject(error);
+      else resolve(zipFile);
+    });
+  });
+}
+
+async function writeZipWithInjectedFiles({ sourceZip, destZip, injections }) {
+  await ensureDir(path.dirname(destZip));
+  const zipIn = await openZipFile(sourceZip);
+  const zipOut = new yazl.ZipFile();
+  const normalizedInjections = injections.map((injection) => ({
+    ...injection,
+    injectAs: injection.injectAs.replaceAll('\\', '/')
+  }));
+  const alreadyPresent = new Set();
+
+  const outputDone = new Promise((resolve, reject) => {
+    const output = createWriteStream(destZip);
+    output.on('close', resolve);
+    output.on('error', reject);
+    zipOut.outputStream.on('error', reject);
+    zipOut.outputStream.pipe(output);
+  });
+
+  const inputDone = new Promise((resolve, reject) => {
+    zipIn.on('entry', (entry) => {
+      const entryName = entry.fileName.replaceAll('\\', '/');
+      for (const injection of normalizedInjections) {
+        if (entryName.toLowerCase() === injection.injectAs.toLowerCase()) {
+          alreadyPresent.add(injection.injectAs.toLowerCase());
+        }
+      }
+      if (entryName.endsWith('/')) {
+        zipIn.readEntry();
+        return;
+      }
+      zipIn.openReadStream(entry, (error, readStream) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        readStream.on('error', reject);
+        readStream.on('end', () => zipIn.readEntry());
+        zipOut.addReadStream(readStream, entryName, {
+          mtime: entry.getLastModDate()
+        });
+      });
+    });
+    zipIn.on('end', () => {
+      for (const injection of normalizedInjections) {
+        if (!alreadyPresent.has(injection.injectAs.toLowerCase())) {
+          zipOut.addFile(injection.injectPath, injection.injectAs);
+        }
+      }
+      zipOut.end();
+      resolve();
+    });
+    zipIn.on('error', reject);
+  });
+
+  zipIn.readEntry();
+  await inputDone;
+  await outputDone;
+  zipIn.close();
+}
+
+async function findBundledJar({ explicitPath = '', dirName, pattern }) {
+  if (explicitPath) {
+    return await pathExists(explicitPath) ? path.resolve(explicitPath) : null;
+  }
+
+  const bundledDir = path.join(appRoot, dirName);
+  const unpackedDir = bundledDir.replace(/app\.asar([\\/]|$)/, 'app.asar.unpacked$1');
+  const candidates = [
+    unpackedDir,
+    bundledDir,
+    process.resourcesPath ? path.join(process.resourcesPath, dirName) : ''
+  ].filter(Boolean);
+
+  for (const candidatesDir of [...new Set(candidates)]) {
+    try {
+      const files = await fs.readdir(candidatesDir);
+      const jars = files.filter((file) => pattern.test(file)).sort().reverse();
+      if (jars.length) {
+        return path.join(candidatesDir, jars[0]);
+      }
+    } catch {
+      // Packaged Electron apps may keep helper assets outside app.asar.
+    }
+  }
+
+  return null;
+}
+
+async function findVersionLockJar(explicitPath = '') {
+  return findBundledJar({
+    explicitPath,
+    dirName: path.join('server-lock-mod', 'build', 'libs'),
+    pattern: /^aht-version-lock-(?!.*-sources\.jar$).+\.jar$/i
+  });
+}
+
+function itemFireFixPattern(manifest) {
+  const minecraftVersion = String(manifest.minecraft?.version || '').toLowerCase();
+  const modLoaders = Array.isArray(manifest.minecraft?.modLoaders)
+    ? manifest.minecraft.modLoaders.map((loader) => String(loader?.id || '').toLowerCase())
+    : [];
+  const loaderText = modLoaders.join(' ');
+  if (minecraftVersion === '1.12.2' || loaderText.includes('forge')) {
+    return /^aht-item-fire-fix-forge-.+\.jar$/i;
+  }
+  if (minecraftVersion === '26.1.2' || loaderText.includes('fabric')) {
+    return /^aht-item-fire-fix-fabric-.+\.jar$/i;
+  }
+  return null;
+}
+
+async function findItemFireFixJar(manifest) {
+  const pattern = itemFireFixPattern(manifest);
+  if (!pattern) {
+    return null;
+  }
+  return findBundledJar({
+    dirName: 'pack-fixes',
+    pattern
+  });
+}
+
+function existingVersionLockJar(zip, overridesDir) {
+  const prefix = `${overridesDir.replace(/\/+$/, '')}/mods/`;
+  const entry = zip.getEntries().find((item) => {
+    const name = item.entryName.replaceAll('\\', '/');
+    return !item.isDirectory && name.startsWith(prefix) && /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name));
+  });
+  return entry ? entry.entryName.replaceAll('\\', '/') : null;
+}
+
+function existingItemFireFixJar(zip, overridesDir) {
+  const prefix = `${overridesDir.replace(/\/+$/, '')}/mods/`;
+  const entry = zip.getEntries().find((item) => {
+    const name = item.entryName.replaceAll('\\', '/');
+    return !item.isDirectory && name.startsWith(prefix) && /aht-item-fire-fix-.+\.jar$/i.test(path.posix.basename(name));
+  });
+  return entry ? entry.entryName.replaceAll('\\', '/') : null;
+}
+
+function addInjectedModToOverrideSummary(overrideSummary, modPath, modSize) {
+  overrideSummary.fileCount += 1;
+  overrideSummary.embeddedModCount += 1;
+  overrideSummary.embeddedModBytes += modSize;
+  overrideSummary.embeddedMods.push({
+    path: modPath,
+    size: modSize
+  });
+  overrideSummary.embeddedMods.sort((a, b) => a.path.localeCompare(b.path));
+  const modsGroup = overrideSummary.groups.mods || { count: 0, bytes: 0 };
+  modsGroup.count += 1;
+  modsGroup.bytes += modSize;
+  overrideSummary.groups.mods = modsGroup;
+}
+
+function forgeConfigValue(value) {
+  return String(value).replace(/\r?\n/g, ' ').replace(/\\/g, '\\\\');
+}
+
+function serverLockConfig({ packId, version }) {
+  return [
+    '# Generated by A Hard Time Launcher.',
+    '# Copy this file to the Minecraft server config folder as aht_version_lock.cfg.',
+    'general {',
+    `    S:requiredPackId=${forgeConfigValue(packId)}`,
+    `    S:requiredVersion=${forgeConfigValue(version)}`,
+    '    I:timeoutTicks=200',
+    '    S:kickMessage=Update A Hard Time in the launcher. Required: {required}. Your version: {actual}.',
+    '}',
+    ''
+  ].join('\n');
+}
+
+function versionHintFromFileName(filePath = '') {
+  const name = path.basename(filePath).replace(/\.zip$/i, '');
+  const match = name.match(/(?:^|[\s_-])v?(\d+(?:\.\d+){1,4}(?:[-_+][A-Za-z0-9][A-Za-z0-9._-]*)?)$/i);
+  return match?.[1]?.replace(/_/g, '-') || '';
+}
+
+export async function buildRelease(options) {
+  const {
+    packZip,
+    outDir,
+    baseUrl = '',
+    channel = 'stable',
+    copyZip = true,
+    versionLockJar = '',
+    cacheModsDir = ''
+  } = options;
+
+  if (!packZip) {
+    throw new Error('--pack-zip is required');
+  }
+  if (!outDir) {
+    throw new Error('--out is required');
+  }
+
+  const zip = new AdmZip(packZip);
+  const manifest = readManifest(zip);
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  const packId = slugify(manifest.name);
+  const version = String(manifest.version || '0.0.0');
+  const zipFileName = `${packId}-${slugify(version)}.zip`;
+  const zipRelPath = `packs/${zipFileName}`;
+  const serverLockRelPath = 'server/aht_version_lock.cfg';
+  const versionLockJarPath = await findVersionLockJar(versionLockJar);
+  const serverLockModRelPath = versionLockJarPath ? `server/mods/${path.basename(versionLockJarPath)}` : null;
+  const zipDest = path.join(outDir, zipRelPath);
+  const overridesDir = manifest.overrides || 'overrides';
+  const existingClientVersionLockPath = existingVersionLockJar(zip, overridesDir);
+  const clientVersionLockPath = existingClientVersionLockPath || (versionLockJarPath ? `${overridesDir.replace(/\/+$/, '')}/mods/${path.basename(versionLockJarPath)}` : null);
+  const injectClientVersionLock = Boolean(versionLockJarPath && !existingClientVersionLockPath);
+  const itemFireFixJarPath = await findItemFireFixJar(manifest);
+  const existingClientItemFireFixPath = existingItemFireFixJar(zip, overridesDir);
+  const clientItemFireFixPath = existingClientItemFireFixPath || (itemFireFixJarPath ? `${overridesDir.replace(/\/+$/, '')}/mods/${path.basename(itemFireFixJarPath)}` : null);
+  const injectClientItemFireFix = Boolean(itemFireFixJarPath && !existingClientItemFireFixPath);
+  const overrideSummary = summarizeOverrides(zip, overridesDir);
+  if (injectClientVersionLock) {
+    const jarStats = await fs.stat(versionLockJarPath);
+    addInjectedModToOverrideSummary(overrideSummary, clientVersionLockPath, jarStats.size);
+  }
+  if (injectClientItemFireFix) {
+    const jarStats = await fs.stat(itemFireFixJarPath);
+    addInjectedModToOverrideSummary(overrideSummary, clientItemFireFixPath, jarStats.size);
+  }
+
+  await ensureDir(path.join(outDir, 'packs'));
+  await ensureDir(path.join(outDir, 'cache'));
+  await ensureDir(path.join(outDir, 'cache', 'files'));
+  await ensureDir(path.join(outDir, 'server'));
+  await ensureDir(path.join(outDir, 'server', 'mods'));
+
+  const zipInjections = [
+    injectClientVersionLock ? {
+      sourceZip: packZip,
+      injectPath: versionLockJarPath,
+      injectAs: clientVersionLockPath
+    } : null,
+    injectClientItemFireFix ? {
+      sourceZip: packZip,
+      injectPath: itemFireFixJarPath,
+      injectAs: clientItemFireFixPath
+    } : null
+  ].filter(Boolean);
+
+  if (zipInjections.length) {
+    await writeZipWithInjectedFiles({
+      sourceZip: packZip,
+      destZip: zipDest,
+      injections: zipInjections
+    });
+  } else if (copyZip) {
+    await fs.copyFile(packZip, zipDest);
+  }
+
+  if (versionLockJarPath) {
+    await fs.copyFile(versionLockJarPath, path.join(outDir, serverLockModRelPath));
+  }
+
+  const artifactPath = await pathExists(zipDest) ? zipDest : packZip;
+  const stats = await fs.stat(artifactPath);
+  const sha256 = await hashFile(artifactPath, 'sha256');
+
+  const latest = {
+    schemaVersion: 1,
+    packId,
+    name: manifest.name,
+    version,
+    channel,
+    createdAt: new Date().toISOString(),
+    minecraft: manifest.minecraft,
+    overrides: overridesDir,
+    zip: {
+      fileName: zipFileName,
+      path: zipRelPath,
+      url: artifactUrl(baseUrl, zipRelPath),
+      sha256,
+      size: stats.size
+    },
+    curseforge: {
+      fileCount: manifestFiles.length
+    },
+    cacheManifest: {
+      path: 'cache/mod-cache.json',
+      url: artifactUrl(baseUrl, 'cache/mod-cache.json')
+    },
+    serverLock: {
+      configPath: serverLockRelPath,
+      modPath: serverLockModRelPath,
+      clientModPath: clientVersionLockPath,
+      injected: injectClientVersionLock
+    },
+    itemFireFix: {
+      clientModPath: clientItemFireFixPath,
+      injected: injectClientItemFireFix
+    },
+    required: true
+  };
+
+  const { cacheManifest, cacheSummary } = await buildFallbackCache({
+    manifestFiles,
+    outDir,
+    packId,
+    cacheModsDir
+  });
+
+  const report = {
+    schemaVersion: 1,
+    packId,
+    name: manifest.name,
+    version,
+    sourceZip: {
+      path: packZip,
+      fileName: path.basename(packZip),
+      versionHint: versionHintFromFileName(packZip)
+    },
+    minecraft: manifest.minecraft,
+    curseforgeManifestFiles: latest.curseforge.fileCount,
+    cacheSummary,
+    overrideSummary,
+    output: {
+      latest: 'latest.json',
+      packZip: zipRelPath,
+      cacheManifest: 'cache/mod-cache.json',
+      serverLockConfig: serverLockRelPath,
+      serverLockMod: serverLockModRelPath,
+      clientVersionLockMod: clientVersionLockPath,
+      clientItemFireFixMod: clientItemFireFixPath
+    }
+  };
+
+  await writeJsonFile(path.join(outDir, 'latest.json'), latest);
+  await writeJsonFile(path.join(outDir, 'cache', 'mod-cache.json'), cacheManifest);
+  await fs.writeFile(path.join(outDir, serverLockRelPath), serverLockConfig({ packId, version }), 'utf8');
+  await writeJsonFile(path.join(outDir, 'release-report.json'), report);
+
+  return { latest, report, outDir };
+}

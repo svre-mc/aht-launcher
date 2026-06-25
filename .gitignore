@@ -1,0 +1,15 @@
+node_modules/
+dist-r2*/
+launcher.config.json
+config/app.defaults.json
+!config/app.defaults.json
+*.log
+*.log.err
+release-builds/
+server-lock-mod/.gradle/
+server-lock-mod/build/
+!server-lock-mod/build/
+!server-lock-mod/build/libs/
+!server-lock-mod/build/libs/aht-version-lock-*.jar
+server-lock-mod/run/
+tools/

@@ -1,0 +1,12 @@
+name = "aht-curseforge-proxy"
+main = "curseforge-proxy-worker.js"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "AHT_RELEASES"
+bucket_name = "ahtlauncher"
+
+[[r2_buckets]]
+binding = "AHT_DATA"
+bucket_name = "ahtlauncher-data"

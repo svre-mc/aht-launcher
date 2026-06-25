@@ -1,0 +1,35 @@
+{
+  "packId": "a-hard-time-dregora",
+  "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/latest.json",
+  "curseforge": {
+    "proxyBaseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/cf/",
+    "apiKeyEnv": "CURSEFORGE_API_KEY"
+  },
+  "sync": {
+    "enabled": true,
+    "sendLocalChanges": true,
+    "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "playerLabel": ""
+  },
+  "developer": {
+    "adminBaseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "r2Bucket": "ahtlauncher",
+    "cacheOnlyMode": false
+  },
+  "launcherUpdate": {
+    "enabled": true,
+    "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json"
+  },
+  "minecraftLauncher": {
+    "enabled": true,
+    "profileId": "a-hard-time-dregora",
+    "profileName": "A Hard Time",
+    "memoryMb": 4096
+  },
+  "launcherProof": {
+    "enabled": true,
+    "required": false,
+    "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "keyId": "aht-launcher-proof-v1"
+  }
+}

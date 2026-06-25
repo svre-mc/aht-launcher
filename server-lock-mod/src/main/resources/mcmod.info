@@ -1,0 +1,16 @@
+[
+  {
+    "modid": "ahtversionlock",
+    "name": "AHT Version Lock",
+    "description": "Requires A Hard Time launcher-installed clients to match the server pack version.",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "url": "",
+    "updateUrl": "",
+    "authorList": ["A Hard Time"],
+    "credits": "Private launcher enforcement mod.",
+    "logoFile": "",
+    "screenshots": [],
+    "dependencies": []
+  }
+]

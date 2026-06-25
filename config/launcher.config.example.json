@@ -1,0 +1,33 @@
+{
+  "packId": "a-hard-time-dregora",
+  "instanceDir": "C:\\AHT\\A Hard Time",
+  "latestUrl": "http://127.0.0.1:8787/latest.json",
+  "curseforge": {
+    "proxyBaseUrl": "",
+    "apiKeyEnv": "CURSEFORGE_API_KEY"
+  },
+  "sync": {
+    "enabled": true,
+    "sendLocalChanges": true,
+    "baseUrl": "",
+    "playerLabel": ""
+  },
+  "developer": {
+    "adminBaseUrl": "",
+    "defaultOutDir": "C:\\Users\\evil\\Documents\\aht-release",
+    "defaultCacheModsDir": "C:\\Users\\evil\\curseforge\\minecraft\\Instances\\RLCraft Dregora\\mods",
+    "r2Bucket": "ahtlauncher"
+  },
+  "minecraftLauncher": {
+    "enabled": true,
+    "rootDir": "C:\\Users\\evil\\AppData\\Roaming\\.minecraft",
+    "profileId": "a-hard-time-dregora",
+    "profileName": "A Hard Time",
+    "memoryMb": 4096
+  },
+  "playCommand": {
+    "command": "",
+    "args": [],
+    "cwd": "C:\\AHT\\A Hard Time"
+  }
+}

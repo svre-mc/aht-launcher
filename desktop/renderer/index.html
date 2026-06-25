@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A Hard Time Launcher</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app-frame">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AHT</div>
+        <div class="brand-copy">
+          <strong>A Hard Time</strong>
+          <span>Launcher</span>
+        </div>
+      </div>
+
+      <div class="game-list">
+        <button id="gameTileButton" class="game-tile active" type="button" data-tab="player">
+          <span class="game-thumb"><span>AHT</span></span>
+          <span class="game-copy">
+            <strong id="sidePackTitle">AHT</strong>
+            <small><span class="button-icon icon-download" aria-hidden="true"></span><span id="sideLatestVersion">-</span></small>
+          </span>
+        </button>
+        <button class="game-tile coming-soon" type="button" disabled aria-disabled="true" tabindex="-1">
+          <span class="game-thumb alt"><span>AHT</span></span>
+          <span class="game-copy">
+            <strong>AHT 3.0</strong>
+            <small>Coming soon</small>
+          </span>
+        </button>
+        <button id="developerTileButton" class="game-tile secondary" type="button" data-tab="developer" hidden>
+          <span class="game-thumb alt"><span>DEV</span></span>
+          <span class="game-copy">
+            <strong id="developerTileTitle">The Developer Mode</strong>
+            <small>Developer client</small>
+          </span>
+        </button>
+      </div>
+
+      <div id="sidebarProgress" class="sidebar-progress" hidden>
+        <div class="sidebar-progress-meta">
+          <span id="sidebarProgressLabel">Idle</span>
+          <strong id="sidebarProgressCount">0%</strong>
+        </div>
+        <div class="progress-track"><div id="sidebarProgressBar" class="progress-bar"></div></div>
+      </div>
+
+      <button id="downloadsButton" class="sidebar-download" type="button">
+        <span class="button-icon icon-download" aria-hidden="true"></span>
+        Downloads
+      </button>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <nav class="nav">
+          <button class="tab nav-item active" data-tab="player">Game</button>
+          <button class="tab nav-item" data-tab="settings">Settings</button>
+          <button id="developerTab" class="tab nav-item" data-tab="developer" hidden>Developer</button>
+        </nav>
+
+        <div class="profile-card">
+          <div class="profile-avatar">AHT</div>
+          <div class="profile-copy">
+            <strong id="playerLabelView">Player</strong>
+            <span id="syncStatus"><span class="online-dot"></span>Sync -</span>
+          </div>
+        </div>
+      </header>
+
+      <section id="setupNotice" class="setup-notice" hidden>
+        <div>
+          <h2>Launcher setup required</h2>
+          <p>Add the release feed and CurseForge proxy once. Players stay locked here until the pack is current.</p>
+        </div>
+        <div class="setup-actions">
+          <button id="setupAutoButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
+          <button id="setupSettingsButton" class="button compact"><span class="button-icon icon-settings" aria-hidden="true"></span>Open Settings</button>
+        </div>
+      </section>
+
+      <section id="player" class="view active">
+        <section class="hero-panel">
+          <div class="hero-art">
+            <div class="hero-copy">
+              <h1>A Hard Time</h1>
+              <div id="versionLine" class="subline">Loading</div>
+            </div>
+            <div id="statusBadge" class="status-pill">Checking</div>
+          </div>
+
+          <div id="updateLogGrid" class="news-grid update-log-grid" aria-label="Update logs" hidden></div>
+        </section>
+
+        <section class="quick-actions">
+          <button id="scanButton" class="ghost-button"><span class="button-icon icon-scan" aria-hidden="true"></span>Scan files</button>
+          <button class="ghost-button tab" data-tab="settings"><span class="button-icon icon-settings" aria-hidden="true"></span>Game settings</button>
+        </section>
+
+        <section class="launch-strip">
+          <div class="version-stack">
+            <dl class="facts compact">
+              <div><dt>Installed</dt><dd id="installedVersion">-</dd></div>
+              <div><dt>Latest</dt><dd id="latestVersion">-</dd></div>
+              <div><dt>Local Changes</dt><dd id="diffSummary">-</dd></div>
+            </dl>
+          </div>
+
+          <div class="launch-actions">
+            <button id="updateButton" class="button primary is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-download" aria-hidden="true"></span>Update</button>
+            <button id="playButton" class="button strong is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-play" aria-hidden="true"></span>Play</button>
+          </div>
+        </section>
+
+        <section class="details-grid player-technical" hidden>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Instance</h2>
+              <span class="quiet-label">Managed folder</span>
+            </div>
+            <dl class="facts">
+              <div><dt>Folder</dt><dd id="instanceDir">-</dd></div>
+              <div><dt>Profile</dt><dd id="minecraftProfile">-</dd></div>
+              <div><dt>Install ID</dt><dd id="installId">-</dd></div>
+              <div><dt>Activity</dt><dd id="activityState">Idle</dd></div>
+            </dl>
+          </section>
+
+          <section id="activityPanel" class="panel activity-panel">
+            <div class="panel-head">
+              <h2>Launcher Log</h2>
+              <span class="quiet-label">Output</span>
+            </div>
+            <div id="progressWrap" class="progress-wrap" hidden>
+              <div class="progress-meta"><span id="progressLabel">Preparing</span><span id="progressCount">0%</span></div>
+              <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+            </div>
+            <pre id="log" class="log"></pre>
+          </section>
+        </section>
+      </section>
+
+      <section id="settings" class="view">
+        <section class="view-shell">
+          <div class="section-title">
+            <p class="eyebrow">Configuration</p>
+            <h1>Game Settings</h1>
+            <span id="platformTargetView">Minecraft Launcher profile and play options.</span>
+          </div>
+          <section class="panel settings-panel">
+            <div class="panel-head">
+              <h2>Launcher Settings</h2>
+              <div class="panel-actions">
+                <button id="testFeedButton" class="button compact player-technical" hidden><span class="button-icon icon-activity" aria-hidden="true"></span>Test Feed</button>
+                <button id="saveSettingsButton" class="button primary compact"><span class="button-icon icon-save" aria-hidden="true"></span>Save</button>
+              </div>
+            </div>
+            <div id="settingsFeedCard" class="settings-feed-card warn">
+              <div>
+                <span id="settingsFeedState">Release feed not checked</span>
+                <strong id="settingsFeedTitle">Configure latest.json</strong>
+              </div>
+              <p id="settingsFeedDetail">The launcher needs a valid feed before players can install or update.</p>
+            </div>
+            <div id="setupAssistantCard" class="setup-assistant-card warn" hidden>
+              <div>
+                <span id="setupAssistantState">Setup assistant</span>
+                <strong id="setupAssistantTitle">Checking local paths</strong>
+                <p id="setupAssistantDetail">Detected release and instance paths appear here.</p>
+              </div>
+              <button id="settingsAutoSetupButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
+            </div>
+            <div class="form-grid">
+              <label class="span-2 player-technical" hidden>Latest Feed <span class="browse"><input id="latestUrlInput" type="text"><button id="pickLatestButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label class="player-technical" hidden>CurseForge Proxy <input id="proxyUrlInput" type="url"></label>
+              <label class="player-technical" hidden>Sync URL <input id="syncUrlInput" type="url"></label>
+              <label class="player-technical" hidden>Player Label <input id="playerLabelInput" type="text"></label>
+              <label class="span-2">Modpack Folder <span class="browse"><input id="instanceInput" type="text"><button id="pickInstanceButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label class="span-2">Minecraft Launcher Folder <span class="browse"><input id="minecraftRootInput" type="text"><button id="pickMinecraftRootButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label>Launcher Profile Name <input id="minecraftProfileNameInput" type="text"></label>
+              <label class="memory-slider span-2">
+                <span>Allocated RAM <output id="minecraftMemoryOutput">4 GB</output></span>
+                <input id="minecraftMemoryInput" type="range" min="4096" max="16384" step="512" value="4096">
+              </label>
+              <label class="player-technical" hidden>Play Command Override <input id="playCommandInput" type="text"></label>
+              <label class="player-technical" hidden>Play Args <input id="playArgsInput" type="text"></label>
+            </div>
+            <div class="settings-row">
+              <label class="switch"><input id="minecraftProfileEnabledInput" type="checkbox"><span></span>Minecraft profile</label>
+              <label class="switch player-technical" hidden><input id="syncEnabledInput" type="checkbox"><span></span>Sync enabled</label>
+              <label class="switch player-technical" hidden><input id="sendChangesInput" type="checkbox"><span></span>Send local changes</label>
+              <button id="openInstanceButton" class="button compact player-technical" hidden><span class="button-icon icon-folder" aria-hidden="true"></span>Open Instance</button>
+            </div>
+          </section>
+        </section>
+      </section>
+
+      <section id="developer" class="view">
+        <section id="developerLoginScreen" class="dev-login-screen">
+          <form id="developerLoginForm" class="dev-login-box">
+            <div>
+              <p class="eyebrow">Developer Console</p>
+              <h1>Login Required</h1>
+              <span id="developerLoginStatus">Enter the developer credentials to continue.</span>
+            </div>
+            <label>Username <input id="adminUserInput" type="text" value="admin" autocomplete="username"></label>
+            <label>Password <input id="adminPasswordInput" type="password" autocomplete="current-password" autofocus></label>
+            <button id="loginButton" class="button primary compact" type="submit"><span class="button-icon icon-login" aria-hidden="true"></span>Login</button>
+          </form>
+        </section>
+
+        <section id="developerConsole" class="dev-console" hidden>
+          <header class="dev-header">
+            <div>
+              <p class="eyebrow">AHT Developer</p>
+              <h1>Release Data Console</h1>
+            </div>
+            <div id="developerSessionStatus" class="dev-session-status">Locked</div>
+          </header>
+
+          <nav class="dev-tabs" aria-label="Developer sections">
+            <button class="dev-tab active" type="button" data-dev-target="releaseTools">Release Builder</button>
+            <button class="dev-tab" type="button" data-dev-target="launcherUpdateTools">Launcher Updates</button>
+            <button class="dev-tab" type="button" data-dev-target="serverUploadTools">Server Upload</button>
+            <button class="dev-tab" type="button" data-dev-target="updateLogTools">Update Logs</button>
+            <button class="dev-tab" type="button" data-dev-target="playerDataTools">Player Data</button>
+          </nav>
+
+          <section class="dev-strip" aria-label="Dashboard totals">
+            <div><span>Installs</span><button id="installCount" class="metric-value" type="button" data-event-filter="installs">-</button></div>
+            <div><span>Repairs</span><button id="repairCount" class="metric-value" type="button" data-event-filter="repairs">-</button></div>
+            <div><span>Change Reports</span><button id="changeCount" class="metric-value" type="button" data-event-filter="changes">-</button></div>
+            <div><span>Unique IPs</span><button id="ipCount" class="metric-value" type="button" data-event-filter="ips">-</button></div>
+          </section>
+
+          <section id="releaseTools" class="dev-section">
+            <div class="dev-section-head">
+              <h2>Release Builder</h2>
+              <div class="dev-actions">
+                <button id="setupCloudButton" class="button compact"><span class="button-icon icon-shield" aria-hidden="true"></span>Setup Cloud</button>
+                <button id="writeDefaultsButton" class="button compact is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-save" aria-hidden="true"></span>Write Defaults</button>
+                <button id="publishReleaseButton" class="button primary compact is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-upload" aria-hidden="true"></span>Publish Update</button>
+              </div>
+            </div>
+            <div class="dev-fields">
+              <label class="span-2">Pack ZIP <span class="browse"><input id="packZipInput" type="text"><button id="pickZipButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label class="span-2">CurseForge API Key <input id="curseforgeApiKeyInput" type="password" autocomplete="off"></label>
+              <label class="span-2">Launcher Proof Secret <span class="browse"><input id="launcherProofSecretInput" type="password" autocomplete="off" placeholder="Same value must be set on the server"><button id="generateProofSecretButton" class="button compact" type="button"><span class="button-icon icon-shield" aria-hidden="true"></span>Generate</button></span></label>
+            </div>
+            <div class="settings-row">
+              <label class="switch"><input id="cacheOnlyInput" type="checkbox"><span></span>Cache-only mode</label>
+            </div>
+            <details class="dev-advanced">
+              <summary>Cloud and cache settings</summary>
+              <div class="dev-fields">
+                <label class="span-2">Player Feed URL <input id="playerFeedUrlInput" type="url" placeholder="https://your-worker.workers.dev/latest.json"></label>
+                <label class="span-2">Fallback Cache Mods Folder <span class="browse"><input id="cacheModsInput" type="text"><button id="pickCacheModsButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+                <label>Channel <input id="channelInput" type="text" value="stable"></label>
+                <label>R2 Bucket <input id="bucketInput" type="text"></label>
+              </div>
+            </details>
+            <div id="releaseCheckCard" class="release-check-card warn">
+              <div>
+                <span id="releaseCheckState">Ready</span>
+                <strong id="releaseCheckTitle">Choose a ZIP</strong>
+              </div>
+              <p id="releaseCheckDetail">Pick a CurseForge export ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.</p>
+            </div>
+          </section>
+
+          <section id="launcherUpdateTools" class="dev-section">
+            <div class="dev-section-head">
+              <h2>Launcher Updates</h2>
+              <div class="dev-actions">
+                <button id="scanLauncherBuildsButton" class="button compact"><span class="button-icon icon-scan" aria-hidden="true"></span>Scan Builds</button>
+                <button id="publishLauncherUpdateButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Publish Launcher</button>
+              </div>
+            </div>
+            <div class="dev-fields">
+              <label>Launcher Version <input id="launcherUpdateVersionInput" type="text" placeholder="0.1.1"></label>
+              <label class="span-2">Windows Installer <input id="launcherWindowsPathInput" type="text" placeholder="release-builds/windows/AHT-Launcher-Windows-10-11-0.1.1.exe"></label>
+              <label class="span-2">macOS DMG <input id="launcherMacosPathInput" type="text" placeholder="release-builds/macos/AHT-Launcher-macOS-x64-0.1.1.dmg"></label>
+              <label class="span-2">Ubuntu Package <input id="launcherUbuntuPathInput" type="text" placeholder="release-builds/ubuntu/AHT-Launcher-Ubuntu-0.1.1-x64.AppImage"></label>
+            </div>
+            <div id="launcherUpdateStatus" class="release-check-card warn">
+              <div>
+                <span>Launcher updates</span>
+                <strong>No app update selected</strong>
+              </div>
+              <p>Publish launcher installers to R2. Players will be forced to update the app before using the launcher.</p>
+            </div>
+          </section>
+
+          <section id="serverUploadTools" class="dev-section">
+            <div class="dev-section-head">
+              <h2>Server Upload</h2>
+              <div class="dev-actions">
+                <button id="planServerTransferButton" class="button compact"><span class="button-icon icon-scan" aria-hidden="true"></span>Plan</button>
+                <button id="uploadServerFilesButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Upload Files</button>
+              </div>
+            </div>
+            <div class="dev-fields">
+              <label class="span-2">Server Folder <span class="browse"><input id="serverSourceInput" type="text" value="C:\RL CRAFT SERVER LIST\New folder - Copy"><button id="pickServerSourceButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label>Linux IP <input id="serverHostInput" type="text" value="192.168.1.121"></label>
+              <label>Port <input id="serverPortInput" type="number" min="1" max="65535" value="22"></label>
+              <label>Username <input id="serverUsernameInput" type="text" value="notevil" autocomplete="username"></label>
+              <label>Password <input id="serverPasswordInput" type="password" autocomplete="current-password"></label>
+              <label class="span-2">Linux Destination Folder <input id="serverRemoteDirInput" type="text" value="/home/notevil/Desktop/AHT Server Files"></label>
+            </div>
+            <div id="serverTransferStatus" class="release-check-card warn">
+              <div>
+                <span>Local transfer</span>
+                <strong>Ready to plan</strong>
+              </div>
+              <p>Uploads server files over local SFTP. DregoraRL is always excluded and never transferred.</p>
+            </div>
+            <pre id="serverTransferLog" class="log dev-raw-log"></pre>
+          </section>
+
+          <section id="updateLogTools" class="dev-section">
+            <div class="dev-section-head">
+              <h2>Update Logs</h2>
+              <div class="dev-actions">
+                <button id="loadUpdateLogsButton" class="button compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Load Logs</button>
+                <button id="publishUpdateLogButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Push Log</button>
+              </div>
+            </div>
+            <div class="dev-fields update-log-fields">
+              <label>Version <input id="updateLogVersionInput" type="text" placeholder="2.8.2"></label>
+              <label>Title <input id="updateLogTitleInput" type="text" maxlength="120"></label>
+              <label class="span-2">Log Text <textarea id="updateLogBodyInput" rows="6" maxlength="2000"></textarea></label>
+            </div>
+            <div id="updateLogStatus" class="release-check-card warn">
+              <div>
+                <span>Update logs</span>
+                <strong>No log selected</strong>
+              </div>
+              <p>Create a log, then push it so players see it on the launcher home screen.</p>
+            </div>
+            <div id="developerUpdateLogsList" class="developer-update-log-list"></div>
+          </section>
+
+          <section id="playerDataTools" class="dev-data-grid">
+            <section class="dev-section">
+              <div class="dev-section-head">
+                <h2>Recent Events</h2>
+                <div class="dev-actions">
+                  <span id="eventFilterLabel" class="quiet-label">All events</span>
+                  <button id="loadDashboardButton" class="button compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Load Data</button>
+                </div>
+              </div>
+              <div class="event-table-head">
+                <span>Time</span><span>Type</span><span>Player</span><span>IP</span><span>Platform</span><span>Version</span><span>Summary</span>
+              </div>
+              <div id="eventsList" class="events data-events">
+                <div class="empty-state">Log in and load data to view recent installs, repairs, and local-change reports.</div>
+              </div>
+            </section>
+
+            <section class="dev-section">
+              <div class="dev-section-head">
+                <h2>Selected Event</h2>
+                <span class="quiet-label">Raw data</span>
+              </div>
+              <div id="eventDetails" class="event-detail" hidden>
+                <div class="event-detail-head">
+                  <div>
+                    <span id="eventDetailType">Event</span>
+                    <strong id="eventDetailTitle">Select an event</strong>
+                  </div>
+                  <span id="eventDetailTime" class="detail-time">-</span>
+                </div>
+                <div id="eventDetailMeta" class="detail-grid"></div>
+                <div id="eventDetailChanges" class="path-groups"></div>
+              </div>
+              <pre id="devLog" class="log dev-raw-log"></pre>
+            </section>
+          </section>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <div id="downloadsOverlay" class="overlay downloads-overlay" hidden>
+    <section class="downloads-dialog" role="dialog" aria-modal="true" aria-labelledby="downloadsTitle">
+      <div class="downloads-head">
+        <h2 id="downloadsTitle">DOWNLOADS</h2>
+        <button id="downloadsCloseButton" class="ghost-button compact" type="button" aria-label="Close downloads">
+          <span class="button-icon icon-close" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <div class="downloads-list">
+        <article class="download-row">
+          <span class="game-thumb download-thumb"><span>AHT</span></span>
+          <div class="download-copy">
+            <strong>A Hard Time</strong>
+            <span id="downloadsState">Idle</span>
+          </div>
+          <div id="downloadsRowProgress" class="download-row-progress" hidden>
+            <span id="downloadsProgressText">0%</span>
+            <div class="progress-track"><div id="downloadsProgressBar" class="progress-bar"></div></div>
+          </div>
+          <button id="downloadsUpdateIconButton" class="download-icon-button is-disabled" type="button" aria-disabled="true" tabindex="-1" aria-label="Update pack">
+            <span class="button-icon icon-download" aria-hidden="true"></span>
+          </button>
+        </article>
+      </div>
+
+      <pre id="downloadsLog" class="downloads-log" hidden></pre>
+      <div class="downloads-footer">Maximum download speed (unlimited)</div>
+    </section>
+  </div>
+  <div id="repairPromptOverlay" class="overlay repair-prompt-overlay" hidden>
+    <section class="repair-prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="repairPromptTitle">
+      <div>
+        <p class="eyebrow">File Validation</p>
+        <h2 id="repairPromptTitle">Repair files?</h2>
+        <span id="repairPromptSummary" class="account-copy">Scan found files that need repair.</span>
+      </div>
+      <div id="repairPromptList" class="repair-prompt-list"></div>
+      <div class="repair-prompt-actions">
+        <button id="repairPromptCancelButton" class="button compact" type="button">Cancel</button>
+        <button id="repairPromptRepairButton" class="button primary compact" type="button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
+      </div>
+    </section>
+  </div>
+  <div id="accountOverlay" class="overlay account-overlay" hidden>
+    <form id="accountForm" class="account-dialog" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
+      <div>
+        <p class="eyebrow">Minecraft Profile</p>
+        <h2 id="accountTitle">Minecraft Username</h2>
+        <span class="account-copy">No password. AHT only needs a Minecraft username if it cannot find one in Minecraft Launcher.</span>
+      </div>
+      <label>Username <input id="minecraftUsernameInput" type="text" maxlength="16" autocomplete="username" spellcheck="false"></label>
+      <div id="accountError" class="account-error" aria-live="polite"></div>
+      <button id="accountCreateButton" class="button primary compact" type="submit"><span class="button-icon icon-login" aria-hidden="true"></span>Continue</button>
+    </form>
+  </div>
+  <div id="launcherUpdateOverlay" class="overlay launcher-update-overlay" hidden>
+    <section class="launcher-update-dialog" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle">
+      <div>
+        <p class="eyebrow">Launcher Update</p>
+        <h2 id="launcherUpdateTitle">Update required</h2>
+        <span id="launcherUpdateSummary" class="account-copy">A newer launcher is required before you can continue.</span>
+      </div>
+      <div class="progress-wrap launcher-update-progress">
+        <div class="progress-meta"><span id="launcherUpdateProgressLabel">Preparing</span><span id="launcherUpdateProgressCount">0%</span></div>
+        <div class="progress-track"><div id="launcherUpdateProgressBar" class="progress-bar"></div></div>
+      </div>
+      <pre id="launcherUpdateLog" class="log launcher-update-log"></pre>
+      <button id="launcherUpdateNowButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update Launcher</button>
+    </section>
+  </div>
+  <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+  <script src="app.js"></script>
+</body>
+</html>
