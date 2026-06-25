@@ -118,6 +118,31 @@ function isDirectModFile(filePath, modsDir) {
   return path.dirname(path.resolve(filePath)).toLowerCase() === path.resolve(modsDir).toLowerCase();
 }
 
+function directManagedFileMatch(filePath, { modsDir, resourcepacksDir }) {
+  if (!filePath || !isModFileName(filePath)) {
+    return null;
+  }
+  const resolved = path.resolve(filePath);
+  const parent = path.dirname(resolved).toLowerCase();
+  if (parent === path.resolve(modsDir).toLowerCase()) {
+    return {
+      filePath: resolved,
+      fileName: path.basename(resolved),
+      installPath: '',
+      source: 'curseforge-instance'
+    };
+  }
+  if (isZipFileName(resolved) && parent === path.resolve(resourcepacksDir).toLowerCase()) {
+    return {
+      filePath: resolved,
+      fileName: path.basename(resolved),
+      installPath: resourcePackRelPath(resolved),
+      source: 'curseforge-resourcepack-instance'
+    };
+  }
+  return null;
+}
+
 async function listDirectModFiles(root) {
   const entries = await fs.readdir(root, { withFileTypes: true });
   const files = [];
@@ -180,6 +205,7 @@ async function readInstanceAddonMap(instanceDir, modsDir) {
   }
 
   const instanceJson = JSON.parse(await fs.readFile(instanceJsonPath, 'utf8'));
+  const resourcepacksDir = path.join(instanceDir, 'resourcepacks');
   const addons = Array.isArray(instanceJson.installedAddons) ? instanceJson.installedAddons : [];
   for (const addon of addons) {
     const installedFile = addon.installedFile || {};
@@ -190,20 +216,24 @@ async function readInstanceAddonMap(instanceDir, modsDir) {
       continue;
     }
 
+    const categoryPath = String(addon.categorySection?.path || '').replaceAll('\\', '/').toLowerCase();
+    const packageType = Number(addon.packageType || addon.categorySection?.packageType || 0);
+    const prefersResourcepacks = categoryPath === 'resourcepacks' || packageType === 3;
+    const baseDirs = prefersResourcepacks ? [resourcepacksDir, modsDir] : [modsDir, resourcepacksDir];
+    const diskNames = [
+      addon.fileNameOnDisk,
+      installedFile.fileNameOnDisk,
+      installedFile.fileName
+    ].filter(Boolean);
     const candidates = [
       ...(Array.isArray(addon.filePaths) ? addon.filePaths : []),
-      addon.fileNameOnDisk ? path.join(modsDir, addon.fileNameOnDisk) : '',
-      installedFile.fileNameOnDisk ? path.join(modsDir, installedFile.fileNameOnDisk) : '',
-      installedFile.fileName ? path.join(modsDir, installedFile.fileName) : ''
+      ...diskNames.flatMap((name) => baseDirs.map((baseDir) => path.join(baseDir, name)))
     ].filter(Boolean);
 
     for (const candidate of candidates) {
-      if (isDirectModFile(candidate, modsDir) && await pathExists(candidate)) {
-        addonMap.set(key, {
-          filePath: candidate,
-          fileName: path.basename(candidate),
-          source: 'curseforge-instance'
-        });
+      const match = directManagedFileMatch(candidate, { modsDir, resourcepacksDir });
+      if (match && await pathExists(match.filePath)) {
+        addonMap.set(key, match);
         break;
       }
     }
@@ -288,7 +318,19 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
 
   const { addonMap, instanceJsonPath } = await readInstanceAddonMap(instanceDir, modsDir);
   cacheSummary.minecraftInstanceJson = instanceJsonPath || '';
-  const jarByName = new Map(jarFiles.map((file) => [path.basename(file).toLowerCase(), file]));
+  const localByName = new Map([
+    ...jarFiles.map((file) => [path.basename(file).toLowerCase(), {
+      filePath: file,
+      fileName: path.basename(file),
+      source: 'local-mods'
+    }]),
+    ...resourcePackFiles.map((file) => [path.basename(file).toLowerCase(), {
+      filePath: file,
+      fileName: path.basename(file),
+      source: 'local-resourcepacks',
+      installPath: resourcePackRelPath(file)
+    }])
+  ]);
   const usedLocalFiles = new Set();
   const copiedUrls = new Set();
 
@@ -298,8 +340,8 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
       continue;
     }
 
-    const match = addonMap.get(key);
-    const sourcePath = match?.filePath || (file.fileName ? jarByName.get(String(file.fileName).toLowerCase()) : '');
+    const match = addonMap.get(key) || (file.fileName ? localByName.get(String(file.fileName).toLowerCase()) : null);
+    const sourcePath = match?.filePath || '';
     if (!sourcePath) {
       cacheSummary.missingManifestFiles.push(key);
       continue;
@@ -311,7 +353,8 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
       sourcePath,
       key,
       fileName: match?.fileName || path.basename(sourcePath),
-      source: match?.source || 'local-mods'
+      source: match?.source || 'local-mods',
+      installPath: match?.installPath || ''
     });
     cacheSummary.matchedManifestFiles += 1;
     cacheSummary.copiedCacheFiles += copiedUrls.has(entry.url) ? 0 : 1;
@@ -347,6 +390,9 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
   }
 
   for (const resourcePackFile of resourcePackFiles) {
+    if (usedLocalFiles.has(path.resolve(resourcePackFile).toLowerCase())) {
+      continue;
+    }
     await addExtraFile(resourcePackFile, 'local-resourcepacks-extra', resourcePackRelPath(resourcePackFile));
   }
 
