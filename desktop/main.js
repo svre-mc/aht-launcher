@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,11 +65,23 @@ let keepOpenUntil = 0;
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
 let launcherModeCache = null;
-const singleInstanceLock = app.requestSingleInstanceLock();
+
+function rawRequestedDeveloperMode() {
+  return process.argv.includes('--developer') || process.env.AHT_DEVELOPER === '1';
+}
+
+const launchMode = rawRequestedDeveloperMode() ? 'developer' : 'player';
+
+if (launchMode === 'developer') {
+  app.setName('AHT Developer Launcher');
+  app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'));
+}
 
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.ahardtime.launcher');
+  app.setAppUserModelId(launchMode === 'developer' ? 'com.ahardtime.launcher.developer' : 'com.ahardtime.launcher');
 }
+
+const singleInstanceLock = app.requestSingleInstanceLock({ mode: launchMode });
 
 function launcherBuildMode() {
   if (launcherModeCache !== null) {
@@ -96,7 +109,7 @@ function developerModeAllowed() {
 }
 
 function requestedDeveloperMode() {
-  return process.argv.includes('--developer') || process.env.AHT_DEVELOPER === '1';
+  return rawRequestedDeveloperMode();
 }
 
 function isDeveloperMode() {
@@ -1739,7 +1752,7 @@ function wranglerAccountSummary(output = '') {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .filter((line) => !/^(â›…|â”€|getting user settings)/i.test(line));
+    .filter((line) => !/^(?:[\u2500-\u257f]+|\u26c5\ufe0f?|getting user settings)/i.test(line));
   return lines.slice(-2).join(' ') || String(output || '').trim();
 }
 

@@ -32,6 +32,9 @@ assert(!rendererApp.includes('update.updateRequired && !status?.developerMode'),
 assert(!rendererApp.includes('status.launcherUpdate?.updateRequired && !status.developerMode'), 'Developer mode must not bypass launcher update gating.');
 assert(!desktopMain.includes('@312Princ'), 'Developer password must not be hardcoded in public source.');
 assert(desktopMain.includes("launcherBuildMode() !== 'player'"), 'Player packaged builds must disable developer mode.');
+assert(desktopMain.includes("import fsSync from 'node:fs';"), 'Launcher mode detection must import fsSync.');
+assert(desktopMain.includes("app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'))"), 'Developer mode must use separate local app data.');
+assert(desktopMain.includes("app.requestSingleInstanceLock({ mode: launchMode })"), 'Single-instance lock must be split by launch mode.');
 
 assert(configs.macos.productName === 'A Hard Time Launcher macOS', 'macOS product name is not tailored.');
 assert(configs.macos.directories?.output === 'release-builds/macos', 'macOS output folder is wrong.');
