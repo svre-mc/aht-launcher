@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import { S3Client } from '@aws-sdk/client-s3';
+import { HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
-const DEFAULT_PART_SIZE = 16 * 1024 * 1024;
-const DEFAULT_QUEUE_SIZE = 6;
+const DEFAULT_PART_SIZE = 32 * 1024 * 1024;
+const DEFAULT_QUEUE_SIZE = 8;
 
 export function cleanR2AccountId(value = '') {
   const raw = String(value || '').trim();
@@ -41,6 +41,55 @@ export function r2Endpoint(accountId = '') {
   return `https://${clean}.r2.cloudflarestorage.com`;
 }
 
+function assertDirectR2Credentials(credentials = {}) {
+  if (!directR2CredentialsReady(credentials)) {
+    throw new Error(`Direct R2 upload is missing: ${missingDirectR2CredentialLabels(credentials).join(', ')}`);
+  }
+}
+
+function r2Client({ accountId, accessKeyId, secretAccessKey } = {}) {
+  assertDirectR2Credentials({ accountId, accessKeyId, secretAccessKey });
+  return new S3Client({
+    region: 'auto',
+    endpoint: r2Endpoint(accountId),
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId: String(accessKeyId || '').trim(),
+      secretAccessKey: String(secretAccessKey || '').trim()
+    }
+  });
+}
+
+export async function headR2ObjectDirect({
+  accountId,
+  accessKeyId,
+  secretAccessKey,
+  bucket,
+  key
+} = {}) {
+  const client = r2Client({ accountId, accessKeyId, secretAccessKey });
+  try {
+    const result = await client.send(new HeadObjectCommand({
+      Bucket: bucket,
+      Key: key
+    }));
+    const metadata = result.Metadata || {};
+    return {
+      exists: true,
+      size: Number(result.ContentLength || 0),
+      etag: String(result.ETag || '').replace(/^"|"$/g, ''),
+      metadata,
+      sha256: metadata['aht-sha256'] || metadata.ahtSha256 || ''
+    };
+  } catch (error) {
+    const status = Number(error?.$metadata?.httpStatusCode || 0);
+    if (status === 404 || error?.name === 'NotFound' || error?.name === 'NoSuchKey') {
+      return { exists: false, size: 0, etag: '', metadata: {}, sha256: '' };
+    }
+    throw error;
+  }
+}
+
 export async function uploadR2ObjectDirect({
   accountId,
   accessKeyId,
@@ -49,25 +98,21 @@ export async function uploadR2ObjectDirect({
   key,
   file,
   contentType = 'application/octet-stream',
+  sha256 = '',
+  metadata = {},
   partSize = DEFAULT_PART_SIZE,
   queueSize = DEFAULT_QUEUE_SIZE,
   onProgress = null
 } = {}) {
-  if (!directR2CredentialsReady({ accountId, accessKeyId, secretAccessKey })) {
-    throw new Error(`Direct R2 upload is missing: ${missingDirectR2CredentialLabels({ accountId, accessKeyId, secretAccessKey }).join(', ')}`);
-  }
+  assertDirectR2Credentials({ accountId, accessKeyId, secretAccessKey });
   const stat = await fsp.stat(file);
   const startedAt = Date.now();
   const endpoint = r2Endpoint(accountId);
-  const client = new S3Client({
-    region: 'auto',
-    endpoint,
-    forcePathStyle: true,
-    credentials: {
-      accessKeyId: String(accessKeyId || '').trim(),
-      secretAccessKey: String(secretAccessKey || '').trim()
-    }
-  });
+  const client = r2Client({ accountId, accessKeyId, secretAccessKey });
+  const uploadMetadata = {
+    ...metadata,
+    ...(sha256 ? { 'aht-sha256': String(sha256).toLowerCase() } : {})
+  };
   const upload = new Upload({
     client,
     queueSize,
@@ -77,7 +122,8 @@ export async function uploadR2ObjectDirect({
       Bucket: bucket,
       Key: key,
       Body: fs.createReadStream(file),
-      ContentType: contentType
+      ContentType: contentType,
+      ...(Object.keys(uploadMetadata).length ? { Metadata: uploadMetadata } : {})
     }
   });
   upload.on('httpUploadProgress', (event = {}) => {

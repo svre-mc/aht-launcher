@@ -929,6 +929,14 @@ function dataBucketName() {
   return release === "ahtlauncher" ? "ahtlauncher-data" : `${release}-data`;
 }
 
+function missingFastR2UploadFields() {
+  const missing = [];
+  if (!inputValue(els.r2AccountIdInput, "")) missing.push("R2 Account ID");
+  if (!inputValue(els.r2AccessKeyIdInput, "")) missing.push("R2 Access Key ID");
+  if (!inputValue(els.r2SecretAccessKeyInput, "")) missing.push("R2 Secret Access Key");
+  return missing;
+}
+
 function cacheOnlyMode() {
   return Boolean(els.cacheOnlyInput?.checked);
 }
@@ -955,6 +963,7 @@ async function saveDeveloperSecrets({ quiet = true } = {}) {
     serverSshPassword: inputValue(els.serverPasswordInput, ""),
     launcherProofSecret: localLauncherProofSecret(),
     githubToken: inputValue(els.githubTokenInput, ""),
+    r2AccountId: inputValue(els.r2AccountIdInput, ""),
     r2AccessKeyId: inputValue(els.r2AccessKeyIdInput, ""),
     r2SecretAccessKey: inputValue(els.r2SecretAccessKeyInput, "")
   });
@@ -1982,7 +1991,7 @@ function fillSettings(status) {
   setInputValue(els.outDirInput, config.developer?.defaultOutDir || "");
   setInputValue(els.cacheModsInput, config.developer?.defaultCacheModsDir || "");
   setInputValue(els.bucketInput, config.developer?.r2Bucket || "ahtlauncher");
-  setInputValue(els.r2AccountIdInput, config.developer?.r2AccountId || "");
+  setInputValue(els.r2AccountIdInput, config.developer?.r2AccountId || status.developerSecrets?.r2AccountId || "");
   setInputValue(els.githubRepoInput, config.developer?.githubRepo || "svre-mc/aht-launcher");
   setInputValue(els.githubBranchInput, config.developer?.githubBranch || "main");
   setInputValue(els.githubWorkflowInput, config.developer?.githubWorkflow || "build-macos.yml");
@@ -2794,13 +2803,17 @@ async function publishSelectedRelease() {
       throw new Error("Cloud setup did not return a Player Feed URL.");
     }
     await validateSelectedRelease();
-    setReleaseCheck("warn", "Uploading release", "Preflight passed", "Starting R2 upload. Fast mode shows byte progress when R2 access keys are saved.");
+    const missingFastR2 = missingFastR2UploadFields();
+    setReleaseCheck("warn", "Uploading release", "Preflight passed", missingFastR2.length ? `Fast R2 upload needs ${missingFastR2.join(", ")}. Large releases will not use slow Wrangler fallback.` : "Fast direct R2 upload enabled with byte progress.");
     setReleaseUploadProgress({ percent: 0, phase: "Starting R2 upload" });
     startUploadPolling();
     const result = await window.aht.devSyncR2({
       outDir: developerOutDir(),
       bucket: releaseBucketName(),
-      publicLatestUrl: playerFeedUrl()
+      publicLatestUrl: playerFeedUrl(),
+      r2AccountId: inputValue(els.r2AccountIdInput, ""),
+      r2AccessKeyId: inputValue(els.r2AccessKeyIdInput, ""),
+      r2SecretAccessKey: inputValue(els.r2SecretAccessKeyInput, "")
     });
     const defaults = await writePlayerDefaultsForCurrentFeed().catch((error) => ({ error: cleanErrorMessage(error) }));
     setDevLog({ upload: result, playerDefaults: defaults });
@@ -2836,7 +2849,7 @@ els.publishReleaseButton.addEventListener("click", () => {
   publishSelectedRelease();
 });
 
-[els.packZipInput, els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.channelInput, els.r2AccountIdInput].filter(Boolean).forEach((input) => {
+[els.packZipInput, els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.channelInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
   input.addEventListener("input", () => invalidateReleaseValidation());
   input.addEventListener("change", () => invalidateReleaseValidation());
 });

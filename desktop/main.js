@@ -32,6 +32,7 @@ import {
 import {
   cleanR2AccountId,
   directR2CredentialsReady,
+  headR2ObjectDirect,
   missingDirectR2CredentialLabels,
   uploadR2ObjectDirect
 } from '../src/r2DirectUpload.js';
@@ -160,12 +161,14 @@ async function loadDeveloperSecrets() {
   const serverSsh = stored.secrets?.serverSshPassword || {};
   const launcherProof = stored.secrets?.launcherProofSecret || {};
   const github = stored.secrets?.githubToken || {};
+  const r2Account = stored.secrets?.r2AccountId || {};
   const r2AccessKey = stored.secrets?.r2AccessKeyId || {};
   const r2SecretKey = stored.secrets?.r2SecretAccessKey || {};
   let curseforgeApiKey = '';
   let serverSshPassword = '';
   let launcherProofSecret = '';
   let githubToken = '';
+  let r2AccountId = '';
   let r2AccessKeyId = '';
   let r2SecretAccessKey = '';
   let warning = '';
@@ -190,6 +193,11 @@ async function loadDeveloperSecrets() {
     warning = warning || error.message;
   }
   try {
+    r2AccountId = decryptDeveloperSecret(r2Account);
+  } catch (error) {
+    warning = warning || error.message;
+  }
+  try {
     r2AccessKeyId = decryptDeveloperSecret(r2AccessKey);
   } catch (error) {
     warning = warning || error.message;
@@ -200,12 +208,13 @@ async function loadDeveloperSecrets() {
     warning = warning || error.message;
   }
   return {
-    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || github.value || r2AccessKey.value || r2SecretKey.value),
+    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || github.value || r2Account.value || r2AccessKey.value || r2SecretKey.value),
     encrypted: Boolean(
       (curseforge.value ? curseforge.encrypted : true)
       && (serverSsh.value ? serverSsh.encrypted : true)
       && (launcherProof.value ? launcherProof.encrypted : true)
       && (github.value ? github.encrypted : true)
+      && (r2Account.value ? r2Account.encrypted : true)
       && (r2AccessKey.value ? r2AccessKey.encrypted : true)
       && (r2SecretKey.value ? r2SecretKey.encrypted : true)
     ),
@@ -215,6 +224,7 @@ async function loadDeveloperSecrets() {
     serverSshPassword,
     launcherProofSecret,
     githubToken,
+    r2AccountId,
     r2AccessKeyId,
     r2SecretAccessKey
   };
@@ -240,6 +250,9 @@ async function saveDeveloperSecrets(secrets = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(secrets, 'githubToken')) {
     next.secrets.githubToken = encryptDeveloperSecret(secrets.githubToken);
+  }
+  if (Object.prototype.hasOwnProperty.call(secrets, 'r2AccountId')) {
+    next.secrets.r2AccountId = encryptDeveloperSecret(secrets.r2AccountId);
   }
   if (Object.prototype.hasOwnProperty.call(secrets, 'r2AccessKeyId')) {
     next.secrets.r2AccessKeyId = encryptDeveloperSecret(secrets.r2AccessKeyId);
@@ -1129,10 +1142,11 @@ async function getStatus(configOverride = null) {
         serverSshPassword: '',
         launcherProofSecret: '',
         githubToken: '',
+        r2AccountId: '',
         r2AccessKeyId: '',
         r2SecretAccessKey: ''
       }))
-      : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', githubToken: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
+      : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
     setup: await setupRecommendations(config),
     minecraftProfile,
     latest,
@@ -2130,6 +2144,7 @@ function r2DirectCredentials({ payload = {}, config = {}, secrets = {} } = {}) {
   return {
     accountId: cleanR2AccountId(
       payload.r2AccountId
+      || secrets.r2AccountId
       || config.developer?.r2AccountId
       || process.env.AHT_R2_ACCOUNT_ID
       || process.env.CLOUDFLARE_ACCOUNT_ID
@@ -2191,6 +2206,26 @@ function trimUploadLines(max = 100) {
   if (uploadState.lines.length > max) {
     uploadState.lines = uploadState.lines.slice(-max);
   }
+}
+
+function sha256FromReleasePath(rel = '') {
+  return String(rel || '').match(/^cache\/files\/([a-f0-9]{64})\.jar$/i)?.[1]?.toLowerCase() || '';
+}
+
+async function releaseObjectSha256({ rel = '', file = '', localLatest = null } = {}) {
+  const relHash = sha256FromReleasePath(rel);
+  if (relHash) return relHash;
+  if (localLatest?.zip?.path && normalizeRelPath(localLatest.zip.path) === rel && localLatest.zip.sha256) {
+    return String(localLatest.zip.sha256).toLowerCase();
+  }
+  return (await hashFile(file, 'sha256')).toLowerCase();
+}
+
+function remoteReleaseObjectMatches({ rel = '', remote = {}, stat = {}, sha256 = '' } = {}) {
+  if (!remote?.exists || Number(remote.size || 0) !== Number(stat.size || 0)) return false;
+  const remoteSha = String(remote.sha256 || '').toLowerCase();
+  if (remoteSha && remoteSha === String(sha256 || '').toLowerCase()) return true;
+  return Boolean(sha256FromReleasePath(rel) && String(sha256 || '').toLowerCase() === sha256FromReleasePath(rel));
 }
 
 function launcherUpdateRootUrl(publicLatestUrl, config = {}) {
@@ -2528,6 +2563,10 @@ async function syncR2(payload = {}) {
   const directCredentials = await resolveR2DirectCredentials({ payload, config, secrets });
   const fastUpload = directR2CredentialsReady(directCredentials);
   const missingFastUpload = missingDirectR2CredentialLabels(directCredentials);
+  const largeUploadThreshold = 50 * 1024 * 1024;
+  if (!fastUpload && totalBytes >= largeUploadThreshold && !payload.allowSlowWranglerUpload) {
+    throw new Error(`Fast R2 upload credentials are required for large releases (${formatBytes(totalBytes)}). Missing ${missingFastUpload.join(', ')}. Add the R2 Account ID, Access Key ID, and Secret Access Key in Release Builder.`);
+  }
   const npx = fastUpload ? '' : wranglerCommand();
   const wranglerCwd = fastUpload ? '' : wranglerWorkDir();
   if (!fastUpload) {
@@ -2582,38 +2621,53 @@ async function syncR2(payload = {}) {
       };
       uploadState.lines.push(`Uploading ${rel} (${formatBytes(stat.size)})`);
       if (fastUpload) {
-        const result = await uploadR2ObjectDirect({
+        uploadState.lines.push(`Checking remote ${rel}`);
+        trimUploadLines();
+        const sha256 = await releaseObjectSha256({ rel, file, localLatest });
+        const remote = await headR2ObjectDirect({
           ...directCredentials,
           bucket,
-          key: rel,
-          file,
-          contentType: contentType(file),
-          onProgress: (progress) => {
-            const currentLoaded = Math.min(Number(progress.loaded || 0), stat.size);
-            const loadedTotal = uploadedBytes + currentLoaded;
-            const totalPercent = totalBytes ? Math.min(100, Math.round((loadedTotal / totalBytes) * 100)) : 0;
-            uploadState.currentBytes = currentLoaded;
-            uploadState.uploadedBytes = loadedTotal;
-            uploadState.progress = {
-              phase: 'Fast R2 upload',
-              completed: loadedTotal,
-              total: totalBytes,
-              percent: totalPercent,
-              unit: 'bytes',
-              currentFile: rel,
-              currentPercent: progress.percent || 0,
-              speedBytesPerSecond: progress.speedBytesPerSecond || 0,
-              method: 'direct-multipart'
-            };
-            const pct = Number(progress.percent || 0);
-            if (pct >= lastLoggedPercent + 10 || pct === 100) {
-              lastLoggedPercent = pct;
-              uploadState.lines.push(`${rel}: ${pct}% (${formatBytes(currentLoaded)}/${formatBytes(stat.size)} at ${formatBytes(progress.speedBytesPerSecond || 0)}/s)`);
-              trimUploadLines();
-            }
-          }
+          key: rel
         });
-        uploaded.push({ path: rel, output: `uploaded ${rel}`, method: result.method, size: result.size });
+        if (remoteReleaseObjectMatches({ rel, remote, stat, sha256 })) {
+          uploaded.push({ path: rel, output: `skipped ${rel}; remote object already matches`, method: 'direct-skip', skipped: true, size: stat.size });
+          uploadState.lines.push(`Skipped ${rel}; remote already matches.`);
+        } else {
+          const result = await uploadR2ObjectDirect({
+            ...directCredentials,
+            bucket,
+            key: rel,
+            file,
+            contentType: contentType(file),
+            sha256,
+            metadata: { 'aht-uploaded-by': 'aht-launcher' },
+            onProgress: (progress) => {
+              const currentLoaded = Math.min(Number(progress.loaded || 0), stat.size);
+              const loadedTotal = uploadedBytes + currentLoaded;
+              const totalPercent = totalBytes ? Math.min(100, Math.round((loadedTotal / totalBytes) * 100)) : 0;
+              uploadState.currentBytes = currentLoaded;
+              uploadState.uploadedBytes = loadedTotal;
+              uploadState.progress = {
+                phase: 'Fast R2 upload',
+                completed: loadedTotal,
+                total: totalBytes,
+                percent: totalPercent,
+                unit: 'bytes',
+                currentFile: rel,
+                currentPercent: progress.percent || 0,
+                speedBytesPerSecond: progress.speedBytesPerSecond || 0,
+                method: 'direct-multipart'
+              };
+              const pct = Number(progress.percent || 0);
+              if (pct >= lastLoggedPercent + 10 || pct === 100) {
+                lastLoggedPercent = pct;
+                uploadState.lines.push(`${rel}: ${pct}% (${formatBytes(currentLoaded)}/${formatBytes(stat.size)} at ${formatBytes(progress.speedBytesPerSecond || 0)}/s)`);
+                trimUploadLines();
+              }
+            }
+          });
+          uploaded.push({ path: rel, output: `uploaded ${rel}`, method: result.method, size: result.size });
+        }
       } else {
         if (rel.endsWith('.zip')) {
           uploadState.lines.push('Large ZIP upload is running through Wrangler; add R2 access keys for byte progress and faster multipart upload.');
@@ -2654,7 +2708,8 @@ async function syncR2(payload = {}) {
         speedBytesPerSecond: Math.round(stat.size / Math.max(0.001, (Date.now() - startedAt) / 1000)),
         method: fastUpload ? 'direct-multipart' : 'wrangler'
       };
-      uploadState.lines.push(`Uploaded ${rel}`);
+      const latestUpload = uploaded.at(-1);
+      uploadState.lines.push(latestUpload?.skipped ? `Remote current ${rel}` : `Uploaded ${rel}`);
       trimUploadLines();
     }
     const verification = await verifyRemoteRelease({ publicLatestUrl, localLatest });
