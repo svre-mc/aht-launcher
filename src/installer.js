@@ -72,6 +72,39 @@ async function downloadVerified(source, dest, expectedHash) {
   }
 }
 
+function clampConcurrency(value, fallback = 10, max = 32) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(Math.floor(parsed), max));
+}
+
+async function runConcurrent(items, limit, worker) {
+  if (!items.length) {
+    return [];
+  }
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function runWorker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => runWorker());
+  await Promise.all(workers);
+  return results;
+}
+
+async function managedSha256(filePath, expectedHash) {
+  if (expectedHash && expectedHash.length === 64) {
+    return expectedHash.toLowerCase();
+  }
+  return hashFile(filePath, 'sha256');
+}
+
 function getCacheEntry(cacheManifest, key) {
   if (!cacheManifest?.entries) {
     return null;
@@ -79,9 +112,28 @@ function getCacheEntry(cacheManifest, key) {
   return cacheManifest.entries[key] || null;
 }
 
+function cacheEntryToDownload({ entry, key, releaseSource, fallbackFileName = '' }) {
+  if (!entry?.url) {
+    return null;
+  }
+  return {
+    source: 'cache',
+    key,
+    fileName: entry.fileName || fallbackFileName || `${key.replace(':', '-')}.jar`,
+    url: resolveSource(releaseSource, entry.url),
+    expectedHash: entry.sha256 || entry.sha1 || null
+  };
+}
+
 async function resolveCurseForgeDownload(file, cfOptions, cacheManifest, releaseSource) {
   const key = manifestFileKey(file);
   const [projectId, fileId] = key.split(':');
+  const cached = cacheEntryToDownload({
+    entry: getCacheEntry(cacheManifest, key),
+    key,
+    releaseSource,
+    fallbackFileName: `${projectId}-${fileId}.jar`
+  });
   let cfError = null;
 
   try {
@@ -98,28 +150,59 @@ async function resolveCurseForgeDownload(file, cfOptions, cacheManifest, release
         key,
         fileName,
         url,
-        expectedHash: sha1
+        expectedHash: sha1,
+        fallback: cached
       };
     }
   } catch (error) {
     cfError = error;
   }
 
-  const cached = getCacheEntry(cacheManifest, key);
-  if (cached?.url) {
-    return {
-      source: 'cache',
-      key,
-      fileName: cached.fileName || `${projectId}-${fileId}.jar`,
-      url: resolveSource(releaseSource, cached.url),
-      expectedHash: cached.sha256 || cached.sha1 || null
-    };
+  if (cached) {
+    return cached;
   }
 
   if (cfError) {
     throw new Error(`Unable to resolve ${key}: ${cfError.message}`);
   }
   throw new Error(`Unable to resolve ${key}: no CurseForge URL and no fallback cache entry`);
+}
+
+async function installResolvedDownload({ resolved, instanceDir, forceRepair, logger }) {
+  const attempts = [resolved, resolved?.fallback].filter(Boolean);
+  let lastError = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const candidate = attempts[index];
+    const relPath = normalizeRelPath(`mods/${candidate.fileName}`);
+    const target = safeJoin(instanceDir, relPath);
+    try {
+      if (!forceRepair && await verifyExisting(target, candidate.expectedHash)) {
+        logger.log(`OK ${relPath}`);
+      } else {
+        logger.log(`Downloading ${candidate.source} ${candidate.key} -> ${relPath}`);
+        await downloadVerified(candidate.url, target, candidate.expectedHash);
+      }
+      return { candidate, relPath, target };
+    } catch (error) {
+      lastError = error;
+      if (index < attempts.length - 1) {
+        logger.log(`Download failed from ${candidate.source} ${candidate.key}; trying fallback cache. ${error.message}`);
+      }
+    }
+  }
+  throw lastError || new Error(`Unable to download ${resolved?.key || 'mod'}`);
+}
+
+function cacheExtraDownloads(cacheManifest, releaseSource) {
+  const extraFiles = Array.isArray(cacheManifest?.extraFiles) ? cacheManifest.extraFiles : [];
+  return extraFiles
+    .map((entry) => cacheEntryToDownload({
+      entry,
+      key: entry.sha256 ? `extra:${entry.sha256}` : `extra:${entry.fileName || entry.url || 'unknown'}`,
+      releaseSource,
+      fallbackFileName: entry.fileName || ''
+    }))
+    .filter(Boolean);
 }
 
 function collectOverrideFiles(zip, overridesDir) {
@@ -153,6 +236,7 @@ export async function installPack(options) {
     cfProxyBaseUrl,
     dryRun = false,
     forceRepair = false,
+    installConcurrency = process.env.AHT_INSTALL_CONCURRENCY || 10,
     onProgress = null,
     logger = console
   } = options;
@@ -188,6 +272,12 @@ export async function installPack(options) {
   const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
   const overridesDir = manifest.overrides || latest.overrides || 'overrides';
   const overrideFiles = collectOverrideFiles(zip, overridesDir);
+  const cacheExtras = cacheExtraDownloads(cacheManifest, latestSource || filePathToSource(process.cwd()));
+  const overrideModBasenames = new Set(
+    overrideFiles
+      .filter((file) => file.relPath.toLowerCase().startsWith('mods/'))
+      .map((file) => path.basename(file.relPath).toLowerCase())
+  );
 
   const previousManagedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
   const previousManaged = !dryRun && await pathExists(previousManagedPath)
@@ -201,7 +291,8 @@ export async function installPack(options) {
       manifestFileCount: manifestFiles.length,
       overrideFileCount: overrideFiles.length,
       embeddedModCount: overrideFiles.filter((file) => file.relPath.startsWith('mods/')).length,
-      cacheEntryCount: cacheManifest?.entries ? Object.keys(cacheManifest.entries).length : 0
+      cacheEntryCount: cacheManifest?.entries ? Object.keys(cacheManifest.entries).length : 0,
+      cacheExtraCount: cacheExtras.length
     };
   }
 
@@ -214,8 +305,10 @@ export async function installPack(options) {
   };
   const nextManaged = [];
   const nextManagedSet = new Set();
-  const totalWork = manifestFiles.length + overrideFiles.length;
+  const totalWork = manifestFiles.length + cacheExtras.length + overrideFiles.length;
   let completedWork = 0;
+  const concurrency = clampConcurrency(installConcurrency);
+  const releaseSource = latestSource || filePathToSource(process.cwd());
   const emitProgress = (phase, currentPath = '') => {
     if (onProgress) {
       onProgress({
@@ -230,39 +323,88 @@ export async function installPack(options) {
 
   emitProgress('Preparing');
 
-  for (const file of manifestFiles) {
-    const resolved = await resolveCurseForgeDownload(file, cfOptions, cacheManifest, latestSource || filePathToSource(process.cwd()));
-    const relPath = normalizeRelPath(`mods/${resolved.fileName}`);
-    const target = safeJoin(instanceDir, relPath);
-    if (!forceRepair && await verifyExisting(target, resolved.expectedHash)) {
-      logger.log(`OK ${relPath}`);
-    } else {
-      logger.log(`Downloading ${resolved.source} ${resolved.key} -> ${relPath}`);
-      await downloadVerified(resolved.url, target, resolved.expectedHash);
-    }
-    nextManaged.push({
-      relativePath: relPath,
-      source: resolved.source,
-      key: resolved.key,
-      sha256: await hashFile(target, 'sha256')
+  logger.log(`Installing ${manifestFiles.length} manifest mods with concurrency ${concurrency}`);
+  const manifestManaged = await runConcurrent(manifestFiles, concurrency, async (file) => {
+    const resolved = await resolveCurseForgeDownload(file, cfOptions, cacheManifest, releaseSource);
+    const { candidate, relPath, target } = await installResolvedDownload({
+      resolved,
+      instanceDir,
+      forceRepair,
+      logger
     });
-    nextManagedSet.add(relPath);
+    const managed = {
+      relativePath: relPath,
+      source: candidate.source,
+      key: candidate.key,
+      sha256: await managedSha256(target, candidate.expectedHash)
+    };
     completedWork += 1;
     emitProgress('Mods', relPath);
+    return managed;
+  });
+  for (const managed of manifestManaged) {
+    nextManaged.push(managed);
+    nextManagedSet.add(managed.relativePath);
   }
 
-  for (const override of overrideFiles) {
+  const cacheExtraJobs = [];
+  const plannedCacheExtras = new Set();
+  for (const extra of cacheExtras) {
+    const relPath = normalizeRelPath(`mods/${extra.fileName}`);
+    const alreadyManaged = nextManagedSet.has(relPath);
+    const alreadyEmbedded = overrideModBasenames.has(path.basename(extra.fileName).toLowerCase());
+    const alreadyPlanned = plannedCacheExtras.has(relPath);
+    if (alreadyManaged || alreadyEmbedded || alreadyPlanned) {
+      logger.log(`Skipping cache extra ${extra.fileName}; already provided by ${alreadyManaged ? 'manifest' : alreadyEmbedded ? 'overrides' : 'another cache extra'}`);
+      completedWork += 1;
+      emitProgress('Cache extras', relPath);
+      continue;
+    }
+    plannedCacheExtras.add(relPath);
+    cacheExtraJobs.push({ extra, relPath });
+  }
+
+  if (cacheExtraJobs.length) {
+    logger.log(`Installing ${cacheExtraJobs.length} cache-only mods with concurrency ${concurrency}`);
+  }
+  const cacheExtraManaged = await runConcurrent(cacheExtraJobs, concurrency, async ({ extra, relPath }) => {
+    const { candidate, target, relPath: installedRelPath } = await installResolvedDownload({
+      resolved: extra,
+      instanceDir,
+      forceRepair,
+      logger
+    });
+    const managed = {
+      relativePath: installedRelPath || relPath,
+      source: 'cache-extra',
+      key: candidate.key,
+      sha256: await managedSha256(target, candidate.expectedHash)
+    };
+    completedWork += 1;
+    emitProgress('Cache extras', managed.relativePath);
+    return managed;
+  });
+  for (const managed of cacheExtraManaged) {
+    nextManaged.push(managed);
+    nextManagedSet.add(managed.relativePath);
+  }
+
+  const overrideManaged = await runConcurrent(overrideFiles, Math.min(concurrency, 16), async (override) => {
     const target = safeJoin(instanceDir, override.relPath);
     await ensureDir(path.dirname(target));
     await fs.writeFile(target, override.entry.getData());
-    nextManaged.push({
+    const managed = {
       relativePath: override.relPath,
       source: 'overrides',
       sha256: await hashFile(target, 'sha256')
-    });
-    nextManagedSet.add(override.relPath);
+    };
     completedWork += 1;
     emitProgress('Overrides', override.relPath);
+    return managed;
+  });
+  for (const managed of overrideManaged) {
+    nextManaged.push(managed);
+    nextManagedSet.add(managed.relativePath);
   }
 
   const removed = await removeStaleManagedFiles(instanceDir, previousManaged, nextManagedSet);

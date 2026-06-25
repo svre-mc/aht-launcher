@@ -261,6 +261,9 @@
                 <label class="span-2">Fallback Cache Mods Folder <span class="browse"><input id="cacheModsInput" type="text"><button id="pickCacheModsButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
                 <label>Channel <input id="channelInput" type="text" value="stable"></label>
                 <label>R2 Bucket <input id="bucketInput" type="text"></label>
+                <label>R2 Account ID <input id="r2AccountIdInput" type="text" autocomplete="off" placeholder="Cloudflare account ID"></label>
+                <label>R2 Access Key ID <input id="r2AccessKeyIdInput" type="password" autocomplete="off"></label>
+                <label class="span-2">R2 Secret Access Key <input id="r2SecretAccessKeyInput" type="password" autocomplete="off"></label>
               </div>
             </details>
             <div id="releaseCheckCard" class="release-check-card warn">
@@ -269,6 +272,10 @@
                 <strong id="releaseCheckTitle">Choose a ZIP</strong>
               </div>
               <p id="releaseCheckDetail">Pick a CurseForge export ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.</p>
+            </div>
+            <div id="releaseUploadProgress" class="progress-wrap release-upload-progress" hidden>
+              <div class="progress-meta"><span id="releaseUploadProgressLabel">Preparing upload</span><span id="releaseUploadProgressCount">0%</span></div>
+              <div class="progress-track"><div id="releaseUploadProgressBar" class="progress-bar"></div></div>
             </div>
           </section>
 

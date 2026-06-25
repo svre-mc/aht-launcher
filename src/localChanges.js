@@ -4,13 +4,24 @@ import { hashFile, normalizeRelPath, pathExists, readJsonFile, safeJoin } from '
 
 const MONITORED_ROOTS = ['mods'];
 
-function managedModFiles(managed = []) {
+function normalizeManagedModFiles(managed = []) {
   return managed
     .map((item) => ({
       ...item,
       relativePath: normalizeRelPath(String(item?.relativePath || ''))
     }))
     .filter((item) => item.relativePath.startsWith('mods/'));
+}
+
+function managedModFiles(managed = [], requiredManaged = []) {
+  const byPath = new Map();
+  for (const item of normalizeManagedModFiles(managed)) {
+    byPath.set(item.relativePath, item);
+  }
+  for (const item of normalizeManagedModFiles(requiredManaged)) {
+    byPath.set(item.relativePath, item);
+  }
+  return [...byPath.values()];
 }
 
 async function walkFiles(root, rel = '') {
@@ -53,7 +64,7 @@ async function loadManaged(instanceDir) {
 
 export async function scanLocalChanges(instanceDir, options = {}) {
   const limit = options.limit || 500;
-  const managed = managedModFiles(await loadManaged(instanceDir));
+  const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
   const missing = [];
@@ -121,7 +132,7 @@ export async function scanLocalChanges(instanceDir, options = {}) {
 
 export async function scanManagedIntegrity(instanceDir, options = {}) {
   const limit = options.limit || 500;
-  const managed = managedModFiles(await loadManaged(instanceDir));
+  const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
   const changed = [];
   const missing = [];
   let checked = 0;

@@ -14,6 +14,7 @@
   "developer": {
     "adminBaseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
     "r2Bucket": "ahtlauncher",
+    "r2AccountId": "",
     "cacheOnlyMode": false,
     "githubRepo": "svre-mc/aht-launcher",
     "githubBranch": "main",

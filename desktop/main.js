@@ -29,6 +29,12 @@ import {
   triggerLauncherReleaseWorkflow
 } from '../src/githubActions.js';
 import {
+  cleanR2AccountId,
+  directR2CredentialsReady,
+  missingDirectR2CredentialLabels,
+  uploadR2ObjectDirect
+} from '../src/r2DirectUpload.js';
+import {
   ensureDir,
   downloadToFile,
   hashFile,
@@ -153,10 +159,14 @@ async function loadDeveloperSecrets() {
   const serverSsh = stored.secrets?.serverSshPassword || {};
   const launcherProof = stored.secrets?.launcherProofSecret || {};
   const github = stored.secrets?.githubToken || {};
+  const r2AccessKey = stored.secrets?.r2AccessKeyId || {};
+  const r2SecretKey = stored.secrets?.r2SecretAccessKey || {};
   let curseforgeApiKey = '';
   let serverSshPassword = '';
   let launcherProofSecret = '';
   let githubToken = '';
+  let r2AccessKeyId = '';
+  let r2SecretAccessKey = '';
   let warning = '';
   try {
     curseforgeApiKey = decryptDeveloperSecret(curseforge);
@@ -178,20 +188,34 @@ async function loadDeveloperSecrets() {
   } catch (error) {
     warning = warning || error.message;
   }
+  try {
+    r2AccessKeyId = decryptDeveloperSecret(r2AccessKey);
+  } catch (error) {
+    warning = warning || error.message;
+  }
+  try {
+    r2SecretAccessKey = decryptDeveloperSecret(r2SecretKey);
+  } catch (error) {
+    warning = warning || error.message;
+  }
   return {
-    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || github.value),
+    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || github.value || r2AccessKey.value || r2SecretKey.value),
     encrypted: Boolean(
       (curseforge.value ? curseforge.encrypted : true)
       && (serverSsh.value ? serverSsh.encrypted : true)
       && (launcherProof.value ? launcherProof.encrypted : true)
       && (github.value ? github.encrypted : true)
+      && (r2AccessKey.value ? r2AccessKey.encrypted : true)
+      && (r2SecretKey.value ? r2SecretKey.encrypted : true)
     ),
     encryptionAvailable: encrypted,
     warning,
     curseforgeApiKey,
     serverSshPassword,
     launcherProofSecret,
-    githubToken
+    githubToken,
+    r2AccessKeyId,
+    r2SecretAccessKey
   };
 }
 async function saveDeveloperSecrets(secrets = {}) {
@@ -215,6 +239,12 @@ async function saveDeveloperSecrets(secrets = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(secrets, 'githubToken')) {
     next.secrets.githubToken = encryptDeveloperSecret(secrets.githubToken);
+  }
+  if (Object.prototype.hasOwnProperty.call(secrets, 'r2AccessKeyId')) {
+    next.secrets.r2AccessKeyId = encryptDeveloperSecret(secrets.r2AccessKeyId);
+  }
+  if (Object.prototype.hasOwnProperty.call(secrets, 'r2SecretAccessKey')) {
+    next.secrets.r2SecretAccessKey = encryptDeveloperSecret(secrets.r2SecretAccessKey);
   }
   await writeJsonFile(developerSecretsPath(), next);
   const usedEncryption = Object.values(next.secrets).every((item) => !item?.value || item.encrypted);
@@ -270,6 +300,7 @@ function defaultConfig() {
       defaultOutDir: path.join(app.getPath('documents'), 'aht-release'),
       defaultCacheModsDir: '',
       r2Bucket: 'ahtlauncher',
+      r2AccountId: '',
       githubRepo: launcherWorkflowDefaults.repo,
       githubBranch: launcherWorkflowDefaults.branch,
       githubWorkflow: launcherWorkflowDefaults.workflow
@@ -290,7 +321,8 @@ function defaultConfig() {
       port: 22,
       username: 'notevil',
       remoteDir: '/home/notevil/Desktop/AHT Server Files',
-      excludeDirs: ['DregoraRL']
+      excludeDirs: ['DregoraRL'],
+      concurrency: 8
     },
     minecraftLauncher: {
       enabled: true,
@@ -532,6 +564,8 @@ async function saveConfig(nextConfig) {
   delete merged.developer.curseforgeApiKey;
   delete merged.developer.launcherProofSecret;
   delete merged.developer.githubToken;
+  delete merged.developer.r2AccessKeyId;
+  delete merged.developer.r2SecretAccessKey;
   await writeJsonFile(configPath(), merged);
   return merged;
 }
@@ -677,10 +711,7 @@ function launcherProofAuthToken() {
 async function identityPayload(config = null) {
   const identity = await loadIdentity();
   let nextIdentity = identity;
-  if (
-    config?.minecraftLauncher?.rootDir
-    && (!nextIdentity.minecraftUsername || nextIdentity.usernameRegistrationMode === 'local')
-  ) {
+  if (config?.minecraftLauncher?.rootDir && config.minecraftLauncher?.autoImportAccount !== false) {
     const auth = await inspectMinecraftLauncherAuth(config.minecraftLauncher.rootDir, {
       extraRoots: minecraftRootCandidates(process.platform, {
         ...process.env,
@@ -689,13 +720,22 @@ async function identityPayload(config = null) {
       }).filter((root) => !samePath(root, config.minecraftLauncher.rootDir))
     });
     if (auth.preferredUsername && auth.preferredUsername !== nextIdentity.minecraftUsername) {
-      nextIdentity = {
-        ...nextIdentity,
-        minecraftUsername: auth.preferredUsername,
-        usernameRegisteredAt: nextIdentity.usernameRegisteredAt || new Date().toISOString(),
-        usernameRegistrationMode: 'minecraft-launcher'
-      };
-      await writeJsonFile(identityPath(), nextIdentity);
+      try {
+        const registered = await registerMinecraftUsername(auth.preferredUsername, {
+          mode: 'minecraft-launcher',
+          skipLauncherAuthSync: true
+        });
+        nextIdentity = await loadIdentity();
+        nextIdentity.minecraftUsernameSyncWarning = '';
+        nextIdentity.minecraftLauncherDetectedUsername = registered.username || auth.preferredUsername;
+      } catch (error) {
+        nextIdentity = {
+          ...nextIdentity,
+          minecraftLauncherDetectedUsername: auth.preferredUsername,
+          minecraftUsernameSyncWarning: error.message || String(error)
+        };
+        await writeJsonFile(identityPath(), nextIdentity);
+      }
     }
   }
   return {
@@ -720,7 +760,7 @@ function accountBaseUrl(config) {
   return config.sync?.baseUrl || config.developer?.adminBaseUrl || '';
 }
 
-async function registerMinecraftUsername(username) {
+async function registerMinecraftUsername(username, options = {}) {
   const normalizedUsername = normalizeMinecraftUsername(username);
   assertMinecraftUsername(normalizedUsername);
   const config = await loadConfig();
@@ -753,7 +793,9 @@ async function registerMinecraftUsername(username) {
     ...identity,
     minecraftUsername: remote.username || normalizedUsername,
     usernameRegisteredAt: identity.usernameRegisteredAt || new Date().toISOString(),
-    usernameRegistrationMode: remote.skipped ? 'local' : 'worker'
+    usernameRegistrationMode: options.mode || (remote.skipped ? 'local' : 'worker'),
+    minecraftLauncherDetectedUsername: options.mode === 'minecraft-launcher' ? normalizedUsername : identity.minecraftLauncherDetectedUsername || '',
+    minecraftUsernameSyncWarning: ''
   };
   await writeJsonFile(identityPath(), nextIdentity);
   return {
@@ -768,6 +810,40 @@ async function readLatest(config) {
     return null;
   }
   return readJsonFromSource(config.latestUrl);
+}
+
+async function expectedCacheExtraManagedFiles(config, latest = null) {
+  if (!config?.latestUrl) {
+    return [];
+  }
+  const release = latest || await readLatest(config);
+  const preferLocalPaths = !isHttpUrl(config.latestUrl);
+  const cacheRef = preferLocalPaths
+    ? (release?.cacheManifest?.path || release?.cacheManifest?.url)
+    : (release?.cacheManifest?.url || release?.cacheManifest?.path);
+  if (!cacheRef) {
+    return [];
+  }
+  const cacheSource = resolveSource(config.latestUrl, cacheRef);
+  const cacheManifest = await readJsonFromSource(cacheSource);
+  const extraFiles = Array.isArray(cacheManifest?.extraFiles) ? cacheManifest.extraFiles : [];
+  return extraFiles
+    .filter((entry) => entry?.fileName)
+    .map((entry) => ({
+      relativePath: normalizeRelPath(`mods/${entry.fileName}`),
+      source: 'cache-extra',
+      sha256: entry.sha256 || '',
+      sha1: entry.sha1 || '',
+      requiredByLatest: true
+    }));
+}
+
+async function scanCurrentManagedIntegrity(config, latest = null) {
+  const requiredManaged = await expectedCacheExtraManagedFiles(config, latest).catch((error) => {
+    console.warn(`Unable to load expected cache extras for integrity scan: ${error.message || error}`);
+    return [];
+  });
+  return scanManagedIntegrity(config.instanceDir, { requiredManaged });
 }
 
 async function readUpdateLogs(config, limit = 3) {
@@ -1040,9 +1116,12 @@ async function getStatus(configOverride = null) {
         warning: error.message,
         curseforgeApiKey: '',
         serverSshPassword: '',
-        launcherProofSecret: ''
+        launcherProofSecret: '',
+        githubToken: '',
+        r2AccessKeyId: '',
+        r2SecretAccessKey: ''
       }))
-      : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '' },
+      : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', githubToken: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
     setup: await setupRecommendations(config),
     minecraftProfile,
     latest,
@@ -1264,7 +1343,8 @@ function serverTransferOptions(config = {}, payload = {}, password = '') {
     username: payload.username || configured.username || 'notevil',
     remoteDir: payload.remoteDir || configured.remoteDir || '/home/notevil/Desktop/AHT Server Files',
     password,
-    excludeDirs
+    excludeDirs,
+    concurrency: Number(payload.concurrency || configured.concurrency || 8)
   };
 }
 
@@ -1304,8 +1384,8 @@ async function syncServerFiles(payload = {}) {
       }
     });
     serverTransferState.lastResult = result;
-    serverTransferState.lines.push(`Done. Uploaded ${result.uploaded}/${result.fileCount} files. Excluded: ${result.excludedDirs.join(', ') || 'none'}`);
-    serverTransferState.progress = { phase: 'Complete', completed: result.uploaded, total: result.fileCount, percent: 100 };
+    serverTransferState.lines.push(`Done. Uploaded ${result.uploaded} changed files, skipped ${result.skipped || 0} unchanged files. Excluded: ${result.excludedDirs.join(', ') || 'none'}`);
+    serverTransferState.progress = { phase: 'Complete', completed: result.fileCount, total: result.fileCount, percent: 100 };
     return result;
   } catch (error) {
     serverTransferState.error = error.message || String(error);
@@ -2021,6 +2101,53 @@ async function uploadR2Object({ bucket, rel, file, wranglerCwd, onOutput = null 
   });
 }
 
+function r2DirectCredentials({ payload = {}, config = {}, secrets = {} } = {}) {
+  return {
+    accountId: cleanR2AccountId(
+      payload.r2AccountId
+      || config.developer?.r2AccountId
+      || process.env.AHT_R2_ACCOUNT_ID
+      || process.env.CLOUDFLARE_ACCOUNT_ID
+      || ''
+    ),
+    accessKeyId: String(
+      payload.r2AccessKeyId
+      || secrets.r2AccessKeyId
+      || process.env.AHT_R2_ACCESS_KEY_ID
+      || process.env.R2_ACCESS_KEY_ID
+      || process.env.AWS_ACCESS_KEY_ID
+      || ''
+    ).trim(),
+    secretAccessKey: String(
+      payload.r2SecretAccessKey
+      || secrets.r2SecretAccessKey
+      || process.env.AHT_R2_SECRET_ACCESS_KEY
+      || process.env.R2_SECRET_ACCESS_KEY
+      || process.env.AWS_SECRET_ACCESS_KEY
+      || ''
+    ).trim()
+  };
+}
+
+function formatBytes(bytes = 0) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function trimUploadLines(max = 100) {
+  if (uploadState.lines.length > max) {
+    uploadState.lines = uploadState.lines.slice(-max);
+  }
+}
+
 function launcherUpdateRootUrl(publicLatestUrl, config = {}) {
   const launcherLatest = launcherLatestUrlFromInput(publicLatestUrl || config.launcherUpdate?.latestUrl || config.latestUrl || '');
   if (!launcherLatest) {
@@ -2304,11 +2431,13 @@ async function syncLauncherUpdate(payload = {}) {
   }
 }
 
-async function syncR2({ outDir, bucket, publicLatestUrl = '' }) {
+async function syncR2(payload = {}) {
+  const { outDir, bucket, publicLatestUrl = '' } = payload;
   assertDeveloperAuthenticated();
   if (uploadState.running) {
     throw new Error('R2 upload is already running');
   }
+  const config = await loadConfig();
   if (!outDir || !bucket) {
     throw new Error('Output directory and R2 bucket are required');
   }
@@ -2330,18 +2459,44 @@ async function syncR2({ outDir, bucket, publicLatestUrl = '' }) {
     const order = releaseUploadOrder(left) - releaseUploadOrder(right);
     return order || left.localeCompare(right);
   });
-  const npx = wranglerCommand();
-  const wranglerCwd = wranglerWorkDir();
-  await ensureDir(wranglerCwd);
+  const fileStats = new Map();
+  let totalBytes = 0;
+  for (const file of files) {
+    const stat = await fs.stat(file);
+    fileStats.set(file, stat);
+    totalBytes += stat.size;
+  }
+  const secrets = await loadDeveloperSecrets().catch(() => ({}));
+  const directCredentials = r2DirectCredentials({ payload, config, secrets });
+  const fastUpload = directR2CredentialsReady(directCredentials);
+  const missingFastUpload = missingDirectR2CredentialLabels(directCredentials);
+  const npx = fastUpload ? '' : wranglerCommand();
+  const wranglerCwd = fastUpload ? '' : wranglerWorkDir();
+  if (!fastUpload) {
+    await ensureDir(wranglerCwd);
+  }
   const uploaded = [];
+  let uploadedBytes = 0;
   uploadState = {
     running: true,
     total: files.length,
     completed: 0,
     current: '',
+    totalBytes,
+    uploadedBytes: 0,
+    progress: {
+      phase: fastUpload ? 'Fast R2 upload' : 'Wrangler upload',
+      completed: 0,
+      total: totalBytes || files.length,
+      percent: 0,
+      method: fastUpload ? 'direct-multipart' : 'wrangler'
+    },
     lines: [
       `Uploading ${files.length} files to remote R2 bucket ${bucket}`,
-      'latest.json will upload last so players only see the update after artifacts are ready.'
+      'latest.json will upload last so players only see the update after artifacts are ready.',
+      fastUpload
+        ? 'Fast direct R2 upload enabled: multipart upload with byte progress.'
+        : `Fast direct R2 upload disabled; missing ${missingFastUpload.join(', ')}. Falling back to Wrangler.`
     ],
     lastResult: null,
     error: null,
@@ -2351,35 +2506,85 @@ async function syncR2({ outDir, bucket, publicLatestUrl = '' }) {
     for (const file of files) {
       const rel = path.relative(outDir, file).replaceAll(path.sep, '/');
       uploadState.current = rel;
-      const stat = await fs.stat(file);
-      uploadState.lines.push(`Uploading ${rel} (${stat.size} bytes)`);
-      if (rel.endsWith('.zip')) {
-        uploadState.lines.push('Large ZIP uploads can be quiet for several minutes; this file is still the active upload.');
-      }
-      const output = await spawnLogged(npx, wranglerArgs([
-        'r2',
-        'object',
-        'put',
-        `${bucket}/${rel}`,
-        `--file=${file}`,
-        `--content-type=${contentType(file)}`,
-        '--remote'
-      ]), {
-        cwd: wranglerCwd,
-        timeoutMs: 30 * 60_000,
-        onOutput: (text) => {
-          const compact = String(text || '').trim();
-          if (compact) {
-            uploadState.lines.push(compact);
+      const stat = fileStats.get(file) || await fs.stat(file);
+      const startedAt = Date.now();
+      let lastLoggedPercent = -1;
+      uploadState.currentSize = stat.size;
+      uploadState.currentBytes = 0;
+      uploadState.lines.push(`Uploading ${rel} (${formatBytes(stat.size)})`);
+      if (fastUpload) {
+        const result = await uploadR2ObjectDirect({
+          ...directCredentials,
+          bucket,
+          key: rel,
+          file,
+          contentType: contentType(file),
+          onProgress: (progress) => {
+            const currentLoaded = Math.min(Number(progress.loaded || 0), stat.size);
+            const loadedTotal = uploadedBytes + currentLoaded;
+            const totalPercent = totalBytes ? Math.min(100, Math.round((loadedTotal / totalBytes) * 100)) : 0;
+            uploadState.currentBytes = currentLoaded;
+            uploadState.uploadedBytes = loadedTotal;
+            uploadState.progress = {
+              phase: 'Fast R2 upload',
+              completed: loadedTotal,
+              total: totalBytes,
+              percent: totalPercent,
+              currentFile: rel,
+              currentPercent: progress.percent || 0,
+              speedBytesPerSecond: progress.speedBytesPerSecond || 0,
+              method: 'direct-multipart'
+            };
+            const pct = Number(progress.percent || 0);
+            if (pct >= lastLoggedPercent + 10 || pct === 100) {
+              lastLoggedPercent = pct;
+              uploadState.lines.push(`${rel}: ${pct}% (${formatBytes(currentLoaded)}/${formatBytes(stat.size)} at ${formatBytes(progress.speedBytesPerSecond || 0)}/s)`);
+              trimUploadLines();
+            }
           }
+        });
+        uploaded.push({ path: rel, output: `uploaded ${rel}`, method: result.method, size: result.size });
+      } else {
+        if (rel.endsWith('.zip')) {
+          uploadState.lines.push('Large ZIP upload is running through Wrangler; add R2 access keys for byte progress and faster multipart upload.');
         }
-      });
-      uploaded.push({ path: rel, output: output.trim() });
-      uploadState.completed = uploaded.length;
-      uploadState.lines.push(`Uploaded ${rel}`);
-      if (uploadState.lines.length > 80) {
-        uploadState.lines = uploadState.lines.slice(-80);
+        const output = await spawnLogged(npx, wranglerArgs([
+          'r2',
+          'object',
+          'put',
+          `${bucket}/${rel}`,
+          `--file=${file}`,
+          `--content-type=${contentType(file)}`,
+          '--remote'
+        ]), {
+          cwd: wranglerCwd,
+          timeoutMs: 30 * 60_000,
+          onOutput: (text) => {
+            const compact = String(text || '').trim();
+            if (compact) {
+              uploadState.lines.push(compact);
+              trimUploadLines();
+            }
+          }
+        });
+        uploaded.push({ path: rel, output: output.trim(), method: 'wrangler', size: stat.size });
       }
+      uploadedBytes += stat.size;
+      uploadState.currentBytes = stat.size;
+      uploadState.uploadedBytes = uploadedBytes;
+      uploadState.completed = uploaded.length;
+      uploadState.progress = {
+        phase: fastUpload ? 'Fast R2 upload' : 'Wrangler upload',
+        completed: fastUpload ? uploadedBytes : uploaded.length,
+        total: fastUpload ? totalBytes : files.length,
+        percent: fastUpload && totalBytes ? Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)) : Math.round((uploaded.length / files.length) * 100),
+        currentFile: rel,
+        currentPercent: 100,
+        speedBytesPerSecond: Math.round(stat.size / Math.max(0.001, (Date.now() - startedAt) / 1000)),
+        method: fastUpload ? 'direct-multipart' : 'wrangler'
+      };
+      uploadState.lines.push(`Uploaded ${rel}`);
+      trimUploadLines();
     }
     const verification = await verifyRemoteRelease({ publicLatestUrl, localLatest });
     uploadState.verification = verification;
@@ -2838,12 +3043,21 @@ async function adminFetch(config, route, options = {}) {
     await ensureRemoteAdminToken(config);
   }
   const url = new URL(route.replace(/^\/+/, ''), base.endsWith('/') ? base : `${base}/`);
-  const headers = { ...(options.headers || {}) };
-  if (adminToken) {
-    headers.Authorization = `Bearer ${adminToken}`;
+  const fetchWithCurrentToken = async () => {
+    const headers = { ...(options.headers || {}) };
+    if (adminToken) {
+      headers.Authorization = `Bearer ${adminToken}`;
+    }
+    const response = await fetch(url, { ...options, headers });
+    const body = await response.json().catch(() => ({}));
+    return { response, body };
+  };
+  let { response, body } = await fetchWithCurrentToken();
+  if (response.status === 401 && !route.replace(/^\/+/, '').startsWith('admin/login')) {
+    adminToken = '';
+    await ensureRemoteAdminToken(config);
+    ({ response, body } = await fetchWithCurrentToken());
   }
-  const response = await fetch(url, { ...options, headers });
-  const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(body.error || `${response.status} ${response.statusText}`);
   }
@@ -2962,7 +3176,7 @@ ipcMain.handle('changes:scan', async () => {
 });
 ipcMain.handle('files:scan', async () => {
   const config = await loadConfig();
-  const integrity = await scanManagedIntegrity(config.instanceDir);
+  const integrity = await scanCurrentManagedIntegrity(config);
   return writeIntegrityState(config, integrity, 'scan');
 });
 ipcMain.handle('changes:sync', async () => {
@@ -2989,7 +3203,7 @@ ipcMain.handle('play:start', async () => {
   const installed = await pathExists(installedPath) ? await readJsonFile(installedPath) : null;
   const integrity = developerClientBypassAllowed()
     ? null
-    : await writeIntegrityState(config, await scanManagedIntegrity(config.instanceDir), 'play-check');
+    : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, latest), 'play-check');
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest, installed });
   const launchState = evaluateLaunchState(config, latest, null, installed, minecraftProfile, integrity);
   if (!launchState.launchReady) {

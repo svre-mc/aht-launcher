@@ -963,6 +963,10 @@ h2 {
   display: none;
 }
 
+.release-upload-progress {
+  margin-top: 10px;
+}
+
 .progress-meta {
   display: flex;
   justify-content: space-between;

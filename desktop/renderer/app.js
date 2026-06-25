@@ -24,6 +24,7 @@ if (!window.aht) {
         defaultOutDir: "C:\\Users\\Player\\Documents\\aht-release",
         defaultCacheModsDir: "C:\\Users\\Player\\curseforge\\minecraft\\Instances\\RLCraft Dregora\\mods",
         r2Bucket: "ahtlauncher",
+        r2AccountId: "",
         githubRepo: "svre-mc/aht-launcher",
         githubBranch: "main",
         githubWorkflow: "build-macos.yml"
@@ -286,7 +287,9 @@ if (!window.aht) {
       curseforgeApiKey: "preview-cf-key",
       serverSshPassword: "preview-ssh-password",
       launcherProofSecret: "preview-proof-secret",
-      githubToken: "preview-github-token"
+      githubToken: "preview-github-token",
+      r2AccessKeyId: "",
+      r2SecretAccessKey: ""
     }),
     devSaveSecrets: async () => ({
       ok: true,
@@ -450,6 +453,9 @@ const els = {
   baseUrlInput: $("#baseUrlInput"),
   channelInput: $("#channelInput"),
   bucketInput: $("#bucketInput"),
+  r2AccountIdInput: $("#r2AccountIdInput"),
+  r2AccessKeyIdInput: $("#r2AccessKeyIdInput"),
+  r2SecretAccessKeyInput: $("#r2SecretAccessKeyInput"),
   cacheOnlyInput: $("#cacheOnlyInput"),
   pickZipButton: $("#pickZipButton"),
   pickOutButton: $("#pickOutButton"),
@@ -458,6 +464,10 @@ const els = {
   setupCloudButton: $("#setupCloudButton"),
   writeDefaultsButton: $("#writeDefaultsButton"),
   publishReleaseButton: $("#publishReleaseButton"),
+  releaseUploadProgress: $("#releaseUploadProgress"),
+  releaseUploadProgressLabel: $("#releaseUploadProgressLabel"),
+  releaseUploadProgressCount: $("#releaseUploadProgressCount"),
+  releaseUploadProgressBar: $("#releaseUploadProgressBar"),
   scanLauncherBuildsButton: $("#scanLauncherBuildsButton"),
   publishLauncherUpdateButton: $("#publishLauncherUpdateButton"),
   launcherUpdateVersionInput: $("#launcherUpdateVersionInput"),
@@ -925,7 +935,9 @@ async function saveDeveloperSecrets({ quiet = true } = {}) {
     curseforgeApiKey: localCurseForgeApiKey(),
     serverSshPassword: inputValue(els.serverPasswordInput, ""),
     launcherProofSecret: localLauncherProofSecret(),
-    githubToken: inputValue(els.githubTokenInput, "")
+    githubToken: inputValue(els.githubTokenInput, ""),
+    r2AccessKeyId: inputValue(els.r2AccessKeyIdInput, ""),
+    r2SecretAccessKey: inputValue(els.r2SecretAccessKeyInput, "")
   });
   if (!quiet && result?.warning) {
     showToast("Developer key saved", result.warning, "warn");
@@ -1002,6 +1014,7 @@ function updateReleaseUploadState() {
 
 function invalidateReleaseValidation(label = "Ready", detail = "Pick a CurseForge export ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.") {
   releaseValidation = null;
+  setReleaseUploadProgress(null, true);
   setReleaseCheck("warn", label, selectedPackZip() ? "Publish update" : "Choose a ZIP", detail);
   updateReleaseUploadState();
 }
@@ -1014,23 +1027,62 @@ function releaseSummary(result) {
   return `${noun(checks, "check", "checks")}, ${noun(warnings, "warning", "warnings")}, ${noun(errors, "error", "errors")}.`;
 }
 
+function formatBytes(bytes = 0) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function setReleaseUploadProgress(progress = null, hidden = false) {
+  if (!els.releaseUploadProgress) return;
+  if (hidden || !progress) {
+    els.releaseUploadProgress.hidden = true;
+    return;
+  }
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent || 0))));
+  els.releaseUploadProgress.hidden = false;
+  if (els.releaseUploadProgressBar) els.releaseUploadProgressBar.style.width = `${percent}%`;
+  if (els.releaseUploadProgressCount) els.releaseUploadProgressCount.textContent = `${percent}%`;
+  if (els.releaseUploadProgressLabel) {
+    const current = progress.currentFile ? `${progress.currentFile}${Number.isFinite(Number(progress.currentPercent)) ? ` ${Math.round(Number(progress.currentPercent))}%` : ""}` : (progress.phase || "Uploading");
+    const speed = progress.speedBytesPerSecond ? ` at ${formatBytes(progress.speedBytesPerSecond)}/s` : "";
+    els.releaseUploadProgressLabel.textContent = `${current}${speed}`;
+  }
+}
+
 function renderUploadState(state) {
   if (!state) return;
   const total = state.total || 0;
   const completed = state.completed || 0;
-  const percent = total ? Math.round((completed / total) * 100) : 0;
+  const progress = state.progress || null;
+  const percent = progress?.percent ?? (total ? Math.round((completed / total) * 100) : 0);
   if (state.running) {
+    setReleaseUploadProgress(progress || { percent, phase: state.current || "Uploading" });
+    const byteDetail = progress?.method === "direct-multipart" && progress?.total
+      ? `${formatBytes(progress.completed || 0)}/${formatBytes(progress.total)}${progress.speedBytesPerSecond ? ` at ${formatBytes(progress.speedBytesPerSecond)}/s` : ""}`
+      : `${completed}/${total} files`;
     setReleaseCheck(
       "warn",
       "Uploading release",
-      `${completed}/${total} files (${percent}%)`,
-      state.current ? `Current: ${state.current}` : "Starting remote R2 upload."
+      `${percent}% uploaded`,
+      state.current ? `Current: ${state.current}. ${byteDetail}` : "Starting remote R2 upload."
     );
   } else if (state.error) {
+    setReleaseUploadProgress(progress || { percent }, false);
     setReleaseCheck("bad", "Upload failed", `${completed}/${total} files uploaded`, state.error);
   } else if (state.lastResult) {
+    setReleaseUploadProgress({ percent: 100, phase: "Upload complete" });
     const verified = state.verification?.publicLatestUrl || state.lastResult?.verification?.publicLatestUrl || "";
     setReleaseCheck("ok", "Upload complete", `${completed}/${total} files uploaded`, verified ? `Player feed verified: ${verified}` : "Release artifacts are in remote R2.");
+  } else {
+    setReleaseUploadProgress(null, true);
   }
   if (Array.isArray(state.lines) && state.lines.length) {
     els.devLog.textContent = state.lines.join("\n");
@@ -1738,9 +1790,12 @@ function renderServerTransferState(state = lastServerTransferState) {
   const percent = Number.isFinite(progress.percent) ? progress.percent : state.lastResult ? 100 : state.running ? 5 : 0;
   const label = state.error ? "Upload failed" : state.running ? "Uploading" : state.lastResult ? "Upload complete" : "Ready";
   const title = state.lastResult
-    ? `${state.lastResult.uploaded}/${state.lastResult.fileCount} files`
+    ? `${state.lastResult.uploaded} uploaded, ${state.lastResult.skipped || 0} skipped`
     : progress.currentPath || progress.phase || "Server upload";
-  const detail = state.error || `Progress ${Math.round(percent)}%. DregoraRL is excluded.`;
+  const byteDetail = progress.totalBytes
+    ? ` ${formatBytes(progress.completedBytes || 0)}/${formatBytes(progress.totalBytes)}.`
+    : "";
+  const detail = state.error || `Progress ${Math.round(percent)}%.${byteDetail} DregoraRL is excluded.`;
   setServerTransferStatus(state.error ? "bad" : state.running ? "warn" : state.lastResult ? "ok" : "warn", label, title, detail);
   const lines = [...(state.lines || [])];
   if (state.error) lines.push(`ERROR: ${state.error}`);
@@ -1813,6 +1868,7 @@ function serializeSettings() {
       defaultOutDir: inputValue(els.outDirInput, existingDeveloper.defaultOutDir || ""),
       defaultCacheModsDir: inputValue(els.cacheModsInput, existingDeveloper.defaultCacheModsDir || ""),
       r2Bucket: inputValue(els.bucketInput, existingDeveloper.r2Bucket || "ahtlauncher"),
+      r2AccountId: inputValue(els.r2AccountIdInput, existingDeveloper.r2AccountId || ""),
       cacheOnlyMode: cacheOnlyMode(),
       githubRepo: inputValue(els.githubRepoInput, existingDeveloper.githubRepo || "svre-mc/aht-launcher"),
       githubBranch: inputValue(els.githubBranchInput, existingDeveloper.githubBranch || "main"),
@@ -1865,6 +1921,7 @@ function fillSettings(status) {
   setInputValue(els.outDirInput, config.developer?.defaultOutDir || "");
   setInputValue(els.cacheModsInput, config.developer?.defaultCacheModsDir || "");
   setInputValue(els.bucketInput, config.developer?.r2Bucket || "ahtlauncher");
+  setInputValue(els.r2AccountIdInput, config.developer?.r2AccountId || "");
   setInputValue(els.githubRepoInput, config.developer?.githubRepo || "svre-mc/aht-launcher");
   setInputValue(els.githubBranchInput, config.developer?.githubBranch || "main");
   setInputValue(els.githubWorkflowInput, config.developer?.githubWorkflow || "build-macos.yml");
@@ -1904,6 +1961,20 @@ function fillSettings(status) {
     && document.activeElement !== els.githubTokenInput
   ) {
     setInputValue(els.githubTokenInput, status.developerSecrets.githubToken);
+  }
+  if (
+    els.r2AccessKeyIdInput
+    && status.developerSecrets?.r2AccessKeyId
+    && document.activeElement !== els.r2AccessKeyIdInput
+  ) {
+    setInputValue(els.r2AccessKeyIdInput, status.developerSecrets.r2AccessKeyId);
+  }
+  if (
+    els.r2SecretAccessKeyInput
+    && status.developerSecrets?.r2SecretAccessKey
+    && document.activeElement !== els.r2SecretAccessKeyInput
+  ) {
+    setInputValue(els.r2SecretAccessKeyInput, status.developerSecrets.r2SecretAccessKey);
   }
   updateReleaseUploadState();
 }
@@ -2655,7 +2726,8 @@ async function publishSelectedRelease() {
       throw new Error("Cloud setup did not return a Player Feed URL.");
     }
     await validateSelectedRelease();
-    setReleaseCheck("warn", "Uploading release", "Preflight passed", "Wrangler is uploading release artifacts to R2. Large ZIPs can sit on one line for a while.");
+    setReleaseCheck("warn", "Uploading release", "Preflight passed", "Starting R2 upload. Fast mode shows byte progress when R2 access keys are saved.");
+    setReleaseUploadProgress({ percent: 0, phase: "Starting R2 upload" });
     startUploadPolling();
     const result = await window.aht.devSyncR2({
       outDir: developerOutDir(),
@@ -2696,7 +2768,7 @@ els.publishReleaseButton.addEventListener("click", () => {
   publishSelectedRelease();
 });
 
-[els.packZipInput, els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.channelInput].filter(Boolean).forEach((input) => {
+[els.packZipInput, els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.channelInput, els.r2AccountIdInput].filter(Boolean).forEach((input) => {
   input.addEventListener("input", () => invalidateReleaseValidation());
   input.addEventListener("change", () => invalidateReleaseValidation());
 });
@@ -2721,6 +2793,18 @@ if (els.launcherProofSecretInput) {
 if (els.githubTokenInput) {
   els.githubTokenInput.addEventListener("input", queueDeveloperSecretSave);
   els.githubTokenInput.addEventListener("change", () => {
+    saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
+  });
+}
+if (els.r2AccessKeyIdInput) {
+  els.r2AccessKeyIdInput.addEventListener("input", queueDeveloperSecretSave);
+  els.r2AccessKeyIdInput.addEventListener("change", () => {
+    saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
+  });
+}
+if (els.r2SecretAccessKeyInput) {
+  els.r2SecretAccessKeyInput.addEventListener("input", queueDeveloperSecretSave);
+  els.r2SecretAccessKeyInput.addEventListener("change", () => {
     saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
   });
 }
