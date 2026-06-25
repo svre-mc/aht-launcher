@@ -36,6 +36,7 @@ assert(desktopMain.includes("import fsSync from 'node:fs';"), 'Launcher mode det
 assert(desktopMain.includes("app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'))"), 'Developer mode must use separate local app data.');
 assert(desktopMain.includes("app.requestSingleInstanceLock({ mode: launchMode })"), 'Single-instance lock must be split by launch mode.');
 assert(desktopMain.includes("legacyDeveloperSecretsPath()"), 'Developer mode must migrate existing local secrets from the old app data folder.');
+assert(desktopMain.includes("migrateDeveloperEncryptionProfile()"), 'Developer mode must migrate the old Electron encryption profile before decrypting old secrets.');
 assert(desktopMain.includes("saveDeveloperSecretField(next, secrets, 'launcherProofSecret')"), 'Developer secrets must not be wiped by empty password fields.');
 assert(desktopMain.includes("openMacMinecraftLauncher(cwd, env)"), 'macOS play must use the macOS Minecraft Launcher opener.');
 assert(desktopMain.includes("'/Applications/Minecraft.app'"), 'macOS opener must try the normal Minecraft.app path.');

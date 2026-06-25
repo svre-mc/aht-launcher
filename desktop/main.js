@@ -64,6 +64,7 @@ let keepOpenUntil = 0;
 
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
+const DEVELOPER_SECRET_KEYS = ['curseforgeApiKey', 'serverSshPassword', 'launcherProofSecret', 'githubToken', 'r2AccountId', 'r2AccessKeyId', 'r2SecretAccessKey'];
 let launcherModeCache = null;
 
 function rawRequestedDeveloperMode() {
@@ -80,6 +81,8 @@ if (launchMode === 'developer') {
 if (process.platform === 'win32') {
   app.setAppUserModelId(launchMode === 'developer' ? 'com.ahardtime.launcher.developer' : 'com.ahardtime.launcher');
 }
+
+migrateDeveloperEncryptionProfile();
 
 const singleInstanceLock = app.requestSingleInstanceLock({ mode: launchMode });
 
@@ -135,6 +138,55 @@ function assertDeveloperAuthenticated() {
   if (!isDeveloperAuthenticated()) {
     throw new Error('Developer login is required.');
   }
+}
+
+function readJsonSync(file) {
+  try {
+    return JSON.parse(fsSync.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function storedSecretValue(file, key) {
+  return String(file?.secrets?.[key]?.value || '');
+}
+
+function hasEncryptedStoredSecret(file, key) {
+  return Boolean(file?.secrets?.[key]?.encrypted && storedSecretValue(file, key));
+}
+
+function developerSecretsUseLegacyKey(currentSecrets, legacySecrets) {
+  if (!currentSecrets?.secrets || !legacySecrets?.secrets) {
+    return true;
+  }
+  return DEVELOPER_SECRET_KEYS.some((key) => (
+    hasEncryptedStoredSecret(currentSecrets, key)
+    && storedSecretValue(currentSecrets, key) === storedSecretValue(legacySecrets, key)
+  ));
+}
+
+function migrateDeveloperEncryptionProfile() {
+  if (launchMode !== 'developer') {
+    return;
+  }
+  const currentDir = app.getPath('userData');
+  const legacyDir = path.join(app.getPath('appData'), 'aht-launcher');
+  if (path.normalize(currentDir).toLowerCase() === path.normalize(legacyDir).toLowerCase()) {
+    return;
+  }
+  const legacyLocalState = path.join(legacyDir, 'Local State');
+  const currentLocalState = path.join(currentDir, 'Local State');
+  const legacySecrets = readJsonSync(path.join(legacyDir, 'developer.secrets.json'));
+  const currentSecrets = readJsonSync(path.join(currentDir, 'developer.secrets.json'));
+  if (!fsSync.existsSync(legacyLocalState) || !legacySecrets?.secrets) {
+    return;
+  }
+  if (fsSync.existsSync(currentLocalState) && !developerSecretsUseLegacyKey(currentSecrets, legacySecrets)) {
+    return;
+  }
+  fsSync.mkdirSync(currentDir, { recursive: true });
+  fsSync.copyFileSync(legacyLocalState, currentLocalState);
 }
 
 function configPath() {
