@@ -8,8 +8,9 @@ The macOS build is produced by GitHub Actions on a real macOS runner. The build 
 
 - Repository: `https://github.com/svre-mc/aht-launcher`
 - Workflow file: `.github/workflows/build-macos.yml`
-- Workflow name: `Build macOS Launcher`
-- Artifact name: `aht-launcher-macos-dmg`
+- Workflow name: `Build and Publish Launchers`
+- GitHub Release tag: `launcher-v<package.json version>`
+- macOS build artifact name: `aht-launcher-macos`
 
 ## Required GitHub Secrets for macOS Signing
 
@@ -40,14 +41,14 @@ Keychain notarization fallback:
 
 ## Build Outputs
 
-Local output folder:
+Local download folder for manually downloaded macOS builds:
 
 - `C:\Users\evil\Documents\Codex\2026-06-23\i-w\outputs\macos`
 
-Local macOS DMGs:
+Expected macOS GitHub Release asset names after the next build:
 
-- `C:\Users\evil\Documents\Codex\2026-06-23\i-w\outputs\macos\AHT-Launcher-macOS-arm64-0.1.0.dmg`
-- `C:\Users\evil\Documents\Codex\2026-06-23\i-w\outputs\macos\AHT-Launcher-macOS-x64-0.1.0.dmg`
+- `AHT-Launcher-macOS-arm64-0.1.1.dmg`
+- `AHT-Launcher-macOS-x64-0.1.1.dmg`
 
 Recommended website paths:
 
@@ -62,9 +63,9 @@ Recommended website paths:
 ```text
 Use the AHT launcher builds from the GitHub repository `https://github.com/svre-mc/aht-launcher`.
 
-For macOS, pull the latest successful `Build macOS Launcher` workflow artifact named `aht-launcher-macos-dmg`. It contains:
-- Apple Silicon: `AHT-Launcher-macOS-arm64-0.1.0.dmg`
-- Intel: `AHT-Launcher-macOS-x64-0.1.0.dmg`
+For macOS, pull the latest `launcher-v<version>` GitHub Release assets. It contains:
+- Apple Silicon: `AHT-Launcher-macOS-arm64-0.1.1.dmg`
+- Intel: `AHT-Launcher-macOS-x64-0.1.1.dmg`
 
 Upload/serve them from these website paths:
 - `/downloads/AHT-Launcher-macOS-arm64.dmg`

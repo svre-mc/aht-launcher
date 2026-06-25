@@ -1,7 +1,13 @@
-name: Build macOS Launcher
+name: Build and Publish Launchers
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_to_r2:
+        description: "Upload the built launcher update to Cloudflare R2"
+        required: true
+        type: boolean
+        default: true
   push:
     branches:
       - main
@@ -14,14 +20,44 @@ on:
       - "public/**"
       - "server-lock-mod/build/libs/aht-version-lock-*.jar"
       - "src/**"
+      - "scripts/prepare-launcher-update.mjs"
+      - "scripts/upload-r2-plan.mjs"
+      - "scripts/test-launcher-update-manifest.mjs"
       - "package.json"
       - "package-lock.json"
       - "README.md"
 
+permissions:
+  contents: write
+
 jobs:
-  build-macos:
-    name: macOS DMG
-    runs-on: macos-14
+  build-launcher:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows
+            label: Windows 10/11
+            runner: windows-latest
+            build_script: dist:regular:windows
+            artifact_name: aht-launcher-windows
+            artifact_path: release-builds/windows/*.exe
+          - id: macos
+            label: macOS
+            runner: macos-14
+            build_script: dist:regular:macos
+            artifact_name: aht-launcher-macos
+            artifact_path: release-builds/macos/*.dmg
+          - id: ubuntu
+            label: Ubuntu/Linux
+            runner: ubuntu-24.04
+            build_script: dist:regular:ubuntu
+            artifact_name: aht-launcher-ubuntu
+            artifact_path: |
+              release-builds/ubuntu/*.AppImage
+              release-builds/ubuntu/*.deb
     env:
       CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
       CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -45,10 +81,20 @@ jobs:
           node-version: "22"
           cache: npm
 
+      - name: Install Linux packaging dependencies
+        if: matrix.id == 'ubuntu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot dpkg libarchive-tools
+
       - name: Install dependencies
         run: npm ci
 
+      - name: Test platform build config
+        run: npm run test:platform-builds
+
       - name: Show macOS signing mode
+        if: matrix.id == 'macos'
         run: |
           if [ -n "$CSC_LINK" ] || [ -n "$CSC_NAME" ]; then
             echo "macOS app signing: enabled"
@@ -62,12 +108,95 @@ jobs:
             echo "macOS notarization: disabled"
           fi
 
-      - name: Build macOS DMGs
-        run: npm run dist:regular:macos
+      - name: Build ${{ matrix.label }} launcher
+        run: npm run ${{ matrix.build_script }}
 
-      - name: Upload macOS DMGs
+      - name: Upload ${{ matrix.label }} launcher artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aht-launcher-macos-dmg
-          path: release-builds/macos/*.dmg
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error
+
+  publish-launcher-update:
+    name: Publish Launcher Update
+    runs-on: ubuntu-24.04
+    needs: build-launcher
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
+      AHT_LAUNCHER_UPDATE_URL: ${{ vars.AHT_LAUNCHER_UPDATE_URL || 'https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download launcher artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: aht-launcher-*
+          merge-multiple: true
+          path: ci-artifacts
+
+      - name: Resolve launcher version
+        id: launcher
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=launcher-v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare launcher update manifest
+        run: node scripts/prepare-launcher-update.mjs --artifacts ci-artifacts --out ci-launcher-update --latest-url "$AHT_LAUNCHER_UPDATE_URL"
+
+      - name: Create or update GitHub Release
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.launcher.outputs.tag }}"
+          VERSION="${{ steps.launcher.outputs.version }}"
+          TITLE="AHT Launcher $VERSION"
+          NOTES_FILE="ci-launcher-update/release-notes.md"
+          cp ci-launcher-update/launcher/latest.json ci-launcher-update/launcher-latest.json
+          {
+            echo "Automated AHT Launcher release $VERSION."
+            echo
+            echo "Includes Windows 10/11, macOS Apple Silicon, macOS Intel, Ubuntu AppImage, and Ubuntu deb builds."
+            echo
+            echo "Launcher update feed: $AHT_LAUNCHER_UPDATE_URL"
+            echo "Source commit: $GITHUB_SHA"
+          } > "$NOTES_FILE"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE"
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
+          fi
+
+          gh release upload "$TAG" ci-artifacts/* ci-launcher-update/launcher-latest.json --clobber
+
+      - name: Upload launcher update plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: aht-launcher-update-plan
+          path: ci-launcher-update/**
+          if-no-files-found: error
+
+      - name: Skip R2 publish when Cloudflare secrets are missing
+        if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && (env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == '')
+        run: |
+          echo "::notice::Cloudflare R2 publish skipped because CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID is missing."
+          echo "::notice::Build artifacts and a launcher update plan were still created."
+
+      - name: Skip R2 publish by manual request
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_to_r2 != true
+        run: echo "::notice::Cloudflare R2 publish skipped because publish_to_r2=false."
+
+      - name: Publish launcher update to R2
+        if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        run: node scripts/upload-r2-plan.mjs --plan ci-launcher-update/upload-plan.json --bucket "$AHT_R2_BUCKET"

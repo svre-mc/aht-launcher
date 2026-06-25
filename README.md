@@ -113,6 +113,8 @@ Use `npm run check:production:strict` when you want a non-zero exit code for aut
 
 For OS-specific regular launcher behavior, `npm run test:platforms` verifies the Windows 10/11, macOS, and Ubuntu/Linux instance folders and package target labels.
 
+For automated launcher app updates, `npm run test:launcher-update-manifest` verifies the GitHub/R2 `launcher/latest.json` manifest shape for Windows, macOS Apple Silicon, macOS Intel, and Ubuntu/Linux. The GitHub Actions workflow builds all platform launchers, creates or updates the `launcher-v<version>` GitHub Release, uploads release assets, uploads launcher files to R2, then uploads `launcher/latest.json` last.
+
 For the first-time Cloudflare setup path, `npm run test:cloud-login` verifies that the developer app does not treat Wrangler's `You are not authenticated` output as a successful login, even when Wrangler exits with code 0.
 
 For player config freedom, `npm run test:mod-only-changes` verifies that local-change reports and integrity scans ignore `config/` edits and only check files under `mods/`.
@@ -308,5 +310,6 @@ The installer tries CurseForge first, then this cache. Release validation report
 - Managed install directory creation and local `latest.json` browsing are implemented.
 - Launch is gated by the required release feed and installed version, then opens the official Minecraft Launcher with the A Hard Time profile selected.
 - Automatic Forge loader installation runs during Update when the Minecraft Launcher profile is missing Forge.
+- GitHub Actions launcher update automation builds Windows/macOS/Ubuntu, creates GitHub Releases, and can publish `launcher/latest.json` to R2 when Cloudflare secrets are configured.
 - Full Microsoft/Minecraft account auth is still outside this private launcher build.
-- Live Cloudflare/R2 deployment and macOS signing still need environment-specific setup.
+- Live Cloudflare/R2 secrets and macOS signing/notarization certificates still need environment-specific setup.

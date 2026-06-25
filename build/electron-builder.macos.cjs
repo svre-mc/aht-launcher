@@ -13,7 +13,6 @@ module.exports = {
     output: 'release-builds/macos',
     target: 'macos'
   }),
-  npmRebuild: false,
   icon: 'build/icon-mac.png',
   mac: {
     target: [

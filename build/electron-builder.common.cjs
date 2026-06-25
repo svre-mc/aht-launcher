@@ -27,6 +27,7 @@ function regularPlayerConfig({ productName, output, target }) {
     directories: {
       output
     },
+    npmRebuild: false,
     files,
     asarUnpack,
     extraMetadata: {
