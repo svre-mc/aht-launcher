@@ -12,6 +12,9 @@ assert(main.includes("updateState = createOperationState(forceRepair ? 'repair' 
 assert(main.includes("updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };"), 'runUpdate must verify installed files before writing terminal success.');
 assert(main.includes('const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall);'), 'runUpdate must scan the repaired install before saving integrity state.');
 assert(main.includes("await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');"), 'runUpdate must save the real post-install integrity result.');
+assert(main.includes('relativePath: normalizeRelPath(entry.installPath || `mods/${entry.fileName}`),'), 'cache-extra integrity must honor release cache installPath for resourcepacks.');
+assert(main.includes('function refreshStaleIntegrityState(config, latest, integrity)'), 'status refresh must be able to self-heal stale cache-extra integrity state.');
+assert(main.includes('integrity = await refreshStaleIntegrityState(config, latest, integrity);'), 'getStatus must refresh stale cache-extra integrity before blocking Play.');
 assert(!main.includes("phase: 'Saving install state'"), 'runUpdate must not skip real integrity verification with a synthetic clean state.');
 assert(main.includes("completeOperationState(updateState, result, 'Complete');"), 'runUpdate must normalize success to Complete.');
 assert(main.includes("failOperationState(updateState, error, forceRepair ? 'Repair failed' : 'Update failed');"), 'runUpdate must normalize failure and clear running.');

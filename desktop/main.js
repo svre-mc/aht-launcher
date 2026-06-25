@@ -1061,7 +1061,7 @@ async function expectedCacheExtraManagedFiles(config, latest = null) {
   return extraFiles
     .filter((entry) => entry?.fileName)
     .map((entry) => ({
-      relativePath: normalizeRelPath(`mods/${entry.fileName}`),
+      relativePath: normalizeRelPath(entry.installPath || `mods/${entry.fileName}`),
       source: 'cache-extra',
       sha256: entry.sha256 || '',
       sha1: entry.sha1 || '',
@@ -1116,6 +1116,31 @@ async function writeIntegrityState(config, integrity, source = 'scan') {
   return state;
 }
 
+function cacheExtraZipPathIssue(integrity) {
+  const issues = [...(integrity?.changed || []), ...(integrity?.missing || [])];
+  if (!issues.length || integrity?.source === 'status-refresh') {
+    return false;
+  }
+  return issues.every((item) => {
+    const relPath = normalizeRelPath(String(item?.path || ''));
+    return item?.source === 'cache-extra' && relPath.startsWith('mods/') && relPath.toLowerCase().endsWith('.zip');
+  });
+}
+
+async function refreshStaleIntegrityState(config, latest, integrity) {
+  if (!latest || !cacheExtraZipPathIssue(integrity)) {
+    return integrity;
+  }
+  try {
+    const refreshed = await scanCurrentManagedIntegrity(config, latest);
+    if (refreshed.valid || refreshed.counts?.corrupted !== integrity?.counts?.corrupted) {
+      return writeIntegrityState(config, refreshed, 'status-refresh');
+    }
+  } catch (error) {
+    console.warn(`Unable to refresh stale integrity state: ${error.message || error}`);
+  }
+  return integrity;
+}
 function integrityBlockReason(integrity) {
   if (!integrity) return '';
   const counts = integrity.counts || {};
@@ -1321,7 +1346,8 @@ async function getStatus(configOverride = null) {
   }
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   const installed = await pathExists(installedPath) ? await readJsonFile(installedPath) : null;
-  const integrity = await readIntegrityState(config);
+  let integrity = await readIntegrityState(config);
+  integrity = await refreshStaleIntegrityState(config, latest, integrity);
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest, installed });
   const launchIntegrity = developerClientBypassAllowed() ? null : integrity;
   const launchState = evaluateLaunchState(config, latest, latestError, installed, minecraftProfile, launchIntegrity);
