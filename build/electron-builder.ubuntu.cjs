@@ -20,7 +20,7 @@ module.exports = {
     category: 'Game',
     executableName: 'aht-launcher',
     maintainer: 'A Hard Time',
-    artifactName: 'AHT-Launcher-Ubuntu-${version}-${arch}.${ext}'
+    artifactName: 'AHT-Launcher-Ubuntu-${version}-x64.${ext}'
   },
   deb: {
     packageName: 'aht-launcher'

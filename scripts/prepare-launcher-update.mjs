@@ -140,8 +140,8 @@ export async function prepareLauncherUpdate(options = {}) {
   const windowsFile = requireArtifact(files, /^AHT-Launcher-Windows-10-11-.*\.exe$/i, 'Windows 10/11');
   const macArmFile = requireArtifact(files, /^AHT-Launcher-macOS-arm64-.*\.dmg$/i, 'macOS Apple Silicon');
   const macX64File = requireArtifact(files, /^AHT-Launcher-macOS-x64-.*\.dmg$/i, 'macOS Intel');
-  const ubuntuAppImageFile = requireArtifact(files, /^AHT-Launcher-Ubuntu-.*-x64\.AppImage$/i, 'Ubuntu/Linux AppImage');
-  const ubuntuDebFile = newestMatch(files, /^AHT-Launcher-Ubuntu-.*-x64\.deb$/i);
+  const ubuntuAppImageFile = requireArtifact(files, /^AHT-Launcher-Ubuntu-.*-(x64|x86_64)\.AppImage$/i, 'Ubuntu/Linux AppImage');
+  const ubuntuDebFile = newestMatch(files, /^AHT-Launcher-Ubuntu-.*-(x64|x86_64)\.deb$/i);
 
   const platforms = {};
   const uploads = [];
