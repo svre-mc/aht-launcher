@@ -6,6 +6,7 @@ module.exports = {
     output: 'release-builds/macos',
     target: 'macos'
   }),
+  npmRebuild: false,
   mac: {
     target: [
       {
