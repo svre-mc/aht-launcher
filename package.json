@@ -1,6 +1,6 @@
 {
     "name":  "aht-launcher",
-    "version":  "0.1.1",
+    "version":  "0.1.2",
     "private":  true,
     "type":  "module",
     "main":  "desktop/main.js",
@@ -110,7 +110,10 @@
                   "nsis":  {
                                "oneClick":  false,
                                "allowToChangeInstallationDirectory":  true,
-                               "runAfterFinish":  true
+                               "runAfterFinish":  true,
+                               "createDesktopShortcut":  true,
+                               "createStartMenuShortcut":  true,
+                               "include":  "build/windows-installer.nsh"
                            }
               }
 }

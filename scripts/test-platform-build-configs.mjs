@@ -3,6 +3,7 @@ import fs from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const windowsInstallerInclude = fs.readFileSync(new URL('../build/windows-installer.nsh', import.meta.url), 'utf8');
 
 const configs = {
   windows: require('../build/electron-builder.windows.cjs'),
@@ -18,6 +19,11 @@ assert(configs.windows.productName === 'A Hard Time Launcher Windows', 'Windows 
 assert(configs.windows.directories?.output === 'release-builds/windows', 'Windows output folder is wrong.');
 assert(configs.windows.win?.artifactName?.includes('Windows-10-11'), 'Windows artifact name should target Windows 10/11.');
 assert(configs.windows.win?.target?.[0]?.target === 'nsis', 'Windows regular launcher must build NSIS.');
+assert(configs.windows.nsis?.oneClick === false, 'Windows installer must show installer options.');
+assert(configs.windows.nsis?.createDesktopShortcut === true, 'Windows desktop shortcut should be checked by default.');
+assert(configs.windows.nsis?.createStartMenuShortcut === true, 'Windows Start Menu shortcut should be enabled.');
+assert(configs.windows.nsis?.include === 'build/windows-installer.nsh', 'Windows installer must include the shortcut options page.');
+assert(windowsInstallerInclude.includes('Create a desktop shortcut'), 'Windows installer include must expose the desktop shortcut option.');
 
 assert(configs.macos.productName === 'A Hard Time Launcher macOS', 'macOS product name is not tailored.');
 assert(configs.macos.directories?.output === 'release-builds/macos', 'macOS output folder is wrong.');

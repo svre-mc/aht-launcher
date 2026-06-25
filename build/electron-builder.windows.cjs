@@ -19,6 +19,9 @@ module.exports = {
     oneClick: false,
     allowToChangeInstallationDirectory: true,
     runAfterFinish: true,
+    createDesktopShortcut: true,
+    createStartMenuShortcut: true,
+    include: 'build/windows-installer.nsh',
     shortcutName: 'AHT Launcher',
     uninstallDisplayName: 'A Hard Time Launcher'
   }
