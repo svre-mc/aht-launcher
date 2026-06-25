@@ -31,8 +31,12 @@ function npxCommand() {
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
+    const shell = Object.hasOwn(options, 'shell')
+      ? options.shell
+      : process.platform === 'win32' && /\.cmd$/i.test(command);
     const child = spawn(command, args, {
       ...options,
+      shell,
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let stdout = '';

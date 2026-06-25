@@ -30,7 +30,9 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+const uploadScript = await fsp.readFile(new URL('./upload-r2-plan.mjs', import.meta.url), 'utf8');
 const manifest = result.manifest;
+assert(uploadScript.includes("process.platform === 'win32' && /\\.cmd$/i.test(command)"), 'Windows R2 upload must shell-wrap npx.cmd');
 assert(manifest.version === '7.8.9', 'manifest version mismatch');
 assert(manifest.platforms['win32-x64']?.installArgs?.[0] === '/S', 'Windows silent install args missing');
 assert(manifest.platforms['darwin-arm64']?.path?.includes('/darwin-arm64/'), 'Apple Silicon path missing');
