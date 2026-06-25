@@ -320,13 +320,25 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
 
 async function profileState({ config, latest = null, installed = null }) {
   const roots = minecraftProfileRoots(config);
-  return profileStateForRoot({
-    config,
-    latest,
-    installed,
-    rootDir: roots[0] || minecraftRoot(config),
-    authRoots: roots
-  });
+  const states = [];
+  for (const rootDir of roots) {
+    states.push(await profileStateForRoot({
+      config,
+      latest,
+      installed,
+      rootDir,
+      authRoots: roots
+    }));
+  }
+  const primaryRoot = roots[0] || minecraftRoot(config);
+  const primaryState = states.find((state) => launcherRootKey(state.rootDir) === launcherRootKey(primaryRoot))
+    || states[0]
+    || await profileStateForRoot({ config, latest, installed, rootDir: primaryRoot, authRoots: roots });
+  return {
+    ...primaryState,
+    syncedProfiles: states,
+    syncedProfileCount: states.length
+  };
 }
 
 export async function inspectMinecraftLauncherProfile(options) {

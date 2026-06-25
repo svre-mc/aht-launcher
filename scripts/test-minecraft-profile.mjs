@@ -238,6 +238,24 @@ if (
 ) {
   throw new Error(`Synced profile did not get CurseForge-style launch args: ${syncedProfileJson.javaArgs}`);
 }
+const missingLoaderRoot = path.join(root, 'missing-loader-root');
+const missingLoaderConfig = {
+  ...curseForgeConfig,
+  minecraftLauncher: {
+    ...curseForgeConfig.minecraftLauncher,
+    syncRoots: [missingLoaderRoot]
+  }
+};
+const missingLoaderState = await ensureMinecraftLauncherProfile({ config: missingLoaderConfig, latest, installed: null });
+const missingLoaderProfile = missingLoaderState.syncedProfiles.find((item) => item.rootDir === missingLoaderRoot);
+if (!missingLoaderProfile || missingLoaderProfile.loaderInstalled) {
+  throw new Error(`Expected synced root to report missing Forge loader: ${JSON.stringify(missingLoaderProfile)}`);
+}
+const inspectedMissingLoader = await inspectMinecraftLauncherProfile({ config: missingLoaderConfig, latest, installed: null });
+const inspectedMissingProfile = inspectedMissingLoader.syncedProfiles.find((item) => item.rootDir === missingLoaderRoot);
+if (!inspectedMissingProfile || inspectedMissingProfile.loaderInstalled || inspectedMissingLoader.syncedProfileCount !== 2) {
+  throw new Error(`Expected inspect to include missing synced loader state: ${JSON.stringify(inspectedMissingLoader)}`);
+}
 
 console.log(JSON.stringify({
   profilesPath: created.profilesPath,
@@ -245,6 +263,7 @@ console.log(JSON.stringify({
   macRootCandidates,
   winRootCandidates,
   syncedProfileCount: syncedState.syncedProfileCount,
+  missingLoaderRoot: inspectedMissingProfile.rootDir,
   macAuth: {
     signedIn: macAuth.signedIn,
     preferredUsername: macAuth.preferredUsername,

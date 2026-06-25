@@ -1211,7 +1211,64 @@ function integrityBlockReason(integrity) {
   return '';
 }
 
-function evaluateLaunchState(config, latest, latestError, installed, minecraftProfile = null, integrity = null) {
+function minecraftProfileInstallTargets(profile = null) {
+  const seen = new Set();
+  const targets = [];
+  for (const item of [profile, ...(Array.isArray(profile?.syncedProfiles) ? profile.syncedProfiles : [])]) {
+    if (!item?.rootDir || !item?.versionId) continue;
+    const key = `${path.resolve(item.rootDir).toLowerCase()}|${item.versionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push(item);
+  }
+  return targets;
+}
+
+function missingForgeLoaderProfiles(profile = null) {
+  return minecraftProfileInstallTargets(profile).filter((item) => (
+    item.versionId
+    && item.loaderId?.startsWith('forge-')
+    && !item.loaderInstalled
+  ));
+}
+
+function minecraftRootSummary(items = []) {
+  return items.map((item) => item.rootDir || 'unknown root').join(', ');
+}
+
+async function installMinecraftProfileLoaders(profile, { config, latest, installed, operationState = null } = {}) {
+  const missing = missingForgeLoaderProfiles(profile);
+  if (!missing.length) return profile;
+  const total = missing.length;
+  for (const [index, target] of missing.entries()) {
+    if (operationState) {
+      operationState.progress = {
+        phase: `Installing Forge (${index + 1}/${total})`,
+        completed: index,
+        total,
+        percent: 97
+      };
+      operationState.lines.push(`Installing Forge ${target.versionId} for Minecraft Launcher root ${target.rootDir}...`);
+    }
+    const forgeLines = [];
+    await installForgeLoader(target, {
+      javaPath: config.minecraftLauncher?.javaPath || 'java',
+      logger: { log: (line) => forgeLines.push(String(line)) }
+    });
+    if (operationState) {
+      operationState.lines.push(...forgeLines);
+      operationState.lines.push(`Forge ${target.versionId} is ready in ${target.rootDir}.`);
+    }
+  }
+  const refreshed = await ensureMinecraftLauncherProfile({ config, latest, installed });
+  const stillMissing = missingForgeLoaderProfiles(refreshed);
+  if (stillMissing.length) {
+    throw new Error(`Forge ${stillMissing[0].versionId} did not appear in all Minecraft Launcher roots: ${minecraftRootSummary(stillMissing)}`);
+  }
+  return refreshed;
+}
+
+function evaluateLaunchState(config, latest, latestError, installed, minecraftProfile = null, integrity = null, options = {}) {
   const profileEnabled = config.minecraftLauncher?.enabled !== false;
   const playConfigured = profileEnabled;
   if (!playConfigured) {
@@ -1292,12 +1349,13 @@ function evaluateLaunchState(config, latest, latestError, installed, minecraftPr
     };
   }
 
-  if (minecraftProfile?.versionId && !minecraftProfile.loaderInstalled) {
+  const missingLoaders = options.skipLoaderCheck ? [] : missingForgeLoaderProfiles(minecraftProfile);
+  if (missingLoaders.length) {
     return {
       playConfigured,
       launchReady: false,
       launchMode: 'minecraftLauncher',
-      launchBlockedReason: `Minecraft Launcher is missing loader ${minecraftProfile.versionId}. Run Update to install Forge automatically.`
+      launchBlockedReason: `Minecraft Launcher is missing loader ${missingLoaders[0].versionId} in ${missingLoaders.length} launcher root${missingLoaders.length === 1 ? '' : 's'}. Run Update or Play through AHT Launcher to install Forge automatically.`
     };
   }
 
@@ -1413,7 +1471,7 @@ async function getStatus(configOverride = null) {
   const launchLatestError = developerClientBypass && installed ? null : latestError;
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   const launchIntegrity = developerClientBypass ? null : integrity;
-  const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity);
+  const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, { skipLoaderCheck: true });
   const launcherUpdate = await readLauncherUpdate(config);
   return {
     developerMode: isDeveloperMode(),
@@ -1508,25 +1566,12 @@ async function runUpdate(forceRepair = false) {
           latest: latestAfterInstall,
           installed: result.installed
         });
-        if (profile.loaderId?.startsWith('forge-') && !profile.loaderInstalled) {
-          updateState.progress = { phase: 'Installing Forge', completed: 0, total: 0, percent: 97 };
-          updateState.lines.push(`Installing Forge ${profile.versionId} for Minecraft Launcher...`);
-          const forgeLines = [];
-          await installForgeLoader(profile, {
-            javaPath: config.minecraftLauncher?.javaPath || 'java',
-            logger: { log: (line) => forgeLines.push(String(line)) }
-          });
-          updateState.lines.push(...forgeLines);
-          profile = await ensureMinecraftLauncherProfile({
-            config,
-            latest: latestAfterInstall,
-            installed: result.installed
-          });
-          if (!profile.loaderInstalled) {
-            throw new Error(`Forge ${profile.versionId} did not appear in the Minecraft Launcher versions folder after install.`);
-          }
-          updateState.lines.push(`Forge ${profile.versionId} is ready.`);
-        }
+        profile = await installMinecraftProfileLoaders(profile, {
+          config,
+          latest: latestAfterInstall,
+          installed: result.installed,
+          operationState: updateState
+        });
         result.minecraftProfile = profile;
       } catch (error) {
         throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
@@ -3693,9 +3738,9 @@ ipcMain.handle('play:start', async () => {
     ? null
     : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest), 'play-check');
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
-  const launchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity);
-  if (!launchState.launchReady) {
-    throw new Error(launchState.launchBlockedReason);
+  const initialLaunchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, { skipLoaderCheck: true });
+  if (!initialLaunchState.launchReady) {
+    throw new Error(initialLaunchState.launchBlockedReason);
   }
 
   keepOpenUntil = Date.now() + 20_000;
@@ -3707,9 +3752,11 @@ ipcMain.handle('play:start', async () => {
     installed,
     authToken: launcherProofAuthToken()
   });
-  const profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
-  if (profile.versionId && !profile.loaderInstalled) {
-    throw new Error(`Minecraft Launcher is missing loader ${profile.versionId}. Run Update to install Forge automatically.`);
+  let profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
+  profile = await installMinecraftProfileLoaders(profile, { config, latest: launchLatest, installed });
+  const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity);
+  if (!finalLaunchState.launchReady) {
+    throw new Error(finalLaunchState.launchBlockedReason);
   }
   return {
     ...(await openMinecraftLauncher(config)),
