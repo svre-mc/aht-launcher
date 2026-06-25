@@ -1397,9 +1397,10 @@ async function runUpdate(forceRepair = false) {
       },
       logger: { log: (line) => updateState.lines.push(String(line)) }
     });
+    let latestAfterInstall = null;
     if (config.minecraftLauncher?.enabled !== false) {
       try {
-        const latestAfterInstall = await readLatest(config);
+        latestAfterInstall = await readLatest(config);
         const launcherProof = await writeLauncherProof({
           config,
           identity: launcherProofIdentity(identity),
@@ -1441,22 +1442,9 @@ async function runUpdate(forceRepair = false) {
         throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
       }
     }
-    updateState.progress = { ...(updateState.progress || {}), phase: 'Saving install state', percent: 98 };
-    await writeIntegrityState(config, {
-      valid: true,
-      instanceDir: config.instanceDir,
-      counts: {
-        managed: (result.installed?.manifestFileCount || 0) + (result.installed?.overrideFileCount || 0),
-        checked: (result.installed?.manifestFileCount || 0) + (result.installed?.overrideFileCount || 0),
-        ok: (result.installed?.manifestFileCount || 0) + (result.installed?.overrideFileCount || 0),
-        changed: 0,
-        missing: 0,
-        corrupted: 0
-      },
-      changed: [],
-      missing: [],
-      truncated: false
-    }, forceRepair ? 'repair' : 'install');
+    updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };
+    const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall);
+    await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');
     await sendLauncherEvent(config, identity, {
       type: forceRepair ? 'repair_completed' : 'install_completed',
       version: result.installed?.version || null,

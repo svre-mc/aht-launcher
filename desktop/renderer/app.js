@@ -2270,13 +2270,25 @@ async function pollUpdate() {
   if (!state.running) {
     clearInterval(updatePoll);
     updatePoll = null;
+    const completedKind = activeUpdateKind;
     if (state.error) {
-      showToast(activeUpdateKind === "repair" ? "Repair failed" : "Update failed", state.error, "error");
+      showToast(completedKind === "repair" ? "Repair failed" : "Update failed", state.error, "error");
     } else if (state.lastResult?.installed?.version) {
-      showToast(activeUpdateKind === "repair" ? "Repair complete" : "Update complete", `Installed ${state.lastResult.installed.version}.`, "success");
+      if (completedKind === "repair") {
+        lastIntegrityScan = null;
+        closeRepairPrompt();
+        els.diffSummary.textContent = "Clean";
+      }
+      showToast(completedKind === "repair" ? "Repair complete" : "Update complete", `Installed ${state.lastResult.installed.version}.`, "success");
     }
     activeUpdateKind = "";
     await refresh();
+    if (completedKind === "repair" && !state.error && !(currentStatus?.integrity?.counts?.corrupted > 0)) {
+      lastIntegrityScan = null;
+      closeRepairPrompt();
+      els.diffSummary.textContent = "Clean";
+      restoreStatusBadge();
+    }
     if (isSuccessfulUpdateState(lastUpdateState)) scheduleCompletedUpdateClear();
   }
 }

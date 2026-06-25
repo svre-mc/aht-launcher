@@ -9,7 +9,10 @@ const renderer = fs.readFileSync('desktop/renderer/app.js', 'utf8');
 
 assert(main.includes('function createOperationState'), 'main process is missing operation state helper.');
 assert(main.includes("updateState = createOperationState(forceRepair ? 'repair' : 'install'"), 'runUpdate must mark updateState running before slow setup work.');
-assert(main.includes("updateState.progress = { ...(updateState.progress || {}), phase: 'Saving install state', percent: 98 };"), 'runUpdate must leave installer Finalizing before writing terminal success.');
+assert(main.includes("updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };"), 'runUpdate must verify installed files before writing terminal success.');
+assert(main.includes('const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall);'), 'runUpdate must scan the repaired install before saving integrity state.');
+assert(main.includes("await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');"), 'runUpdate must save the real post-install integrity result.');
+assert(!main.includes("phase: 'Saving install state'"), 'runUpdate must not skip real integrity verification with a synthetic clean state.');
 assert(main.includes("completeOperationState(updateState, result, 'Complete');"), 'runUpdate must normalize success to Complete.');
 assert(main.includes("failOperationState(updateState, error, forceRepair ? 'Repair failed' : 'Update failed');"), 'runUpdate must normalize failure and clear running.');
 assert(!main.includes('finally {\n    updateState.running = false;\n  }'), 'runUpdate must not rely on a bare finally running=false terminal state.');
@@ -25,5 +28,9 @@ assert(renderer.includes('lastUpdateState = {\n    running: true,'), 'startUpdat
 assert(renderer.includes('lastIntegrityScan = null;'), 'repair must clear stale scan results before starting.');
 assert(renderer.includes('setUnavailable(els.scanButton, true);'), 'update and repair must lock Scan while installing.');
 assert(renderer.includes('setInterval(pollUpdate, 500)'), 'update polling should be responsive while installing.');
+assert(renderer.includes('const completedKind = activeUpdateKind;'), 'repair completion must preserve the finished update kind before clearing it.');
+assert(renderer.includes('completedKind === "repair"'), 'repair completion must use the preserved repair kind.');
+assert(renderer.includes('els.diffSummary.textContent = "Clean";'), 'successful repair must clear stale corrupted-file summary text.');
+assert(renderer.includes('closeRepairPrompt();'), 'successful repair must close any stale repair prompt.');
 
 console.log(JSON.stringify({ ok: true }, null, 2));
