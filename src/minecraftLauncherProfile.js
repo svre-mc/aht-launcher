@@ -22,15 +22,55 @@ export function defaultMinecraftRoot(platform = process.platform, env = process.
 
 export function minecraftRootCandidates(platform = process.platform, env = process.env) {
   const primary = defaultMinecraftRoot(platform, env);
+  if (platform === 'win32') {
+    const roots = [primary];
+    if (env.LOCALAPPDATA) {
+      roots.push(path.win32.join(
+        env.LOCALAPPDATA,
+        'Packages',
+        'Microsoft.4297127D64EC6_8wekyb3d8bbwe',
+        'LocalCache',
+        'Roaming',
+        '.minecraft'
+      ));
+    }
+    return uniqueLauncherRoots(roots, platform);
+  }
   if (platform !== 'darwin') {
-    return [primary];
+    return uniqueLauncherRoots([primary], platform);
   }
   const home = env.HOME || os.homedir();
-  return [...new Set([
+  return uniqueLauncherRoots([
     primary,
     path.posix.join(home, 'Library', 'Application Support', 'Minecraft'),
     path.posix.join(home, 'Library', 'Application Support', 'com.mojang.minecraftlauncher')
-  ])];
+  ], platform);
+}
+
+function launcherRootKey(rootDir = '', platform = process.platform) {
+  const text = String(rootDir || '').trim();
+  if (!text) {
+    return '';
+  }
+  const normalized = platform === 'win32'
+    ? path.win32.normalize(text).toLowerCase()
+    : path.posix.normalize(text);
+  return normalized.replace(/[\\/]+$/, '');
+}
+
+function uniqueLauncherRoots(roots = [], platform = process.platform) {
+  const seen = new Set();
+  const ordered = [];
+  for (const root of roots) {
+    const text = String(root || '').trim();
+    const key = launcherRootKey(text, platform);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    ordered.push(text);
+  }
+  return ordered;
 }
 
 export function primaryModLoader(minecraft = {}) {
@@ -78,12 +118,6 @@ function quoteJavaValue(value = '') {
   return text.includes(' ') ? `"${text.replace(/"/g, '\\"')}"` : text;
 }
 
-function isCurseForgeLauncherRoot(rootDir = '') {
-  return rootDir
-    && path.basename(rootDir).toLowerCase() === 'install'
-    && path.basename(path.dirname(path.dirname(rootDir))).toLowerCase() === 'curseforge';
-}
-
 function memoryMbFor(config = {}) {
   const value = Number(config.minecraftLauncher?.memoryMb || 4096);
   if (!Number.isFinite(value)) {
@@ -93,14 +127,13 @@ function memoryMbFor(config = {}) {
 }
 
 function javaArgsFor({ config = {}, rootDir = '', gameDir = '' }) {
-  const curseForgeRoot = isCurseForgeLauncherRoot(rootDir);
   const ram = memoryMbFor(config);
   const args = [];
   args.push(`-Xmx${ram}m`, '-Xms512m');
   if (config.launcherProof?.enabled !== false && gameDir) {
     args.push(...launcherProofJavaArgs(launcherProofPath(gameDir)));
   }
-  if (curseForgeRoot) {
+  if (gameDir) {
     args.push(
       `-Dminecraft.applet.TargetDirectory=${quoteJavaValue(path.resolve(gameDir))}`,
       '-Dfml.ignorePatchDiscrepancies=true',
@@ -115,6 +148,20 @@ function javaArgsFor({ config = {}, rootDir = '', gameDir = '' }) {
 
 function minecraftRoot(config = {}) {
   return config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
+}
+
+function minecraftProfileRoots(config = {}) {
+  const defaultRoots = config.minecraftLauncher?.syncDefaultRoots === false
+    ? []
+    : minecraftRootCandidates();
+  const extraRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
+    ? config.minecraftLauncher.syncRoots
+    : [];
+  return uniqueLauncherRoots([
+    minecraftRoot(config),
+    ...defaultRoots,
+    ...extraRoots
+  ]);
 }
 
 function pushMinecraftUsername(usernames, value = '') {
@@ -151,10 +198,10 @@ function orderedLegacyProfilesAccounts(profiles = {}) {
 }
 
 export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
-  const roots = [
+  const roots = uniqueLauncherRoots([
     rootDir,
     ...(options.extraRoots || [])
-  ].filter(Boolean);
+  ].filter(Boolean));
   if (!roots.length) {
     return { signedIn: false, accountCount: 0, files: [], usernames: [], preferredUsername: '' };
   }
@@ -229,8 +276,7 @@ async function readProfiles(file) {
   return readJsonFile(file);
 }
 
-async function profileState({ config, latest = null, installed = null }) {
-  const rootDir = minecraftRoot(config);
+async function profileStateForRoot({ config, latest = null, installed = null, rootDir = minecraftRoot(config), authRoots = null }) {
   const profilesPath = path.join(rootDir, 'launcher_profiles.json');
   const minecraft = minecraftMetadata(latest, installed);
   const versionCandidates = loaderVersionIdCandidates(minecraft || {});
@@ -246,7 +292,10 @@ async function profileState({ config, latest = null, installed = null }) {
   }
   const profileId = config.minecraftLauncher?.profileId || profileIdFor(latest?.packId || installed?.packId || config.packId);
   const profile = await readProfiles(profilesPath).then((profiles) => profiles.profiles?.[profileId] || null).catch(() => null);
-  const auth = await inspectMinecraftLauncherAuth(rootDir);
+  const allAuthRoots = uniqueLauncherRoots(authRoots || [rootDir]);
+  const auth = await inspectMinecraftLauncherAuth(rootDir, {
+    extraRoots: allAuthRoots.filter((candidate) => launcherRootKey(candidate) !== launcherRootKey(rootDir))
+  });
   return {
     enabled: config.minecraftLauncher?.enabled !== false,
     rootDir,
@@ -269,19 +318,22 @@ async function profileState({ config, latest = null, installed = null }) {
   };
 }
 
+async function profileState({ config, latest = null, installed = null }) {
+  const roots = minecraftProfileRoots(config);
+  return profileStateForRoot({
+    config,
+    latest,
+    installed,
+    rootDir: roots[0] || minecraftRoot(config),
+    authRoots: roots
+  });
+}
+
 export async function inspectMinecraftLauncherProfile(options) {
   return profileState(options);
 }
 
-export async function ensureMinecraftLauncherProfile({ config, latest = null, installed = null }) {
-  const state = await profileState({ config, latest, installed });
-  if (!state.enabled) {
-    return state;
-  }
-  if (!state.versionId) {
-    throw new Error('Minecraft loader metadata is missing from the release feed.');
-  }
-
+async function writeMinecraftLauncherProfile(state) {
   await ensureDir(state.rootDir);
   const profiles = await readProfiles(state.profilesPath);
   profiles.profiles = profiles.profiles && typeof profiles.profiles === 'object' ? profiles.profiles : {};
@@ -306,5 +358,45 @@ export async function ensureMinecraftLauncherProfile({ config, latest = null, in
   return {
     ...state,
     profileExists: true
+  };
+}
+
+export async function ensureMinecraftLauncherProfile({ config, latest = null, installed = null }) {
+  const roots = minecraftProfileRoots(config);
+  const state = await profileStateForRoot({
+    config,
+    latest,
+    installed,
+    rootDir: roots[0] || minecraftRoot(config),
+    authRoots: roots
+  });
+  if (!state.enabled) {
+    return state;
+  }
+  if (!state.versionId) {
+    throw new Error('Minecraft loader metadata is missing from the release feed.');
+  }
+
+  const syncedProfiles = [];
+  for (const rootDir of roots) {
+    const rootState = await profileStateForRoot({
+      config,
+      latest,
+      installed,
+      rootDir,
+      authRoots: roots
+    });
+    if (!rootState.versionId) {
+      continue;
+    }
+    syncedProfiles.push(await writeMinecraftLauncherProfile(rootState));
+  }
+
+  const primaryProfile = syncedProfiles.find((profile) => launcherRootKey(profile.rootDir) === launcherRootKey(state.rootDir))
+    || await writeMinecraftLauncherProfile(state);
+  return {
+    ...primaryProfile,
+    syncedProfiles,
+    syncedProfileCount: syncedProfiles.length
   };
 }

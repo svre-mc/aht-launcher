@@ -46,6 +46,15 @@ if (
 ) {
   throw new Error(`Unexpected macOS Minecraft root candidates: ${JSON.stringify(macRootCandidates)}`);
 }
+const winRootCandidates = minecraftRootCandidates('win32', {
+  APPDATA: 'C:\\Users\\Player\\AppData\\Roaming',
+  LOCALAPPDATA: 'C:\\Users\\Player\\AppData\\Local',
+  USERPROFILE: 'C:\\Users\\Player'
+});
+const winStoreRoot = 'C:\\Users\\Player\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Roaming\\.minecraft';
+if (winRootCandidates[0] !== platformRoots.win32 || !winRootCandidates.includes(winStoreRoot)) {
+  throw new Error(`Unexpected Windows Minecraft root candidates: ${JSON.stringify(winRootCandidates)}`);
+}
 
 const latest = {
   packId: 'a-hard-time-dregora',
@@ -63,7 +72,8 @@ const config = {
     enabled: true,
     rootDir: minecraftRoot,
     profileId: 'a-hard-time-dregora',
-    profileName: 'A Hard Time'
+    profileName: 'A Hard Time',
+    syncDefaultRoots: false
   }
 };
 
@@ -186,10 +196,39 @@ if (
   throw new Error(`Expected CurseForge Java properties, got ${curseForgeProfileJson.javaArgs}`);
 }
 
+const syncedMinecraftRoot = path.join(root, 'synced-minecraft-root');
+await fs.mkdir(path.join(syncedMinecraftRoot, 'versions', versionId), { recursive: true });
+await fs.writeFile(path.join(syncedMinecraftRoot, 'versions', versionId, `${versionId}.json`), '{}');
+const syncedConfig = {
+  ...curseForgeConfig,
+  minecraftLauncher: {
+    ...curseForgeConfig.minecraftLauncher,
+    syncRoots: [syncedMinecraftRoot]
+  }
+};
+const syncedState = await ensureMinecraftLauncherProfile({ config: syncedConfig, latest, installed: null });
+if (syncedState.syncedProfileCount !== 2) {
+  throw new Error(`Expected profile to sync to CurseForge and normal roots, got ${syncedState.syncedProfileCount}`);
+}
+const syncedProfiles = JSON.parse(await fs.readFile(path.join(syncedMinecraftRoot, 'launcher_profiles.json'), 'utf8'));
+const syncedProfileJson = syncedProfiles.profiles['a-hard-time-dregora'];
+if (!syncedProfileJson || syncedProfileJson.gameDir !== path.resolve(instanceDir)) {
+  throw new Error(`Synced Minecraft profile did not point at the AHT instance: ${JSON.stringify(syncedProfileJson)}`);
+}
+if (
+  syncedProfileJson.lastVersionId !== versionId
+  || !syncedProfileJson.javaArgs.includes('-Dminecraft.applet.TargetDirectory=')
+  || !syncedProfileJson.javaArgs.includes('-DlibraryDirectory=')
+) {
+  throw new Error(`Synced profile did not get CurseForge-style launch args: ${syncedProfileJson.javaArgs}`);
+}
+
 console.log(JSON.stringify({
   profilesPath: created.profilesPath,
   platformRoots,
   macRootCandidates,
+  winRootCandidates,
+  syncedProfileCount: syncedState.syncedProfileCount,
   macAuth: {
     signedIn: macAuth.signedIn,
     preferredUsername: macAuth.preferredUsername,
