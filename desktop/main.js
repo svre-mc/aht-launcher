@@ -3496,6 +3496,18 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
   });
 }
 
+async function existingLaunchCwd(preferred = '') {
+  const candidates = [preferred, app.getPath('home'), process.cwd()].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isDirectory()) return candidate;
+    } catch {
+      // Try the next fallback path.
+    }
+  }
+  return app.getPath('home');
+}
 async function openMacApplication(args, cwd, env) {
   await spawnLogged('open', args, { cwd, env, timeoutMs: 10_000 });
   return { ok: true, command: 'open', args };
@@ -3535,8 +3547,23 @@ async function openMacMinecraftLauncher(cwd, env) {
   throw new Error(`Minecraft Launcher could not be opened on macOS.${lastError ? ` ${lastError.message}` : ''}`);
 }
 
+async function openWindowsStoreMinecraftLauncher(cwd, env) {
+  const appTarget = 'shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft';
+  const explorer = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe') : 'explorer.exe';
+  try {
+    return await spawnDetached(explorer, [appTarget], cwd, env);
+  } catch (explorerError) {
+    const commandPrompt = process.env.ComSpec || (process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
+    try {
+      return await spawnDetached(commandPrompt, ['/d', '/s', '/c', 'start', '""', appTarget], cwd, env);
+    } catch (startError) {
+      throw new Error(`Minecraft Launcher could not be opened. Explorer failed: ${explorerError.message}. Start failed: ${startError.message}`);
+    }
+  }
+}
 async function openMinecraftLauncher(config) {
-  const cwd = config.minecraftLauncher?.rootDir || app.getPath('home');
+  const requestedCwd = config.minecraftLauncher?.rootDir || app.getPath('home');
+  const cwd = await existingLaunchCwd(requestedCwd);
   const env = minecraftLaunchEnv();
   if (config.minecraftLauncher?.openCommand) {
     return spawnDetached(config.minecraftLauncher.openCommand, config.minecraftLauncher.openArgs || [], cwd, env);
@@ -3557,7 +3584,7 @@ async function openMinecraftLauncher(config) {
         return spawnDetached(candidate, [], cwd, env);
       }
     }
-    return spawnDetached('explorer.exe', ['shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft'], cwd, env);
+    return openWindowsStoreMinecraftLauncher(cwd, env);
   }
 
   if (process.platform === 'darwin') {

@@ -41,6 +41,12 @@ assert(desktopMain.includes("saveDeveloperSecretField(next, secrets, 'launcherPr
 assert(desktopMain.includes("openMacMinecraftLauncher(cwd, env)"), 'macOS play must use the macOS Minecraft Launcher opener.');
 assert(desktopMain.includes("'/Applications/Minecraft.app'"), 'macOS opener must try the normal Minecraft.app path.');
 assert(desktopMain.includes("['-a', 'Minecraft']"), 'macOS opener must fall back to the Minecraft app name.');
+assert(desktopMain.includes('async function existingLaunchCwd'), 'Minecraft Launcher opener must sanitize missing configured cwd before spawning.');
+assert(desktopMain.includes('const cwd = await existingLaunchCwd(requestedCwd);'), 'Minecraft Launcher opener must use a verified existing cwd.');
+assert(desktopMain.includes('async function openWindowsStoreMinecraftLauncher(cwd, env)'), 'Windows Store Minecraft Launcher opener must be isolated.');
+assert(desktopMain.includes("process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe')"), 'Windows Store opener must use absolute explorer.exe when available.');
+assert(desktopMain.includes('return openWindowsStoreMinecraftLauncher(cwd, env);'), 'Windows play fallback must use the robust Store opener.');
+assert(!desktopMain.includes("spawnDetached('explorer.exe', ['shell:AppsFolder\\\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft'], cwd, env)"), 'Windows Store fallback must not spawn plain explorer.exe directly.');
 assert(rendererApp.includes('els.r2AccountIdInput.addEventListener("input", queueDeveloperSecretSave)'), 'R2 Account ID input must persist in developer mode.');
 
 assert(configs.macos.productName === 'A Hard Time Launcher macOS', 'macOS product name is not tailored.');

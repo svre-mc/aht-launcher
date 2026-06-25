@@ -11,7 +11,8 @@ import {
 } from '../src/minecraftLauncherProfile.js';
 import {
   buildForgeInstallPlan,
-  forgeInstallerUrl
+  forgeInstallerUrl,
+  resolveJavaPath
 } from '../src/forgeInstaller.js';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-profile-test-'));
@@ -118,6 +119,24 @@ if (forgeInstallerUrl(latest.minecraft.version, latest.minecraft.modLoaders[0].i
 const forgePlan = buildForgeInstallPlan(created);
 if (forgePlan.args.join(' ') !== `-jar ${forgePlan.installerPath} --installClient ${minecraftRoot}`) {
   throw new Error(`Unexpected Forge install args: ${forgePlan.args.join(' ')}`);
+}
+const fakeRuntimeRoot = path.join(root, 'fake-minecraft-runtime');
+const fakeLegacyJava = path.join(fakeRuntimeRoot, 'jre-legacy', 'windows-x64', 'jre-legacy', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const fakeModernJava = path.join(fakeRuntimeRoot, 'java-runtime-gamma', 'windows-x64', 'java-runtime-gamma', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+await fs.mkdir(path.dirname(fakeLegacyJava), { recursive: true });
+await fs.mkdir(path.dirname(fakeModernJava), { recursive: true });
+await fs.writeFile(fakeModernJava, 'modern');
+await fs.writeFile(fakeLegacyJava, 'legacy');
+const resolvedJava = await resolveJavaPath(created, { javaRoots: [fakeRuntimeRoot] });
+if (resolvedJava !== fakeLegacyJava) {
+  throw new Error(`Expected legacy Minecraft Java runtime, got ${resolvedJava}`);
+}
+const explicitJava = path.join(root, 'custom-java', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+await fs.mkdir(path.dirname(explicitJava), { recursive: true });
+await fs.writeFile(explicitJava, 'custom');
+const resolvedExplicitJava = await resolveJavaPath(created, { javaPath: explicitJava, javaRoots: [fakeRuntimeRoot] });
+if (resolvedExplicitJava !== explicitJava) {
+  throw new Error(`Expected explicit Java path, got ${resolvedExplicitJava}`);
 }
 
 const macAuthRoot = path.join(root, 'mac-launcher-auth');
