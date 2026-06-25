@@ -801,7 +801,7 @@ function playerSafeFeedProblem(status = currentStatus) {
 }
 
 function playerSafeBlockedReason(status = currentStatus) {
-  if (status?.latestError) return playerSafeFeedProblem(status);
+  if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return playerSafeFeedProblem(status);
   return status?.launchBlockedReason || "";
 }
 
@@ -1233,13 +1233,14 @@ function setMiniProgress(bar, percent = 0) {
 
 function restoreStatusBadge(status = currentStatus) {
   if (!status) return;
-  if (status.integrity?.counts?.corrupted > 0 || status.launchBlockedReason?.startsWith("Repair required")) {
+  const developerBypass = Boolean(status.developerClientBypass || status.developerMode);
+  if (!developerBypass && (status.integrity?.counts?.corrupted > 0 || status.launchBlockedReason?.startsWith("Repair required"))) {
     setBadge("Repair needed", "warn");
-  } else if (status.latestError) {
+  } else if (status.latestError && !(developerBypass && status.installed)) {
     setBadge(isFirstPublishPending(status) ? "Not Installed" : (status.developerMode ? "Config error" : "Service unavailable"), isFirstPublishPending(status) ? "warn" : (status.developerMode ? "bad" : "warn"));
   } else if (status.updateRequired) {
     setBadge("Update required", "warn");
-  } else if (status.latest) {
+  } else if (status.latest || (developerBypass && status.installed)) {
     setBadge(status.launchReady ? "Ready" : "Launch locked", status.launchReady ? "ok" : "warn");
   } else {
     setBadge("Setup required", "warn");
@@ -1336,7 +1337,8 @@ function downloadStateLabel(status, state) {
   if (state?.error) return "Needs attention";
   if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state)) return "Complete";
   if (!status?.config?.latestUrl) return "Setup required";
-  if (status?.latestError) return isFirstPublishPending(status) ? "Not installed" : (status.developerMode ? "Config error" : "Service unavailable");
+  if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return isFirstPublishPending(status) ? "Not installed" : (status.developerMode ? "Config error" : "Service unavailable");
+  if (status?.developerClientBypass && status?.installed) return "Developer client";
   if (status?.updateRequired) return "Game update required";
   if (status?.latest) return "No update required";
   return "No downloads queued";
@@ -2120,7 +2122,7 @@ function renderStatus(status) {
   developerAuthenticated = Boolean(status.developerAuthenticated);
   applyDeveloperGate(status);
   const latestVersion = status.latest?.version || "-";
-  const developerBypass = Boolean(status.developerMode && status.developerAuthenticated);
+  const developerBypass = Boolean(status.developerClientBypass || status.developerMode);
   const installedVersion = status.installed?.version || null;
   const configured = Boolean(status.config.latestUrl);
   const installedLabel = installedVersion ? `v.${installedVersion}` : "Not Installed";
@@ -2173,9 +2175,13 @@ function renderStatus(status) {
     setSettingsFeed("warn", "Feed pending", "Waiting for latest.json", "Save settings or test the feed.");
   }
 
-  if (status.latestError) {
+  if (status.latestError && !(developerBypass && status.installed)) {
     setBadge(isFirstPublishPending(status) ? "Not Installed" : (status.developerMode ? "Config error" : "Service unavailable"), isFirstPublishPending(status) ? "warn" : (status.developerMode ? "bad" : "warn"));
     setLog(playerSafeFeedProblem(status));
+  } else if (developerBypass && status.installed) {
+    setBadge(status.launchReady ? "Ready" : "Launch locked", status.launchReady ? "ok" : "warn");
+    els.diffSummary.textContent = "Bypassed";
+    if (!els.log.textContent) setLog(status.launchReady ? "Developer client bypass active. Local mods and configs are allowed." : (status.launchBlockedReason || "Developer client bypass active."));
   } else if (status.updateRequired) {
     setBadge("Update required", "warn");
     if (!els.log.textContent) setLog("A newer pack version is available.");

@@ -921,6 +921,10 @@ async function loadIdentity() {
 }
 
 function developerClientBypassAllowed() {
+  return isDeveloperMode();
+}
+
+function developerAdminSessionAllowed() {
   return isDeveloperMode() && isDeveloperAuthenticated();
 }
 
@@ -937,7 +941,7 @@ function launcherProofIdentity(identity = {}) {
 }
 
 function launcherProofAuthToken() {
-  return developerClientBypassAllowed() ? adminToken : '';
+  return developerAdminSessionAllowed() ? adminToken : '';
 }
 async function identityPayload(config = null) {
   const identity = await loadIdentity();
@@ -1116,6 +1120,45 @@ async function writeIntegrityState(config, integrity, source = 'scan') {
   return state;
 }
 
+function developerBypassIntegrityState(config, source = 'developer-bypass') {
+  return {
+    generatedAt: new Date().toISOString(),
+    instanceDir: config.instanceDir,
+    valid: true,
+    counts: {
+      managed: 0,
+      checked: 0,
+      ok: 0,
+      changed: 0,
+      missing: 0,
+      corrupted: 0
+    },
+    changed: [],
+    missing: [],
+    truncated: false,
+    source,
+    developerClientBypass: true
+  };
+}
+
+function developerBypassLocalChangesState(config, source = 'developer-bypass') {
+  return {
+    generatedAt: new Date().toISOString(),
+    instanceDir: config.instanceDir,
+    counts: {
+      managed: 0,
+      changed: 0,
+      missing: 0,
+      added: 0
+    },
+    changed: [],
+    missing: [],
+    added: [],
+    truncated: false,
+    source,
+    developerClientBypass: true
+  };
+}
 function cacheExtraZipPathIssue(integrity) {
   const issues = [...(integrity?.changed || []), ...(integrity?.missing || [])];
   if (!issues.length || integrity?.source === 'status-refresh') {
@@ -1346,14 +1389,20 @@ async function getStatus(configOverride = null) {
   }
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   const installed = await pathExists(installedPath) ? await readJsonFile(installedPath) : null;
-  let integrity = await readIntegrityState(config);
-  integrity = await refreshStaleIntegrityState(config, latest, integrity);
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest, installed });
-  const launchIntegrity = developerClientBypassAllowed() ? null : integrity;
-  const launchState = evaluateLaunchState(config, latest, latestError, installed, minecraftProfile, launchIntegrity);
+  const developerClientBypass = developerClientBypassAllowed();
+  let integrity = developerClientBypass ? developerBypassIntegrityState(config) : await readIntegrityState(config);
+  if (!developerClientBypass) {
+    integrity = await refreshStaleIntegrityState(config, latest, integrity);
+  }
+  const launchLatest = latest || (developerClientBypass && installed ? installed : null);
+  const launchLatestError = developerClientBypass && installed ? null : latestError;
+  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
+  const launchIntegrity = developerClientBypass ? null : integrity;
+  const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity);
   const launcherUpdate = await readLauncherUpdate(config);
   return {
     developerMode: isDeveloperMode(),
+    developerClientBypass,
     appVersion: app.getVersion(),
     platformProfile: platformProfile(process.platform, {
       ...process.env,
@@ -1389,7 +1438,7 @@ async function getStatus(configOverride = null) {
     launcherUpdate,
     installed,
     integrity,
-    updateRequired: latest && latest.required !== false ? installed?.version !== latest.version : false,
+    updateRequired: !developerClientBypass && latest && latest.required !== false ? installed?.version !== latest.version : false,
     ...launchState
   };
 }
@@ -3573,17 +3622,25 @@ ipcMain.handle('launcher:updateState', async () => launcherUpdateState);
 ipcMain.handle('account:register', async (_event, username) => registerMinecraftUsername(username));
 ipcMain.handle('changes:scan', async () => {
   const config = await loadConfig();
+  if (developerClientBypassAllowed()) {
+    return developerBypassLocalChangesState(config, 'developer-scan-bypass');
+  }
   return scanLocalChanges(config.instanceDir);
 });
 ipcMain.handle('files:scan', async () => {
   const config = await loadConfig();
+  if (developerClientBypassAllowed()) {
+    return developerBypassIntegrityState(config, 'developer-scan-bypass');
+  }
   const integrity = await scanCurrentManagedIntegrity(config);
   return writeIntegrityState(config, integrity, 'scan');
 });
 ipcMain.handle('changes:sync', async () => {
   const config = await loadConfig();
   const identity = await identityPayload(config);
-  const changes = await scanLocalChanges(config.instanceDir);
+  const changes = developerClientBypassAllowed()
+    ? developerBypassLocalChangesState(config, 'developer-sync-bypass')
+    : await scanLocalChanges(config.instanceDir);
   return sendLauncherEvent(config, identity, {
     type: 'local_changes',
     version: null,
@@ -3592,21 +3649,27 @@ ipcMain.handle('changes:sync', async () => {
 });
 ipcMain.handle('play:start', async () => {
   const config = await loadConfig();
-
-  let latest = null;
-  try {
-    latest = await readLatest(config);
-  } catch (error) {
-    throw new Error(`Release feed cannot be checked: ${error.message}`);
-  }
+  const developerClientBypass = developerClientBypassAllowed();
 
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   const installed = await pathExists(installedPath) ? await readJsonFile(installedPath) : null;
-  const integrity = developerClientBypassAllowed()
+  let latest = null;
+  let latestError = null;
+  try {
+    latest = await readLatest(config);
+  } catch (error) {
+    latestError = error.message;
+    if (!developerClientBypass) {
+      throw new Error(`Release feed cannot be checked: ${error.message}`);
+    }
+  }
+
+  const launchLatest = latest || (developerClientBypass && installed ? installed : null);
+  const integrity = developerClientBypass
     ? null
-    : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, latest), 'play-check');
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest, installed });
-  const launchState = evaluateLaunchState(config, latest, null, installed, minecraftProfile, integrity);
+    : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest), 'play-check');
+  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
+  const launchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity);
   if (!launchState.launchReady) {
     throw new Error(launchState.launchBlockedReason);
   }
@@ -3616,11 +3679,11 @@ ipcMain.handle('play:start', async () => {
   const launcherProof = await writeLauncherProof({
     config,
     identity: launcherProofIdentity(identity),
-    latest,
+    latest: launchLatest,
     installed,
     authToken: launcherProofAuthToken()
   });
-  const profile = await ensureMinecraftLauncherProfile({ config, latest, installed });
+  const profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   if (profile.versionId && !profile.loaderInstalled) {
     throw new Error(`Minecraft Launcher is missing loader ${profile.versionId}. Run Update to install Forge automatically.`);
   }
