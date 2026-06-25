@@ -7,6 +7,7 @@ module.exports = {
     target: 'macos'
   }),
   npmRebuild: false,
+  icon: 'build/icon-mac.png',
   mac: {
     target: [
       {
