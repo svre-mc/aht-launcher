@@ -149,6 +149,10 @@ function developerSecretsPath() {
   return path.join(app.getPath('userData'), 'developer.secrets.json');
 }
 
+function legacyDeveloperSecretsPath() {
+  return path.join(app.getPath('appData'), 'aht-launcher', 'developer.secrets.json');
+}
+
 function developerCredentialsPath() {
   return path.join(app.getPath('userData'), 'developer.credentials.json');
 }
@@ -210,10 +214,50 @@ function decryptDeveloperSecret(record = {}) {
 
 async function readDeveloperSecretsFile() {
   const file = developerSecretsPath();
-  if (!(await pathExists(file))) {
-    return { schemaVersion: 1, secrets: {} };
+  let current = { schemaVersion: 1, secrets: {} };
+  if (await pathExists(file)) {
+    current = await readJsonFile(file);
   }
-  return readJsonFile(file);
+
+  if (launchMode !== 'developer') {
+    return current;
+  }
+
+  const legacyFile = legacyDeveloperSecretsPath();
+  if (samePath(file, legacyFile) || !(await pathExists(legacyFile))) {
+    return current;
+  }
+
+  const legacy = await readJsonFile(legacyFile);
+  const merged = mergeDeveloperSecretFiles(current, legacy);
+  if (merged.changed) {
+    await writeJsonFile(file, merged.file);
+  }
+  return merged.file;
+}
+
+function hasStoredSecret(record = {}) {
+  return Boolean(record && typeof record === 'object' && String(record.value || ''));
+}
+
+function mergeDeveloperSecretFiles(current = {}, legacy = {}) {
+  const merged = {
+    schemaVersion: current.schemaVersion || legacy.schemaVersion || 1,
+    updatedAt: current.updatedAt || legacy.updatedAt || new Date().toISOString(),
+    secrets: {
+      ...(legacy.secrets || {}),
+      ...(current.secrets || {})
+    }
+  };
+  let changed = false;
+  for (const [key, legacyValue] of Object.entries(legacy.secrets || {})) {
+    const currentValue = current.secrets?.[key];
+    if (!hasStoredSecret(currentValue) && hasStoredSecret(legacyValue)) {
+      merged.secrets[key] = legacyValue;
+      changed = true;
+    }
+  }
+  return { file: merged, changed };
 }
 
 async function loadDeveloperSecrets() {
@@ -277,7 +321,6 @@ async function loadDeveloperSecrets() {
       && (serverSsh.value ? serverSsh.encrypted : true)
       && (launcherProof.value ? launcherProof.encrypted : true)
       && (github.value ? github.encrypted : true)
-      && (r2Account.value ? r2Account.encrypted : true)
       && (r2AccessKey.value ? r2AccessKey.encrypted : true)
       && (r2SecretKey.value ? r2SecretKey.encrypted : true)
     ),
@@ -292,6 +335,21 @@ async function loadDeveloperSecrets() {
     r2SecretAccessKey
   };
 }
+function saveDeveloperSecretField(next, secrets, key) {
+  if (!Object.prototype.hasOwnProperty.call(secrets, key)) {
+    return;
+  }
+  const value = String(secrets[key] || '');
+  if (!value && hasStoredSecret(next.secrets[key])) {
+    return;
+  }
+  if (!value) {
+    delete next.secrets[key];
+    return;
+  }
+  next.secrets[key] = encryptDeveloperSecret(value);
+}
+
 async function saveDeveloperSecrets(secrets = {}) {
   assertDeveloperAuthenticated();
   const current = await readDeveloperSecretsFile();
@@ -302,29 +360,15 @@ async function saveDeveloperSecrets(secrets = {}) {
       ...(current.secrets || {})
     }
   };
-  if (Object.prototype.hasOwnProperty.call(secrets, 'curseforgeApiKey')) {
-    next.secrets.curseforgeApiKey = encryptDeveloperSecret(secrets.curseforgeApiKey);
-  }
-  if (Object.prototype.hasOwnProperty.call(secrets, 'serverSshPassword')) {
-    next.secrets.serverSshPassword = encryptDeveloperSecret(secrets.serverSshPassword);
-  }
-  if (Object.prototype.hasOwnProperty.call(secrets, 'launcherProofSecret')) {
-    next.secrets.launcherProofSecret = encryptDeveloperSecret(secrets.launcherProofSecret);
-  }
-  if (Object.prototype.hasOwnProperty.call(secrets, 'githubToken')) {
-    next.secrets.githubToken = encryptDeveloperSecret(secrets.githubToken);
-  }
-  if (Object.prototype.hasOwnProperty.call(secrets, 'r2AccountId')) {
-    next.secrets.r2AccountId = encryptDeveloperSecret(secrets.r2AccountId);
-  }
-  if (Object.prototype.hasOwnProperty.call(secrets, 'r2AccessKeyId')) {
-    next.secrets.r2AccessKeyId = encryptDeveloperSecret(secrets.r2AccessKeyId);
-  }
-  if (Object.prototype.hasOwnProperty.call(secrets, 'r2SecretAccessKey')) {
-    next.secrets.r2SecretAccessKey = encryptDeveloperSecret(secrets.r2SecretAccessKey);
-  }
+  saveDeveloperSecretField(next, secrets, 'curseforgeApiKey');
+  saveDeveloperSecretField(next, secrets, 'serverSshPassword');
+  saveDeveloperSecretField(next, secrets, 'launcherProofSecret');
+  saveDeveloperSecretField(next, secrets, 'githubToken');
+  saveDeveloperSecretField(next, secrets, 'r2AccountId');
+  saveDeveloperSecretField(next, secrets, 'r2AccessKeyId');
+  saveDeveloperSecretField(next, secrets, 'r2SecretAccessKey');
   await writeJsonFile(developerSecretsPath(), next);
-  const usedEncryption = Object.values(next.secrets).every((item) => !item?.value || item.encrypted);
+  const usedEncryption = Object.entries(next.secrets).every(([key, item]) => key === 'r2AccountId' || !item?.value || item.encrypted);
   return {
     ok: true,
     saved: Object.values(next.secrets).some((item) => Boolean(item?.value)),
@@ -3289,6 +3333,45 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
   });
 }
 
+async function openMacApplication(args, cwd, env) {
+  await spawnLogged('open', args, { cwd, env, timeoutMs: 10_000 });
+  return { ok: true, command: 'open', args };
+}
+
+async function openMacMinecraftLauncher(cwd, env) {
+  const home = app.getPath('home');
+  const appPaths = [
+    process.env.AHT_MINECRAFT_MAC_APP || '',
+    '/Applications/Minecraft.app',
+    '/Applications/Minecraft Launcher.app',
+    path.join(home, 'Applications', 'Minecraft.app'),
+    path.join(home, 'Applications', 'Minecraft Launcher.app')
+  ].filter(Boolean);
+  let lastError = null;
+  for (const appPath of appPaths) {
+    if (!(await pathExists(appPath))) {
+      continue;
+    }
+    try {
+      return await openMacApplication([appPath], cwd, env);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  for (const args of [
+    ['-b', 'com.mojang.minecraftlauncher'],
+    ['-a', 'Minecraft'],
+    ['-a', 'Minecraft Launcher']
+  ]) {
+    try {
+      return await openMacApplication(args, cwd, env);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`Minecraft Launcher could not be opened on macOS.${lastError ? ` ${lastError.message}` : ''}`);
+}
+
 async function openMinecraftLauncher(config) {
   const cwd = config.minecraftLauncher?.rootDir || app.getPath('home');
   const env = minecraftLaunchEnv();
@@ -3315,7 +3398,7 @@ async function openMinecraftLauncher(config) {
   }
 
   if (process.platform === 'darwin') {
-    return spawnDetached('open', ['-a', 'Minecraft Launcher'], cwd, env);
+    return openMacMinecraftLauncher(cwd, env);
   }
 
   return spawnDetached('minecraft-launcher', [], cwd, env);

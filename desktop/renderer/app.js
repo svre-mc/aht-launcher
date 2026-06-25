@@ -2877,6 +2877,12 @@ if (els.githubTokenInput) {
     saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
   });
 }
+if (els.r2AccountIdInput) {
+  els.r2AccountIdInput.addEventListener("input", queueDeveloperSecretSave);
+  els.r2AccountIdInput.addEventListener("change", () => {
+    saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
+  });
+}
 if (els.r2AccessKeyIdInput) {
   els.r2AccessKeyIdInput.addEventListener("input", queueDeveloperSecretSave);
   els.r2AccessKeyIdInput.addEventListener("change", () => {
