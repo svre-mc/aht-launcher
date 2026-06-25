@@ -4,7 +4,9 @@ import path from 'node:path';
 import {
   downloadToFile,
   ensureDir,
-  pathExists
+  pathExists,
+  readJsonFile,
+  writeJsonFile
 } from './utils.js';
 
 export function forgeLoaderVersion(loaderId = '') {
@@ -54,6 +56,103 @@ export function buildForgeInstallPlan(profile, options = {}) {
     javaPath: options.javaPath || 'java',
     args: ['-jar', installerPath, '--installClient', rootDir]
   };
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function uniqueValues(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text || seen.has(text.toLowerCase())) continue;
+    seen.add(text.toLowerCase());
+    result.push(text);
+  }
+  return result;
+}
+
+function forgeVersionCandidates(plan = {}) {
+  const forgeVersion = forgeLoaderVersion(plan.loaderId);
+  return uniqueValues([
+    plan.versionId,
+    plan.minecraftVersion && forgeVersion ? `${plan.minecraftVersion}-forge-${forgeVersion}` : '',
+    plan.minecraftVersion && forgeVersion ? `${plan.minecraftVersion}-forge${plan.minecraftVersion}-${forgeVersion}` : '',
+    plan.minecraftVersion && forgeVersion ? `${plan.minecraftVersion}-Forge${forgeVersion}-${plan.minecraftVersion}` : '',
+    plan.loaderId
+  ]);
+}
+
+function forgeVersionScore(name = '', plan = {}) {
+  const lower = String(name || '').toLowerCase();
+  const candidates = forgeVersionCandidates(plan).map((candidate) => candidate.toLowerCase());
+  const exactIndex = candidates.indexOf(lower);
+  if (exactIndex >= 0) return exactIndex;
+  const forgeVersion = forgeLoaderVersion(plan.loaderId).toLowerCase();
+  const minecraftVersion = String(plan.minecraftVersion || '').toLowerCase();
+  if (forgeVersion && minecraftVersion && lower.includes('forge') && lower.includes(forgeVersion) && lower.includes(minecraftVersion)) return 20;
+  if (forgeVersion && lower.includes('forge') && lower.includes(forgeVersion)) return 30;
+  return 100;
+}
+
+export async function findInstalledForgeVersion(plan = {}) {
+  const versionsDir = path.join(plan.rootDir || '', 'versions');
+  const candidates = forgeVersionCandidates(plan);
+  for (const candidate of candidates) {
+    const jsonPath = path.join(versionsDir, candidate, `${candidate}.json`);
+    if (await pathExists(jsonPath)) {
+      return { installed: true, versionId: candidate, versionJson: jsonPath };
+    }
+  }
+  let entries = [];
+  try {
+    entries = await fs.readdir(versionsDir, { withFileTypes: true });
+  } catch {
+    return { installed: false, versionId: plan.versionId || '', versionJson: '' };
+  }
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const score = forgeVersionScore(entry.name, plan);
+    if (score >= 100) continue;
+    const jsonPath = path.join(versionsDir, entry.name, `${entry.name}.json`);
+    if (await pathExists(jsonPath)) {
+      matches.push({ score, versionId: entry.name, versionJson: jsonPath });
+    }
+  }
+  matches.sort((left, right) => left.score - right.score || left.versionId.localeCompare(right.versionId));
+  const best = matches[0];
+  return best ? { installed: true, versionId: best.versionId, versionJson: best.versionJson } : { installed: false, versionId: plan.versionId || '', versionJson: '' };
+}
+
+async function waitForInstalledForgeVersion(plan = {}, timeoutMs = 15000) {
+  const started = Date.now();
+  let result = await findInstalledForgeVersion(plan);
+  while (!result.installed && Date.now() - started < timeoutMs) {
+    await sleep(500);
+    result = await findInstalledForgeVersion(plan);
+  }
+  return result;
+}
+
+async function ensureLauncherProfilesFile(rootDir = '') {
+  const profilesPath = path.join(rootDir, 'launcher_profiles.json');
+  try {
+    const profiles = await readJsonFile(profilesPath);
+    if (profiles && typeof profiles === 'object') {
+      profiles.profiles = profiles.profiles && typeof profiles.profiles === 'object' ? profiles.profiles : {};
+      await writeJsonFile(profilesPath, profiles);
+      return;
+    }
+  } catch {
+    // Forge 1.12.2 refuses to install without a readable launcher_profiles.json.
+  }
+  await writeJsonFile(profilesPath, { profiles: {} });
+}
+
+function outputTail(output = '') {
+  return String(output || '').trim().split(/\r?\n/).slice(-12).join('\n');
 }
 
 function javaExecutableName() {
@@ -211,6 +310,7 @@ export async function installForgeLoader(profile, options = {}) {
   }
 
   await ensureDir(plan.installerDir || path.dirname(plan.installerPath));
+  await ensureLauncherProfilesFile(plan.rootDir);
   if (!(await pathExists(plan.installerPath)) || options.forceDownload) {
     options.logger?.log?.(`Downloading Forge installer ${plan.installerUrl}`);
     await downloadToFile(plan.installerUrl, plan.installerPath);
@@ -222,15 +322,20 @@ export async function installForgeLoader(profile, options = {}) {
     cwd: plan.rootDir,
     logger: options.logger
   });
-  const installed = plan.versionId ? await pathExists(path.join(plan.rootDir, 'versions', plan.versionId, `${plan.versionId}.json`)) : false;
-  if (!installed) {
-    throw new Error(`Forge installer finished, but ${plan.versionId} was not found in ${path.join(plan.rootDir, 'versions')}.`);
+  const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs || 15000);
+  if (!installed.installed) {
+    const tail = outputTail(result.output);
+    throw new Error(`Forge installer finished, but no compatible Forge ${forgeLoaderVersion(plan.loaderId)} profile was found in ${path.join(plan.rootDir, 'versions')}.${tail ? ` Installer output:\n${tail}` : ''}`);
   }
+  plan.versionId = installed.versionId;
+  plan.versionJson = installed.versionJson;
   return {
     ok: true,
     skipped: false,
     plan,
     output: result.output,
-    loaderInstalled: installed
+    loaderInstalled: true,
+    versionId: installed.versionId,
+    versionJson: installed.versionJson
   };
 }

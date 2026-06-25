@@ -94,15 +94,36 @@ export function loaderVersionId(minecraft = {}) {
   return `${minecraftVersion}-${loaderId}`;
 }
 
+function uniqueVersionIds(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text || seen.has(text.toLowerCase())) continue;
+    seen.add(text.toLowerCase());
+    result.push(text);
+  }
+  return result;
+}
+
 function loaderVersionIdCandidates(minecraft = {}) {
   const primary = loaderVersionId(minecraft);
   const loader = primaryModLoader(minecraft);
   const loaderId = loader?.id || '';
+  const minecraftVersion = minecraft.version || '';
   const candidates = [primary];
+  if (loaderId?.startsWith('forge-') && minecraftVersion) {
+    const forgeVersion = loaderId.slice('forge-'.length);
+    candidates.push(
+      `${minecraftVersion}-forge-${forgeVersion}`,
+      `${minecraftVersion}-forge${minecraftVersion}-${forgeVersion}`,
+      `${minecraftVersion}-Forge${forgeVersion}-${minecraftVersion}`
+    );
+  }
   if (loaderId && loaderId !== primary) {
     candidates.push(loaderId);
   }
-  return candidates.filter(Boolean);
+  return uniqueVersionIds(candidates);
 }
 
 function profileIdFor(packId = 'a-hard-time-dregora') {

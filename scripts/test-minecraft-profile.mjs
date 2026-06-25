@@ -11,6 +11,7 @@ import {
 } from '../src/minecraftLauncherProfile.js';
 import {
   buildForgeInstallPlan,
+  findInstalledForgeVersion,
   forgeInstallerUrl,
   resolveJavaPath
 } from '../src/forgeInstaller.js';
@@ -119,6 +120,18 @@ if (forgeInstallerUrl(latest.minecraft.version, latest.minecraft.modLoaders[0].i
 const forgePlan = buildForgeInstallPlan(created);
 if (forgePlan.args.join(' ') !== `-jar ${forgePlan.installerPath} --installClient ${minecraftRoot}`) {
   throw new Error(`Unexpected Forge install args: ${forgePlan.args.join(' ')}`);
+}
+const exactForgeInstall = await findInstalledForgeVersion(forgePlan);
+if (!exactForgeInstall.installed || exactForgeInstall.versionId !== versionId) {
+  throw new Error(`Expected exact Forge profile detection, got ${JSON.stringify(exactForgeInstall)}`);
+}
+const altForgeRoot = path.join(root, 'alt-forge-root');
+const altForgeVersionId = '1.12.2-forge1.12.2-14.23.5.2860';
+await fs.mkdir(path.join(altForgeRoot, 'versions', altForgeVersionId), { recursive: true });
+await fs.writeFile(path.join(altForgeRoot, 'versions', altForgeVersionId, `${altForgeVersionId}.json`), '{}');
+const altForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: altForgeRoot });
+if (!altForgeInstall.installed || altForgeInstall.versionId !== altForgeVersionId) {
+  throw new Error(`Expected alternate Forge profile detection, got ${JSON.stringify(altForgeInstall)}`);
 }
 const fakeRuntimeRoot = path.join(root, 'fake-minecraft-runtime');
 const fakeLegacyJava = path.join(fakeRuntimeRoot, 'jre-legacy', 'windows-x64', 'jre-legacy', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
