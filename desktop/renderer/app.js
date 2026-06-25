@@ -2725,7 +2725,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
       curseforgeApiKey: localCurseForgeApiKey(),
       launcherProofSecret: localLauncherProofSecret(),
       adminUsername: inputValue(els.adminUserInput, "admin"),
-      adminPassword: inputValue(els.adminPasswordInput, "@312Princ"),
+      adminPassword: inputValue(els.adminPasswordInput, ""),
       releaseBucket: releaseBucketName(),
       dataBucket: dataBucketName(),
       cacheOnlyMode: cacheOnlyMode()

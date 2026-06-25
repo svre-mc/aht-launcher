@@ -59,9 +59,6 @@ Important fields:
     "platform": "win32",
     "arch": "x64",
     "launcherChannel": "player",
-    "developerClient": false,
-    "developerClientBypass": false,
-    "modIntegrityBypass": false,
     "instanceDirHash": "<sha256>"
   },
   "signature": {
@@ -94,22 +91,7 @@ Server mod rules:
    - `issuedAt` is not too far in the future
 6. Track `launchId` for a short time and reject reuse if you want one-token-per-join behavior.
 
-## Developer Client Bypass
-
-The developer app can launch the AHT Modpack as a developer client after developer login. In that case the signed payload includes:
-
-```json
-{
-  "launcherChannel": "developer",
-  "developerClient": true,
-  "developerClientBypass": true,
-  "modIntegrityBypass": true
-}
-```
-
-Server mod rule: only exempt local mod-change checks when the token signature is valid, `source === "worker"`, `launcherChannel === "developer"`, and `modIntegrityBypass === true`.
-
-The Worker only signs those bypass fields when `/api/launcher-proof` receives a valid developer admin bearer token. Normal player launchers cannot get a Worker-signed developer bypass by editing local files.
+## Worker Secret
 
 Cloudflare Worker secret required for real signatures:
 
@@ -122,6 +104,6 @@ The Worker signs launcher proof tokens with `LAUNCHER_PROOF_SECRET`. For compati
 
 Do not use `CURSEFORGE_API_KEY` as the proof-signing secret. That key is only for CurseForge API access.
 
-The developer launcher's Cloud setup writes `LAUNCHER_PROOF_SECRET` to the Worker from the Launcher Proof Secret field. It does not write the server `run.bat` or `run.sh`; set the same value in the server process environment, service manager, or host panel before starting the Minecraft server.
+Set the same proof secret in the Minecraft server process environment, service manager, or host panel before starting the server.
 
-Until the updated Worker is deployed and `LAUNCHER_PROOF_SECRET` is set, the launcher can write an unsigned fallback proof. The server mod should not accept fallback proofs.
+Until the Worker is deployed and `LAUNCHER_PROOF_SECRET` is set, the launcher can write an unsigned fallback proof. The server mod should not accept fallback proofs.

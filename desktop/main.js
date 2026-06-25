@@ -61,17 +61,46 @@ let adminToken = '';
 let developerSession = null;
 let keepOpenUntil = 0;
 
-const DEVELOPER_USERNAME = 'admin';
-const DEVELOPER_PASSWORD = '@312Princ';
+const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
+let launcherModeCache = null;
 const singleInstanceLock = app.requestSingleInstanceLock();
 
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.ahardtime.launcher');
 }
 
-function isDeveloperMode() {
+function launcherBuildMode() {
+  if (launcherModeCache !== null) {
+    return launcherModeCache;
+  }
+  const candidates = [
+    path.join(appRoot, 'package.json'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'app.asar', 'package.json') : ''
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const packageJson = JSON.parse(fsSync.readFileSync(candidate, 'utf8'));
+      launcherModeCache = packageJson.ahtLauncherMode || packageJson.extraMetadata?.ahtLauncherMode || '';
+      return launcherModeCache;
+    } catch {
+      // Source runs and packaged apps resolve package metadata differently.
+    }
+  }
+  launcherModeCache = '';
+  return launcherModeCache;
+}
+
+function developerModeAllowed() {
+  return process.env.AHT_ALLOW_DEVELOPER === '1' || launcherBuildMode() !== 'player';
+}
+
+function requestedDeveloperMode() {
   return process.argv.includes('--developer') || process.env.AHT_DEVELOPER === '1';
+}
+
+function isDeveloperMode() {
+  return developerModeAllowed() && requestedDeveloperMode();
 }
 
 function isDeveloperAuthenticated() {
@@ -105,6 +134,27 @@ function identityPath() {
 
 function developerSecretsPath() {
   return path.join(app.getPath('userData'), 'developer.secrets.json');
+}
+
+function developerCredentialsPath() {
+  return path.join(app.getPath('userData'), 'developer.credentials.json');
+}
+
+async function loadDeveloperCredentials() {
+  let localCredentials = {};
+  try {
+    localCredentials = await readJsonFile(developerCredentialsPath());
+  } catch {
+    localCredentials = {};
+  }
+  return {
+    username: String(process.env.AHT_DEVELOPER_USERNAME || localCredentials.username || DEFAULT_DEVELOPER_USERNAME).trim(),
+    password: String(process.env.AHT_DEVELOPER_PASSWORD || localCredentials.password || '')
+  };
+}
+
+function developerCredentialsConfigured(credentials) {
+  return Boolean(credentials?.username && credentials?.password);
 }
 
 function safeStorageAvailable() {
@@ -1689,7 +1739,7 @@ function wranglerAccountSummary(output = '') {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .filter((line) => !/^(⛅|─|getting user settings)/i.test(line));
+    .filter((line) => !/^(â›…|â”€|getting user settings)/i.test(line));
   return lines.slice(-2).join(' ') || String(output || '').trim();
 }
 
@@ -1836,8 +1886,8 @@ function randomSecret() {
 
 async function cloudSetupSecrets({
   curseforgeApiKey = '',
-  adminUsername = DEVELOPER_USERNAME,
-  adminPassword = DEVELOPER_PASSWORD,
+  adminUsername = '',
+  adminPassword = '',
   adminTokenSecret = '',
   launcherProofSecret = '',
   releaseBucket = 'ahtlauncher',
@@ -1851,10 +1901,16 @@ async function cloudSetupSecrets({
   if (!launcherProofSecret) {
     throw new Error('Launcher Proof Secret is required before cloud setup. Set the same value on the server as LAUNCHER_PROOF_SECRET.');
   }
+  const credentials = await loadDeveloperCredentials();
+  const resolvedAdminUsername = String(adminUsername || credentials.username || DEFAULT_DEVELOPER_USERNAME).trim();
+  const resolvedAdminPassword = String(adminPassword || credentials.password || '');
+  if (!resolvedAdminUsername || !resolvedAdminPassword) {
+    throw new Error('Developer credentials are not configured on this machine. Set AHT_DEVELOPER_PASSWORD or create developer.credentials.json in the app data folder.');
+  }
   const options = { releaseBucket: releaseName, dataBucket: dataName };
   const secrets = [
-    ['ADMIN_USERNAME', adminUsername || DEVELOPER_USERNAME],
-    ['ADMIN_PASSWORD', adminPassword || DEVELOPER_PASSWORD],
+    ['ADMIN_USERNAME', resolvedAdminUsername],
+    ['ADMIN_PASSWORD', resolvedAdminPassword],
     ['ADMIN_TOKEN_SECRET', adminTokenSecret || randomSecret()],
     ['LAUNCHER_PROOF_SECRET', launcherProofSecret]
   ];
@@ -3130,7 +3186,13 @@ async function validateRelease({ outDir, publicLatestUrl = '' }) {
   };
 }
 
-async function remoteAdminLogin(config, username = DEVELOPER_USERNAME, password = DEVELOPER_PASSWORD) {
+async function remoteAdminLogin(config, username = '', password = '') {
+  const credentials = await loadDeveloperCredentials();
+  const loginUsername = String(username || credentials.username || '').trim();
+  const loginPassword = String(password || credentials.password || '');
+  if (!loginUsername || !loginPassword) {
+    return { ok: false, error: 'Developer credentials are not configured on this machine' };
+  }
   const base = config.developer?.adminBaseUrl || config.sync?.baseUrl;
   if (!base) {
     return { ok: false, error: 'Developer admin URL is not configured' };
@@ -3139,7 +3201,7 @@ async function remoteAdminLogin(config, username = DEVELOPER_USERNAME, password 
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password })
+    body: JSON.stringify({ username: loginUsername, password: loginPassword })
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -3437,8 +3499,14 @@ ipcMain.handle('dev:getSecrets', async () => loadDeveloperSecrets());
 ipcMain.handle('dev:saveSecrets', async (_event, payload) => saveDeveloperSecrets(payload));
 ipcMain.handle('dev:login', async (_event, { username, password }) => {
   assertDeveloperMode();
+  const credentials = await loadDeveloperCredentials();
+  if (!developerCredentialsConfigured(credentials)) {
+    developerSession = null;
+    adminToken = '';
+    throw new Error('Developer credentials are not configured on this machine. Set AHT_DEVELOPER_PASSWORD or create developer.credentials.json in the app data folder.');
+  }
   const normalizedUsername = String(username || '').trim();
-  if (normalizedUsername !== DEVELOPER_USERNAME || password !== DEVELOPER_PASSWORD) {
+  if (normalizedUsername !== credentials.username || password !== credentials.password) {
     developerSession = null;
     adminToken = '';
     throw new Error('Invalid username or password');

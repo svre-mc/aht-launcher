@@ -5,6 +5,7 @@ const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const windowsInstallerInclude = fs.readFileSync(new URL('../build/windows-installer.nsh', import.meta.url), 'utf8');
 const rendererApp = fs.readFileSync(new URL('../desktop/renderer/app.js', import.meta.url), 'utf8');
+const desktopMain = fs.readFileSync(new URL('../desktop/main.js', import.meta.url), 'utf8');
 
 const configs = {
   windows: require('../build/electron-builder.windows.cjs'),
@@ -25,10 +26,12 @@ assert(configs.windows.nsis?.createDesktopShortcut === true, 'Windows desktop sh
 assert(configs.windows.nsis?.createStartMenuShortcut === true, 'Windows Start Menu shortcut should be enabled.');
 assert(configs.windows.nsis?.include === 'build/windows-installer.nsh', 'Windows installer must include the shortcut options page.');
 assert(windowsInstallerInclude.includes('Create a desktop shortcut'), 'Windows installer include must expose the desktop shortcut option.');
-assert(windowsInstallerInclude.includes('AHT Developer Launcher.lnk'), 'Windows installer must create a developer launcher shortcut.');
-assert(windowsInstallerInclude.includes('"--developer"'), 'Developer launcher shortcut must pass --developer.');
+assert(!/CreateShortCut[\s\S]*--developer/.test(windowsInstallerInclude), 'Public Windows installer must not create private-mode shortcuts.');
+assert(!windowsInstallerInclude.includes('"--developer"'), 'Public Windows installer must not expose private-mode args.');
 assert(!rendererApp.includes('update.updateRequired && !status?.developerMode'), 'Developer mode must not suppress required launcher update overlay.');
 assert(!rendererApp.includes('status.launcherUpdate?.updateRequired && !status.developerMode'), 'Developer mode must not bypass launcher update gating.');
+assert(!desktopMain.includes('@312Princ'), 'Developer password must not be hardcoded in public source.');
+assert(desktopMain.includes("launcherBuildMode() !== 'player'"), 'Player packaged builds must disable developer mode.');
 
 assert(configs.macos.productName === 'A Hard Time Launcher macOS', 'macOS product name is not tailored.');
 assert(configs.macos.directories?.output === 'release-builds/macos', 'macOS output folder is wrong.');

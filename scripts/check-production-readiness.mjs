@@ -62,8 +62,8 @@ function commandDetail(output = '', fallback = '') {
     .filter(Boolean);
   return lines.find((line) => /does not exist/i.test(line))
     || lines.find((line) => /failed|error|not authenticated|wrangler login/i.test(line))
-    || lines.find((line) => !/wrangler|^-+$|^─+$|getting user settings/i.test(line))
-    || lines.find((line) => !/^(⛅️|─|getting user settings)/i.test(line))
+    || lines.find((line) => !/wrangler|^-+$|^Ã¢â€â‚¬+$|getting user settings/i.test(line))
+    || lines.find((line) => !/^(Ã¢â€ºâ€¦Ã¯Â¸Â|Ã¢â€â‚¬|getting user settings)/i.test(line))
     || lines[0]
     || fallback;
 }
@@ -337,7 +337,7 @@ function checkWindowsShortcuts() {
     return;
   }
 
-  const names = ['AHT Launcher.lnk', 'AHT Developer Launcher.lnk'];
+  const names = ['AHT Launcher.lnk'];
   const expectedExe = path.join(releaseDir, 'win-unpacked', 'A Hard Time Launcher.exe').toLowerCase();
 
   for (const name of names) {
@@ -354,9 +354,7 @@ function checkWindowsShortcuts() {
     const argsText = String(shortcut?.Arguments || '');
     const iconText = String(shortcut?.IconLocation || '').toLowerCase();
     addCheck(`shortcut target: ${name}`, 'warn', target === expectedExe, shortcut?.TargetPath || 'unreadable shortcut target');
-    if (name.includes('Developer')) {
-      addCheck(`shortcut developer flag: ${name}`, 'warn', argsText.includes('--developer'), argsText || 'missing arguments');
-    }
+    addCheck(`shortcut has no developer flag: ${name}`, 'warn', !argsText.includes('--developer'), argsText || 'no arguments');
     addCheck(`shortcut icon: ${name}`, 'warn', iconText.includes('icon.ico'), shortcut?.IconLocation || 'missing icon');
   }
 }

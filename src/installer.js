@@ -72,6 +72,99 @@ async function downloadVerified(source, dest, expectedHash) {
   }
 }
 
+function isZipFileName(fileName = '') {
+  return /\.zip$/i.test(fileName);
+}
+
+function archiveEntriesLookLikeResourcePack(entries = []) {
+  const names = entries
+    .filter((entry) => !entry.isDirectory)
+    .map((entry) => entry.entryName.replaceAll('\\', '/').toLowerCase());
+  const hasPackMetadata = names.some((name) => name === 'pack.mcmeta' || name.endsWith('/pack.mcmeta'));
+  if (!hasPackMetadata) {
+    return false;
+  }
+  const hasModMarker = names.some((name) => (
+    name === 'mcmod.info'
+    || name.endsWith('/mcmod.info')
+    || name === 'fabric.mod.json'
+    || name.endsWith('/fabric.mod.json')
+    || name === 'quilt.mod.json'
+    || name.endsWith('/quilt.mod.json')
+    || name === 'meta-inf/mods.toml'
+    || name.endsWith('/meta-inf/mods.toml')
+    || name.endsWith('.class')
+  ));
+  return !hasModMarker;
+}
+
+function isResourcePackArchiveBuffer(buffer, fileName = '') {
+  if (!isZipFileName(fileName)) {
+    return false;
+  }
+  try {
+    return archiveEntriesLookLikeResourcePack(new AdmZip(buffer).getEntries());
+  } catch {
+    return false;
+  }
+}
+
+function isResourcePackArchiveFile(filePath, fileName = '') {
+  if (!isZipFileName(fileName || filePath)) {
+    return false;
+  }
+  try {
+    return archiveEntriesLookLikeResourcePack(new AdmZip(filePath).getEntries());
+  } catch {
+    return false;
+  }
+}
+
+function resourcePackRelPath(fileName = '') {
+  return normalizeRelPath(`resourcepacks/${path.basename(fileName)}`);
+}
+
+function explicitInstallRelPath(candidate) {
+  return candidate?.installPath || candidate?.relativePath || '';
+}
+
+function defaultInstallRelPath(candidate) {
+  const explicit = explicitInstallRelPath(candidate);
+  return explicit ? normalizeRelPath(explicit) : normalizeRelPath(`mods/${candidate.fileName}`);
+}
+
+async function maybeUseExistingResourcePackTarget({ candidate, instanceDir, forceRepair, logger }) {
+  if (forceRepair || explicitInstallRelPath(candidate) || !isZipFileName(candidate?.fileName || '')) {
+    return null;
+  }
+  const relPath = resourcePackRelPath(candidate.fileName);
+  const target = safeJoin(instanceDir, relPath);
+  if (await verifyExisting(target, candidate.expectedHash)) {
+    logger.log(`OK ${relPath}`);
+    return { relPath, target };
+  }
+  return null;
+}
+
+async function relocateResourcePackDownload({ candidate, instanceDir, relPath, target, logger }) {
+  if (!isZipFileName(candidate?.fileName || '') || !relPath.toLowerCase().startsWith('mods/')) {
+    return { relPath, target };
+  }
+  if (!isResourcePackArchiveFile(target, candidate.fileName)) {
+    return { relPath, target };
+  }
+  const nextRelPath = resourcePackRelPath(candidate.fileName);
+  const nextTarget = safeJoin(instanceDir, nextRelPath);
+  if (nextRelPath.toLowerCase() === relPath.toLowerCase()) {
+    return { relPath, target };
+  }
+  await ensureDir(path.dirname(nextTarget));
+  await removeFileIfExists(nextTarget);
+  await fs.rename(target, nextTarget);
+  logger.log(`Placed resourcepack ${candidate.fileName} -> ${nextRelPath}`);
+  return { relPath: nextRelPath, target: nextTarget };
+}
+
 function clampConcurrency(value, fallback = 10, max = 32) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -121,7 +214,8 @@ function cacheEntryToDownload({ entry, key, releaseSource, fallbackFileName = ''
     key,
     fileName: entry.fileName || fallbackFileName || `${key.replace(':', '-')}.jar`,
     url: resolveSource(releaseSource, entry.url),
-    expectedHash: entry.sha256 || entry.sha1 || null
+    expectedHash: entry.sha256 || entry.sha1 || null,
+    installPath: entry.installPath || entry.relativePath || ''
   };
 }
 
@@ -173,15 +267,31 @@ async function installResolvedDownload({ resolved, instanceDir, forceRepair, log
   let lastError = null;
   for (let index = 0; index < attempts.length; index += 1) {
     const candidate = attempts[index];
-    const relPath = normalizeRelPath(`mods/${candidate.fileName}`);
-    const target = safeJoin(instanceDir, relPath);
+    let relPath = defaultInstallRelPath(candidate);
+    let target = safeJoin(instanceDir, relPath);
     try {
+      const existingResourcePack = await maybeUseExistingResourcePackTarget({
+        candidate,
+        instanceDir,
+        forceRepair,
+        logger
+      });
+      if (existingResourcePack) {
+        return { candidate, ...existingResourcePack };
+      }
       if (!forceRepair && await verifyExisting(target, candidate.expectedHash)) {
         logger.log(`OK ${relPath}`);
       } else {
         logger.log(`Downloading ${candidate.source} ${candidate.key} -> ${relPath}`);
         await downloadVerified(candidate.url, target, candidate.expectedHash);
       }
+      ({ relPath, target } = await relocateResourcePackDownload({
+        candidate,
+        instanceDir,
+        relPath,
+        target,
+        logger
+      }));
       return { candidate, relPath, target };
     } catch (error) {
       lastError = error;
@@ -205,14 +315,35 @@ function cacheExtraDownloads(cacheManifest, releaseSource) {
     .filter(Boolean);
 }
 
+function classifyOverrideRelPath(entry, relPath) {
+  const normalized = normalizeRelPath(relPath);
+  if (!normalized.toLowerCase().startsWith('mods/') || !isZipFileName(normalized)) {
+    return { relPath: normalized, data: null };
+  }
+  const data = entry.getData();
+  if (isResourcePackArchiveBuffer(data, path.basename(normalized))) {
+    return {
+      relPath: resourcePackRelPath(path.basename(normalized)),
+      data
+    };
+  }
+  return { relPath: normalized, data };
+}
+
 function collectOverrideFiles(zip, overridesDir) {
   const prefix = `${overridesDir.replace(/\/+$/, '')}/`;
   return zip.getEntries()
     .filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix))
-    .map((entry) => ({
-      entry,
-      relPath: normalizeRelPath(entry.entryName.slice(prefix.length))
-    }));
+    .map((entry) => {
+      const originalRelPath = normalizeRelPath(entry.entryName.slice(prefix.length));
+      const placement = classifyOverrideRelPath(entry, originalRelPath);
+      return {
+        entry,
+        relPath: placement.relPath,
+        originalRelPath,
+        data: placement.data
+      };
+    });
 }
 
 async function removeStaleManagedFiles(instanceDir, previousManaged, nextManagedSet) {
@@ -275,7 +406,13 @@ export async function installPack(options) {
   const cacheExtras = cacheExtraDownloads(cacheManifest, latestSource || filePathToSource(process.cwd()));
   const overrideModBasenames = new Set(
     overrideFiles
-      .filter((file) => file.relPath.toLowerCase().startsWith('mods/'))
+      .filter((file) => {
+        const relPath = file.relPath.toLowerCase();
+        const originalRelPath = (file.originalRelPath || '').toLowerCase();
+        return relPath.startsWith('mods/')
+          || relPath.startsWith('resourcepacks/')
+          || originalRelPath.startsWith('mods/');
+      })
       .map((file) => path.basename(file.relPath).toLowerCase())
   );
 
@@ -298,6 +435,7 @@ export async function installPack(options) {
 
   await ensureDir(instanceDir);
   await ensureDir(path.join(instanceDir, 'mods'));
+  await ensureDir(path.join(instanceDir, 'resourcepacks'));
 
   const cfOptions = {
     apiKey: cfApiKey || process.env.CURSEFORGE_API_KEY || '',
@@ -350,17 +488,19 @@ export async function installPack(options) {
   const cacheExtraJobs = [];
   const plannedCacheExtras = new Set();
   for (const extra of cacheExtras) {
-    const relPath = normalizeRelPath(`mods/${extra.fileName}`);
-    const alreadyManaged = nextManagedSet.has(relPath);
+    const relPath = defaultInstallRelPath(extra);
+    const resourceRelPath = isZipFileName(extra.fileName) ? resourcePackRelPath(extra.fileName) : '';
+    const alreadyManaged = nextManagedSet.has(relPath) || (resourceRelPath && nextManagedSet.has(resourceRelPath));
     const alreadyEmbedded = overrideModBasenames.has(path.basename(extra.fileName).toLowerCase());
-    const alreadyPlanned = plannedCacheExtras.has(relPath);
+    const planKey = `${relPath.toLowerCase()}|${resourceRelPath.toLowerCase()}`;
+    const alreadyPlanned = plannedCacheExtras.has(planKey);
     if (alreadyManaged || alreadyEmbedded || alreadyPlanned) {
       logger.log(`Skipping cache extra ${extra.fileName}; already provided by ${alreadyManaged ? 'manifest' : alreadyEmbedded ? 'overrides' : 'another cache extra'}`);
       completedWork += 1;
       emitProgress('Cache extras', relPath);
       continue;
     }
-    plannedCacheExtras.add(relPath);
+    plannedCacheExtras.add(planKey);
     cacheExtraJobs.push({ extra, relPath });
   }
 
@@ -392,7 +532,7 @@ export async function installPack(options) {
   const overrideManaged = await runConcurrent(overrideFiles, Math.min(concurrency, 16), async (override) => {
     const target = safeJoin(instanceDir, override.relPath);
     await ensureDir(path.dirname(target));
-    await fs.writeFile(target, override.entry.getData());
+    await fs.writeFile(target, override.data || override.entry.getData());
     const managed = {
       relativePath: override.relPath,
       source: 'overrides',

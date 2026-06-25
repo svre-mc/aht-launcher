@@ -9,6 +9,7 @@ import {
   artifactUrl,
   ensureDir,
   hashFile,
+  normalizeRelPath,
   slugify,
   writeJsonFile
 } from './utils.js';
@@ -59,6 +60,47 @@ function isModFileName(fileName = '') {
   return /\.(jar|zip)$/i.test(fileName);
 }
 
+function isZipFileName(fileName = '') {
+  return /\.zip$/i.test(fileName);
+}
+
+function archiveEntriesLookLikeResourcePack(entries = []) {
+  const names = entries
+    .filter((entry) => !entry.isDirectory)
+    .map((entry) => entry.entryName.replaceAll('\\', '/').toLowerCase());
+  const hasPackMetadata = names.some((name) => name === 'pack.mcmeta' || name.endsWith('/pack.mcmeta'));
+  if (!hasPackMetadata) {
+    return false;
+  }
+  const hasModMarker = names.some((name) => (
+    name === 'mcmod.info'
+    || name.endsWith('/mcmod.info')
+    || name === 'fabric.mod.json'
+    || name.endsWith('/fabric.mod.json')
+    || name === 'quilt.mod.json'
+    || name.endsWith('/quilt.mod.json')
+    || name === 'meta-inf/mods.toml'
+    || name.endsWith('/meta-inf/mods.toml')
+    || name.endsWith('.class')
+  ));
+  return !hasModMarker;
+}
+
+function isResourcePackArchive(filePath) {
+  if (!isZipFileName(filePath)) {
+    return false;
+  }
+  try {
+    return archiveEntriesLookLikeResourcePack(new AdmZip(filePath).getEntries());
+  } catch {
+    return false;
+  }
+}
+
+function resourcePackRelPath(fileName = '') {
+  return normalizeRelPath(`resourcepacks/${path.basename(fileName)}`);
+}
+
 function isDirectModFile(filePath, modsDir) {
   if (!filePath || !isModFileName(filePath)) {
     return false;
@@ -75,6 +117,17 @@ async function listDirectModFiles(root) {
     }
   }
   return files;
+}
+
+async function listDirectResourcePackFiles(instanceDir) {
+  const resourcepacksDir = path.join(instanceDir, 'resourcepacks');
+  if (!(await pathExists(resourcepacksDir))) {
+    return [];
+  }
+  const entries = await fs.readdir(resourcepacksDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && isZipFileName(entry.name))
+    .map((entry) => path.join(resourcepacksDir, entry.name));
 }
 
 async function resolveCacheSource(cacheModsDir) {
@@ -149,10 +202,11 @@ async function readInstanceAddonMap(instanceDir, modsDir) {
   return { addonMap, instanceJsonPath };
 }
 
-async function addCachedJar({ outDir, cacheManifest, sourcePath, key, fileName, source }) {
+async function addCachedJar({ outDir, cacheManifest, sourcePath, key, fileName, source, installPath = '' }) {
   const sha256 = await hashFile(sourcePath, 'sha256');
   const stats = await fs.stat(sourcePath);
-  const relPath = `cache/files/${sha256}.jar`;
+  const ext = path.extname(sourcePath).toLowerCase() || '.jar';
+  const relPath = `cache/files/${sha256}${ext}`;
   const target = path.join(outDir, relPath);
   if (!(await pathExists(target))) {
     await ensureDir(path.dirname(target));
@@ -168,6 +222,9 @@ async function addCachedJar({ outDir, cacheManifest, sourcePath, key, fileName, 
     source
   };
 
+  if (installPath) {
+    entry.installPath = normalizeRelPath(installPath);
+  }
   if (key) {
     cacheManifest.entries[key] = entry;
   }
@@ -193,6 +250,9 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
     matchedManifestFiles: 0,
     missingManifestFiles: [],
     extraLocalFiles: 0,
+    resourcepacksDir: '',
+    localResourcePackCount: 0,
+    localResourcePackBytes: 0,
     copiedCacheFiles: 0,
     copiedCacheBytes: 0
   };
@@ -204,10 +264,16 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
 
   const { modsDir, instanceDir } = cacheSource;
   cacheSummary.modsDir = modsDir;
+  cacheSummary.resourcepacksDir = path.join(instanceDir, 'resourcepacks');
   const jarFiles = await listDirectModFiles(modsDir);
+  const resourcePackFiles = await listDirectResourcePackFiles(instanceDir);
   cacheSummary.localJarCount = jarFiles.length;
+  cacheSummary.localResourcePackCount = resourcePackFiles.length;
   for (const jarFile of jarFiles) {
     cacheSummary.localJarBytes += (await fs.stat(jarFile)).size;
+  }
+  for (const resourcePackFile of resourcePackFiles) {
+    cacheSummary.localResourcePackBytes += (await fs.stat(resourcePackFile)).size;
   }
 
   const { addonMap, instanceJsonPath } = await readInstanceAddonMap(instanceDir, modsDir);
@@ -245,24 +311,41 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
   }
 
   const extraFiles = [];
-  for (const jarFile of jarFiles) {
-    if (usedLocalFiles.has(path.resolve(jarFile).toLowerCase())) {
-      continue;
+  const plannedExtraTargets = new Set();
+  async function addExtraFile(sourcePath, source, installPath = '') {
+    const normalizedInstallPath = installPath ? normalizeRelPath(installPath) : '';
+    const installKey = (normalizedInstallPath || `mods/${path.basename(sourcePath)}`).toLowerCase();
+    if (plannedExtraTargets.has(installKey)) {
+      return;
     }
     const entry = await addCachedJar({
       outDir,
       cacheManifest,
-      sourcePath: jarFile,
+      sourcePath,
       key: '',
-      fileName: path.basename(jarFile),
-      source: 'local-mods-extra'
+      fileName: path.basename(sourcePath),
+      source,
+      installPath: normalizedInstallPath
     });
     if (!copiedUrls.has(entry.url)) {
       cacheSummary.copiedCacheFiles += 1;
       cacheSummary.copiedCacheBytes += entry.size;
       copiedUrls.add(entry.url);
     }
+    plannedExtraTargets.add(installKey);
     extraFiles.push(entry);
+  }
+
+  for (const resourcePackFile of resourcePackFiles) {
+    await addExtraFile(resourcePackFile, 'local-resourcepacks-extra', resourcePackRelPath(resourcePackFile));
+  }
+
+  for (const jarFile of jarFiles) {
+    if (usedLocalFiles.has(path.resolve(jarFile).toLowerCase())) {
+      continue;
+    }
+    const installPath = isResourcePackArchive(jarFile) ? resourcePackRelPath(jarFile) : '';
+    await addExtraFile(jarFile, installPath ? 'local-resourcepack-in-mods-extra' : 'local-mods-extra', installPath);
   }
 
   cacheSummary.extraLocalFiles = extraFiles.length;
