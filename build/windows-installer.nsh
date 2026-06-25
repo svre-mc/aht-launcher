@@ -42,9 +42,16 @@ Function AhtShortcutOptionsPageLeave
 FunctionEnd
 
 !macro customInstall
+  CreateShortCut "$SMPROGRAMS\AHT Developer Launcher.lnk" "$INSTDIR\${APP_EXECUTABLE_FILENAME}" "--developer" "$INSTDIR\${APP_EXECUTABLE_FILENAME}" 0
+
+  ${If} $AhtCreateDesktopShortcut == ${BST_CHECKED}
+    CreateShortCut "$DESKTOP\AHT Developer Launcher.lnk" "$INSTDIR\${APP_EXECUTABLE_FILENAME}" "--developer" "$INSTDIR\${APP_EXECUTABLE_FILENAME}" 0
+  ${EndIf}
+
   ${If} $AhtCreateDesktopShortcut != ${BST_CHECKED}
     WinShell::UninstShortcut "$newDesktopLink"
     Delete "$newDesktopLink"
+    Delete "$DESKTOP\AHT Developer Launcher.lnk"
 
     ${If} "$oldDesktopLink" != "$newDesktopLink"
       WinShell::UninstShortcut "$oldDesktopLink"
@@ -53,5 +60,10 @@ FunctionEnd
 
     System::Call 'Shell32::SHChangeNotify(i 0x8000000, i 0, i 0, i 0)'
   ${EndIf}
+!macroend
+!else
+!macro customUnInstall
+  Delete "$SMPROGRAMS\AHT Developer Launcher.lnk"
+  Delete "$DESKTOP\AHT Developer Launcher.lnk"
 !macroend
 !endif

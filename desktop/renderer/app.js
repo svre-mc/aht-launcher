@@ -1314,7 +1314,7 @@ function launcherUpdatePercent(state) {
 function renderLauncherUpdateOverlay(status = currentStatus, state = lastLauncherUpdateState) {
   if (!els.launcherUpdateOverlay) return;
   const update = status?.launcherUpdate || {};
-  const required = Boolean(update.updateRequired && !status?.developerMode);
+  const required = Boolean(update.updateRequired);
   els.launcherUpdateOverlay.hidden = !required;
   if (!required) return;
   const current = update.currentVersion || status?.appVersion || "-";
@@ -2119,7 +2119,7 @@ function renderStatus(status) {
   }
 
   const updateRunning = Boolean(lastUpdateState?.running);
-  const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired && !status.developerMode);
+  const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
   setUnavailable(els.updateButton, launcherUpdateRequired || !status.latest || !status.updateRequired || updateRunning);
   setUnavailable(els.playButton, launcherUpdateRequired || !status.launchReady || updateRunning);
   setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
