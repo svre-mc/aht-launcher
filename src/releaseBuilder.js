@@ -30,13 +30,23 @@ function manifestFileKey(file) {
   return projectId && fileId ? `${projectId}:${fileId}` : '';
 }
 
+function normalizedOverridesDir(overridesDir = 'overrides') {
+  return normalizeRelPath(overridesDir || 'overrides').replace(/\/+$/, '');
+}
+
+function normalizedZipEntryName(entry) {
+  return normalizeRelPath(entry.entryName);
+}
+
 function summarizeOverrides(zip, overridesDir) {
-  const prefix = `${overridesDir.replace(/\/+$/, '')}/`;
-  const files = zip.getEntries().filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix));
-  const embeddedModFiles = files.filter((entry) => entry.entryName.startsWith(`${prefix}mods/`));
+  const prefix = `${normalizedOverridesDir(overridesDir)}/`;
+  const files = zip.getEntries()
+    .map((entry) => ({ entry, entryName: normalizedZipEntryName(entry) }))
+    .filter(({ entry, entryName }) => !entry.isDirectory && entryName.startsWith(prefix));
+  const embeddedModFiles = files.filter(({ entryName }) => entryName.startsWith(`${prefix}mods/`));
   const groupMap = new Map();
-  for (const entry of files) {
-    const rel = entry.entryName.slice(prefix.length);
+  for (const { entry, entryName } of files) {
+    const rel = entryName.slice(prefix.length);
     const group = rel.includes('/') ? rel.slice(0, rel.indexOf('/')) : '(root)';
     const current = groupMap.get(group) || { count: 0, bytes: 0 };
     current.count += 1;
@@ -47,9 +57,9 @@ function summarizeOverrides(zip, overridesDir) {
   return {
     fileCount: files.length,
     embeddedModCount: embeddedModFiles.length,
-    embeddedModBytes: embeddedModFiles.reduce((sum, entry) => sum + entry.header.size, 0),
-    embeddedMods: embeddedModFiles.map((entry) => ({
-      path: entry.entryName,
+    embeddedModBytes: embeddedModFiles.reduce((sum, { entry }) => sum + entry.header.size, 0),
+    embeddedMods: embeddedModFiles.map(({ entry, entryName }) => ({
+      path: entryName,
       size: entry.header.size
     })),
     groups
@@ -497,21 +507,21 @@ async function findItemFireFixJar(manifest) {
 }
 
 function existingVersionLockJar(zip, overridesDir) {
-  const prefix = `${overridesDir.replace(/\/+$/, '')}/mods/`;
+  const prefix = `${normalizedOverridesDir(overridesDir)}/mods/`;
   const entry = zip.getEntries().find((item) => {
-    const name = item.entryName.replaceAll('\\', '/');
+    const name = normalizedZipEntryName(item);
     return !item.isDirectory && name.startsWith(prefix) && /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name));
   });
-  return entry ? entry.entryName.replaceAll('\\', '/') : null;
+  return entry ? normalizedZipEntryName(entry) : null;
 }
 
 function existingItemFireFixJar(zip, overridesDir) {
-  const prefix = `${overridesDir.replace(/\/+$/, '')}/mods/`;
+  const prefix = `${normalizedOverridesDir(overridesDir)}/mods/`;
   const entry = zip.getEntries().find((item) => {
-    const name = item.entryName.replaceAll('\\', '/');
+    const name = normalizedZipEntryName(item);
     return !item.isDirectory && name.startsWith(prefix) && /aht-item-fire-fix-.+\.jar$/i.test(path.posix.basename(name));
   });
-  return entry ? entry.entryName.replaceAll('\\', '/') : null;
+  return entry ? normalizedZipEntryName(entry) : null;
 }
 
 function addInjectedModToOverrideSummary(overrideSummary, modPath, modSize) {
@@ -582,13 +592,13 @@ export async function buildRelease(options) {
   const versionLockJarPath = await findVersionLockJar(versionLockJar);
   const serverLockModRelPath = versionLockJarPath ? `server/mods/${path.basename(versionLockJarPath)}` : null;
   const zipDest = path.join(outDir, zipRelPath);
-  const overridesDir = manifest.overrides || 'overrides';
+  const overridesDir = normalizedOverridesDir(manifest.overrides || 'overrides');
   const existingClientVersionLockPath = existingVersionLockJar(zip, overridesDir);
-  const clientVersionLockPath = existingClientVersionLockPath || (versionLockJarPath ? `${overridesDir.replace(/\/+$/, '')}/mods/${path.basename(versionLockJarPath)}` : null);
+  const clientVersionLockPath = existingClientVersionLockPath || (versionLockJarPath ? `${overridesDir}/mods/${path.basename(versionLockJarPath)}` : null);
   const injectClientVersionLock = Boolean(versionLockJarPath && !existingClientVersionLockPath);
   const itemFireFixJarPath = await findItemFireFixJar(manifest);
   const existingClientItemFireFixPath = existingItemFireFixJar(zip, overridesDir);
-  const clientItemFireFixPath = existingClientItemFireFixPath || (itemFireFixJarPath ? `${overridesDir.replace(/\/+$/, '')}/mods/${path.basename(itemFireFixJarPath)}` : null);
+  const clientItemFireFixPath = existingClientItemFireFixPath || (itemFireFixJarPath ? `${overridesDir}/mods/${path.basename(itemFireFixJarPath)}` : null);
   const injectClientItemFireFix = Boolean(itemFireFixJarPath && !existingClientItemFireFixPath);
   const overrideSummary = summarizeOverrides(zip, overridesDir);
   if (injectClientVersionLock) {

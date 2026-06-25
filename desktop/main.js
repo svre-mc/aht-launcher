@@ -66,16 +66,64 @@ const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
 const DEVELOPER_SECRET_KEYS = ['curseforgeApiKey', 'serverSshPassword', 'launcherProofSecret', 'githubToken', 'r2AccountId', 'r2AccessKeyId', 'r2SecretAccessKey'];
 let launcherModeCache = null;
+function createOperationState(kind, phase = 'Preparing') {
+  return {
+    running: true,
+    kind,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    lines: [],
+    lastResult: null,
+    error: null,
+    progress: { phase, completed: 0, total: 0, percent: 0 }
+  };
+}
+
+function completeOperationState(state, result, phase = 'Complete') {
+  const previous = state.progress || {};
+  const total = Number(previous.total || previous.completed || 0);
+  state.running = false;
+  state.completedAt = new Date().toISOString();
+  state.error = null;
+  state.lastResult = result;
+  state.progress = {
+    ...previous,
+    phase,
+    completed: total || previous.completed || 0,
+    total,
+    percent: 100
+  };
+}
+
+function failOperationState(state, error, phase = 'Failed') {
+  const previous = state.progress || {};
+  state.running = false;
+  state.completedAt = new Date().toISOString();
+  state.error = error?.message || String(error || 'Unknown error');
+  state.progress = { ...previous, phase, percent: 100 };
+}
+
 
 function rawRequestedDeveloperMode() {
   return process.argv.includes('--developer') || process.env.AHT_DEVELOPER === '1';
 }
+function explicitUserDataDirArg() {
+  const inline = process.argv.find((arg) => arg.startsWith('--user-data-dir='));
+  if (inline) {
+    return inline.slice('--user-data-dir='.length);
+  }
+  const index = process.argv.indexOf('--user-data-dir');
+  return index >= 0 ? process.argv[index + 1] || '' : '';
+}
 
 const launchMode = rawRequestedDeveloperMode() ? 'developer' : 'player';
+const explicitUserDataDir = explicitUserDataDirArg();
 
 if (launchMode === 'developer') {
   app.setName('AHT Developer Launcher');
-  app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'));
+  if (!explicitUserDataDir) {
+    app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'));
+  }
 }
 
 if (process.platform === 'win32') {
@@ -167,7 +215,7 @@ function developerSecretsUseLegacyKey(currentSecrets, legacySecrets) {
 }
 
 function migrateDeveloperEncryptionProfile() {
-  if (launchMode !== 'developer') {
+  if (launchMode !== 'developer' || explicitUserDataDir) {
     return;
   }
   const currentDir = app.getPath('userData');
@@ -271,7 +319,7 @@ async function readDeveloperSecretsFile() {
     current = await readJsonFile(file);
   }
 
-  if (launchMode !== 'developer') {
+  if (launchMode !== 'developer' || explicitUserDataDir) {
     return current;
   }
 
@@ -713,7 +761,7 @@ async function loadConfig() {
     config.minecraftLauncher.memoryMb = 4096;
     changed = true;
   }
-  if (!stored.developer?.defaultCacheModsDir && defaults.developer?.defaultCacheModsDir) {
+  if (!Object.prototype.hasOwnProperty.call(stored.developer || {}, 'defaultCacheModsDir') && defaults.developer?.defaultCacheModsDir) {
     config.developer.defaultCacheModsDir = defaults.developer.defaultCacheModsDir;
     changed = true;
   }
@@ -1325,17 +1373,19 @@ async function runUpdate(forceRepair = false) {
     updateState.lines.push(`${forceRepair ? 'Repair' : 'Update'} request ignored because an install is already running.`);
     return updateState;
   }
-  const config = await loadConfig();
-  const identity = await identityPayload(config);
-  if (!config.latestUrl) {
-    throw new Error('latestUrl is not configured');
-  }
-  updateState = { running: true, lines: [], lastResult: null, error: null, progress: { phase: 'Preparing', completed: 0, total: 0, percent: 0 } };
-  await sendLauncherEvent(config, identity, {
-    type: forceRepair ? 'repair_started' : 'install_started',
-    version: null
-  }).catch((error) => updateState.lines.push(`Sync warning: ${error.message}`));
+  updateState = createOperationState(forceRepair ? 'repair' : 'install', forceRepair ? 'Preparing repair' : 'Preparing update');
+  let config = null;
+  let identity = null;
   try {
+    config = await loadConfig();
+    identity = await identityPayload(config);
+    if (!config.latestUrl) {
+      throw new Error('latestUrl is not configured');
+    }
+    await sendLauncherEvent(config, identity, {
+      type: forceRepair ? 'repair_started' : 'install_started',
+      version: null
+    }).catch((error) => updateState.lines.push(`Sync warning: ${error.message}`));
     const result = await installPack({
       latestSource: config.latestUrl,
       instanceDir: config.instanceDir,
@@ -1391,7 +1441,7 @@ async function runUpdate(forceRepair = false) {
         throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
       }
     }
-    updateState.lastResult = result;
+    updateState.progress = { ...(updateState.progress || {}), phase: 'Saving install state', percent: 98 };
     await writeIntegrityState(config, {
       valid: true,
       instanceDir: config.instanceDir,
@@ -1413,16 +1463,17 @@ async function runUpdate(forceRepair = false) {
       manifestFileCount: result.installed?.manifestFileCount || 0,
       overrideFileCount: result.installed?.overrideFileCount || 0
     }).catch((error) => updateState.lines.push(`Sync warning: ${error.message}`));
+    completeOperationState(updateState, result, 'Complete');
     return result;
   } catch (error) {
-    updateState.error = error.message;
-    await sendLauncherEvent(config, identity, {
-      type: forceRepair ? 'repair_failed' : 'install_failed',
-      error: error.message
-    }).catch(() => {});
+    failOperationState(updateState, error, forceRepair ? 'Repair failed' : 'Update failed');
+    if (config && identity) {
+      await sendLauncherEvent(config, identity, {
+        type: forceRepair ? 'repair_failed' : 'install_failed',
+        error: updateState.error
+      }).catch(() => {});
+    }
     throw error;
-  } finally {
-    updateState.running = false;
   }
 }
 

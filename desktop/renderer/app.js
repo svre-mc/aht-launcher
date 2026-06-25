@@ -556,6 +556,8 @@ let releaseBusy = false;
 let developerSecretSaveTimer = null;
 let launcherUpdateAutoStarted = false;
 let lastStatusRefreshAt = 0;
+let updateCompleteHideTimer = null;
+const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 
 function setBadge(text, state = "") {
   els.statusBadge.textContent = text;
@@ -1244,11 +1246,75 @@ function restoreStatusBadge(status = currentStatus) {
   }
 }
 
+function isTerminalUpdateState(state) {
+  return Boolean(state && !state.running && (state.lastResult || state.error));
+}
+
+function isSuccessfulUpdateState(state) {
+  return Boolean(state && !state.running && !state.error && state.lastResult);
+}
+
+function ensureTerminalUpdateTimestamp(state) {
+  if (isTerminalUpdateState(state) && !state.completedAt && !state.clientCompletedAt) {
+    state.clientCompletedAt = Date.now();
+  }
+  return state;
+}
+
+function terminalUpdateAgeMs(state) {
+  const value = state?.completedAt ? Date.parse(state.completedAt) : state?.clientCompletedAt;
+  return Number.isFinite(value) ? Math.max(0, Date.now() - value) : 0;
+}
+
+function shouldShowUpdateProgress(state) {
+  if (!state) return false;
+  if (state.running || state.error) return true;
+  return isSuccessfulUpdateState(state) && terminalUpdateAgeMs(state) < DOWNLOAD_COMPLETE_VISIBLE_MS;
+}
+
+function updateProgressPhase(state) {
+  if (state?.running) return state.progress?.phase || "Installing pack";
+  if (state?.error) return state.progress?.phase || "Needs attention";
+  if (isSuccessfulUpdateState(state)) return "Complete";
+  return state?.progress?.phase || "";
+}
+
+function updateProgressLabel(state) {
+  const phase = updateProgressPhase(state);
+  const count = state?.running && state.progress?.total ? ` ${state.progress.completed}/${state.progress.total}` : "";
+  return `${phase}${count}`.trim();
+}
+
+function clearCompletedUpdateState() {
+  window.clearTimeout(updateCompleteHideTimer);
+  updateCompleteHideTimer = null;
+  if (!isSuccessfulUpdateState(lastUpdateState) || updatePoll) return;
+  lastUpdateState = null;
+  setProgress(false);
+  renderDownloads(null);
+  restoreStatusBadge();
+}
+
+function scheduleCompletedUpdateClear(delay = DOWNLOAD_COMPLETE_VISIBLE_MS) {
+  window.clearTimeout(updateCompleteHideTimer);
+  if (!isSuccessfulUpdateState(lastUpdateState)) return;
+  const completedAt = lastUpdateState.completedAt || lastUpdateState.clientCompletedAt || "";
+  const remaining = Math.max(0, Math.min(delay, DOWNLOAD_COMPLETE_VISIBLE_MS - terminalUpdateAgeMs(lastUpdateState)));
+  if (remaining === 0) {
+    clearCompletedUpdateState();
+    return;
+  }
+  updateCompleteHideTimer = window.setTimeout(() => {
+    const sameCompletion = lastUpdateState && (lastUpdateState.completedAt || lastUpdateState.clientCompletedAt || "") === completedAt;
+    if (sameCompletion) clearCompletedUpdateState();
+  }, remaining);
+}
+
 function clearScanProgressSoon(delay = 1400) {
   window.clearTimeout(scanProgressHideTimer);
   scanProgressHideTimer = window.setTimeout(() => {
     scanProgressHideTimer = null;
-    if (lastUpdateState?.running || updatePoll) return;
+    if (updatePoll || shouldShowUpdateProgress(lastUpdateState)) return;
     setProgress(false);
   }, delay);
 }
@@ -1268,7 +1334,7 @@ function isUnavailable(button) {
 function downloadStateLabel(status, state) {
   if (state?.running) return state.progress?.phase || "Installing";
   if (state?.error) return "Needs attention";
-  if (state?.lastResult?.installed?.version) return `Installed ${state.lastResult.installed.version}`;
+  if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state)) return "Complete";
   if (!status?.config?.latestUrl) return "Setup required";
   if (status?.latestError) return isFirstPublishPending(status) ? "Not installed" : (status.developerMode ? "Config error" : "Service unavailable");
   if (status?.updateRequired) return "Game update required";
@@ -1279,21 +1345,24 @@ function downloadStateLabel(status, state) {
 function downloadLogText(state) {
   const lines = [...(state?.lines || [])];
   if (state?.error) lines.push(`ERROR: ${state.error}`);
-  if (state?.lastResult?.installed?.version) lines.push(`Installed ${state.lastResult.installed.version}`);
+  if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state) && state.lastResult?.installed?.version) {
+    lines.push(`Installed ${state.lastResult.installed.version}`);
+  }
   if (lines.length) return lines.join("\n");
   return "No downloads yet.";
 }
 
 function renderDownloads(state = lastUpdateState) {
   const status = currentStatus;
-  const percent = state ? estimateProgress(state) : 0;
-  const progressText = state?.progress?.total
+  const progressVisible = shouldShowUpdateProgress(state);
+  const percent = progressVisible ? estimateProgress(state) : 0;
+  const progressText = state?.progress?.total && progressVisible
     ? `${Math.round(percent)}% (${state.progress.completed}/${state.progress.total})`
     : `${Math.round(percent)}%`;
   els.downloadsState.textContent = downloadStateLabel(status, state);
   els.downloadsProgressText.textContent = progressText;
   if (els.downloadsRowProgress) {
-    els.downloadsRowProgress.hidden = !(state?.running || state?.lastResult || state?.error);
+    els.downloadsRowProgress.hidden = !progressVisible;
   }
   setMiniProgress(els.downloadsProgressBar, percent);
   const logText = downloadLogText(state);
@@ -1934,7 +2003,7 @@ function serializeSettings() {
     developer: {
       adminBaseUrl: inputValue(els.adminUrlInput, "") || workerBase || existingDeveloper.adminBaseUrl || "",
       defaultOutDir: inputValue(els.outDirInput, existingDeveloper.defaultOutDir || ""),
-      defaultCacheModsDir: inputValue(els.cacheModsInput, existingDeveloper.defaultCacheModsDir || ""),
+      defaultCacheModsDir: els.cacheModsInput?.value.trim() || "",
       r2Bucket: inputValue(els.bucketInput, existingDeveloper.r2Bucket || "ahtlauncher"),
       r2AccountId: inputValue(els.r2AccountIdInput, existingDeveloper.r2AccountId || ""),
       cacheOnlyMode: cacheOnlyMode(),
@@ -2133,10 +2202,8 @@ function renderStatus(status) {
   setUnavailable(els.playButton, launcherUpdateRequired || !status.launchReady || updateRunning);
   setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
   els.playButton.title = status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Launch is locked.");
-  if (lastUpdateState?.running || lastUpdateState?.lastResult || lastUpdateState?.error) {
-    const percent = estimateProgress(lastUpdateState);
-    const phase = lastUpdateState.progress?.phase || (lastUpdateState.error ? "Needs attention" : "Complete");
-    setProgress(true, percent, phase);
+  if (shouldShowUpdateProgress(lastUpdateState)) {
+    setProgress(true, estimateProgress(lastUpdateState), updateProgressLabel(lastUpdateState));
   } else {
     setProgress(false);
   }
@@ -2181,7 +2248,7 @@ function focusActivityPanel(message) {
 async function pollUpdate() {
   let state;
   try {
-    state = await window.aht.getUpdateState();
+    state = ensureTerminalUpdateTimestamp(await window.aht.getUpdateState());
   } catch (error) {
     const message = cleanErrorMessage(error);
     appendLog(`ERROR: ${message}`);
@@ -2195,12 +2262,9 @@ async function pollUpdate() {
   lastUpdateState = state;
   const lines = [...state.lines];
   els.activityState.textContent = state.running ? "Running" : "Idle";
-  const percent = estimateProgress(state);
-  const phase = state.progress?.phase || (state.running ? "Installing pack" : state.error ? "Needs attention" : "Complete");
-  const count = state.progress?.total ? ` ${state.progress.completed}/${state.progress.total}` : "";
-  setProgress(state.running || Boolean(state.lastResult) || Boolean(state.error), percent, `${phase}${count}`);
+  setProgress(shouldShowUpdateProgress(state), estimateProgress(state), updateProgressLabel(state));
   if (state.error) lines.push(`ERROR: ${state.error}`);
-  if (state.lastResult?.installed?.version) lines.push(`Installed ${state.lastResult.installed.version}`);
+  if (isSuccessfulUpdateState(state) && state.lastResult?.installed?.version) lines.push(`Installed ${state.lastResult.installed.version}`);
   setLog(lines.join("\n"));
   renderDownloads(state);
   if (!state.running) {
@@ -2213,6 +2277,7 @@ async function pollUpdate() {
     }
     activeUpdateKind = "";
     await refresh();
+    if (isSuccessfulUpdateState(lastUpdateState)) scheduleCompletedUpdateClear();
   }
 }
 
@@ -2221,26 +2286,49 @@ async function startUpdate(forceRepair) {
     showToast("Install already running", "The launcher is already installing files. Leave it open until it finishes.", "info");
     return;
   }
+  window.clearTimeout(updateCompleteHideTimer);
+  updateCompleteHideTimer = null;
   activeUpdateKind = forceRepair ? "repair" : "update";
+  if (forceRepair) {
+    lastIntegrityScan = null;
+    els.diffSummary.textContent = "Repairing";
+  }
+  lastUpdateState = {
+    running: true,
+    kind: activeUpdateKind,
+    lines: [],
+    lastResult: null,
+    error: null,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    progress: { phase: forceRepair ? "Preparing repair" : "Preparing update", completed: 0, total: 0, percent: 3 }
+  };
   setBadge(forceRepair ? "Repairing" : "Updating", "warn");
   els.activityState.textContent = forceRepair ? "Repairing" : "Updating";
   setProgress(true, 3, forceRepair ? "Preparing repair" : "Preparing update");
   setUnavailable(els.updateButton, true);
   setUnavailable(els.playButton, true);
+  setUnavailable(els.scanButton, true);
   setLog("");
-  renderDownloads({ running: true, lines: [], progress: { phase: forceRepair ? "Preparing repair" : "Preparing update", percent: 3 } });
+  renderDownloads(lastUpdateState);
   showToast(forceRepair ? "Repair started" : "Update started", "Progress is shown in the sidebar.", "info");
   window.aht.startUpdate(forceRepair).catch((error) => {
     const message = cleanErrorMessage(error);
+    lastUpdateState = ensureTerminalUpdateTimestamp({
+      ...(lastUpdateState || {}),
+      running: false,
+      error: message,
+      progress: { ...(lastUpdateState?.progress || {}), phase: forceRepair ? "Repair failed" : "Update failed", percent: 100 }
+    });
     appendLog(`ERROR: ${message}`);
-    renderDownloads({ ...(lastUpdateState || {}), error: message, running: false });
+    renderDownloads(lastUpdateState);
     showToast(forceRepair ? "Repair failed" : "Update failed", message, "error");
     clearInterval(updatePoll);
     updatePoll = null;
     activeUpdateKind = "";
     refresh().catch(() => {});
   });
-  updatePoll = setInterval(pollUpdate, 900);
+  updatePoll = setInterval(pollUpdate, 500);
   await pollUpdate();
 }
 

@@ -331,11 +331,13 @@ function classifyOverrideRelPath(entry, relPath) {
 }
 
 function collectOverrideFiles(zip, overridesDir) {
-  const prefix = `${overridesDir.replace(/\/+$/, '')}/`;
+  const normalizedOverridesDir = normalizeRelPath(overridesDir || 'overrides').replace(/\/+$/, '');
+  const prefix = `${normalizedOverridesDir}/`;
   return zip.getEntries()
-    .filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix))
-    .map((entry) => {
-      const originalRelPath = normalizeRelPath(entry.entryName.slice(prefix.length));
+    .map((entry) => ({ entry, entryName: normalizeRelPath(entry.entryName) }))
+    .filter(({ entry, entryName }) => !entry.isDirectory && entryName.startsWith(prefix))
+    .map(({ entry, entryName }) => {
+      const originalRelPath = normalizeRelPath(entryName.slice(prefix.length));
       const placement = classifyOverrideRelPath(entry, originalRelPath);
       return {
         entry,

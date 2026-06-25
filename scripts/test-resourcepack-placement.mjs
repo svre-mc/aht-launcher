@@ -25,6 +25,7 @@ async function writeModZip(filePath) {
 }
 
 async function writePackZip(filePath, overrideResourcePack, overrideMod) {
+  const overridesDir = 'overrides\\client';
   const zip = new AdmZip();
   zip.addFile('manifest.json', Buffer.from(JSON.stringify({
     minecraft: { version: '1.12.2', modLoaders: [{ id: 'forge-14.23.5.2860', primary: true }] },
@@ -34,10 +35,14 @@ async function writePackZip(filePath, overrideResourcePack, overrideMod) {
     version: '9.9.9-resourcepack-test',
     author: 'AHT',
     files: [],
-    overrides: 'overrides'
+    overrides: overridesDir
   }, null, 2)));
-  zip.addFile('overrides/mods/override-resourcepack.zip', await fs.readFile(overrideResourcePack));
-  zip.addFile('overrides/mods/override-mod.zip', await fs.readFile(overrideMod));
+  zip.addFile('overrides\\client\\mods\\override-resourcepack.zip', await fs.readFile(overrideResourcePack));
+  zip.addFile('overrides\\client\\mods\\override-mod.zip', await fs.readFile(overrideMod));
+  zip.addFile('overrides\\client\\resourcepacks\\override-direct-resourcepack.zip', await fs.readFile(overrideResourcePack));
+  zip.addFile('overrides\\client\\config\\aht-client.cfg', Buffer.from('client config=true\n'));
+  zip.addFile('overrides\\client\\scripts\\startup.zs', Buffer.from('print("aht");\n'));
+  zip.addFile('overrides\\client\\shaderpacks\\aht-shader.zip', Buffer.from('shader bytes\n'));
   zip.writeZip(filePath);
 }
 
@@ -47,6 +52,8 @@ const outDir = path.join(temp, 'release');
 const installDir = path.join(temp, 'install');
 await fs.mkdir(path.join(sourceInstance, 'mods'), { recursive: true });
 await fs.mkdir(path.join(sourceInstance, 'resourcepacks'), { recursive: true });
+await fs.mkdir(path.join(sourceInstance, 'mods', '1.12.2'), { recursive: true });
+await fs.mkdir(path.join(sourceInstance, 'mods', 'memory_repo'), { recursive: true });
 
 const cacheResourcePack = path.join(sourceInstance, 'mods', 'cache-resourcepack.zip');
 const directResourcePack = path.join(sourceInstance, 'resourcepacks', 'direct-resourcepack.zip');
@@ -59,6 +66,8 @@ await writeResourcePackZip(overrideResourcePack, 'override resourcepack misplace
 await writeModZip(cacheModZip);
 await writeModZip(overrideMod);
 await fs.writeFile(path.join(sourceInstance, 'mods', 'private-mod.jar'), Buffer.from('private jar bytes\n'));
+await fs.writeFile(path.join(sourceInstance, 'mods', '1.12.2', 'nested-library.jar'), Buffer.from('nested library should stay out\n'));
+await fs.writeFile(path.join(sourceInstance, 'mods', 'memory_repo', 'memory-repo.jar'), Buffer.from('memory repo should stay out\n'));
 
 const packZip = path.join(temp, 'aht-pack.zip');
 await writePackZip(packZip, overrideResourcePack, overrideMod);
@@ -70,11 +79,22 @@ await buildRelease({
   cacheModsDir: path.join(sourceInstance, 'mods')
 });
 
+const latest = await readJsonFile(path.join(outDir, 'latest.json'));
+assert(latest.overrides === 'overrides/client', 'release latest.json did not normalize the overrides path.');
+
+const report = await readJsonFile(path.join(outDir, 'release-report.json'));
+assert(report.overrideSummary.groups.config?.count === 1, 'override config files were not counted under config.');
+assert(report.overrideSummary.groups.scripts?.count === 1, 'override scripts files were not counted under scripts.');
+assert(report.overrideSummary.groups.shaderpacks?.count === 1, 'override shaderpacks files were not counted under shaderpacks.');
+assert(report.overrideSummary.groups.resourcepacks?.count === 1, 'override resourcepacks files were not counted under resourcepacks.');
+
 const cacheManifest = await readJsonFile(path.join(outDir, 'cache', 'mod-cache.json'));
 const extraByName = new Map((cacheManifest.extraFiles || []).map((entry) => [entry.fileName, entry]));
 assert(extraByName.get('cache-resourcepack.zip')?.installPath === 'resourcepacks/cache-resourcepack.zip', 'cache resourcepack from mods was not marked for resourcepacks.');
 assert(extraByName.get('direct-resourcepack.zip')?.installPath === 'resourcepacks/direct-resourcepack.zip', 'source resourcepacks folder was not included as a resourcepack extra.');
 assert(!extraByName.get('cache-mod.zip')?.installPath, 'real mod ZIP should not be marked as a resourcepack.');
+assert(!extraByName.has('nested-library.jar'), 'nested mods/1.12.2 file should not be uploaded as a cache extra.');
+assert(!extraByName.has('memory-repo.jar'), 'mods/memory_repo file should not be uploaded as a cache extra.');
 
 await installPack({
   latestSource: path.join(outDir, 'latest.json'),
@@ -87,6 +107,10 @@ const expectedFiles = [
   'resourcepacks/cache-resourcepack.zip',
   'resourcepacks/direct-resourcepack.zip',
   'resourcepacks/override-resourcepack.zip',
+  'resourcepacks/override-direct-resourcepack.zip',
+  'config/aht-client.cfg',
+  'scripts/startup.zs',
+  'shaderpacks/aht-shader.zip',
   'mods/cache-mod.zip',
   'mods/private-mod.jar',
   'mods/override-mod.zip'
@@ -98,10 +122,13 @@ for (const relPath of expectedFiles) {
 const forbiddenFiles = [
   'mods/cache-resourcepack.zip',
   'mods/direct-resourcepack.zip',
-  'mods/override-resourcepack.zip'
+  'mods/override-resourcepack.zip',
+  'mods/override-direct-resourcepack.zip',
+  'mods/1.12.2/nested-library.jar',
+  'mods/memory_repo/memory-repo.jar'
 ];
 for (const relPath of forbiddenFiles) {
-  assert(!(await pathExists(path.join(installDir, relPath))), `resourcepack was installed in the wrong folder: ${relPath}`);
+  assert(!(await pathExists(path.join(installDir, relPath))), `file was installed in the wrong folder: ${relPath}`);
 }
 
 const managedFiles = await readJsonFile(path.join(installDir, '.aht-launcher', 'managed-files.json'));
