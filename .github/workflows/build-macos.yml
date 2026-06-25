@@ -23,7 +23,18 @@ jobs:
     name: macOS DMG
     runs-on: macos-14
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      CSC_NAME: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
+      APPLE_DEVELOPER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_KEYCHAIN: ${{ secrets.APPLE_KEYCHAIN }}
+      APPLE_KEYCHAIN_PROFILE: ${{ secrets.APPLE_KEYCHAIN_PROFILE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,6 +47,20 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Show macOS signing mode
+        run: |
+          if [ -n "$CSC_LINK" ] || [ -n "$CSC_NAME" ]; then
+            echo "macOS app signing: enabled"
+          else
+            echo "macOS app signing: disabled, unsigned DMGs will be produced"
+          fi
+
+          if { [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_KEY_ID" ] && [ -n "$APPLE_API_ISSUER" ]; } || { [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; } || { [ -n "$APPLE_KEYCHAIN" ] && [ -n "$APPLE_KEYCHAIN_PROFILE" ]; }; then
+            echo "macOS notarization: enabled"
+          else
+            echo "macOS notarization: disabled"
+          fi
 
       - name: Build macOS DMGs
         run: npm run dist:regular:macos

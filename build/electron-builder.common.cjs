@@ -22,6 +22,7 @@ function regularPlayerConfig({ productName, output, target }) {
   return {
     appId: 'com.ahardtime.launcher',
     productName,
+    copyright: 'Copyright (c) 2026 au Savant',
     icon: 'build/icon',
     directories: {
       output
