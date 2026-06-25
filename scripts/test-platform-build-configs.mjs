@@ -49,6 +49,7 @@ assert(desktopMain.includes('return openWindowsStoreMinecraftLauncher(cwd, env);
 assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = null)'), 'Launcher must gather all synced Minecraft profile roots before installing loaders.');
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');
 assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update and Play must install Forge into synced launcher roots.');
+assert(desktopMain.includes('javaCacheDir') || fs.readFileSync(new URL('../src/forgeInstaller.js', import.meta.url), 'utf8').includes('ensureManagedJava8Runtime'), 'Forge installer must have managed Java 8 fallback for stale jre-legacy certificates.');
 assert(desktopMain.includes('{ skipLoaderCheck: true }'), 'Status and initial Play gate must allow Play to self-repair missing synced loaders.');
 assert(!desktopMain.includes("if (profile.loaderId?.startsWith('forge-') && !profile.loaderInstalled)"), 'Forge install flow must not only check the primary Minecraft root.');
 assert(!desktopMain.includes("spawnDetached('explorer.exe', ['shell:AppsFolder\\\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft'], cwd, env)"), 'Windows Store fallback must not spawn plain explorer.exe directly.');

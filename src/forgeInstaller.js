@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import AdmZip from 'adm-zip';
 import {
   downloadToFile,
   ensureDir,
@@ -155,8 +156,79 @@ function outputTail(output = '') {
   return String(output || '').trim().split(/\r?\n/).slice(-12).join('\n');
 }
 
+const WINDOWS_JAVA8_RUNTIME_URL = 'https://api.adoptium.net/v3/binary/latest/8/ga/windows/x64/jre/hotspot/normal/eclipse?project=jdk';
+
 function javaExecutableName() {
   return process.platform === 'win32' ? 'java.exe' : 'java';
+}
+
+function isLegacyJavaPath(file = '') {
+  const normalized = String(file || '').toLowerCase();
+  return normalized.includes('jre-legacy') || normalized.includes('java-runtime-legacy');
+}
+
+function isManagedAhtJavaPath(file = '', cacheDir = '') {
+  const javaPath = String(file || '').toLowerCase();
+  const cachePath = String(cacheDir || '').toLowerCase();
+  return Boolean(javaPath && cachePath && javaPath.startsWith(cachePath));
+}
+
+function certificateFailureMessage(error = null) {
+  const text = `${error?.message || error || ''}`;
+  return /PKIX|certification path|unable to find valid certification path|Failed to validate certificates/i.test(text);
+}
+
+function defaultJavaCacheDir(plan = {}, options = {}) {
+  return options.javaCacheDir || path.join(plan.rootDir || '.', '.aht-launcher', 'java');
+}
+
+function javaRuntimeDownloadUrl(options = {}) {
+  if (options.javaDownloadUrl) return options.javaDownloadUrl;
+  if (process.env.AHT_JAVA8_DOWNLOAD_URL) return process.env.AHT_JAVA8_DOWNLOAD_URL;
+  if (process.platform === 'win32' && process.arch === 'x64') return WINDOWS_JAVA8_RUNTIME_URL;
+  return '';
+}
+
+async function extractJavaArchive(archivePath, cacheDir) {
+  const zip = new AdmZip(archivePath);
+  zip.extractAllTo(cacheDir, true);
+}
+
+async function ensureManagedJava8Runtime(plan = {}, options = {}) {
+  const cacheDir = defaultJavaCacheDir(plan, options);
+  const existing = await findJavaInRoot(cacheDir, 8);
+  if (existing) return existing;
+  const downloadUrl = javaRuntimeDownloadUrl(options);
+  if (!downloadUrl) return '';
+  await ensureDir(cacheDir);
+  const archivePath = path.join(cacheDir, 'temurin-jre8.zip');
+  options.logger?.log?.('Downloading current Java 8 runtime for Forge installer HTTPS support...');
+  await downloadToFile(downloadUrl, archivePath);
+  options.logger?.log?.('Extracting Java 8 runtime...');
+  await extractJavaArchive(archivePath, cacheDir);
+  const javaPath = await findJavaInRoot(cacheDir, 8);
+  if (!javaPath) {
+    throw new Error(`Downloaded Java runtime, but ${javaExecutableName()} was not found in ${cacheDir}.`);
+  }
+  return javaPath;
+}
+
+async function resolveForgeInstallerJavaPath(profile = {}, plan = {}, options = {}) {
+  const resolved = await resolveJavaPath(profile, options);
+  if (isLegacyJavaPath(resolved)) {
+    const managed = await ensureManagedJava8Runtime(plan, options);
+    if (managed) return managed;
+  }
+  return resolved;
+}
+
+async function runForgeInstallerProcess(plan, options = {}, javaPath = plan.javaPath) {
+  plan.javaPath = javaPath;
+  options.logger?.log?.(`Running ${plan.javaPath} ${plan.args.map((arg) => arg.includes(' ') ? `"${arg}"` : arg).join(' ')}`);
+  return runProcess(plan.javaPath, plan.args, {
+    cwd: plan.rootDir,
+    logger: options.logger
+  });
 }
 
 function looksPathLike(value = '') {
@@ -316,12 +388,19 @@ export async function installForgeLoader(profile, options = {}) {
     await downloadToFile(plan.installerUrl, plan.installerPath);
   }
 
-  plan.javaPath = await resolveJavaPath(profile, options);
-  options.logger?.log?.(`Running ${plan.javaPath} ${plan.args.map((arg) => arg.includes(' ') ? `"${arg}"` : arg).join(' ')}`);
-  const result = await runProcess(plan.javaPath, plan.args, {
-    cwd: plan.rootDir,
-    logger: options.logger
-  });
+  plan.javaPath = await resolveForgeInstallerJavaPath(profile, plan, options);
+  let result;
+  try {
+    result = await runForgeInstallerProcess(plan, options, plan.javaPath);
+  } catch (error) {
+    const cacheDir = defaultJavaCacheDir(plan, options);
+    if (!certificateFailureMessage(error) || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
+      throw error;
+    }
+    options.logger?.log?.('Forge installer Java failed HTTPS certificate validation. Retrying with current Java 8 runtime...');
+    const managedJava = await ensureManagedJava8Runtime(plan, { ...options, forceDownloadJava: true });
+    result = await runForgeInstallerProcess(plan, options, managedJava);
+  }
   const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs || 15000);
   if (!installed.installed) {
     const tail = outputTail(result.output);
