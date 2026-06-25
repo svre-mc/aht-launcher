@@ -53,7 +53,7 @@ async function listFiles(root) {
 
 function contentType(file) {
   const lower = file.toLowerCase();
-  if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
+  if (lower.endsWith('.json')) return 'application/json';
   if (lower.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
   if (lower.endsWith('.dmg')) return 'application/x-apple-diskimage';
   return 'application/octet-stream';

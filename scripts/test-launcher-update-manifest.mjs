@@ -39,6 +39,7 @@ assert(manifest.platforms['darwin-arm64']?.path?.includes('/darwin-arm64/'), 'Ap
 assert(manifest.platforms['darwin-x64']?.path?.includes('/darwin-x64/'), 'Intel macOS path missing');
 assert(!Object.keys(manifest.platforms).some((key) => /linux|ubuntu/i.test(key)), 'manifest must not publish Linux artifacts');
 assert(result.plan.uploads.at(-1)?.rel === 'launcher/latest.json', 'launcher/latest.json must upload last');
+assert(result.plan.uploads.at(-1)?.contentType === 'application/json', 'launcher/latest.json content type must be shell-safe');
 assert(result.plan.uploads.every((item) => path.isAbsolute(item.file)), 'upload plan must use absolute files');
 
 const uploadDryRun = await uploadR2Plan({
