@@ -69,6 +69,31 @@ async function readGithubJson(response, label) {
   return parsed;
 }
 
+export async function readGithubPackageVersion({
+  repo = DEFAULT_REPO,
+  ref = DEFAULT_BRANCH,
+  token,
+  fetchImpl = globalThis.fetch
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is not available.');
+  const cleanRepo = cleanGithubRepo(repo);
+  const cleanBranch = cleanRef(ref);
+  const response = await fetchImpl(`${GITHUB_API}/repos/${cleanRepo}/contents/package.json?ref=${encodeURIComponent(cleanBranch)}`, {
+    headers: githubHeaders(token)
+  });
+  const parsed = await readGithubJson(response, 'GitHub package.json lookup');
+  const content = String(parsed?.content || '').replace(/\s+/g, '');
+  if (!content) {
+    throw new Error('GitHub package.json lookup failed: package.json content was empty.');
+  }
+  const packageJson = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
+  const version = cleanLauncherVersion(packageJson.version);
+  if (!version) {
+    throw new Error('GitHub package.json lookup failed: package.json version is missing.');
+  }
+  return version;
+}
+
 export async function dispatchGithubWorkflow({
   repo = DEFAULT_REPO,
   workflow = DEFAULT_WORKFLOW,

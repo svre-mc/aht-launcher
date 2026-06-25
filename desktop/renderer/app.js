@@ -94,7 +94,9 @@ if (!window.aht) {
       port: 22,
       username: "notevil",
       remoteDir: "/home/notevil/Desktop/AHT Server Files",
-      excludeDirs: ["DregoraRL"]
+      excludeDirs: ["DregoraRL"],
+      includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
+      includeRootFiles: true
     },
     updateRequired: true,
     playConfigured: false,
@@ -241,6 +243,8 @@ if (!window.aht) {
       repo: "svre-mc/aht-launcher",
       ref: "main",
       workflow: "build-macos.yml",
+      packageVersion: "0.1.3",
+      version: "0.1.3",
       actionsUrl: "https://github.com/svre-mc/aht-launcher/actions/workflows/build-macos.yml",
       latestRun: { id: 123, status: "success", htmlUrl: "https://github.com/svre-mc/aht-launcher/actions/runs/123" }
     }),
@@ -258,6 +262,7 @@ if (!window.aht) {
       ref: "main",
       workflow: "build-macos.yml",
       version: "0.1.3",
+      packageVersion: "0.1.3",
       actionsUrl: "https://github.com/svre-mc/aht-launcher/actions/workflows/build-macos.yml",
       releaseUrl: "https://github.com/svre-mc/aht-launcher/releases/tag/launcher-v0.1.3",
       run: { id: 124, status: "queued", htmlUrl: "https://github.com/svre-mc/aht-launcher/actions/runs/124" }
@@ -270,9 +275,19 @@ if (!window.aht) {
       sourceDir: "C:\\RL CRAFT SERVER LIST\\New folder - Copy",
       fileCount: 128,
       totalBytes: 1024,
-      excludedDirs: ["DregoraRL"]
+      excludedDirs: ["DregoraRL"],
+      includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
+      includeRootFiles: true
     }),
-    devSyncServerFiles: async () => ({ ok: true, uploaded: 128, fileCount: 128, excludedDirs: ["DregoraRL"] }),
+    devSyncServerFiles: async () => ({
+      ok: true,
+      uploaded: 128,
+      fileCount: 128,
+      totalBytes: 1024,
+      excludedDirs: ["DregoraRL"],
+      includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
+      includeRootFiles: true
+    }),
     devServerTransferState: async () => ({
       running: false,
       lines: ["Ready"],
@@ -470,7 +485,6 @@ const els = {
   releaseUploadProgressBar: $("#releaseUploadProgressBar"),
   scanLauncherBuildsButton: $("#scanLauncherBuildsButton"),
   publishLauncherUpdateButton: $("#publishLauncherUpdateButton"),
-  launcherUpdateVersionInput: $("#launcherUpdateVersionInput"),
   launcherWindowsPathInput: $("#launcherWindowsPathInput"),
   launcherMacosPathInput: $("#launcherMacosPathInput"),
   launcherUbuntuPathInput: $("#launcherUbuntuPathInput"),
@@ -489,6 +503,10 @@ const els = {
   planServerTransferButton: $("#planServerTransferButton"),
   uploadServerFilesButton: $("#uploadServerFilesButton"),
   serverTransferStatus: $("#serverTransferStatus"),
+  serverTransferProgress: $("#serverTransferProgress"),
+  serverTransferProgressLabel: $("#serverTransferProgressLabel"),
+  serverTransferProgressCount: $("#serverTransferProgressCount"),
+  serverTransferProgressBar: $("#serverTransferProgressBar"),
   serverTransferLog: $("#serverTransferLog"),
   loadUpdateLogsButton: $("#loadUpdateLogsButton"),
   publishUpdateLogButton: $("#publishUpdateLogButton"),
@@ -1041,21 +1059,44 @@ function formatBytes(bytes = 0) {
   return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
-function setReleaseUploadProgress(progress = null, hidden = false) {
-  if (!els.releaseUploadProgress) return;
+function setProgressElements(wrap, labelEl, countEl, barEl, progress = null, hidden = false) {
+  if (!wrap) return;
   if (hidden || !progress) {
-    els.releaseUploadProgress.hidden = true;
+    wrap.hidden = true;
     return;
   }
   const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent || 0))));
-  els.releaseUploadProgress.hidden = false;
-  if (els.releaseUploadProgressBar) els.releaseUploadProgressBar.style.width = `${percent}%`;
-  if (els.releaseUploadProgressCount) els.releaseUploadProgressCount.textContent = `${percent}%`;
-  if (els.releaseUploadProgressLabel) {
-    const current = progress.currentFile ? `${progress.currentFile}${Number.isFinite(Number(progress.currentPercent)) ? ` ${Math.round(Number(progress.currentPercent))}%` : ""}` : (progress.phase || "Uploading");
+  wrap.hidden = false;
+  if (barEl) barEl.style.width = `${percent}%`;
+  if (countEl) countEl.textContent = `${percent}%`;
+  if (labelEl) {
+    const activePath = progress.currentFile || progress.currentPath || "";
+    const current = activePath ? `${activePath}${Number.isFinite(Number(progress.currentPercent)) ? ` ${Math.round(Number(progress.currentPercent))}%` : ""}` : (progress.phase || "Uploading");
     const speed = progress.speedBytesPerSecond ? ` at ${formatBytes(progress.speedBytesPerSecond)}/s` : "";
-    els.releaseUploadProgressLabel.textContent = `${current}${speed}`;
+    labelEl.textContent = `${current}${speed}`;
   }
+}
+
+function setReleaseUploadProgress(progress = null, hidden = false) {
+  setProgressElements(
+    els.releaseUploadProgress,
+    els.releaseUploadProgressLabel,
+    els.releaseUploadProgressCount,
+    els.releaseUploadProgressBar,
+    progress,
+    hidden
+  );
+}
+
+function setServerTransferProgress(progress = null, hidden = false) {
+  setProgressElements(
+    els.serverTransferProgress,
+    els.serverTransferProgressLabel,
+    els.serverTransferProgressCount,
+    els.serverTransferProgressBar,
+    progress,
+    hidden
+  );
 }
 
 function renderUploadState(state) {
@@ -1066,7 +1107,8 @@ function renderUploadState(state) {
   const percent = progress?.percent ?? (total ? Math.round((completed / total) * 100) : 0);
   if (state.running) {
     setReleaseUploadProgress(progress || { percent, phase: state.current || "Uploading" });
-    const byteDetail = progress?.method === "direct-multipart" && progress?.total
+    const hasByteProgress = (progress?.unit === "bytes" || progress?.method === "direct-multipart") && progress?.total;
+    const byteDetail = hasByteProgress
       ? `${formatBytes(progress.completed || 0)}/${formatBytes(progress.total)}${progress.speedBytesPerSecond ? ` at ${formatBytes(progress.speedBytesPerSecond)}/s` : ""}`
       : `${completed}/${total} files`;
     setReleaseCheck(
@@ -1705,10 +1747,11 @@ async function scanLauncherBuilds() {
       githubToken: inputValue(els.githubTokenInput, "")
     });
     const run = result.latestRun;
-    const title = run ? `Latest run ${run.status || "unknown"}` : "Workflow found";
+    const packageVersion = result.packageVersion || result.version || "";
+    const title = packageVersion ? `GitHub package ${packageVersion}` : run ? `Latest run ${run.status || "unknown"}` : "Workflow found";
     const detail = run?.htmlUrl
-      ? `Latest run: ${run.htmlUrl}`
-      : `Actions page: ${result.actionsUrl}`;
+      ? `Branch ${result.ref || "main"} uses ${result.workflow}. Latest run: ${run.htmlUrl}`
+      : `Branch ${result.ref || "main"} uses ${result.workflow}. Actions page: ${result.actionsUrl}`;
     setLauncherUpdateStatus("ok", "GitHub ready", title, detail);
     setDevLog(result);
   } catch (error) {
@@ -1727,20 +1770,20 @@ async function publishLauncherUpdate() {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings());
     const payload = {
-      version: inputValue(els.launcherUpdateVersionInput, currentStatus?.appVersion || ""),
       githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
       githubBranch: inputValue(els.githubBranchInput, "main"),
       githubWorkflow: inputValue(els.githubWorkflowInput, "build-macos.yml"),
       githubToken: inputValue(els.githubTokenInput, ""),
       publishToR2: true
     };
-    setLauncherUpdateStatus("warn", "Starting GitHub", "Dispatching release workflow", "GitHub Actions will build every launcher and publish the update to R2.");
+    setLauncherUpdateStatus("warn", "Starting GitHub", "Reading version from GitHub", "GitHub Actions will build every launcher and publish the update to R2.");
     const result = await window.aht.devDispatchLauncherWorkflow(payload);
     setDevLog(result);
     const runDetail = result.run?.htmlUrl
       ? `Run started: ${result.run.htmlUrl}`
       : `Workflow dispatched. Watch: ${result.actionsUrl}`;
-    setLauncherUpdateStatus("ok", "GitHub started", `AHT Launcher ${result.version || payload.version}`.trim(), `${runDetail} GitHub will publish to R2 and update launcher/latest.json when it finishes.`);
+    const version = result.version || result.packageVersion || "";
+    setLauncherUpdateStatus("ok", "GitHub started", version ? `AHT Launcher ${version}` : "AHT Launcher", `${runDetail} GitHub will publish to R2 and update launcher/latest.json when it finishes.`);
     showToast("Launcher workflow started", result.run?.htmlUrl || result.actionsUrl, "success");
   } catch (error) {
     const message = cleanErrorMessage(error);
@@ -1760,19 +1803,21 @@ function serverTransferPayload() {
     username: inputValue(els.serverUsernameInput, "notevil"),
     password: inputValue(els.serverPasswordInput, ""),
     remoteDir: inputValue(els.serverRemoteDirInput, "/home/notevil/Desktop/AHT Server Files"),
-    excludeDirs: ["DregoraRL"]
+    excludeDirs: ["DregoraRL"],
+    includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
+    includeRootFiles: true
   };
 }
 
 async function planServerTransfer() {
   setUnavailable(els.planServerTransferButton, true);
-  setServerTransferStatus("warn", "Planning", "Scanning local server folder", "DregoraRL is always excluded.");
+  setServerTransferStatus("warn", "Planning", "Scanning local server folder", "Root files plus mods, scripts, config, and ForgeEssentials will be included.");
   try {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings());
     const result = await window.aht.devPlanServerTransfer(serverTransferPayload());
     const excluded = result.excludedDirs?.length ? ` Excluded: ${result.excludedDirs.join(", ")}.` : "";
-    setServerTransferStatus("ok", "Plan ready", `${result.fileCount || 0} files`, `${Math.round((result.totalBytes || 0) / 1024 / 1024)} MB will upload.${excluded}`);
+    setServerTransferStatus("ok", "Plan ready", `${result.fileCount || 0} files`, `${Math.round((result.totalBytes || 0) / 1024 / 1024)} MB will upload. Scope: root files, mods, scripts, config, ForgeEssentials.${excluded}`);
     els.serverTransferLog.textContent = JSON.stringify(result, null, 2);
     return result;
   } catch (error) {
@@ -1796,7 +1841,19 @@ function renderServerTransferState(state = lastServerTransferState) {
   const byteDetail = progress.totalBytes
     ? ` ${formatBytes(progress.completedBytes || 0)}/${formatBytes(progress.totalBytes)}.`
     : "";
-  const detail = state.error || `Progress ${Math.round(percent)}%.${byteDetail} DregoraRL is excluded.`;
+  const progressForBar = progress.totalBytes
+    ? {
+      ...progress,
+      completed: progress.completedBytes || 0,
+      total: progress.totalBytes,
+      unit: "bytes",
+      currentFile: progress.currentPath || progress.currentFile || "",
+      percent
+    }
+    : { ...progress, percent };
+  const shouldShowProgress = state.running || state.lastResult || state.error || Number(progress.percent || 0) > 0;
+  setServerTransferProgress(progressForBar, !shouldShowProgress);
+  const detail = state.error || `Progress ${Math.round(percent)}%.${byteDetail} Scope: root files, mods, scripts, config, ForgeEssentials.`;
   setServerTransferStatus(state.error ? "bad" : state.running ? "warn" : state.lastResult ? "ok" : "warn", label, title, detail);
   const lines = [...(state.lines || [])];
   if (state.error) lines.push(`ERROR: ${state.error}`);
@@ -1820,7 +1877,8 @@ async function uploadServerFiles() {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings());
     setServerTransferStatus("warn", "Starting upload", "Connecting to Linux PC", "This is local SFTP only. No Cloudflare is used.");
-    els.serverTransferLog.textContent = "Starting server file upload...\nDregoraRL is excluded.";
+    setServerTransferProgress({ phase: "Connecting", percent: 0 });
+    els.serverTransferLog.textContent = "Starting server file upload...\nScope: root files, mods, scripts, config, ForgeEssentials.\nDregoraRL is excluded.";
     window.aht.devSyncServerFiles(serverTransferPayload()).catch((error) => {
       lastServerTransferState = {
         running: false,
@@ -1885,7 +1943,9 @@ function serializeSettings() {
       port: Number(inputValue(els.serverPortInput, currentStatus?.config?.serverTransfer?.port || 22)),
       username: inputValue(els.serverUsernameInput, currentStatus?.config?.serverTransfer?.username || "notevil"),
       remoteDir: inputValue(els.serverRemoteDirInput, currentStatus?.config?.serverTransfer?.remoteDir || "/home/notevil/Desktop/AHT Server Files"),
-      excludeDirs: ["DregoraRL"]
+      excludeDirs: ["DregoraRL"],
+      includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
+      includeRootFiles: true
     },
     minecraftLauncher: {
       enabled: els.minecraftProfileEnabledInput.checked,
@@ -1926,9 +1986,6 @@ function fillSettings(status) {
   setInputValue(els.githubRepoInput, config.developer?.githubRepo || "svre-mc/aht-launcher");
   setInputValue(els.githubBranchInput, config.developer?.githubBranch || "main");
   setInputValue(els.githubWorkflowInput, config.developer?.githubWorkflow || "build-macos.yml");
-  if (els.launcherUpdateVersionInput && !els.launcherUpdateVersionInput.value && status.appVersion) {
-    setInputValue(els.launcherUpdateVersionInput, status.appVersion);
-  }
   if (els.cacheOnlyInput) els.cacheOnlyInput.checked = Boolean(config.developer?.cacheOnlyMode);
   setInputValue(els.serverSourceInput, config.serverTransfer?.sourceDir || "C:\\RL CRAFT SERVER LIST\\New folder - Copy");
   setInputValue(els.serverHostInput, config.serverTransfer?.host || "192.168.1.121");

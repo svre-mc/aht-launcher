@@ -13,6 +13,7 @@
   },
   "developer": {
     "adminBaseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "defaultCacheModsDir": "C:\\Users\\evil\\curseforge\\minecraft\\Instances\\RLCraft Dregora\\mods",
     "r2Bucket": "ahtlauncher",
     "r2AccountId": "",
     "cacheOnlyMode": false,

@@ -288,7 +288,6 @@
               </div>
             </div>
             <div class="dev-fields">
-              <label>Launcher Version <input id="launcherUpdateVersionInput" type="text" placeholder="0.1.3"></label>
               <label class="span-2">GitHub Repository <input id="githubRepoInput" type="text" placeholder="svre-mc/aht-launcher"></label>
               <label>Branch <input id="githubBranchInput" type="text" placeholder="main"></label>
               <label>Workflow <input id="githubWorkflowInput" type="text" placeholder="build-macos.yml"></label>
@@ -324,7 +323,11 @@
                 <span>Local transfer</span>
                 <strong>Ready to plan</strong>
               </div>
-              <p>Uploads server files over local SFTP. DregoraRL is always excluded and never transferred.</p>
+              <p>Uploads root files plus mods, scripts, config, and ForgeEssentials over local SFTP. DregoraRL is always excluded.</p>
+            </div>
+            <div id="serverTransferProgress" class="progress-wrap release-upload-progress" hidden>
+              <div class="progress-meta"><span id="serverTransferProgressLabel">Preparing upload</span><span id="serverTransferProgressCount">0%</span></div>
+              <div class="progress-track"><div id="serverTransferProgressBar" class="progress-bar"></div></div>
             </div>
             <pre id="serverTransferLog" class="log dev-raw-log"></pre>
           </section>

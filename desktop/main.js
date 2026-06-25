@@ -17,7 +17,7 @@ import {
 } from '../src/minecraftLauncherProfile.js';
 import { installForgeLoader } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
-import { collectServerTransferFiles, uploadServerFiles } from '../src/serverTransfer.js';
+import { collectServerTransferFiles, DEFAULT_INCLUDED_DIRS, uploadServerFiles } from '../src/serverTransfer.js';
 import { defaultInstanceDirForPlatform, platformProfile } from '../src/platformProfile.js';
 import { writeLauncherProof } from '../src/launcherProof.js';
 import {
@@ -26,6 +26,7 @@ import {
   cleanWorkflowId,
   findRecentWorkflowRun,
   launcherWorkflowDefaults,
+  readGithubPackageVersion,
   triggerLauncherReleaseWorkflow
 } from '../src/githubActions.js';
 import {
@@ -267,6 +268,10 @@ function oldUserDataInstanceDir() {
   return path.join(app.getPath('userData'), 'instances', 'RLCraft Dregora');
 }
 
+function defaultCacheModsDir() {
+  return path.join(app.getPath('home'), 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora', 'mods');
+}
+
 function isCurseForgeInstanceDir(value = '') {
   const normalized = String(value || '').replace(/\\/g, '/').toLowerCase();
   return normalized.includes('/curseforge/minecraft/instances/');
@@ -298,7 +303,7 @@ function defaultConfig() {
     developer: {
       adminBaseUrl: '',
       defaultOutDir: path.join(app.getPath('documents'), 'aht-release'),
-      defaultCacheModsDir: '',
+      defaultCacheModsDir: defaultCacheModsDir(),
       r2Bucket: 'ahtlauncher',
       r2AccountId: '',
       githubRepo: launcherWorkflowDefaults.repo,
@@ -322,6 +327,8 @@ function defaultConfig() {
       username: 'notevil',
       remoteDir: '/home/notevil/Desktop/AHT Server Files',
       excludeDirs: ['DregoraRL'],
+      includeDirs: DEFAULT_INCLUDED_DIRS,
+      includeRootFiles: true,
       concurrency: 8
     },
     minecraftLauncher: {
@@ -532,6 +539,10 @@ async function loadConfig() {
   }
   if (!Number.isFinite(Number(stored.minecraftLauncher?.memoryMb))) {
     config.minecraftLauncher.memoryMb = 4096;
+    changed = true;
+  }
+  if (!stored.developer?.defaultCacheModsDir && defaults.developer?.defaultCacheModsDir) {
+    config.developer.defaultCacheModsDir = defaults.developer.defaultCacheModsDir;
     changed = true;
   }
   await ensureDir(config.instanceDir);
@@ -1336,6 +1347,7 @@ async function runLauncherUpdate() {
 function serverTransferOptions(config = {}, payload = {}, password = '') {
   const configured = config.serverTransfer || {};
   const excludeDirs = [...new Set(['DregoraRL', ...(configured.excludeDirs || []), ...(payload.excludeDirs || [])])];
+  const includeDirs = [...new Set([...(payload.includeDirs || configured.includeDirs || DEFAULT_INCLUDED_DIRS)])];
   return {
     sourceDir: payload.sourceDir || configured.sourceDir || 'C:\\RL CRAFT SERVER LIST\\New folder - Copy',
     host: payload.host || configured.host || '192.168.1.121',
@@ -1344,6 +1356,8 @@ function serverTransferOptions(config = {}, payload = {}, password = '') {
     remoteDir: payload.remoteDir || configured.remoteDir || '/home/notevil/Desktop/AHT Server Files',
     password,
     excludeDirs,
+    includeDirs,
+    includeRootFiles: payload.includeRootFiles ?? configured.includeRootFiles ?? true,
     concurrency: Number(payload.concurrency || configured.concurrency || 8)
   };
 }
@@ -1352,7 +1366,11 @@ async function planServerTransfer(payload = {}) {
   assertDeveloperAuthenticated();
   const config = await loadConfig();
   const options = serverTransferOptions(config, payload);
-  return collectServerTransferFiles(options.sourceDir, { excludeDirs: options.excludeDirs });
+  return collectServerTransferFiles(options.sourceDir, {
+    excludeDirs: options.excludeDirs,
+    includeDirs: options.includeDirs,
+    includeRootFiles: options.includeRootFiles
+  });
 }
 
 async function syncServerFiles(payload = {}) {
@@ -1370,7 +1388,7 @@ async function syncServerFiles(payload = {}) {
     running: true,
     lines: [
       `Uploading server files to ${options.username}@${options.host}:${options.remoteDir}`,
-      'The DregoraRL world folder is always excluded.'
+      `Scope: root files plus ${options.includeDirs.join(', ')}. DregoraRL is always excluded.`
     ],
     lastResult: null,
     error: null,
@@ -1385,7 +1403,14 @@ async function syncServerFiles(payload = {}) {
     });
     serverTransferState.lastResult = result;
     serverTransferState.lines.push(`Done. Uploaded ${result.uploaded} changed files, skipped ${result.skipped || 0} unchanged files. Excluded: ${result.excludedDirs.join(', ') || 'none'}`);
-    serverTransferState.progress = { phase: 'Complete', completed: result.fileCount, total: result.fileCount, percent: 100 };
+    serverTransferState.progress = {
+      phase: 'Complete',
+      completed: result.fileCount,
+      total: result.fileCount,
+      completedBytes: result.totalBytes,
+      totalBytes: result.totalBytes,
+      percent: 100
+    };
     return result;
   } catch (error) {
     serverTransferState.error = error.message || String(error);
@@ -2129,6 +2154,26 @@ function r2DirectCredentials({ payload = {}, config = {}, secrets = {} } = {}) {
   };
 }
 
+async function detectCloudflareAccountId() {
+  try {
+    const output = await spawnLogged(wranglerCommand(), wranglerArgs(['whoami']), {
+      cwd: wranglerWorkDir(),
+      timeoutMs: 20_000
+    });
+    return output.match(/\b[0-9a-f]{32}\b/i)?.[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+async function resolveR2DirectCredentials({ payload = {}, config = {}, secrets = {} } = {}) {
+  const credentials = r2DirectCredentials({ payload, config, secrets });
+  if (!credentials.accountId && credentials.accessKeyId && credentials.secretAccessKey) {
+    credentials.accountId = await detectCloudflareAccountId();
+  }
+  return credentials;
+}
+
 function formatBytes(bytes = 0) {
   const value = Number(bytes || 0);
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -2304,6 +2349,11 @@ async function checkLauncherWorkflow(payload = {}) {
   const config = await loadConfig();
   const workflow = githubWorkflowPayload(payload, config);
   const { token, source } = await resolveGithubToken(payload);
+  const packageVersion = await readGithubPackageVersion({
+    repo: workflow.repo,
+    ref: workflow.ref,
+    token
+  });
   const run = await findRecentWorkflowRun({
     ...workflow,
     token,
@@ -2312,6 +2362,8 @@ async function checkLauncherWorkflow(payload = {}) {
   return {
     ok: true,
     ...workflow,
+    version: packageVersion,
+    packageVersion,
     tokenSource: source,
     actionsUrl: `https://github.com/${workflow.repo}/actions/workflows/${workflow.workflow}`,
     latestRun: run
@@ -2323,7 +2375,11 @@ async function dispatchLauncherWorkflow(payload = {}) {
   const config = await loadConfig();
   const workflow = githubWorkflowPayload(payload, config);
   const { token, source } = await resolveGithubToken(payload);
-  const version = String(payload.version || app.getVersion()).trim();
+  const version = await readGithubPackageVersion({
+    repo: workflow.repo,
+    ref: workflow.ref,
+    token
+  });
   const result = await triggerLauncherReleaseWorkflow({
     ...workflow,
     token,
@@ -2334,8 +2390,10 @@ async function dispatchLauncherWorkflow(payload = {}) {
   });
   return {
     ...result,
+    version: result.version || version,
+    packageVersion: version,
     tokenSource: source,
-    releaseUrl: result.version ? `https://github.com/${result.repo}/releases/tag/launcher-v${result.version}` : ''
+    releaseUrl: `https://github.com/${result.repo}/releases/tag/launcher-v${result.version || version}`
   };
 }
 
@@ -2467,7 +2525,7 @@ async function syncR2(payload = {}) {
     totalBytes += stat.size;
   }
   const secrets = await loadDeveloperSecrets().catch(() => ({}));
-  const directCredentials = r2DirectCredentials({ payload, config, secrets });
+  const directCredentials = await resolveR2DirectCredentials({ payload, config, secrets });
   const fastUpload = directR2CredentialsReady(directCredentials);
   const missingFastUpload = missingDirectR2CredentialLabels(directCredentials);
   const npx = fastUpload ? '' : wranglerCommand();
@@ -2489,6 +2547,7 @@ async function syncR2(payload = {}) {
       completed: 0,
       total: totalBytes || files.length,
       percent: 0,
+      unit: totalBytes ? 'bytes' : 'files',
       method: fastUpload ? 'direct-multipart' : 'wrangler'
     },
     lines: [
@@ -2511,6 +2570,16 @@ async function syncR2(payload = {}) {
       let lastLoggedPercent = -1;
       uploadState.currentSize = stat.size;
       uploadState.currentBytes = 0;
+      uploadState.progress = {
+        phase: fastUpload ? 'Fast R2 upload' : 'Wrangler upload',
+        completed: uploadedBytes,
+        total: totalBytes || files.length,
+        percent: totalBytes ? Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)) : Math.round((uploaded.length / files.length) * 100),
+        unit: totalBytes ? 'bytes' : 'files',
+        currentFile: rel,
+        currentPercent: 0,
+        method: fastUpload ? 'direct-multipart' : 'wrangler'
+      };
       uploadState.lines.push(`Uploading ${rel} (${formatBytes(stat.size)})`);
       if (fastUpload) {
         const result = await uploadR2ObjectDirect({
@@ -2530,6 +2599,7 @@ async function syncR2(payload = {}) {
               completed: loadedTotal,
               total: totalBytes,
               percent: totalPercent,
+              unit: 'bytes',
               currentFile: rel,
               currentPercent: progress.percent || 0,
               speedBytesPerSecond: progress.speedBytesPerSecond || 0,
@@ -2575,9 +2645,10 @@ async function syncR2(payload = {}) {
       uploadState.completed = uploaded.length;
       uploadState.progress = {
         phase: fastUpload ? 'Fast R2 upload' : 'Wrangler upload',
-        completed: fastUpload ? uploadedBytes : uploaded.length,
-        total: fastUpload ? totalBytes : files.length,
-        percent: fastUpload && totalBytes ? Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)) : Math.round((uploaded.length / files.length) * 100),
+        completed: totalBytes ? uploadedBytes : uploaded.length,
+        total: totalBytes || files.length,
+        percent: totalBytes ? Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)) : Math.round((uploaded.length / files.length) * 100),
+        unit: totalBytes ? 'bytes' : 'files',
         currentFile: rel,
         currentPercent: 100,
         speedBytesPerSecond: Math.round(stat.size / Math.max(0.001, (Date.now() - startedAt) / 1000)),

@@ -55,17 +55,23 @@ function summarizeOverrides(zip, overridesDir) {
   };
 }
 
-async function listJarFiles(root, rel = '') {
-  const target = path.join(root, rel);
-  const entries = await fs.readdir(target, { withFileTypes: true });
+function isModFileName(fileName = '') {
+  return /\.(jar|zip)$/i.test(fileName);
+}
+
+function isDirectModFile(filePath, modsDir) {
+  if (!filePath || !isModFileName(filePath)) {
+    return false;
+  }
+  return path.dirname(path.resolve(filePath)).toLowerCase() === path.resolve(modsDir).toLowerCase();
+}
+
+async function listDirectModFiles(root) {
+  const entries = await fs.readdir(root, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
-    const childRel = rel ? path.join(rel, entry.name) : entry.name;
-    const childAbs = path.join(root, childRel);
-    if (entry.isDirectory()) {
-      files.push(...await listJarFiles(root, childRel));
-    } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jar')) {
-      files.push(childAbs);
+    if (entry.isFile() && isModFileName(entry.name)) {
+      files.push(path.join(root, entry.name));
     }
   }
   return files;
@@ -129,7 +135,7 @@ async function readInstanceAddonMap(instanceDir, modsDir) {
     ].filter(Boolean);
 
     for (const candidate of candidates) {
-      if (await pathExists(candidate)) {
+      if (isDirectModFile(candidate, modsDir) && await pathExists(candidate)) {
         addonMap.set(key, {
           filePath: candidate,
           fileName: path.basename(candidate),
@@ -198,7 +204,7 @@ async function buildFallbackCache({ manifestFiles, outDir, packId, cacheModsDir 
 
   const { modsDir, instanceDir } = cacheSource;
   cacheSummary.modsDir = modsDir;
-  const jarFiles = await listJarFiles(modsDir);
+  const jarFiles = await listDirectModFiles(modsDir);
   cacheSummary.localJarCount = jarFiles.length;
   for (const jarFile of jarFiles) {
     cacheSummary.localJarBytes += (await fs.stat(jarFile)).size;

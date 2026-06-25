@@ -3,6 +3,7 @@ import {
   cleanLauncherVersion,
   dispatchGithubWorkflow,
   findRecentWorkflowRun,
+  readGithubPackageVersion,
   triggerLauncherReleaseWorkflow
 } from '../src/githubActions.js';
 
@@ -16,6 +17,11 @@ assert(cleanLauncherVersion('0.1.3') === '0.1.3', 'version parsing failed');
 const calls = [];
 const fetchImpl = async (url, options = {}) => {
   calls.push({ url: String(url), options });
+  if (String(url).includes('/contents/package.json')) {
+    return Response.json({
+      content: Buffer.from(JSON.stringify({ version: '0.1.9' })).toString('base64')
+    });
+  }
   if (String(url).endsWith('/dispatches')) {
     return new Response(null, { status: 204 });
   }
@@ -49,6 +55,14 @@ assert(body.ref === 'main', 'dispatch ref mismatch');
 assert(body.inputs.launcher_version === '0.1.3', 'dispatch version input missing');
 assert(body.inputs.publish_to_r2 === true, 'dispatch publish_to_r2 input missing');
 assert(calls[0].options.headers.Authorization === 'Bearer test-token', 'authorization header mismatch');
+
+const githubPackageVersion = await readGithubPackageVersion({
+  repo: 'svre-mc/aht-launcher',
+  ref: 'main',
+  token: 'test-token',
+  fetchImpl
+});
+assert(githubPackageVersion === '0.1.9', 'GitHub package version lookup failed');
 
 const run = await findRecentWorkflowRun({
   repo: 'svre-mc/aht-launcher',

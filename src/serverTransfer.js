@@ -2,10 +2,15 @@ import { Client } from 'ssh2';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+const DEFAULT_INCLUDED_DIRS = ['mods', 'scripts', 'config', 'ForgeEssentials'];
 const DEFAULT_EXCLUDED_DIRS = ['DregoraRL'];
 
 function excludedSet(excludeDirs = DEFAULT_EXCLUDED_DIRS) {
   return new Set(excludeDirs.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean));
+}
+
+function includedSet(includeDirs = DEFAULT_INCLUDED_DIRS) {
+  return new Set(includeDirs.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean));
 }
 
 function toRemotePath(value = '') {
@@ -61,6 +66,8 @@ export async function collectServerTransferFiles(sourceDir, options = {}) {
   }
 
   const excluded = excludedSet(options.excludeDirs || DEFAULT_EXCLUDED_DIRS);
+  const includedRootDirs = includedSet(options.includeDirs || DEFAULT_INCLUDED_DIRS);
+  const includeRootFiles = options.includeRootFiles !== false;
   const files = [];
   const excludedDirs = [];
   let totalBytes = 0;
@@ -75,10 +82,17 @@ export async function collectServerTransferFiles(sourceDir, options = {}) {
           excludedDirs.push(childRel.replaceAll(path.sep, '/'));
           continue;
         }
+        if (!rel && includedRootDirs.size && !includedRootDirs.has(entry.name.toLowerCase())) {
+          excludedDirs.push(childRel.replaceAll(path.sep, '/'));
+          continue;
+        }
         await walk(childAbs, childRel);
         continue;
       }
       if (!entry.isFile()) {
+        continue;
+      }
+      if (!rel && !includeRootFiles) {
         continue;
       }
       const stat = await fs.stat(childAbs);
@@ -101,7 +115,9 @@ export async function collectServerTransferFiles(sourceDir, options = {}) {
     fileCount: files.length,
     totalBytes,
     excludedDirs,
-    excludeDirs: [...excluded]
+    excludeDirs: [...excluded],
+    includeDirs: [...includedRootDirs],
+    includeRootFiles
   };
 }
 
@@ -256,6 +272,8 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
     username,
     password,
     excludeDirs = DEFAULT_EXCLUDED_DIRS,
+    includeDirs = DEFAULT_INCLUDED_DIRS,
+    includeRootFiles = true,
     concurrency = 6,
     fastPutConcurrency = 64,
     chunkSize = 256 * 1024
@@ -266,8 +284,17 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
   if (!password) throw new Error('Linux password is required.');
   if (!remoteDir) throw new Error('Linux destination folder is required.');
 
-  const plan = await collectServerTransferFiles(sourceDir, { excludeDirs });
-  hooks.onProgress?.({ phase: 'Connecting', completed: 0, total: plan.fileCount, percent: 0 });
+  const plan = await collectServerTransferFiles(sourceDir, { excludeDirs, includeDirs, includeRootFiles });
+  hooks.onProgress?.({
+    phase: 'Connecting',
+    completed: 0,
+    total: plan.fileCount,
+    completedBytes: 0,
+    totalBytes: plan.totalBytes,
+    uploaded: 0,
+    skipped: 0,
+    percent: 0
+  });
   hooks.logger?.log?.(`Connecting to ${username}@${host}:${port}`);
   const { client, sftp } = await connectSftp({ host, port, username, password });
   const ensureRemoteDirCached = createRemoteDirEnsurer(sftp);
@@ -357,11 +384,13 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
       concurrency: fileConcurrency,
       fastPutConcurrency: putConcurrency,
       chunkSize: putChunkSize,
-      excludedDirs: plan.excludedDirs
+      excludedDirs: plan.excludedDirs,
+      includeDirs: plan.includeDirs,
+      includeRootFiles: plan.includeRootFiles
     };
   } finally {
     client.end();
   }
 }
 
-export { DEFAULT_EXCLUDED_DIRS };
+export { DEFAULT_EXCLUDED_DIRS, DEFAULT_INCLUDED_DIRS };
