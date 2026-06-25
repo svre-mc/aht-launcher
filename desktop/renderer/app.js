@@ -23,7 +23,10 @@ if (!window.aht) {
         adminBaseUrl: "https://aht.example.workers.dev/",
         defaultOutDir: "C:\\Users\\Player\\Documents\\aht-release",
         defaultCacheModsDir: "C:\\Users\\Player\\curseforge\\minecraft\\Instances\\RLCraft Dregora\\mods",
-        r2Bucket: "ahtlauncher"
+        r2Bucket: "ahtlauncher",
+        githubRepo: "svre-mc/aht-launcher",
+        githubBranch: "main",
+        githubWorkflow: "build-macos.yml"
       },
       minecraftLauncher: {
         enabled: true,
@@ -233,14 +236,34 @@ if (!window.aht) {
       verification: { publicLatestUrl: "https://packs.example.com/latest.json", latest: { name: "A Hard Time", version: "2.8.2" } }
     }),
     devFindLauncherBuilds: async () => ({
-      version: "0.1.1",
-      windowsPath: "D:\\AHT\\release-builds\\windows\\AHT-Launcher-Windows-10-11-0.1.1.exe",
-      macosPath: "",
-      ubuntuPath: "D:\\AHT\\release-builds\\ubuntu\\AHT-Launcher-Ubuntu-0.1.1-x64.AppImage"
+      version: "0.1.3",
+      repo: "svre-mc/aht-launcher",
+      ref: "main",
+      workflow: "build-macos.yml",
+      actionsUrl: "https://github.com/svre-mc/aht-launcher/actions/workflows/build-macos.yml",
+      latestRun: { id: 123, status: "success", htmlUrl: "https://github.com/svre-mc/aht-launcher/actions/runs/123" }
+    }),
+    devCheckLauncherWorkflow: async () => ({
+      ok: true,
+      repo: "svre-mc/aht-launcher",
+      ref: "main",
+      workflow: "build-macos.yml",
+      actionsUrl: "https://github.com/svre-mc/aht-launcher/actions/workflows/build-macos.yml",
+      latestRun: { id: 123, status: "success", htmlUrl: "https://github.com/svre-mc/aht-launcher/actions/runs/123" }
+    }),
+    devDispatchLauncherWorkflow: async () => ({
+      ok: true,
+      repo: "svre-mc/aht-launcher",
+      ref: "main",
+      workflow: "build-macos.yml",
+      version: "0.1.3",
+      actionsUrl: "https://github.com/svre-mc/aht-launcher/actions/workflows/build-macos.yml",
+      releaseUrl: "https://github.com/svre-mc/aht-launcher/releases/tag/launcher-v0.1.3",
+      run: { id: 124, status: "queued", htmlUrl: "https://github.com/svre-mc/aht-launcher/actions/runs/124" }
     }),
     devSyncLauncherUpdate: async () => ({
-      uploaded: [{ path: "launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe" }, { path: "launcher/latest.json" }],
-      verification: { publicLatestUrl: "https://packs.example.com/launcher/latest.json", latest: { version: "0.1.1" } }
+      uploaded: [{ path: "launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.3.exe" }, { path: "launcher/latest.json" }],
+      verification: { publicLatestUrl: "https://packs.example.com/launcher/latest.json", latest: { version: "0.1.3" } }
     }),
     devPlanServerTransfer: async () => ({
       sourceDir: "C:\\RL CRAFT SERVER LIST\\New folder - Copy",
@@ -262,7 +285,8 @@ if (!window.aht) {
       warning: "",
       curseforgeApiKey: "preview-cf-key",
       serverSshPassword: "preview-ssh-password",
-      launcherProofSecret: "preview-proof-secret"
+      launcherProofSecret: "preview-proof-secret",
+      githubToken: "preview-github-token"
     }),
     devSaveSecrets: async () => ({
       ok: true,
@@ -440,6 +464,10 @@ const els = {
   launcherWindowsPathInput: $("#launcherWindowsPathInput"),
   launcherMacosPathInput: $("#launcherMacosPathInput"),
   launcherUbuntuPathInput: $("#launcherUbuntuPathInput"),
+  githubRepoInput: $("#githubRepoInput"),
+  githubBranchInput: $("#githubBranchInput"),
+  githubWorkflowInput: $("#githubWorkflowInput"),
+  githubTokenInput: $("#githubTokenInput"),
   launcherUpdateStatus: $("#launcherUpdateStatus"),
   serverSourceInput: $("#serverSourceInput"),
   pickServerSourceButton: $("#pickServerSourceButton"),
@@ -896,7 +924,8 @@ async function saveDeveloperSecrets({ quiet = true } = {}) {
   const result = await window.aht.devSaveSecrets({
     curseforgeApiKey: localCurseForgeApiKey(),
     serverSshPassword: inputValue(els.serverPasswordInput, ""),
-    launcherProofSecret: localLauncherProofSecret()
+    launcherProofSecret: localLauncherProofSecret(),
+    githubToken: inputValue(els.githubTokenInput, "")
   });
   if (!quiet && result?.warning) {
     showToast("Developer key saved", result.warning, "warn");
@@ -1612,19 +1641,26 @@ async function publishDeveloperUpdateLog() {
 
 async function scanLauncherBuilds() {
   setUnavailable(els.scanLauncherBuildsButton, true);
-  setLauncherUpdateStatus("warn", "Scanning builds", "Looking at release-builds", "Checking local packaged launcher outputs.");
+  setLauncherUpdateStatus("warn", "Checking GitHub", "Looking at workflow", "Checking the configured GitHub Actions release workflow.");
   try {
-    const result = await window.aht.devFindLauncherBuilds();
-    setInputValue(els.launcherUpdateVersionInput, result.version || "");
-    setInputValue(els.launcherWindowsPathInput, result.windowsPath || "");
-    setInputValue(els.launcherMacosPathInput, result.macosPath || "");
-    setInputValue(els.launcherUbuntuPathInput, result.ubuntuPath || "");
-    const found = [result.windowsPath, result.macosPath, result.ubuntuPath].filter(Boolean).length;
-    setLauncherUpdateStatus(found ? "ok" : "warn", "Build scan complete", `${found} launcher artifact${found === 1 ? "" : "s"} found`, found ? "Review paths, then publish the launcher update." : "Build platform installers first, then scan again.");
+    await saveDeveloperSecrets();
+    await window.aht.saveSettings(serializeSettings());
+    const result = await window.aht.devCheckLauncherWorkflow({
+      githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
+      githubBranch: inputValue(els.githubBranchInput, "main"),
+      githubWorkflow: inputValue(els.githubWorkflowInput, "build-macos.yml"),
+      githubToken: inputValue(els.githubTokenInput, "")
+    });
+    const run = result.latestRun;
+    const title = run ? `Latest run ${run.status || "unknown"}` : "Workflow found";
+    const detail = run?.htmlUrl
+      ? `Latest run: ${run.htmlUrl}`
+      : `Actions page: ${result.actionsUrl}`;
+    setLauncherUpdateStatus("ok", "GitHub ready", title, detail);
     setDevLog(result);
   } catch (error) {
     const message = cleanErrorMessage(error);
-    setLauncherUpdateStatus("bad", "Scan failed", "Could not scan launcher builds", message);
+    setLauncherUpdateStatus("bad", "GitHub check failed", "Could not read workflow", message);
     setDevLog(message);
   } finally {
     setUnavailable(els.scanLauncherBuildsButton, false);
@@ -1637,26 +1673,27 @@ async function publishLauncherUpdate() {
   try {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings());
-    setLauncherUpdateStatus("warn", "Publishing launcher", "Uploading launcher artifacts", "Artifacts upload before launcher/latest.json.");
-    startUploadPolling();
-    const result = await window.aht.devSyncLauncherUpdate({
+    const payload = {
       version: inputValue(els.launcherUpdateVersionInput, currentStatus?.appVersion || ""),
-      windowsPath: inputValue(els.launcherWindowsPathInput, ""),
-      macosPath: inputValue(els.launcherMacosPathInput, ""),
-      ubuntuPath: inputValue(els.launcherUbuntuPathInput, ""),
-      bucket: releaseBucketName(),
-      publicLatestUrl: playerFeedUrl()
-    });
+      githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
+      githubBranch: inputValue(els.githubBranchInput, "main"),
+      githubWorkflow: inputValue(els.githubWorkflowInput, "build-macos.yml"),
+      githubToken: inputValue(els.githubTokenInput, ""),
+      publishToR2: true
+    };
+    setLauncherUpdateStatus("warn", "Starting GitHub", "Dispatching release workflow", "GitHub Actions will build every launcher and publish the update to R2.");
+    const result = await window.aht.devDispatchLauncherWorkflow(payload);
     setDevLog(result);
-    setLauncherUpdateStatus("ok", "Launcher published", `AHT Launcher ${result.manifest?.version || ""}`.trim(), `${result.uploaded?.length || 0} objects uploaded. Players will update from launcher/latest.json.`);
-    showToast("Launcher update published", `${result.uploaded?.length || 0} objects uploaded to R2.`, "success");
+    const runDetail = result.run?.htmlUrl
+      ? `Run started: ${result.run.htmlUrl}`
+      : `Workflow dispatched. Watch: ${result.actionsUrl}`;
+    setLauncherUpdateStatus("ok", "GitHub started", `AHT Launcher ${result.version || payload.version}`.trim(), `${runDetail} GitHub will publish to R2 and update launcher/latest.json when it finishes.`);
+    showToast("Launcher workflow started", result.run?.htmlUrl || result.actionsUrl, "success");
   } catch (error) {
     const message = cleanErrorMessage(error);
-    const uploadState = await window.aht.devUploadState().catch(() => null);
-    if (uploadState) renderUploadState(uploadState);
-    setLauncherUpdateStatus("bad", "Publish failed", "Launcher update was not published", message);
+    setLauncherUpdateStatus("bad", "GitHub failed", "Launcher workflow was not started", message);
     setDevLog(message);
-    showToast("Launcher publish failed", message, "error");
+    showToast("Launcher workflow failed", message, "error");
   } finally {
     setUnavailable(els.publishLauncherUpdateButton, false);
   }
@@ -1776,7 +1813,10 @@ function serializeSettings() {
       defaultOutDir: inputValue(els.outDirInput, existingDeveloper.defaultOutDir || ""),
       defaultCacheModsDir: inputValue(els.cacheModsInput, existingDeveloper.defaultCacheModsDir || ""),
       r2Bucket: inputValue(els.bucketInput, existingDeveloper.r2Bucket || "ahtlauncher"),
-      cacheOnlyMode: cacheOnlyMode()
+      cacheOnlyMode: cacheOnlyMode(),
+      githubRepo: inputValue(els.githubRepoInput, existingDeveloper.githubRepo || "svre-mc/aht-launcher"),
+      githubBranch: inputValue(els.githubBranchInput, existingDeveloper.githubBranch || "main"),
+      githubWorkflow: inputValue(els.githubWorkflowInput, existingDeveloper.githubWorkflow || "build-macos.yml")
     },
     launcherUpdate: {
       enabled: true,
@@ -1825,6 +1865,12 @@ function fillSettings(status) {
   setInputValue(els.outDirInput, config.developer?.defaultOutDir || "");
   setInputValue(els.cacheModsInput, config.developer?.defaultCacheModsDir || "");
   setInputValue(els.bucketInput, config.developer?.r2Bucket || "ahtlauncher");
+  setInputValue(els.githubRepoInput, config.developer?.githubRepo || "svre-mc/aht-launcher");
+  setInputValue(els.githubBranchInput, config.developer?.githubBranch || "main");
+  setInputValue(els.githubWorkflowInput, config.developer?.githubWorkflow || "build-macos.yml");
+  if (els.launcherUpdateVersionInput && !els.launcherUpdateVersionInput.value && status.appVersion) {
+    setInputValue(els.launcherUpdateVersionInput, status.appVersion);
+  }
   if (els.cacheOnlyInput) els.cacheOnlyInput.checked = Boolean(config.developer?.cacheOnlyMode);
   setInputValue(els.serverSourceInput, config.serverTransfer?.sourceDir || "C:\\RL CRAFT SERVER LIST\\New folder - Copy");
   setInputValue(els.serverHostInput, config.serverTransfer?.host || "192.168.1.121");
@@ -1851,6 +1897,13 @@ function fillSettings(status) {
     && document.activeElement !== els.launcherProofSecretInput
   ) {
     setInputValue(els.launcherProofSecretInput, status.developerSecrets.launcherProofSecret);
+  }
+  if (
+    els.githubTokenInput
+    && status.developerSecrets?.githubToken
+    && document.activeElement !== els.githubTokenInput
+  ) {
+    setInputValue(els.githubTokenInput, status.developerSecrets.githubToken);
   }
   updateReleaseUploadState();
 }
@@ -2662,6 +2715,12 @@ if (els.serverPasswordInput) {
 if (els.launcherProofSecretInput) {
   els.launcherProofSecretInput.addEventListener("input", queueDeveloperSecretSave);
   els.launcherProofSecretInput.addEventListener("change", () => {
+    saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
+  });
+}
+if (els.githubTokenInput) {
+  els.githubTokenInput.addEventListener("input", queueDeveloperSecretSave);
+  els.githubTokenInput.addEventListener("change", () => {
     saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
   });
 }

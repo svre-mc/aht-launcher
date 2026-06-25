@@ -1,6 +1,6 @@
 {
     "name":  "aht-launcher",
-    "version":  "0.1.2",
+    "version":  "0.1.3",
     "private":  true,
     "type":  "module",
     "main":  "desktop/main.js",
@@ -32,6 +32,7 @@
                     "test:launcher-self-update":  "node work/smoke-launcher-self-update.mjs",
                     "test:launcher-update-publish":  "node work/smoke-launcher-update-publish.mjs",
                     "test:launcher-update-manifest":  "node scripts/test-launcher-update-manifest.mjs",
+                    "test:github-workflow":  "node scripts/test-github-workflow-dispatch.mjs",
                     "test:server-transfer-plan":  "node work/smoke-server-transfer-plan.mjs",
                     "test:mod-only-changes":  "node work/smoke-mod-only-changes.mjs",
                     "test:play-gate":  "node work/smoke-play-integrity-gate.mjs",

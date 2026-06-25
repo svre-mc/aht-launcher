@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('aht', {
   devSyncR2: (payload) => ipcRenderer.invoke('dev:syncR2', payload),
   devFindLauncherBuilds: () => ipcRenderer.invoke('dev:findLauncherBuilds'),
   devSyncLauncherUpdate: (payload) => ipcRenderer.invoke('dev:syncLauncherUpdate', payload),
+  devCheckLauncherWorkflow: (payload) => ipcRenderer.invoke('dev:checkLauncherWorkflow', payload),
+  devDispatchLauncherWorkflow: (payload) => ipcRenderer.invoke('dev:dispatchLauncherWorkflow', payload),
   devUploadState: () => ipcRenderer.invoke('dev:uploadState'),
   devPlanServerTransfer: (payload) => ipcRenderer.invoke('dev:planServerTransfer', payload),
   devSyncServerFiles: (payload) => ipcRenderer.invoke('dev:syncServerFiles', payload),

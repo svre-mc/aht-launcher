@@ -21,6 +21,14 @@ import { collectServerTransferFiles, uploadServerFiles } from '../src/serverTran
 import { defaultInstanceDirForPlatform, platformProfile } from '../src/platformProfile.js';
 import { writeLauncherProof } from '../src/launcherProof.js';
 import {
+  cleanGithubRepo,
+  cleanRef,
+  cleanWorkflowId,
+  findRecentWorkflowRun,
+  launcherWorkflowDefaults,
+  triggerLauncherReleaseWorkflow
+} from '../src/githubActions.js';
+import {
   ensureDir,
   downloadToFile,
   hashFile,
@@ -144,9 +152,11 @@ async function loadDeveloperSecrets() {
   const curseforge = stored.secrets?.curseforgeApiKey || {};
   const serverSsh = stored.secrets?.serverSshPassword || {};
   const launcherProof = stored.secrets?.launcherProofSecret || {};
+  const github = stored.secrets?.githubToken || {};
   let curseforgeApiKey = '';
   let serverSshPassword = '';
   let launcherProofSecret = '';
+  let githubToken = '';
   let warning = '';
   try {
     curseforgeApiKey = decryptDeveloperSecret(curseforge);
@@ -163,14 +173,25 @@ async function loadDeveloperSecrets() {
   } catch (error) {
     warning = warning || error.message;
   }
+  try {
+    githubToken = decryptDeveloperSecret(github);
+  } catch (error) {
+    warning = warning || error.message;
+  }
   return {
-    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value),
-    encrypted: Boolean((curseforge.value ? curseforge.encrypted : true) && (serverSsh.value ? serverSsh.encrypted : true) && (launcherProof.value ? launcherProof.encrypted : true)),
+    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || github.value),
+    encrypted: Boolean(
+      (curseforge.value ? curseforge.encrypted : true)
+      && (serverSsh.value ? serverSsh.encrypted : true)
+      && (launcherProof.value ? launcherProof.encrypted : true)
+      && (github.value ? github.encrypted : true)
+    ),
     encryptionAvailable: encrypted,
     warning,
     curseforgeApiKey,
     serverSshPassword,
-    launcherProofSecret
+    launcherProofSecret,
+    githubToken
   };
 }
 async function saveDeveloperSecrets(secrets = {}) {
@@ -191,6 +212,9 @@ async function saveDeveloperSecrets(secrets = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(secrets, 'launcherProofSecret')) {
     next.secrets.launcherProofSecret = encryptDeveloperSecret(secrets.launcherProofSecret);
+  }
+  if (Object.prototype.hasOwnProperty.call(secrets, 'githubToken')) {
+    next.secrets.githubToken = encryptDeveloperSecret(secrets.githubToken);
   }
   await writeJsonFile(developerSecretsPath(), next);
   const usedEncryption = Object.values(next.secrets).every((item) => !item?.value || item.encrypted);
@@ -245,7 +269,10 @@ function defaultConfig() {
       adminBaseUrl: '',
       defaultOutDir: path.join(app.getPath('documents'), 'aht-release'),
       defaultCacheModsDir: '',
-      r2Bucket: 'ahtlauncher'
+      r2Bucket: 'ahtlauncher',
+      githubRepo: launcherWorkflowDefaults.repo,
+      githubBranch: launcherWorkflowDefaults.branch,
+      githubWorkflow: launcherWorkflowDefaults.workflow
     },
     launcherUpdate: {
       enabled: true,
@@ -504,6 +531,7 @@ async function saveConfig(nextConfig) {
   }
   delete merged.developer.curseforgeApiKey;
   delete merged.developer.launcherProofSecret;
+  delete merged.developer.githubToken;
   await writeJsonFile(configPath(), merged);
   return merged;
 }
@@ -2114,6 +2142,76 @@ async function findLauncherBuilds() {
   };
 }
 
+function githubCommand() {
+  return process.platform === 'win32' ? 'gh.cmd' : 'gh';
+}
+
+async function resolveGithubToken(payload = {}) {
+  const explicit = String(payload.githubToken || payload.token || '').trim();
+  if (explicit) return { token: explicit, source: 'input' };
+  const secrets = await loadDeveloperSecrets();
+  if (secrets.githubToken) return { token: secrets.githubToken, source: 'saved' };
+  const envToken = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim();
+  if (envToken) return { token: envToken, source: 'environment' };
+  try {
+    const output = await spawnLogged(githubCommand(), ['auth', 'token'], {
+      timeoutMs: 10_000
+    });
+    const token = output.trim();
+    if (token) return { token, source: 'gh-cli' };
+  } catch {}
+  throw new Error('GitHub token is required. Paste a token in the Launcher Updates tab, or sign in with GitHub CLI.');
+}
+
+function githubWorkflowPayload(payload = {}, config = {}) {
+  const developer = config.developer || {};
+  return {
+    repo: cleanGithubRepo(payload.githubRepo || payload.repo || developer.githubRepo || launcherWorkflowDefaults.repo),
+    ref: cleanRef(payload.githubBranch || payload.branch || developer.githubBranch || launcherWorkflowDefaults.branch),
+    workflow: cleanWorkflowId(payload.githubWorkflow || payload.workflow || developer.githubWorkflow || launcherWorkflowDefaults.workflow)
+  };
+}
+
+async function checkLauncherWorkflow(payload = {}) {
+  assertDeveloperAuthenticated();
+  const config = await loadConfig();
+  const workflow = githubWorkflowPayload(payload, config);
+  const { token, source } = await resolveGithubToken(payload);
+  const run = await findRecentWorkflowRun({
+    ...workflow,
+    token,
+    since: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  });
+  return {
+    ok: true,
+    ...workflow,
+    tokenSource: source,
+    actionsUrl: `https://github.com/${workflow.repo}/actions/workflows/${workflow.workflow}`,
+    latestRun: run
+  };
+}
+
+async function dispatchLauncherWorkflow(payload = {}) {
+  assertDeveloperAuthenticated();
+  const config = await loadConfig();
+  const workflow = githubWorkflowPayload(payload, config);
+  const { token, source } = await resolveGithubToken(payload);
+  const version = String(payload.version || app.getVersion()).trim();
+  const result = await triggerLauncherReleaseWorkflow({
+    ...workflow,
+    token,
+    launcherVersion: version,
+    publishToR2: payload.publishToR2 !== false,
+    waitForRunMs: 24_000,
+    pollIntervalMs: 2_000
+  });
+  return {
+    ...result,
+    tokenSource: source,
+    releaseUrl: result.version ? `https://github.com/${result.repo}/releases/tag/launcher-v${result.version}` : ''
+  };
+}
+
 async function verifyRemoteLauncherUpdate({ publicLatestUrl, localManifest }) {
   const latestUrl = launcherLatestUrlFromInput(publicLatestUrl);
   if (!latestUrl) {
@@ -2989,6 +3087,8 @@ ipcMain.handle('dev:writePlayerDefaults', async (_event, payload) => writePlayer
 ipcMain.handle('dev:syncR2', async (_event, payload) => syncR2(payload));
 ipcMain.handle('dev:findLauncherBuilds', async () => findLauncherBuilds());
 ipcMain.handle('dev:syncLauncherUpdate', async (_event, payload) => syncLauncherUpdate(payload));
+ipcMain.handle('dev:checkLauncherWorkflow', async (_event, payload) => checkLauncherWorkflow(payload));
+ipcMain.handle('dev:dispatchLauncherWorkflow', async (_event, payload) => dispatchLauncherWorkflow(payload));
 ipcMain.handle('dev:uploadState', async () => uploadState);
 ipcMain.handle('dev:planServerTransfer', async (_event, payload) => planServerTransfer(payload));
 ipcMain.handle('dev:syncServerFiles', async (_event, payload) => syncServerFiles(payload));

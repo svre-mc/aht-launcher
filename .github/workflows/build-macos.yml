@@ -8,6 +8,11 @@ on:
         required: true
         type: boolean
         default: true
+      launcher_version:
+        description: "Launcher version to build. Leave blank to use package.json."
+        required: false
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -21,7 +26,9 @@ on:
       - "server-lock-mod/build/libs/aht-version-lock-*.jar"
       - "src/**"
       - "scripts/prepare-launcher-update.mjs"
+      - "scripts/set-package-version.mjs"
       - "scripts/upload-r2-plan.mjs"
+      - "scripts/test-github-workflow-dispatch.mjs"
       - "scripts/test-launcher-update-manifest.mjs"
       - "package.json"
       - "package-lock.json"
@@ -81,6 +88,10 @@ jobs:
           node-version: "22"
           cache: npm
 
+      - name: Apply launcher version override
+        if: github.event_name == 'workflow_dispatch' && inputs.launcher_version != ''
+        run: node scripts/set-package-version.mjs "${{ inputs.launcher_version }}"
+
       - name: Install Linux packaging dependencies
         if: matrix.id == 'ubuntu'
         run: |
@@ -137,6 +148,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Apply launcher version override
+        if: github.event_name == 'workflow_dispatch' && inputs.launcher_version != ''
+        run: node scripts/set-package-version.mjs "${{ inputs.launcher_version }}"
 
       - name: Download launcher artifacts
         uses: actions/download-artifact@v4
