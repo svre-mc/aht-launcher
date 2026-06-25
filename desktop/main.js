@@ -1576,13 +1576,7 @@ async function launchDownloadedLauncherUpdate(filePath, artifact = {}) {
   if (process.platform === 'darwin') {
     return spawnDetached('open', [filePath], cwd, process.env);
   }
-  if (process.platform === 'linux') {
-    if (/\.deb$/i.test(filePath)) {
-      return spawnDetached('xdg-open', [filePath], cwd, process.env);
-    }
-    await fs.chmod(filePath, 0o755).catch(() => {});
-    return spawnDetached(filePath, args, cwd, process.env);
-  }
+
   return spawnDetached(filePath, args, cwd, process.env);
 }
 
@@ -1797,8 +1791,6 @@ function contentType(filePath) {
   if (ext === '.jar') return 'application/java-archive';
   if (ext === '.exe') return 'application/vnd.microsoft.portable-executable';
   if (ext === '.dmg') return 'application/x-apple-diskimage';
-  if (ext === '.deb') return 'application/vnd.debian.binary-package';
-  if (ext === '.appimage') return 'application/octet-stream';
   if (ext === '.html') return 'text/html; charset=utf-8';
   if (ext === '.txt') return 'text/plain; charset=utf-8';
   return 'application/octet-stream';
@@ -1875,7 +1867,6 @@ function launcherPlatformKeys(platform = process.platform, arch = process.arch) 
   const keys = [`${platform}-${arch}`, platform];
   if (platform === 'win32') keys.push('windows', 'windows-x64');
   if (platform === 'darwin') keys.push(arch === 'arm64' ? 'macos-arm64' : 'macos-x64', 'macos');
-  if (platform === 'linux') keys.push('ubuntu-linux', 'ubuntu', 'linux-x64');
   return [...new Set(keys)];
 }
 
@@ -2547,14 +2538,6 @@ function launcherArtifactDescriptors(payload = {}) {
       kind: 'dmg',
       installArgs: [],
       file: payload.macosPath || payload.darwinPath || ''
-    },
-    {
-      key: 'linux-x64',
-      aliases: ['linux', 'ubuntu', 'ubuntu-linux'],
-      label: 'Ubuntu/Linux',
-      kind: 'appimage',
-      installArgs: [],
-      file: payload.ubuntuPath || payload.linuxPath || ''
     }
   ].filter((item) => String(item.file || '').trim());
 }
@@ -2636,10 +2619,7 @@ async function findLauncherBuilds() {
     ], /\.exe$/i),
     macosPath: await findNewestFile([
       path.join(appRoot, 'release-builds', 'macos')
-    ], /\.dmg$/i),
-    ubuntuPath: await findNewestFile([
-      path.join(appRoot, 'release-builds', 'ubuntu')
-    ], /\.(appimage|deb)$/i)
+    ], /\.dmg$/i)
   };
 }
 

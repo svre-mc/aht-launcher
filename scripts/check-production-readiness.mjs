@@ -145,7 +145,6 @@ function checkRequiredFiles() {
     'build/icon.png',
     'build/electron-builder.windows.cjs',
     'build/electron-builder.macos.cjs',
-    'build/electron-builder.ubuntu.cjs',
     'pack-fixes/aht-item-fire-fix-fabric-26.1.2-1.0.0.jar',
     'pack-fixes/aht-item-fire-fix-forge-1.0.0.jar'
   ];
@@ -164,11 +163,9 @@ function checkPackageConfig() {
 
   addCheck('Windows app id is AHT branded', 'blocker', packageJson.build?.appId === 'com.ahardtime.launcher', packageJson.build?.appId || 'missing appId');
   addCheck('Windows installer script exists', 'blocker', Boolean(packageJson.scripts?.['dist:win']), 'npm run dist:win');
-  addCheck('Linux package script exists', 'blocker', Boolean(packageJson.scripts?.['dist:linux']), 'npm run dist:linux');
   addCheck('macOS package script exists', 'blocker', Boolean(packageJson.scripts?.['dist:mac']), 'npm run dist:mac');
   addCheck('Windows regular launcher script exists', 'blocker', Boolean(packageJson.scripts?.['dist:regular:windows']), 'npm run dist:regular:windows');
   addCheck('macOS regular launcher script exists', 'blocker', Boolean(packageJson.scripts?.['dist:regular:macos']), 'npm run dist:regular:macos');
-  addCheck('Ubuntu regular launcher script exists', 'blocker', Boolean(packageJson.scripts?.['dist:regular:ubuntu']), 'npm run dist:regular:ubuntu');
   addCheck('pack fix jars are packaged', 'blocker', packageJson.build?.files?.includes('pack-fixes/**/*'), 'pack-fixes/**/*');
 }
 
@@ -233,10 +230,6 @@ function checkPlayerDefaults() {
     path.join(releaseDir, 'win-unpacked', 'resources', 'app.defaults.json'),
     path.join(releaseDir, 'windows', 'win-unpacked', 'app.defaults.json'),
     path.join(releaseDir, 'windows', 'win-unpacked', 'resources', 'app.defaults.json'),
-    path.join(releaseDir, 'linux-unpacked', 'app.defaults.json'),
-    path.join(releaseDir, 'linux-unpacked', 'resources', 'app.defaults.json'),
-    path.join(releaseDir, 'ubuntu', 'linux-unpacked', 'app.defaults.json'),
-    path.join(releaseDir, 'ubuntu', 'linux-unpacked', 'resources', 'app.defaults.json')
   ];
 
   const present = candidates.filter((candidate) => fs.existsSync(candidate));
@@ -266,18 +259,13 @@ function checkArtifacts() {
     path.join(releaseDir, 'A Hard Time Launcher Setup 0.1.0.exe'),
     path.join(releaseDir, 'A Hard Time Launcher Setup 0.1.0.exe.blockmap'),
     path.join(releaseDir, 'win-unpacked', 'A Hard Time Launcher.exe'),
-    path.join(releaseDir, 'linux-unpacked'),
     path.join(releaseDir, 'windows', 'AHT-Launcher-Windows-10-11-0.1.0.exe'),
     path.join(releaseDir, 'windows', 'AHT-Launcher-Windows-10-11-0.1.0.exe.blockmap'),
     path.join(releaseDir, 'windows', 'win-unpacked', 'A Hard Time Launcher Windows.exe'),
-    path.join(releaseDir, 'ubuntu', 'linux-unpacked'),
     path.join(outputsDir, 'A Hard Time Launcher Setup 0.1.0.exe'),
     path.join(outputsDir, 'A Hard Time Launcher Setup 0.1.0.exe.blockmap'),
-    path.join(outputsDir, 'A Hard Time Launcher linux-unpacked.zip'),
-    path.join(outputsDir, 'aht-launcher-linux-unpacked.tar.gz'),
     path.join(outputsDir, 'AHT-Launcher-Windows-10-11-0.1.0.exe'),
     path.join(outputsDir, 'AHT-Launcher-Windows-10-11-0.1.0.exe.blockmap'),
-    path.join(outputsDir, 'AHT-Launcher-Ubuntu-linux-unpacked.zip'),
     path.join(outputsDir, 'aht-launcher-mvp-source.zip')
   ];
 

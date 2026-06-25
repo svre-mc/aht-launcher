@@ -6,11 +6,11 @@ const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import
 const windowsInstallerInclude = fs.readFileSync(new URL('../build/windows-installer.nsh', import.meta.url), 'utf8');
 const rendererApp = fs.readFileSync(new URL('../desktop/renderer/app.js', import.meta.url), 'utf8');
 const desktopMain = fs.readFileSync(new URL('../desktop/main.js', import.meta.url), 'utf8');
+const releaseWorkflow = fs.readFileSync(new URL('../.github/workflows/build-macos.yml', import.meta.url), 'utf8');
 
 const configs = {
   windows: require('../build/electron-builder.windows.cjs'),
-  macos: require('../build/electron-builder.macos.cjs'),
-  ubuntu: require('../build/electron-builder.ubuntu.cjs')
+  macos: require('../build/electron-builder.macos.cjs')
 };
 
 function assert(condition, message) {
@@ -49,16 +49,16 @@ assert(configs.macos.mac?.target?.[0]?.target === 'dmg', 'macOS regular launcher
 assert(configs.macos.mac?.target?.[0]?.arch?.includes('arm64'), 'macOS regular launcher should include Apple Silicon.');
 assert(configs.macos.mac?.target?.[0]?.arch?.includes('x64'), 'macOS regular launcher should include Intel.');
 
-assert(configs.ubuntu.productName === 'A Hard Time Launcher Ubuntu', 'Ubuntu product name is not tailored.');
-assert(configs.ubuntu.directories?.output === 'release-builds/ubuntu', 'Ubuntu output folder is wrong.');
-assert(configs.ubuntu.linux?.executableName === 'aht-launcher', 'Ubuntu executable name should be Linux-safe.');
-assert(configs.ubuntu.linux?.target?.some((item) => item.target === 'AppImage'), 'Ubuntu regular launcher must build AppImage.');
-assert(configs.ubuntu.linux?.target?.some((item) => item.target === 'deb'), 'Ubuntu regular launcher must build .deb.');
-assert(configs.ubuntu.deb?.packageName === 'aht-launcher', 'Ubuntu .deb package name is wrong.');
-
+assert(!fs.existsSync(new URL('../build/electron-builder.ubuntu.cjs', import.meta.url)), 'Ubuntu builder config must not exist.');
+assert(!packageJson.scripts['dist:linux'], 'Linux package script must not exist.');
+assert(!packageJson.scripts['dist:regular:ubuntu'], 'Ubuntu regular launcher script must not exist.');
+assert(!packageJson.build?.linux, 'package.json must not define Linux build targets.');
+assert(!releaseWorkflow.includes('id: ubuntu'), 'GitHub workflow must not include an Ubuntu/Linux build matrix entry.');
+assert(!releaseWorkflow.includes('ubuntu-'), 'GitHub workflow must not use Ubuntu runners.');
+assert(!releaseWorkflow.includes('dist:regular:ubuntu'), 'GitHub workflow must not call the Ubuntu build script.');
+assert(!releaseWorkflow.includes('aht-launcher-ubuntu'), 'GitHub workflow must not upload Ubuntu launcher artifacts.');
 assert(packageJson.scripts['dist:regular:windows']?.includes('--win'), 'Windows regular script must force --win.');
 assert(packageJson.scripts['dist:regular:macos']?.includes('--mac'), 'macOS regular script must force --mac.');
-assert(packageJson.scripts['dist:regular:ubuntu']?.includes('--linux'), 'Ubuntu regular script must force --linux.');
 
 for (const [name, config] of Object.entries(configs)) {
   assert(config.extraMetadata?.ahtLauncherMode === 'player', `${name} config should be regular/player mode.`);

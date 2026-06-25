@@ -18,8 +18,6 @@ async function writeArtifact(name, text) {
 await writeArtifact('AHT-Launcher-Windows-10-11-7.8.9.exe', 'windows');
 await writeArtifact('AHT-Launcher-macOS-arm64-7.8.9.dmg', 'mac-arm');
 await writeArtifact('AHT-Launcher-macOS-x64-7.8.9.dmg', 'mac-x64');
-await writeArtifact('AHT-Launcher-Ubuntu-7.8.9-x64.AppImage', 'appimage');
-await writeArtifact('AHT-Launcher-Ubuntu-7.8.9-x64.deb', 'deb');
 
 const result = await prepareLauncherUpdate({
   artifactsDir: artifacts,
@@ -37,8 +35,7 @@ assert(manifest.version === '7.8.9', 'manifest version mismatch');
 assert(manifest.platforms['win32-x64']?.installArgs?.[0] === '/S', 'Windows silent install args missing');
 assert(manifest.platforms['darwin-arm64']?.path?.includes('/darwin-arm64/'), 'Apple Silicon path missing');
 assert(manifest.platforms['darwin-x64']?.path?.includes('/darwin-x64/'), 'Intel macOS path missing');
-assert(manifest.platforms['linux-x64']?.path?.endsWith('.AppImage'), 'Linux should auto-update from AppImage');
-assert(manifest.platforms['ubuntu-deb']?.path?.endsWith('.deb'), 'Ubuntu deb path missing');
+assert(!Object.keys(manifest.platforms).some((key) => /linux|ubuntu/i.test(key)), 'manifest must not publish Linux artifacts');
 assert(result.plan.uploads.at(-1)?.rel === 'launcher/latest.json', 'launcher/latest.json must upload last');
 assert(result.plan.uploads.every((item) => path.isAbsolute(item.file)), 'upload plan must use absolute files');
 

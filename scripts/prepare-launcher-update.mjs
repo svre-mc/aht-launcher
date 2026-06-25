@@ -56,7 +56,6 @@ function contentType(file) {
   if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
   if (lower.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
   if (lower.endsWith('.dmg')) return 'application/x-apple-diskimage';
-  if (lower.endsWith('.deb')) return 'application/vnd.debian.binary-package';
   return 'application/octet-stream';
 }
 
@@ -140,8 +139,6 @@ export async function prepareLauncherUpdate(options = {}) {
   const windowsFile = requireArtifact(files, /^AHT-Launcher-Windows-10-11-.*\.exe$/i, 'Windows 10/11');
   const macArmFile = requireArtifact(files, /^AHT-Launcher-macOS-arm64-.*\.dmg$/i, 'macOS Apple Silicon');
   const macX64File = requireArtifact(files, /^AHT-Launcher-macOS-x64-.*\.dmg$/i, 'macOS Intel');
-  const ubuntuAppImageFile = requireArtifact(files, /^AHT-Launcher-Ubuntu-.*-(x64|x86_64)\.AppImage$/i, 'Ubuntu/Linux AppImage');
-  const ubuntuDebFile = newestMatch(files, /^AHT-Launcher-Ubuntu-.*-(x64|x86_64)\.deb$/i);
 
   const platforms = {};
   const uploads = [];
@@ -177,27 +174,6 @@ export async function prepareLauncherUpdate(options = {}) {
   uploads.push(macX64.upload);
   addAliases(platforms, ['darwin-x64', 'macos-x64', 'darwin', 'macos'], macX64.entry);
 
-  const ubuntuAppImage = await artifactEntry({
-    file: ubuntuAppImageFile,
-    key: 'linux-x64',
-    label: 'Ubuntu/Linux AppImage',
-    kind: 'appimage',
-    rootUrl
-  });
-  uploads.push(ubuntuAppImage.upload);
-  addAliases(platforms, ['linux-x64', 'linux', 'ubuntu-linux', 'ubuntu'], ubuntuAppImage.entry);
-
-  if (ubuntuDebFile) {
-    const ubuntuDeb = await artifactEntry({
-      file: ubuntuDebFile,
-      key: 'linux-x64-deb',
-      label: 'Ubuntu/Linux deb',
-      kind: 'deb',
-      rootUrl
-    });
-    uploads.push(ubuntuDeb.upload);
-    addAliases(platforms, ['linux-x64-deb', 'ubuntu-deb'], ubuntuDeb.entry);
-  }
 
   const manifest = {
     schemaVersion: 1,

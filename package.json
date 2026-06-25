@@ -1,6 +1,6 @@
 {
     "name": "aht-launcher",
-    "version": "0.1.18",
+    "version": "0.1.19",
     "private": true,
     "type": "module",
     "main": "desktop/main.js",
@@ -54,11 +54,9 @@
         "cloudflare:login": "npx --yes wrangler login",
         "cloudflare:deploy": "npx --yes wrangler deploy --config cloudflare/wrangler.toml",
         "dist:win": "electron-builder --win nsis",
-        "dist:linux": "electron-builder --linux AppImage deb",
         "dist:mac": "electron-builder --mac dmg",
         "dist:regular:windows": "electron-builder --config build/electron-builder.windows.cjs --win --publish never",
         "dist:regular:macos": "electron-builder --config build/electron-builder.macos.cjs --mac --publish never",
-        "dist:regular:ubuntu": "electron-builder --config build/electron-builder.ubuntu.cjs --linux --publish never",
         "pack": "electron-builder --dir",
         "test:launcher-proof": "node scripts/test-launcher-proof.mjs"
     },
@@ -98,13 +96,6 @@
         ],
         "win": {
             "target": "nsis"
-        },
-        "linux": {
-            "target": [
-                "AppImage",
-                "deb"
-            ],
-            "category": "Game"
         },
         "mac": {
             "target": "dmg",

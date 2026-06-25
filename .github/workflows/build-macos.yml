@@ -57,14 +57,7 @@ jobs:
             build_script: dist:regular:macos
             artifact_name: aht-launcher-macos
             artifact_path: release-builds/macos/*.dmg
-          - id: ubuntu
-            label: Ubuntu/Linux
-            runner: ubuntu-24.04
-            build_script: dist:regular:ubuntu
-            artifact_name: aht-launcher-ubuntu
-            artifact_path: |
-              release-builds/ubuntu/*.AppImage
-              release-builds/ubuntu/*.deb
+
     env:
       CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
       CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -92,11 +85,6 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.launcher_version != ''
         run: node scripts/set-package-version.mjs "${{ inputs.launcher_version }}"
 
-      - name: Install Linux packaging dependencies
-        if: matrix.id == 'ubuntu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fakeroot dpkg libarchive-tools
 
       - name: Install dependencies
         run: npm ci
@@ -131,7 +119,10 @@ jobs:
 
   publish-launcher-update:
     name: Publish Launcher Update
-    runs-on: ubuntu-24.04
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     needs: build-launcher
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     env:
@@ -181,7 +172,7 @@ jobs:
           {
             echo "Automated AHT Launcher release $VERSION."
             echo
-            echo "Includes Windows 10/11, macOS Apple Silicon, macOS Intel, Ubuntu AppImage, and Ubuntu deb builds."
+            echo "Includes Windows 10/11, macOS Apple Silicon, and macOS Intel builds."
             echo
             echo "Launcher update feed: $AHT_LAUNCHER_UPDATE_URL"
             echo "Source commit: $GITHUB_SHA"

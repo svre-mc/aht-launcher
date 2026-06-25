@@ -336,7 +336,7 @@ if (!window.aht) {
           ip: "198.51.100.14",
           playerLabel: "TestRig",
           installId: "4fb39d5a-2d17-49f4-b75c-251d9998d0a2",
-          platform: "linux",
+          platform: "darwin",
           event: {
             type: "local_changes",
             changes: {

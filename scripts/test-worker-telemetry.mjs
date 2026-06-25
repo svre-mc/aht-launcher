@@ -64,7 +64,7 @@ await jsonRequest('/api/events', {
     schemaVersion: 1,
     installId: 'install-b',
     playerLabel: 'TestRig',
-    platform: 'linux',
+    platform: 'darwin',
     arch: 'x64',
     packId: 'a-hard-time-dregora',
     event: {
@@ -89,7 +89,7 @@ const registration = await jsonRequest('/api/users/register', {
   body: JSON.stringify({
     username: 'TestRig',
     installId: 'install-b',
-    platform: 'linux',
+    platform: 'darwin',
     arch: 'x64',
     packId: 'a-hard-time-dregora'
   })

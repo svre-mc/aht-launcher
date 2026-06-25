@@ -8,7 +8,6 @@ Use the build made for your operating system:
 
 - Windows 10/11: NSIS installer
 - macOS: DMG package for Apple Silicon and Intel Macs
-- Ubuntu/Linux: AppImage or `.deb`
 
 Players do not need Node.js, Git, Wrangler, or terminal commands to use a packaged build.
 
@@ -18,7 +17,6 @@ The launcher manages the modpack in its own folder:
 
 - Windows 10/11: `C:\AHT\A Hard Time`
 - macOS: `~/Library/Application Support/A Hard Time/Instance`
-- Ubuntu/Linux: `${XDG_DATA_HOME:-~/.local/share}/aht-launcher/A Hard Time`
 
 The app also writes a Minecraft Launcher profile that points at that managed folder as `gameDir`.
 
@@ -41,15 +39,14 @@ The player app:
 
 ## Launcher Updates
 
-The launcher checks its own update feed on startup. When a launcher update is required, the app shows an update overlay, downloads the correct installer/package for the current OS, applies the update, and restarts.
+The launcher checks its own update feed on startup. When a launcher update is required, the app shows an update overlay, downloads the correct installer/package for Windows or macOS, applies the update, and restarts.
 
 ## Build Targets
 
-The repository builds player launchers for:
+The repository builds player launchers for Windows and macOS only:
 
 - Windows 10/11: `npm run dist:regular:windows`
 - macOS: `npm run dist:regular:macos`
-- Ubuntu/Linux: `npm run dist:regular:ubuntu`
 
 GitHub Actions can build the platform packages and publish player launcher release assets.
 

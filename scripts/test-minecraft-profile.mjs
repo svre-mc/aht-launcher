@@ -26,8 +26,7 @@ const platformRoots = {
     APPDATA: 'C:\\Users\\Player\\AppData\\Roaming',
     USERPROFILE: 'C:\\Users\\Player'
   }),
-  darwin: defaultMinecraftRoot('darwin', { HOME: '/Users/player' }),
-  linux: defaultMinecraftRoot('linux', { HOME: '/home/player' })
+  darwin: defaultMinecraftRoot('darwin', { HOME: '/Users/player' })
 };
 if (platformRoots.win32 !== 'C:\\Users\\Player\\AppData\\Roaming\\.minecraft') {
   throw new Error(`Unexpected Windows Minecraft root: ${platformRoots.win32}`);
@@ -35,9 +34,7 @@ if (platformRoots.win32 !== 'C:\\Users\\Player\\AppData\\Roaming\\.minecraft') {
 if (platformRoots.darwin !== '/Users/player/Library/Application Support/minecraft') {
   throw new Error(`Unexpected macOS Minecraft root: ${platformRoots.darwin}`);
 }
-if (platformRoots.linux !== '/home/player/.minecraft') {
-  throw new Error(`Unexpected Linux Minecraft root: ${platformRoots.linux}`);
-}
+
 const macRootCandidates = minecraftRootCandidates('darwin', { HOME: '/Users/player' });
 if (
   macRootCandidates[0] !== '/Users/player/Library/Application Support/minecraft'
