@@ -537,6 +537,7 @@ let uploadPoll = null;
 let releaseBusy = false;
 let developerSecretSaveTimer = null;
 let launcherUpdateAutoStarted = false;
+let lastStatusRefreshAt = 0;
 
 function setBadge(text, state = "") {
   els.statusBadge.textContent = text;
@@ -2080,6 +2081,16 @@ function renderStatus(status) {
 
 async function refresh() {
   renderStatus(await window.aht.getStatus());
+  lastStatusRefreshAt = Date.now();
+}
+
+async function refreshQuietly() {
+  if (updatePoll || launcherUpdatePoll) return;
+  try {
+    await refresh();
+  } catch (error) {
+    console.warn("Status refresh failed", error);
+  }
 }
 
 function activateTab(name) {
@@ -2825,3 +2836,13 @@ refresh().catch((error) => {
   setLog(message);
   showToast("Launcher error", message, "error");
 });
+
+window.addEventListener("focus", () => {
+  if (Date.now() - lastStatusRefreshAt > 5000) {
+    refreshQuietly();
+  }
+});
+
+window.setInterval(() => {
+  refreshQuietly();
+}, 60_000);

@@ -108,9 +108,23 @@ export function filePathToSource(filePath) {
   return pathToFileURL(path.resolve(filePath)).toString();
 }
 
+export function cacheBustHttpUrl(value, paramName = 'aht_cache_bust') {
+  const url = new URL(value);
+  url.searchParams.set(paramName, `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  return url.toString();
+}
+
 export async function readJsonFromSource(source, headers = {}) {
   if (isHttpUrl(source)) {
-    const response = await fetch(source, { headers: { Accept: 'application/json', ...headers } });
+    const response = await fetch(cacheBustHttpUrl(source), {
+      headers: {
+        Accept: 'application/json',
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache',
+        ...headers
+      },
+      cache: 'no-store'
+    });
     if (!response.ok) {
       throw new Error(`GET ${source} failed: ${response.status} ${response.statusText}`);
     }
@@ -121,7 +135,15 @@ export async function readJsonFromSource(source, headers = {}) {
 }
 
 export async function fetchJson(source, headers = {}) {
-  const response = await fetch(source, { headers: { Accept: 'application/json', ...headers } });
+  const response = await fetch(isHttpUrl(source) ? cacheBustHttpUrl(source) : source, {
+    headers: {
+      Accept: 'application/json',
+      'Cache-Control': 'no-cache',
+      Pragma: 'no-cache',
+      ...headers
+    },
+    cache: 'no-store'
+  });
   if (!response.ok) {
     const body = await response.text().catch(() => '');
     throw new Error(`GET ${source} failed: ${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
