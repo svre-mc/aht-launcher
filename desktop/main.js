@@ -492,6 +492,15 @@ function defaultCacheModsDir() {
   return path.join(app.getPath('home'), 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora', 'mods');
 }
 
+function defaultReleaseOutDir() {
+  return path.join(app.getPath('userData'), 'release-builder');
+}
+
+function resolveReleaseOutDir(value = '') {
+  const normalized = String(value || '').trim();
+  return normalized ? normalized : defaultReleaseOutDir();
+}
+
 function isCurseForgeInstanceDir(value = '') {
   const normalized = String(value || '').replace(/\\/g, '/').toLowerCase();
   return normalized.includes('/curseforge/minecraft/instances/');
@@ -522,7 +531,7 @@ function defaultConfig() {
     },
     developer: {
       adminBaseUrl: '',
-      defaultOutDir: path.join(app.getPath('documents'), 'aht-release'),
+      defaultOutDir: defaultReleaseOutDir(),
       defaultCacheModsDir: defaultCacheModsDir(),
       r2Bucket: 'ahtlauncher',
       r2AccountId: '',
@@ -679,6 +688,7 @@ function mergeConfig(defaults, stored) {
   if (merged.minecraftLauncher?.profileName === 'A Hard Time Dregora') {
     merged.minecraftLauncher.profileName = 'A Hard Time';
   }
+  merged.developer.defaultOutDir = resolveReleaseOutDir(merged.developer?.defaultOutDir);
   return merged;
 }
 
@@ -765,6 +775,10 @@ async function loadConfig() {
     config.developer.defaultCacheModsDir = defaults.developer.defaultCacheModsDir;
     changed = true;
   }
+  if (!String(stored.developer?.defaultOutDir || '').trim()) {
+    config.developer.defaultOutDir = resolveReleaseOutDir(config.developer?.defaultOutDir);
+    changed = true;
+  }
   await ensureDir(config.instanceDir);
   if (changed) {
     await writeJsonFile(file, config);
@@ -785,6 +799,7 @@ async function saveConfig(nextConfig) {
     minecraftLauncher: { ...current.minecraftLauncher, ...nextConfig.minecraftLauncher },
     playCommand: { ...current.playCommand, ...nextConfig.playCommand }
   };
+  merged.developer.defaultOutDir = resolveReleaseOutDir(merged.developer?.defaultOutDir);
   if (merged.instanceDir) {
     merged.playCommand = {
       ...merged.playCommand,
@@ -2804,14 +2819,16 @@ async function syncLauncherUpdate(payload = {}) {
 }
 
 async function syncR2(payload = {}) {
-  const { outDir, bucket, publicLatestUrl = '' } = payload;
+  const { publicLatestUrl = '' } = payload;
   assertDeveloperAuthenticated();
   if (uploadState.running) {
     throw new Error('R2 upload is already running');
   }
   const config = await loadConfig();
-  if (!outDir || !bucket) {
-    throw new Error('Output directory and R2 bucket are required');
+  const outDir = resolveReleaseOutDir(payload.outDir || config.developer?.defaultOutDir);
+  const bucket = String(payload.bucket || config.developer?.r2Bucket || 'ahtlauncher').trim();
+  if (!bucket) {
+    throw new Error('R2 bucket is required');
   }
   const validation = await validateRelease({ outDir, publicLatestUrl });
   if (!validation.ok) {
@@ -3720,10 +3737,12 @@ ipcMain.handle('setup:recommend', async () => setupRecommendations());
 ipcMain.handle('setup:apply', async () => applyRecommendedSetup());
 ipcMain.handle('dev:buildRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
-  await ensureDir(payload.outDir);
+  const config = await loadConfig();
+  const outDir = resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir);
+  await ensureDir(outDir);
   return buildRelease({
     packZip: payload.packZip,
-    outDir: payload.outDir,
+    outDir,
     baseUrl: payload.baseUrl,
     channel: payload.channel || 'stable',
     cacheModsDir: payload.cacheModsDir || ''
@@ -3754,7 +3773,11 @@ ipcMain.handle('dev:inspectPackZip', async (_event, packZip) => {
 });
 ipcMain.handle('dev:validateRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
-  return validateRelease(payload);
+  const config = await loadConfig();
+  return validateRelease({
+    ...payload,
+    outDir: resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir)
+  });
 });
 ipcMain.handle('dev:cloudLogin', async (_event, payload) => cloudLogin(payload));
 ipcMain.handle('dev:cloudSetupBuckets', async (_event, payload) => cloudSetupBuckets(payload));
