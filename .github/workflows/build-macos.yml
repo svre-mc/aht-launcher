@@ -187,13 +187,28 @@ jobs:
             echo "Source commit: $GITHUB_SHA"
           } > "$NOTES_FILE"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file "$NOTES_FILE"
           else
-            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
           fi
 
-          gh release upload "$TAG" ci-artifacts/* ci-launcher-update/launcher-latest.json --clobber
+          for asset in ci-artifacts/* ci-launcher-update/launcher-latest.json; do
+            name="$(basename "$asset")"
+            for attempt in 1 2 3; do
+              if gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber; then
+                break
+              fi
+              if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq ".assets[].name" | grep -Fxq "$name"; then
+                echo "Asset $name is present after upload warning; continuing."
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            done
+          done
 
       - name: Upload launcher update plan
         uses: actions/upload-artifact@v4
