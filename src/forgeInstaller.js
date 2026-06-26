@@ -162,9 +162,46 @@ function javaExecutableName() {
   return process.platform === 'win32' ? 'java.exe' : 'java';
 }
 
+function javaRootKey(root = '') {
+  const text = String(root || '').trim();
+  if (!text) return '';
+  const normalized = path.resolve(text);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
 function isLegacyJavaPath(file = '') {
   const normalized = String(file || '').toLowerCase();
   return normalized.includes('jre-legacy') || normalized.includes('java-runtime-legacy');
+}
+
+function isJava8Path(file = '') {
+  const normalized = String(file || '').toLowerCase();
+  return isLegacyJavaPath(normalized)
+    || /(jdk-?8|jre-?8|jdk8|jre8|8u|1\.8|java8|temurin-8)/i.test(normalized);
+}
+
+function javaMajorFromVersion(version = '') {
+  const text = String(version || '').trim();
+  const match = text.match(/^"?(\d+)(?:\.(\d+))?/);
+  if (!match) return 0;
+  const first = Number(match[1]);
+  if (first === 1 && match[2]) return Number(match[2]);
+  return first;
+}
+
+async function javaMajorFromReleaseFile(javaPath = '') {
+  try {
+    const releasePath = path.join(path.dirname(path.dirname(javaPath)), 'release');
+    const text = await fs.readFile(releasePath, 'utf8');
+    const match = text.match(/^JAVA_VERSION="([^"]+)"/m);
+    return javaMajorFromVersion(match?.[1] || '');
+  } catch {
+    return 0;
+  }
+}
+
+async function isJava8Candidate(file = '') {
+  return isJava8Path(file) || await javaMajorFromReleaseFile(file) === 8;
 }
 
 function isManagedAhtJavaPath(file = '', cacheDir = '') {
@@ -176,6 +213,29 @@ function isManagedAhtJavaPath(file = '', cacheDir = '') {
 function certificateFailureMessage(error = null) {
   const text = `${error?.message || error || ''}`;
   return /PKIX|certification path|unable to find valid certification path|Failed to validate certificates/i.test(text);
+}
+
+export function javaSetupHelpMessage(platform = process.platform) {
+  const runtime = platform === 'win32'
+    ? 'Eclipse Temurin JDK 8 (HotSpot) x64'
+    : 'Java 8 / JDK 8';
+  return `Install ${runtime}, restart AHT Launcher, then click Update again.`;
+}
+
+export function friendlyForgeJavaErrorMessage(error = null, javaPath = 'java', platform = process.platform) {
+  const text = `${error?.message || error || ''}`;
+  const help = javaSetupHelpMessage(platform);
+  if (error?.code === 'ENOENT' || /ENOENT|not found|spawn .* ENOENT/i.test(text)) {
+    return `Java 8 runtime was not found (${javaPath}). ${help}`;
+  }
+  if (certificateFailureMessage(error)) {
+    return `Forge could not validate Mojang/Forge HTTPS certificates with the selected Java runtime (${javaPath}). ${help}`;
+  }
+  return '';
+}
+
+function managedJavaDownloadFailureMessage(error = null, platform = process.platform) {
+  return `AHT could not download its managed Java 8 runtime. ${javaSetupHelpMessage(platform)}`;
 }
 
 function defaultJavaCacheDir(plan = {}, options = {}) {
@@ -202,10 +262,14 @@ async function ensureManagedJava8Runtime(plan = {}, options = {}) {
   if (!downloadUrl) return '';
   await ensureDir(cacheDir);
   const archivePath = path.join(cacheDir, 'temurin-jre8.zip');
-  options.logger?.log?.('Downloading current Java 8 runtime for Forge installer HTTPS support...');
-  await downloadToFile(downloadUrl, archivePath);
-  options.logger?.log?.('Extracting Java 8 runtime...');
-  await extractJavaArchive(archivePath, cacheDir);
+  try {
+    options.logger?.log?.('Downloading current Java 8 runtime for Forge installer HTTPS support...');
+    await downloadToFile(downloadUrl, archivePath);
+    options.logger?.log?.('Extracting Java 8 runtime...');
+    await extractJavaArchive(archivePath, cacheDir);
+  } catch (error) {
+    throw new Error(managedJavaDownloadFailureMessage(error));
+  }
   const javaPath = await findJavaInRoot(cacheDir, 8);
   if (!javaPath) {
     throw new Error(`Downloaded Java runtime, but ${javaExecutableName()} was not found in ${cacheDir}.`);
@@ -215,7 +279,7 @@ async function ensureManagedJava8Runtime(plan = {}, options = {}) {
 
 async function resolveForgeInstallerJavaPath(profile = {}, plan = {}, options = {}) {
   const resolved = await resolveJavaPath(profile, options);
-  if (isLegacyJavaPath(resolved)) {
+  if (resolved === 'java' || isLegacyJavaPath(resolved) || !(await isJava8Candidate(resolved))) {
     const managed = await ensureManagedJava8Runtime(plan, options);
     if (managed) return managed;
   }
@@ -238,9 +302,77 @@ function looksPathLike(value = '') {
 
 function pushJavaRoot(roots, value = '') {
   const text = String(value || '').trim();
-  if (text && !roots.includes(text)) {
+  if (!text) {
+    return;
+  }
+  const key = javaRootKey(text);
+  if (key && !roots.some((root) => javaRootKey(root) === key)) {
     roots.push(text);
   }
+}
+
+function windowsJavaInstallRoots(env = process.env) {
+  if (process.platform !== 'win32') {
+    return [];
+  }
+  const programRoots = uniqueValues([
+    env.ProgramW6432,
+    env.ProgramFiles,
+    env['ProgramFiles(x86)']
+  ]);
+  const userProgramRoots = uniqueValues([
+    env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'Programs') : '',
+    env.USERPROFILE ? path.join(env.USERPROFILE, '.jdks') : ''
+  ]);
+  const scoopRoots = uniqueValues([
+    env.SCOOP ? path.join(env.SCOOP, 'apps') : '',
+    env.USERPROFILE ? path.join(env.USERPROFILE, 'scoop', 'apps') : ''
+  ]);
+  const chocolateyRoot = env.ProgramData ? path.join(env.ProgramData, 'chocolatey', 'lib') : '';
+  const vendorDirs = [
+    'Eclipse Adoptium',
+    'Adoptium',
+    'Java',
+    'Microsoft',
+    'Zulu',
+    'BellSoft'
+  ];
+  const roots = [];
+  for (const root of programRoots) {
+    for (const vendor of vendorDirs) {
+      pushJavaRoot(roots, path.join(root, vendor));
+    }
+  }
+  for (const root of userProgramRoots) {
+    pushJavaRoot(roots, root);
+    for (const vendor of vendorDirs) {
+      pushJavaRoot(roots, path.join(root, vendor));
+    }
+  }
+  const packageDirs = [
+    'temurin8',
+    'temurin8-jdk',
+    'temurin8-jre',
+    'adoptium8',
+    'adoptium8-jdk',
+    'adoptium8-jre',
+    'jdk8',
+    'jre8',
+    'zulu8',
+    'zulu8-jdk',
+    'zulu8-jre'
+  ];
+  for (const root of scoopRoots) {
+    for (const dir of packageDirs) {
+      pushJavaRoot(roots, path.join(root, dir));
+    }
+  }
+  if (chocolateyRoot) {
+    for (const dir of packageDirs) {
+      pushJavaRoot(roots, path.join(chocolateyRoot, dir));
+    }
+  }
+  return roots;
 }
 
 function javaSearchRoots(profile = {}, options = {}) {
@@ -249,8 +381,12 @@ function javaSearchRoots(profile = {}, options = {}) {
   for (const root of options.javaRoots || []) {
     pushJavaRoot(roots, root);
   }
-  pushJavaRoot(roots, rootDir ? path.join(rootDir, 'runtime') : '');
+  pushJavaRoot(roots, rootDir ? path.join(rootDir, '.aht-launcher', 'java') : '');
   pushJavaRoot(roots, rootDir ? path.join(rootDir, 'java') : '');
+  for (const root of options.javaInstallRoots || windowsJavaInstallRoots()) {
+    pushJavaRoot(roots, root);
+  }
+  pushJavaRoot(roots, rootDir ? path.join(rootDir, 'runtime') : '');
   if (process.platform === 'win32' && rootDir) {
     pushJavaRoot(roots, path.resolve(rootDir, '..', '..', 'Local', 'runtime'));
   }
@@ -272,16 +408,18 @@ function javaSearchRoots(profile = {}, options = {}) {
 
 function rankJavaCandidate(file = '') {
   const normalized = String(file || '').toLowerCase();
-  if (normalized.includes('jre-legacy') || normalized.includes('java-runtime-legacy')) return 0;
-  if (normalized.includes('java-runtime-gamma')) return 2;
-  if (normalized.includes('java-runtime-beta')) return 3;
-  if (normalized.includes('java-runtime-delta')) return 4;
-  if (normalized.includes('java-runtime-epsilon')) return 5;
-  if (normalized.includes('jre_21') || normalized.includes('java-runtime-alpha')) return 8;
-  return 6;
+  if (/(temurin|adoptium|eclipse adoptium|zulu|bellsoft|microsoft|java)/i.test(normalized) && isJava8Path(normalized)) return 0;
+  if (normalized.includes('.aht-launcher') && isJava8Path(normalized)) return 1;
+  if (normalized.includes('jre-legacy') || normalized.includes('java-runtime-legacy')) return 2;
+  if (normalized.includes('java-runtime-gamma')) return 4;
+  if (normalized.includes('java-runtime-beta')) return 5;
+  if (normalized.includes('java-runtime-delta')) return 6;
+  if (normalized.includes('java-runtime-epsilon')) return 7;
+  if (normalized.includes('jre_21') || normalized.includes('java-runtime-alpha')) return 9;
+  return 8;
 }
 
-async function findJavaInRoot(root, maxDepth = 6) {
+async function findJavaInRoot(root, maxDepth = 6, options = {}) {
   const target = javaExecutableName().toLowerCase();
   const matches = [];
   async function visit(dir, depth) {
@@ -303,31 +441,57 @@ async function findJavaInRoot(root, maxDepth = 6) {
   }
   await visit(root, 0);
   matches.sort((left, right) => rankJavaCandidate(left) - rankJavaCandidate(right) || left.localeCompare(right));
+  if (options.requireJava8) {
+    for (const match of matches) {
+      if (await isJava8Candidate(match)) return match;
+    }
+    return '';
+  }
   return matches[0] || '';
 }
 
 export async function resolveJavaPath(profile = {}, options = {}) {
   const configured = String(options.javaPath || '').trim();
-  const candidates = [];
+  const explicitCandidates = [];
   if (configured && configured !== 'java') {
-    candidates.push(configured);
+    explicitCandidates.push(configured);
   }
-  for (const envName of ['JAVA_HOME', 'JRE_HOME']) {
-    const envPath = String(process.env[envName] || '').trim();
-    if (envPath) {
-      candidates.push(path.join(envPath, 'bin', javaExecutableName()));
-    }
-  }
-  for (const candidate of candidates) {
+  for (const candidate of explicitCandidates) {
     if (looksPathLike(candidate) && await pathExists(candidate)) {
       return candidate;
     }
   }
+  const envCandidates = [];
+  for (const envName of ['AHT_JAVA_HOME', 'JAVA8_HOME', 'JDK8_HOME', 'JRE8_HOME', 'JDK_HOME', 'JAVA_HOME', 'JRE_HOME']) {
+    const envPath = String(process.env[envName] || '').trim();
+    if (envPath) {
+      envCandidates.push(path.join(envPath, 'bin', javaExecutableName()));
+    }
+  }
+  const fallbackCandidates = [];
+  for (const candidate of envCandidates) {
+    if (looksPathLike(candidate) && await pathExists(candidate)) {
+      if (await isJava8Candidate(candidate)) {
+        return candidate;
+      }
+      fallbackCandidates.push(candidate);
+    }
+  }
+  let fallbackRootJava = '';
   for (const root of javaSearchRoots(profile, options)) {
-    const javaPath = await findJavaInRoot(root);
+    const javaPath = await findJavaInRoot(root, 6, { requireJava8: true });
     if (javaPath) {
       return javaPath;
     }
+    if (!fallbackRootJava) {
+      fallbackRootJava = await findJavaInRoot(root);
+    }
+  }
+  for (const candidate of fallbackCandidates) {
+    return candidate;
+  }
+  if (fallbackRootJava) {
+    return fallbackRootJava;
   }
   return configured || 'java';
 }
@@ -352,11 +516,8 @@ function runProcess(command, args, options = {}) {
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
     child.once('error', (error) => {
-      if (error?.code === 'ENOENT') {
-        reject(new Error(`Java runtime was not found (${command}). Open Minecraft Launcher once so it can download its runtime, or install Java and try Update again.`));
-      } else {
-        reject(error);
-      }
+      const friendly = friendlyForgeJavaErrorMessage(error, command);
+      reject(friendly ? new Error(friendly) : error);
     });
     child.once('close', (code) => {
       const text = output.join('');
@@ -395,15 +556,26 @@ export async function installForgeLoader(profile, options = {}) {
   } catch (error) {
     const cacheDir = defaultJavaCacheDir(plan, options);
     if (!certificateFailureMessage(error) || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
-      throw error;
+      const friendly = friendlyForgeJavaErrorMessage(error, plan.javaPath);
+      throw new Error(friendly || error.message || String(error));
     }
     options.logger?.log?.('Forge installer Java failed HTTPS certificate validation. Retrying with current Java 8 runtime...');
-    const managedJava = await ensureManagedJava8Runtime(plan, { ...options, forceDownloadJava: true });
-    result = await runForgeInstallerProcess(plan, options, managedJava);
+    let managedJava = '';
+    try {
+      managedJava = await ensureManagedJava8Runtime(plan, { ...options, forceDownloadJava: true });
+      result = await runForgeInstallerProcess(plan, options, managedJava);
+    } catch (retryError) {
+      const friendly = friendlyForgeJavaErrorMessage(retryError, managedJava || plan.javaPath);
+      throw new Error(friendly || managedJavaDownloadFailureMessage(retryError));
+    }
   }
-  const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs || 15000);
+  const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs || 60000);
   if (!installed.installed) {
     const tail = outputTail(result.output);
+    const friendly = friendlyForgeJavaErrorMessage(tail, plan.javaPath);
+    if (friendly) {
+      throw new Error(friendly);
+    }
     throw new Error(`Forge installer finished, but no compatible Forge ${forgeLoaderVersion(plan.loaderId)} profile was found in ${path.join(plan.rootDir, 'versions')}.${tail ? ` Installer output:\n${tail}` : ''}`);
   }
   plan.versionId = installed.versionId;

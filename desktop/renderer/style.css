@@ -105,6 +105,34 @@ body::before {
   box-shadow: var(--bevel), 0 16px 32px rgba(0, 0, 0, 0.28);
 }
 
+.aht-art {
+  position: relative;
+  overflow: hidden;
+  background: #151819 url("assets/aht-cover.png") center / cover no-repeat !important;
+  color: transparent !important;
+  text-shadow: none !important;
+}
+
+.aht-art > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.brand-mark.aht-art {
+  background-size: cover !important;
+  background-position: center !important;
+}
+
+.game-thumb.aht-art,
+.profile-avatar.aht-art,
+.download-thumb.aht-art {
+  background-size: cover !important;
+  background-position: center !important;
+}
 .brand-copy {
   display: grid;
   gap: 2px;

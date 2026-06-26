@@ -50,6 +50,10 @@ if (!proof.trusted || proof.source !== 'local-hmac' || saved.token.split('.').le
 if (saved.payload.protocol !== LAUNCHER_PROOF_PROTOCOL || saved.payload.minecraftUsername !== 'ProofUser') {
   throw new Error(`Proof payload did not include expected protocol/user: ${JSON.stringify(saved.payload)}`);
 }
+const proofLifetimeMs = Date.parse(saved.payload.expiresAt) - Date.parse(saved.payload.issuedAt);
+if (proofLifetimeMs < 59 * 60 * 1000 || proofLifetimeMs > 61 * 60 * 1000) {
+  throw new Error(`Expected one-hour launcher proof lifetime, got ${proofLifetimeMs}ms`);
+}
 if (saved.proofFile !== path.resolve(proofFile)) {
   throw new Error(`Unexpected proof file path: ${saved.proofFile}`);
 }

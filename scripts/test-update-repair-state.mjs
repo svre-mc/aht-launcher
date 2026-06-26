@@ -27,7 +27,7 @@ assert(renderer.includes('els.downloadsRowProgress.hidden = !progressVisible;'),
 assert(renderer.includes('setProgress(shouldShowUpdateProgress(state), estimateProgress(state), updateProgressLabel(state));'), 'pollUpdate must use normalized progress visibility.');
 assert(renderer.includes('if (shouldShowUpdateProgress(lastUpdateState))'), 'renderStatus must use normalized progress visibility.');
 assert(!renderer.includes('lastUpdateState?.running || lastUpdateState?.lastResult || lastUpdateState?.error'), 'renderer must not treat lastResult as active progress forever.');
-assert(renderer.includes('lastUpdateState = {\n    running: true,'), 'startUpdate must create an optimistic running state for first-click feedback.');
+assert(/lastUpdateState\s*=\s*\{\s*running:\s*true,/.test(renderer), 'startUpdate must create an optimistic running state for first-click feedback.');
 assert(renderer.includes('lastIntegrityScan = null;'), 'repair must clear stale scan results before starting.');
 assert(renderer.includes('setUnavailable(els.scanButton, true);'), 'update and repair must lock Scan while installing.');
 assert(renderer.includes('setInterval(pollUpdate, 500)'), 'update polling should be responsive while installing.');

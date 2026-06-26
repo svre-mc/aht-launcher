@@ -3743,7 +3743,7 @@ ipcMain.handle('play:start', async () => {
     throw new Error(initialLaunchState.launchBlockedReason);
   }
 
-  keepOpenUntil = Date.now() + 20_000;
+  keepOpenUntil = Date.now() + 5 * 60_000;
   const identity = await identityPayload(config);
   const launcherProof = await writeLauncherProof({
     config,

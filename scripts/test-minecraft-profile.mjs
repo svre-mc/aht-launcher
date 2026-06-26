@@ -13,6 +13,8 @@ import {
   buildForgeInstallPlan,
   findInstalledForgeVersion,
   forgeInstallerUrl,
+  friendlyForgeJavaErrorMessage,
+  javaSetupHelpMessage,
   resolveJavaPath
 } from '../src/forgeInstaller.js';
 
@@ -144,12 +146,122 @@ const resolvedJava = await resolveJavaPath(created, { javaRoots: [fakeRuntimeRoo
 if (resolvedJava !== fakeLegacyJava) {
   throw new Error(`Expected legacy Minecraft Java runtime, got ${resolvedJava}`);
 }
+const fakeBundledLegacyJava = path.join(minecraftRoot, 'runtime', 'jre-legacy', 'windows-x64', 'jre-legacy', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const fakeInstalledJavaRoot = path.join(root, 'Program Files', 'Eclipse Adoptium');
+const fakeInstalledJava = path.join(fakeInstalledJavaRoot, 'jdk-8.0.999.1-hotspot', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+await fs.mkdir(path.dirname(fakeBundledLegacyJava), { recursive: true });
+await fs.mkdir(path.dirname(fakeInstalledJava), { recursive: true });
+await fs.writeFile(fakeBundledLegacyJava, 'bundled-legacy');
+await fs.writeFile(fakeInstalledJava, 'temurin-8');
+const resolvedInstalledJava = await resolveJavaPath(created, { javaInstallRoots: [fakeInstalledJavaRoot] });
+if (resolvedInstalledJava !== fakeInstalledJava) {
+  throw new Error(`Expected installed Temurin Java 8 to beat bundled legacy Java, got ${resolvedInstalledJava}`);
+}
+const fakeJava17Home = path.join(root, 'Program Files', 'Java', 'jdk-17');
+const fakeJava17 = path.join(fakeJava17Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+await fs.mkdir(path.dirname(fakeJava17), { recursive: true });
+await fs.writeFile(fakeJava17, 'java-17');
+await fs.writeFile(path.join(fakeJava17Home, 'release'), 'JAVA_VERSION="17.0.10"\n');
+const previousJavaHome = process.env.JAVA_HOME;
+process.env.JAVA_HOME = fakeJava17Home;
+try {
+  const resolvedWithWrongJavaHome = await resolveJavaPath(created, { javaInstallRoots: [fakeInstalledJavaRoot] });
+  if (resolvedWithWrongJavaHome !== fakeInstalledJava) {
+    throw new Error(`Expected installed Temurin Java 8 to beat JAVA_HOME Java 17, got ${resolvedWithWrongJavaHome}`);
+  }
+} finally {
+  if (previousJavaHome === undefined) {
+    delete process.env.JAVA_HOME;
+  } else {
+    process.env.JAVA_HOME = previousJavaHome;
+  }
+}
+const fakeJava8EnvHome = path.join(root, 'Program Files', 'Eclipse Adoptium', 'jdk-8.0.888.1-hotspot-env');
+const fakeJava8Env = path.join(fakeJava8EnvHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+await fs.mkdir(path.dirname(fakeJava8Env), { recursive: true });
+await fs.writeFile(fakeJava8Env, 'temurin-8-env');
+await fs.writeFile(path.join(fakeJava8EnvHome, 'release'), 'JAVA_VERSION="1.8.0_888"\n');
+const previousJdk8Home = process.env.JDK8_HOME;
+const previousJavaHomeForJdk8 = process.env.JAVA_HOME;
+process.env.JAVA_HOME = fakeJava17Home;
+process.env.JDK8_HOME = fakeJava8EnvHome;
+try {
+  const resolvedWithJdk8Home = await resolveJavaPath(created, { javaInstallRoots: [] });
+  if (resolvedWithJdk8Home !== fakeJava8Env) {
+    throw new Error(`Expected JDK8_HOME Temurin Java 8 to beat JAVA_HOME Java 17, got ${resolvedWithJdk8Home}`);
+  }
+} finally {
+  if (previousJdk8Home === undefined) {
+    delete process.env.JDK8_HOME;
+  } else {
+    process.env.JDK8_HOME = previousJdk8Home;
+  }
+  if (previousJavaHomeForJdk8 === undefined) {
+    delete process.env.JAVA_HOME;
+  } else {
+    process.env.JAVA_HOME = previousJavaHomeForJdk8;
+  }
+}
+if (process.platform === 'win32') {
+  const fakeLocalAppData = path.join(root, 'LocalAppData');
+  const fakeLocalTemurinHome = path.join(fakeLocalAppData, 'Programs', 'Eclipse Adoptium', 'jdk-8.0.889.1-hotspot');
+  const fakeLocalTemurin = path.join(fakeLocalTemurinHome, 'bin', 'java.exe');
+  await fs.mkdir(path.dirname(fakeLocalTemurin), { recursive: true });
+  await fs.writeFile(fakeLocalTemurin, 'temurin-8-localappdata');
+  await fs.writeFile(path.join(fakeLocalTemurinHome, 'release'), 'JAVA_VERSION="1.8.0_889"\n');
+  const envNames = ['LOCALAPPDATA', 'ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData', 'USERPROFILE', 'AHT_JAVA_HOME', 'JAVA8_HOME', 'JDK8_HOME', 'JRE8_HOME', 'JDK_HOME', 'JAVA_HOME', 'JRE_HOME'];
+  const previousEnv = new Map(envNames.map((name) => [name, process.env[name]]));
+  try {
+    process.env.LOCALAPPDATA = fakeLocalAppData;
+    process.env.ProgramW6432 = path.join(root, 'empty-program-w6432');
+    process.env.ProgramFiles = path.join(root, 'empty-program-files');
+    process.env['ProgramFiles(x86)'] = path.join(root, 'empty-program-files-x86');
+    process.env.ProgramData = path.join(root, 'empty-program-data');
+    process.env.USERPROFILE = path.join(root, 'empty-user-profile');
+    for (const name of ['AHT_JAVA_HOME', 'JAVA8_HOME', 'JDK8_HOME', 'JRE8_HOME', 'JDK_HOME', 'JAVA_HOME', 'JRE_HOME']) {
+      delete process.env[name];
+    }
+    const resolvedLocalTemurin = await resolveJavaPath(created, { javaRoots: [] });
+    if (resolvedLocalTemurin !== fakeLocalTemurin) {
+      throw new Error(`Expected user-local Temurin Java 8 to be detected, got ${resolvedLocalTemurin}`);
+    }
+  } finally {
+    for (const [name, value] of previousEnv) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+}
+const fakeGenericJava8Home = path.join(root, 'custom-runtime-with-release-file');
+const fakeGenericJava8 = path.join(fakeGenericJava8Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+await fs.mkdir(path.dirname(fakeGenericJava8), { recursive: true });
+await fs.writeFile(fakeGenericJava8, 'generic-java-8');
+await fs.writeFile(path.join(fakeGenericJava8Home, 'release'), 'JAVA_VERSION="1.8.0_452"\n');
+const resolvedReleaseFileJava8 = await resolveJavaPath(created, { javaRoots: [fakeGenericJava8Home] });
+if (resolvedReleaseFileJava8 !== fakeGenericJava8) {
+  throw new Error(`Expected release-file Java 8 detection, got ${resolvedReleaseFileJava8}`);
+}
 const explicitJava = path.join(root, 'custom-java', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 await fs.mkdir(path.dirname(explicitJava), { recursive: true });
 await fs.writeFile(explicitJava, 'custom');
 const resolvedExplicitJava = await resolveJavaPath(created, { javaPath: explicitJava, javaRoots: [fakeRuntimeRoot] });
 if (resolvedExplicitJava !== explicitJava) {
   throw new Error(`Expected explicit Java path, got ${resolvedExplicitJava}`);
+}
+const javaHelp = javaSetupHelpMessage('win32');
+if (!javaHelp.includes('Eclipse Temurin JDK 8') || !javaHelp.includes('restart AHT Launcher')) {
+  throw new Error(`Java setup help is not specific enough: ${javaHelp}`);
+}
+const missingJavaMessage = friendlyForgeJavaErrorMessage(Object.assign(new Error('spawn java ENOENT'), { code: 'ENOENT' }), 'java', 'win32');
+if (!missingJavaMessage.includes('Java 8 runtime was not found') || !missingJavaMessage.includes('Eclipse Temurin JDK 8')) {
+  throw new Error(`Missing Java message is not actionable: ${missingJavaMessage}`);
+}
+const certificateMessage = friendlyForgeJavaErrorMessage(new Error('sun.security.provider.certpath.SunCertPathBuilderException: unable to find valid certification path to requested target'), fakeLegacyJava, 'win32');
+if (!certificateMessage.includes('could not validate Mojang/Forge HTTPS certificates') || !certificateMessage.includes('Eclipse Temurin JDK 8') || certificateMessage.includes('SunCertPathBuilderException')) {
+  throw new Error(`Certificate message is not clean: ${certificateMessage}`);
 }
 
 const macAuthRoot = path.join(root, 'mac-launcher-auth');
