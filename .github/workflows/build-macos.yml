@@ -8,11 +8,6 @@ on:
         required: true
         type: boolean
         default: true
-      launcher_version:
-        description: "Launcher version to build. Leave blank to use package.json."
-        required: false
-        type: string
-        default: ""
   push:
     branches:
       - main
@@ -22,14 +17,13 @@ on:
       - "config/**"
       - "desktop/**"
       - "pack-fixes/**"
-      - "public/**"
       - "server-lock-mod/build/libs/aht-version-lock-*.jar"
       - "src/**"
       - "scripts/prepare-launcher-update.mjs"
-      - "scripts/set-package-version.mjs"
       - "scripts/upload-r2-plan.mjs"
       - "scripts/test-github-workflow-dispatch.mjs"
       - "scripts/test-launcher-update-manifest.mjs"
+      - "scripts/validate-launcher-update-manifest.mjs"
       - "package.json"
       - "package-lock.json"
       - "README.md"
@@ -56,7 +50,9 @@ jobs:
             runner: macos-14
             build_script: dist:regular:macos
             artifact_name: aht-launcher-macos
-            artifact_path: release-builds/macos/*.dmg
+            artifact_path: |
+              release-builds/macos/*.dmg
+              release-builds/macos/*.zip
 
     env:
       CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -80,11 +76,6 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-
-      - name: Apply launcher version override
-        if: github.event_name == 'workflow_dispatch' && inputs.launcher_version != ''
-        run: node scripts/set-package-version.mjs "${{ inputs.launcher_version }}"
-
 
       - name: Install dependencies
         run: npm ci
@@ -140,9 +131,8 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Apply launcher version override
-        if: github.event_name == 'workflow_dispatch' && inputs.launcher_version != ''
-        run: node scripts/set-package-version.mjs "${{ inputs.launcher_version }}"
+      - name: Test launcher update manifest
+        run: npm run test:launcher-update-manifest
 
       - name: Download launcher artifacts
         uses: actions/download-artifact@v4
@@ -160,6 +150,9 @@ jobs:
 
       - name: Prepare launcher update manifest
         run: node scripts/prepare-launcher-update.mjs --artifacts ci-artifacts --out ci-launcher-update --latest-url "$AHT_LAUNCHER_UPDATE_URL"
+
+      - name: Validate generated launcher update manifest
+        run: node scripts/validate-launcher-update-manifest.mjs ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"
 
       - name: Create or update GitHub Release
         run: |

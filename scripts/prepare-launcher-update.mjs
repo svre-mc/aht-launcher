@@ -56,6 +56,7 @@ function contentType(file) {
   if (lower.endsWith('.json')) return 'application/json';
   if (lower.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
   if (lower.endsWith('.dmg')) return 'application/x-apple-diskimage';
+  if (lower.endsWith('.zip')) return 'application/zip';
   return 'application/octet-stream';
 }
 
@@ -81,6 +82,10 @@ function newestMatch(files, pattern) {
     .map((file) => ({ file, stat: fs.statSync(file) }))
     .sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
   return matches[0]?.file || '';
+}
+
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function requireArtifact(files, pattern, label) {
@@ -122,13 +127,26 @@ function defaultLatestUrl(config) {
     || 'https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json';
 }
 
+function requireHttpsLatestUrl(latestUrl = '') {
+  let parsed = null;
+  try {
+    parsed = new URL(String(latestUrl || ''));
+  } catch {
+    throw new Error('Launcher update latest URL must be a valid HTTPS URL.');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Launcher update latest URL must be HTTPS.');
+  }
+  return parsed.toString();
+}
+
 export async function prepareLauncherUpdate(options = {}) {
   const packageJson = await readJson(path.join(repoRoot, 'package.json'), {});
   const config = await readJson(path.join(repoRoot, 'config', 'app.defaults.json'), {});
   const artifactsDir = path.resolve(options.artifactsDir || 'ci-artifacts');
   const outDir = path.resolve(options.outDir || 'ci-launcher-update');
   const version = String(options.version || process.env.AHT_LAUNCHER_VERSION || packageJson.version || '').trim();
-  const latestUrl = String(options.latestUrl || defaultLatestUrl(config)).trim();
+  const latestUrl = requireHttpsLatestUrl(String(options.latestUrl || defaultLatestUrl(config)).trim());
 
   if (!version) throw new Error('Launcher version is required.');
   if (!latestUrl) throw new Error('Launcher update latest URL is required.');
@@ -136,9 +154,12 @@ export async function prepareLauncherUpdate(options = {}) {
 
   const rootUrl = launcherRootUrl(latestUrl);
   const files = await listFiles(artifactsDir);
-  const windowsFile = requireArtifact(files, /^AHT-Launcher-Windows-10-11-.*\.exe$/i, 'Windows 10/11');
-  const macArmFile = requireArtifact(files, /^AHT-Launcher-macOS-arm64-.*\.dmg$/i, 'macOS Apple Silicon');
-  const macX64File = requireArtifact(files, /^AHT-Launcher-macOS-x64-.*\.dmg$/i, 'macOS Intel');
+  const artifactVersion = escapeRegExp(version);
+  const windowsFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Windows-10-11-${artifactVersion}\\.exe$`, 'i'), 'Windows 10/11');
+  const macArmUpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-arm64-${artifactVersion}\\.zip$`, 'i'), 'macOS Apple Silicon update ZIP');
+  const macX64UpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.zip$`, 'i'), 'macOS Intel update ZIP');
+  const macArmInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-arm64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Apple Silicon DMG');
+  const macX64InstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Intel DMG');
 
   const platforms = {};
   const uploads = [];
@@ -155,25 +176,48 @@ export async function prepareLauncherUpdate(options = {}) {
   addAliases(platforms, ['win32-x64', 'win32', 'windows', 'windows-x64'], windows.entry);
 
   const macArm = await artifactEntry({
-    file: macArmFile,
+    file: macArmUpdateFile,
     key: 'darwin-arm64',
     label: 'macOS Apple Silicon',
-    kind: 'dmg',
+    kind: 'zip',
     rootUrl
   });
   uploads.push(macArm.upload);
   addAliases(platforms, ['darwin-arm64', 'macos-arm64'], macArm.entry);
 
   const macX64 = await artifactEntry({
-    file: macX64File,
+    file: macX64UpdateFile,
     key: 'darwin-x64',
     label: 'macOS Intel',
-    kind: 'dmg',
+    kind: 'zip',
     rootUrl
   });
   uploads.push(macX64.upload);
   addAliases(platforms, ['darwin-x64', 'macos-x64', 'darwin', 'macos'], macX64.entry);
 
+  const macArmInstaller = await artifactEntry({
+    file: macArmInstallerFile,
+    key: 'darwin-arm64',
+    label: 'macOS Apple Silicon installer',
+    kind: 'dmg',
+    rootUrl
+  });
+  uploads.push(macArmInstaller.upload);
+
+  const macX64Installer = await artifactEntry({
+    file: macX64InstallerFile,
+    key: 'darwin-x64',
+    label: 'macOS Intel installer',
+    kind: 'dmg',
+    rootUrl
+  });
+  uploads.push(macX64Installer.upload);
+
+  const downloads = {
+    'windows-x64': { ...windows.entry },
+    'macos-arm64': { ...macArmInstaller.entry },
+    'macos-x64': { ...macX64Installer.entry }
+  };
 
   const manifest = {
     schemaVersion: 1,
@@ -188,7 +232,8 @@ export async function prepareLauncherUpdate(options = {}) {
       commit: process.env.GITHUB_SHA || '',
       runId: process.env.GITHUB_RUN_ID || ''
     },
-    platforms
+    platforms,
+    downloads
   };
 
   const manifestPath = path.join(outDir, 'launcher', 'latest.json');

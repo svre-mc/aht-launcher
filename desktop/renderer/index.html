@@ -10,7 +10,7 @@
   <main class="app-frame">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">AHT</div>
+        <div class="brand-mark bill-art"><span>AHT</span></div>
         <div class="brand-copy">
           <strong>A Hard Time</strong>
           <span>Launcher</span>
@@ -19,14 +19,14 @@
 
       <div class="game-list">
         <button id="gameTileButton" class="game-tile active" type="button" data-tab="player">
-          <span class="game-thumb"><span>AHT</span></span>
+          <span class="game-thumb aht-art"><span>AHT</span></span>
           <span class="game-copy">
             <strong id="sidePackTitle">AHT</strong>
-            <small><span class="button-icon icon-download" aria-hidden="true"></span><span id="sideLatestVersion">-</span></small>
+            <small><span class="sidebar-version-dot" aria-hidden="true"></span><span id="sideInstalledVersion">Not Installed</span></small>
           </span>
         </button>
         <button class="game-tile coming-soon" type="button" disabled aria-disabled="true" tabindex="-1">
-          <span class="game-thumb alt"><span>AHT</span></span>
+          <span class="game-thumb alt aht-art"><span>AHT</span></span>
           <span class="game-copy">
             <strong>AHT 3.0</strong>
             <small>Coming soon</small>
@@ -64,7 +64,7 @@
         </nav>
 
         <div class="profile-card">
-          <div class="profile-avatar">AHT</div>
+          <div class="profile-avatar bill-art"><span>AHT</span></div>
           <div class="profile-copy">
             <strong id="playerLabelView">Player</strong>
             <span id="syncStatus"><span class="online-dot"></span>Sync -</span>
@@ -75,7 +75,7 @@
       <section id="setupNotice" class="setup-notice" hidden>
         <div>
           <h2>Launcher setup required</h2>
-          <p>Add the release feed and CurseForge proxy once. Players stay locked here until the pack is current.</p>
+          <p>Finish launcher setup once. The pack stays locked until the install is ready.</p>
         </div>
         <div class="setup-actions">
           <button id="setupAutoButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
@@ -116,32 +116,7 @@
           </div>
         </section>
 
-        <section class="details-grid player-technical" hidden>
-          <section class="panel">
-            <div class="panel-head">
-              <h2>Instance</h2>
-              <span class="quiet-label">Managed folder</span>
-            </div>
-            <dl class="facts">
-              <div><dt>Folder</dt><dd id="instanceDir">-</dd></div>
-              <div><dt>Profile</dt><dd id="minecraftProfile">-</dd></div>
-              <div><dt>Install ID</dt><dd id="installId">-</dd></div>
-              <div><dt>Activity</dt><dd id="activityState">Idle</dd></div>
-            </dl>
-          </section>
 
-          <section id="activityPanel" class="panel activity-panel">
-            <div class="panel-head">
-              <h2>Launcher Log</h2>
-              <span class="quiet-label">Output</span>
-            </div>
-            <div id="progressWrap" class="progress-wrap" hidden>
-              <div class="progress-meta"><span id="progressLabel">Preparing</span><span id="progressCount">0%</span></div>
-              <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
-            </div>
-            <pre id="log" class="log"></pre>
-          </section>
-        </section>
       </section>
 
       <section id="settings" class="view">
@@ -170,7 +145,7 @@
               <div>
                 <span id="setupAssistantState">Setup assistant</span>
                 <strong id="setupAssistantTitle">Checking local paths</strong>
-                <p id="setupAssistantDetail">Detected release and instance paths appear here.</p>
+                <p id="setupAssistantDetail">Feed: checking | Install folder: checking</p>
               </div>
               <button id="settingsAutoSetupButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
             </div>
@@ -224,6 +199,7 @@
 
           <nav class="dev-tabs" aria-label="Developer sections">
             <button class="dev-tab active" type="button" data-dev-target="releaseTools">Release Builder</button>
+            <button class="dev-tab" type="button" data-dev-target="modpackZipTools">Modpack ZIP</button>
             <button class="dev-tab" type="button" data-dev-target="launcherUpdateTools">Launcher Updates</button>
             <button class="dev-tab" type="button" data-dev-target="serverUploadTools">Server Upload</button>
             <button class="dev-tab" type="button" data-dev-target="updateLogTools">Update Logs</button>
@@ -237,7 +213,7 @@
             <div><span>Unique IPs</span><button id="ipCount" class="metric-value" type="button" data-event-filter="ips">-</button></div>
           </section>
 
-          <section id="releaseTools" class="dev-section">
+          <section id="releaseTools" class="dev-section" data-dev-panel>
             <div class="dev-section-head">
               <h2>Release Builder</h2>
               <div class="dev-actions">
@@ -271,7 +247,7 @@
                 <span id="releaseCheckState">Ready</span>
                 <strong id="releaseCheckTitle">Choose a ZIP</strong>
               </div>
-              <p id="releaseCheckDetail">Pick a CurseForge export ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.</p>
+              <p id="releaseCheckDetail">Pick an exact AHT client ZIP from Modpack ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.</p>
             </div>
             <div id="releaseUploadProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="releaseUploadProgressLabel">Preparing upload</span><span id="releaseUploadProgressCount">0%</span></div>
@@ -279,7 +255,26 @@
             </div>
           </section>
 
-          <section id="launcherUpdateTools" class="dev-section">
+          <section id="modpackZipTools" class="dev-section" data-dev-panel hidden>
+            <div class="dev-section-head">
+              <h2>Modpack ZIP</h2>
+              <div class="dev-actions">
+                <button id="buildClientZipButton" class="button primary compact" type="button"><span class="button-icon icon-save" aria-hidden="true"></span>Create ZIP</button>
+              </div>
+            </div>
+            <div class="dev-fields">
+              <label class="span-2">Client Modpack Folder <span class="browse"><input id="clientModpackDirInput" type="text" placeholder="C:\AHT\Source Client"><button id="pickClientModpackDirButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label>Pack Version <input id="clientZipVersionInput" type="text" placeholder="2.8.52"></label>
+            </div>
+            <div id="clientZipStatus" class="release-check-card warn">
+              <div>
+                <span>Exact client package</span>
+                <strong>Ready to create</strong>
+              </div>
+              <p>Creates a clean AHT ZIP from config, fancymenu_data, mods, resourcepacks, resources, scripts, structures, options.txt, and optionsof.txt.</p>
+            </div>
+          </section>
+          <section id="launcherUpdateTools" class="dev-section" data-dev-panel hidden>
             <div class="dev-section-head">
               <h2>Launcher Updates</h2>
               <div class="dev-actions">
@@ -298,11 +293,11 @@
                 <span>Launcher updates</span>
                 <strong>GitHub Actions ready</strong>
               </div>
-              <p>Run the GitHub release workflow. Actions builds Windows, macOS, and Ubuntu, publishes GitHub Releases, uploads R2, then players update from launcher/latest.json.</p>
+              <p>Run the GitHub release workflow. Actions builds Windows and macOS, publishes GitHub Releases, uploads R2, then players update from launcher/latest.json.</p>
             </div>
           </section>
 
-          <section id="serverUploadTools" class="dev-section">
+          <section id="serverUploadTools" class="dev-section" data-dev-panel hidden>
             <div class="dev-section-head">
               <h2>Server Upload</h2>
               <div class="dev-actions">
@@ -311,12 +306,12 @@
               </div>
             </div>
             <div class="dev-fields">
-              <label class="span-2">Server Folder <span class="browse"><input id="serverSourceInput" type="text" value="C:\RL CRAFT SERVER LIST\New folder - Copy"><button id="pickServerSourceButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
-              <label>Linux IP <input id="serverHostInput" type="text" value="192.168.1.121"></label>
+              <label class="span-2">Server Folder <span class="browse"><input id="serverSourceInput" type="text" placeholder="Select your local server folder"><button id="pickServerSourceButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label>Server IP <input id="serverHostInput" type="text" placeholder="192.168.x.x"></label>
               <label>Port <input id="serverPortInput" type="number" min="1" max="65535" value="22"></label>
-              <label>Username <input id="serverUsernameInput" type="text" value="notevil" autocomplete="username"></label>
+              <label>Username <input id="serverUsernameInput" type="text" placeholder="SSH username" autocomplete="username"></label>
               <label>Password <input id="serverPasswordInput" type="password" autocomplete="current-password"></label>
-              <label class="span-2">Linux Destination Folder <input id="serverRemoteDirInput" type="text" value="/home/notevil/Desktop/AHT Server Files"></label>
+              <label class="span-2">Remote Destination Folder <input id="serverRemoteDirInput" type="text" placeholder="/home/user/Desktop/AHT Server Files"></label>
             </div>
             <div id="serverTransferStatus" class="release-check-card warn">
               <div>
@@ -332,7 +327,7 @@
             <pre id="serverTransferLog" class="log dev-raw-log"></pre>
           </section>
 
-          <section id="updateLogTools" class="dev-section">
+          <section id="updateLogTools" class="dev-section" data-dev-panel hidden>
             <div class="dev-section-head">
               <h2>Update Logs</h2>
               <div class="dev-actions">
@@ -355,7 +350,7 @@
             <div id="developerUpdateLogsList" class="developer-update-log-list"></div>
           </section>
 
-          <section id="playerDataTools" class="dev-data-grid">
+          <section id="playerDataTools" class="dev-data-grid" data-dev-panel hidden>
             <section class="dev-section">
               <div class="dev-section-head">
                 <h2>Recent Events</h2>
@@ -407,7 +402,7 @@
 
       <div class="downloads-list">
         <article class="download-row">
-          <span class="game-thumb download-thumb"><span>AHT</span></span>
+          <span class="game-thumb download-thumb aht-art"><span>AHT</span></span>
           <div class="download-copy">
             <strong>A Hard Time</strong>
             <span id="downloadsState">Idle</span>
@@ -437,6 +432,20 @@
       <div class="repair-prompt-actions">
         <button id="repairPromptCancelButton" class="button compact" type="button">Cancel</button>
         <button id="repairPromptRepairButton" class="button primary compact" type="button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
+      </div>
+    </section>
+  </div>
+  <div id="updateOptionsOverlay" class="overlay repair-prompt-overlay" hidden>
+    <section class="repair-prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="updateOptionsTitle">
+      <div>
+        <p class="eyebrow">Pack Update</p>
+        <h2 id="updateOptionsTitle">Update A Hard Time?</h2>
+        <span id="updateOptionsSummary" class="account-copy">The launcher will download the current AHT modpack release.</span>
+      </div>
+      <label class="switch update-settings-switch"><input id="replaceGameSettingsInput" type="checkbox"><span></span>Replace in-game settings</label>
+      <div class="repair-prompt-actions">
+        <button id="updateOptionsBackButton" class="button compact" type="button">Back</button>
+        <button id="updateOptionsUpdateButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update</button>
       </div>
     </section>
   </div>

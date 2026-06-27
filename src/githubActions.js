@@ -99,7 +99,6 @@ export async function dispatchGithubWorkflow({
   workflow = DEFAULT_WORKFLOW,
   ref = DEFAULT_BRANCH,
   token,
-  launcherVersion = '',
   publishToR2 = true,
   fetchImpl = globalThis.fetch
 } = {}) {
@@ -107,13 +106,9 @@ export async function dispatchGithubWorkflow({
   const cleanRepo = cleanGithubRepo(repo);
   const cleanWorkflow = cleanWorkflowId(workflow);
   const cleanBranch = cleanRef(ref);
-  const version = cleanLauncherVersion(launcherVersion);
   const inputs = {
     publish_to_r2: Boolean(publishToR2)
   };
-  if (version) {
-    inputs.launcher_version = version;
-  }
   const response = await fetchImpl(`${GITHUB_API}/repos/${cleanRepo}/actions/workflows/${encodeURIComponent(cleanWorkflow)}/dispatches`, {
     method: 'POST',
     headers: githubHeaders(token),
@@ -128,7 +123,6 @@ export async function dispatchGithubWorkflow({
     repo: cleanRepo,
     workflow: cleanWorkflow,
     ref: cleanBranch,
-    version,
     actionsUrl: `https://github.com/${cleanRepo}/actions/workflows/${cleanWorkflow}`
   };
 }

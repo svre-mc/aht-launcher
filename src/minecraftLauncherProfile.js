@@ -94,6 +94,16 @@ export function loaderVersionId(minecraft = {}) {
   return `${minecraftVersion}-${loaderId}`;
 }
 
+export function loaderInstallerUrl(minecraft = {}) {
+  const loader = primaryModLoader(minecraft);
+  return String(
+    loader?.installerUrl
+    || minecraft?.forgeInstallerUrl
+    || minecraft?.loaderInstallerUrl
+    || ''
+  ).trim();
+}
+
 function uniqueVersionIds(values = []) {
   const seen = new Set();
   const result = [];
@@ -331,6 +341,7 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
     javaArgs: javaArgsFor({ config, rootDir, gameDir: config.instanceDir }),
     minecraftVersion: minecraft?.version || '',
     loaderId: primaryModLoader(minecraft || {})?.id || '',
+    loaderInstallerUrl: loaderInstallerUrl(minecraft || {}),
     accountReuseAvailable: auth.signedIn,
     accountCount: auth.accountCount,
     accountFiles: auth.files,

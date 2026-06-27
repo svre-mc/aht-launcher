@@ -11,16 +11,6 @@
     "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
     "playerLabel": ""
   },
-  "developer": {
-    "adminBaseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
-    "defaultCacheModsDir": "C:\\Users\\evil\\curseforge\\minecraft\\Instances\\RLCraft Dregora\\mods",
-    "r2Bucket": "ahtlauncher",
-    "r2AccountId": "",
-    "cacheOnlyMode": false,
-    "githubRepo": "svre-mc/aht-launcher",
-    "githubBranch": "main",
-    "githubWorkflow": "build-macos.yml"
-  },
   "launcherUpdate": {
     "enabled": true,
     "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json"
@@ -33,7 +23,7 @@
   },
   "launcherProof": {
     "enabled": true,
-    "required": false,
+    "required": true,
     "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
     "keyId": "aht-launcher-proof-v1"
   }

@@ -8,10 +8,10 @@ if (bootDeveloperMode) {
 
 if (!window.aht) {
   const mockStatus = {
-    developerMode: true,
+    developerMode: bootDeveloperMode,
     config: {
       latestUrl: "https://packs.example.com/latest.json",
-      instanceDir: "C:\\AHT\\A Hard Time",
+      instanceDir: "C:\\AHT\\A Hard Time Developer",
       curseforge: { proxyBaseUrl: "https://aht.example.workers.dev/cf/" },
       sync: {
         enabled: true,
@@ -22,7 +22,7 @@ if (!window.aht) {
       developer: {
         adminBaseUrl: "https://aht.example.workers.dev/",
         defaultOutDir: "C:\\Users\\Player\\Documents\\aht-release",
-        defaultCacheModsDir: "C:\\Users\\Player\\curseforge\\minecraft\\Instances\\RLCraft Dregora\\mods",
+        defaultCacheModsDir: "C:\\AHT\\fallback-cache\\mods",
         r2Bucket: "ahtlauncher",
         r2AccountId: "",
         githubRepo: "svre-mc/aht-launcher",
@@ -64,14 +64,14 @@ if (!window.aht) {
       profileExists: true,
       versionId: "1.12.2-forge-14.23.5.2860",
       loaderInstalled: true,
-      gameDir: "C:\\AHT\\A Hard Time"
+      gameDir: "C:\\AHT\\A Hard Time Developer"
     },
     setup: {
-      detectedInstanceDir: "C:\\Users\\Player\\curseforge\\minecraft\\Instances\\RLCraft Dregora",
-      recommendedInstanceDir: "C:\\AHT\\A Hard Time",
-      defaultInstanceDir: "C:\\AHT\\A Hard Time",
+      detectedInstanceDir: "C:\\AHT\\A Hard Time Developer",
+      recommendedInstanceDir: "C:\\AHT\\A Hard Time Developer",
+      defaultInstanceDir: "C:\\AHT\\A Hard Time Developer",
       instanceExists: true,
-      cacheModsDir: "C:\\Users\\Player\\curseforge\\minecraft\\Instances\\RLCraft Dregora\\mods",
+      cacheModsDir: "C:\\AHT\\fallback-cache\\mods",
       cacheModsExists: true,
       localReleaseLatest: "D:\\AHT\\dist-r2\\latest.json",
       latestConfigured: true,
@@ -89,11 +89,11 @@ if (!window.aht) {
       error: ""
     },
     serverTransfer: {
-      sourceDir: "C:\\RL CRAFT SERVER LIST\\New folder - Copy",
-      host: "192.168.1.121",
+      sourceDir: "",
+      host: "",
       port: 22,
-      username: "notevil",
-      remoteDir: "/home/notevil/Desktop/AHT Server Files",
+      username: "",
+      remoteDir: "",
       excludeDirs: ["DregoraRL"],
       includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
       includeRootFiles: true
@@ -103,6 +103,36 @@ if (!window.aht) {
     launchReady: false,
     launchBlockedReason: "Update required. Installed 2.8.0, latest 2.8.1."
   };
+  if (!bootDeveloperMode) {
+    delete mockStatus.config.developer;
+    delete mockStatus.serverTransfer;
+    mockStatus.config.instanceDir = "C:\\AHT\\A Hard Time";
+    mockStatus.config.curseforge = { proxyBaseUrl: "" };
+    mockStatus.config.sync = { enabled: true, sendLocalChanges: false, baseUrl: "", playerLabel: "" };
+    mockStatus.config.minecraftLauncher = {
+      enabled: true,
+      rootDir: "",
+      profileId: "a-hard-time",
+      profileName: "A Hard Time"
+    };
+    mockStatus.minecraftProfile = {
+      enabled: true,
+      profileId: "a-hard-time",
+      profileName: "A Hard Time",
+      profileExists: false,
+      versionId: "",
+      loaderInstalled: false,
+      minecraftVersion: "",
+      loaderId: "",
+      accountReuseAvailable: false
+    };
+    mockStatus.setup = {
+      instanceExists: true,
+      latestConfigured: true,
+      canAutoConfigure: false,
+      minecraftAccountReuseAvailable: false
+    };
+  }
   const mockUpdateLogs = [];
   window.aht = {
     getStatus: async () => mockStatus,
@@ -117,7 +147,7 @@ if (!window.aht) {
         version: "2.8.1",
         curseforgeFileCount: 268,
         hasCacheManifest: true,
-        packSource: "https://packs.example.com/packs/a-hard-time-dregora-2.8.1.zip"
+        packSource: "https://packs.example.com/packs/a-hard-time-2.8.1.zip"
       }
     }),
     startUpdate: async () => ({ installed: { version: "2.8.1" } }),
@@ -155,8 +185,8 @@ if (!window.aht) {
     syncChanges: async () => ({ ok: true }),
     play: async () => ({}),
     selectJson: async () => "D:\\AHT\\dist-r2\\latest.json",
-    selectZip: async () => "D:\\Downloads\\A Hard Time Dregora-2.8.2.zip",
-    selectFolder: async () => "D:\\AHT\\dist-r2",
+    selectZip: async () => "D:\\Downloads\\A Hard Time-2.8.2.zip",
+    selectFolder: async (defaultPath = "") => defaultPath || "D:\\AHT\\dist-r2",
     openPath: async () => ({}),
     devBuildRelease: async () => ({
       report: {
@@ -272,7 +302,7 @@ if (!window.aht) {
       verification: { publicLatestUrl: "https://packs.example.com/launcher/latest.json", latest: { version: "0.1.3" } }
     }),
     devPlanServerTransfer: async () => ({
-      sourceDir: "C:\\RL CRAFT SERVER LIST\\New folder - Copy",
+      sourceDir: "",
       fileCount: 128,
       totalBytes: 1024,
       excludedDirs: ["DregoraRL"],
@@ -299,10 +329,10 @@ if (!window.aht) {
       saved: true,
       encrypted: true,
       warning: "",
-      curseforgeApiKey: "preview-cf-key",
-      serverSshPassword: "preview-ssh-password",
-      launcherProofSecret: "preview-proof-secret",
-      githubToken: "preview-github-token",
+      curseforgeApiKey: "",
+      serverSshPassword: "",
+      launcherProofSecret: "",
+      githubToken: "",
       r2AccessKeyId: "",
       r2SecretAccessKey: ""
     }),
@@ -350,6 +380,11 @@ if (!window.aht) {
       ]
     })
   };
+  if (!bootDeveloperMode) {
+    for (const key of Object.keys(window.aht)) {
+      if (key.startsWith("dev")) delete window.aht[key];
+    }
+  }
 }
 
 const els = {
@@ -389,7 +424,7 @@ const els = {
   setupSettingsButton: $("#setupSettingsButton"),
   installedVersion: $("#installedVersion"),
   latestVersion: $("#latestVersion"),
-  sideLatestVersion: $("#sideLatestVersion"),
+  sideInstalledVersion: $("#sideInstalledVersion"),
   sidePackTitle: $("#sidePackTitle"),
   developerTileTitle: $("#developerTileTitle"),
   instanceDir: $("#instanceDir"),
@@ -416,6 +451,11 @@ const els = {
   repairPromptList: $("#repairPromptList"),
   repairPromptCancelButton: $("#repairPromptCancelButton"),
   repairPromptRepairButton: $("#repairPromptRepairButton"),
+  updateOptionsOverlay: $("#updateOptionsOverlay"),
+  updateOptionsSummary: $("#updateOptionsSummary"),
+  replaceGameSettingsInput: $("#replaceGameSettingsInput"),
+  updateOptionsBackButton: $("#updateOptionsBackButton"),
+  updateOptionsUpdateButton: $("#updateOptionsUpdateButton"),
   openInstanceFromPlayerButton: $("#openInstanceFromPlayerButton"),
   latestUrlInput: $("#latestUrlInput"),
   pickLatestButton: $("#pickLatestButton"),
@@ -456,6 +496,7 @@ const els = {
   developerConsole: $("#developerConsole"),
   developerSessionStatus: $("#developerSessionStatus"),
   devTabs: [...document.querySelectorAll(".dev-tab[data-dev-target]")],
+  devPanels: [...document.querySelectorAll("[data-dev-panel]")],
   saveAdminUrlButton: $("#saveAdminUrlButton"),
   loginButton: $("#loginButton"),
   loadDashboardButton: $("#loadDashboardButton"),
@@ -465,6 +506,11 @@ const els = {
   launcherProofSecretInput: $("#launcherProofSecretInput"),
   outDirInput: $("#outDirInput"),
   cacheModsInput: $("#cacheModsInput"),
+  clientModpackDirInput: $("#clientModpackDirInput"),
+  clientZipVersionInput: $("#clientZipVersionInput"),
+  pickClientModpackDirButton: $("#pickClientModpackDirButton"),
+  buildClientZipButton: $("#buildClientZipButton"),
+  clientZipStatus: $("#clientZipStatus"),
   baseUrlInput: $("#baseUrlInput"),
   channelInput: $("#channelInput"),
   bucketInput: $("#bucketInput"),
@@ -487,7 +533,6 @@ const els = {
   publishLauncherUpdateButton: $("#publishLauncherUpdateButton"),
   launcherWindowsPathInput: $("#launcherWindowsPathInput"),
   launcherMacosPathInput: $("#launcherMacosPathInput"),
-  launcherUbuntuPathInput: $("#launcherUbuntuPathInput"),
   githubRepoInput: $("#githubRepoInput"),
   githubBranchInput: $("#githubBranchInput"),
   githubWorkflowInput: $("#githubWorkflowInput"),
@@ -558,6 +603,7 @@ let launcherUpdateAutoStarted = false;
 let lastStatusRefreshAt = 0;
 let updateCompleteHideTimer = null;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
+const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
 
 function setBadge(text, state = "") {
   els.statusBadge.textContent = text;
@@ -575,11 +621,20 @@ function syncSetupNotice() {
   els.setupNotice.hidden = true;
 }
 
+function currentLogText() {
+  return els.log?.textContent || "";
+}
+
+function logIsEmpty() {
+  return !currentLogText().trim();
+}
+
 function setLog(text) {
-  els.log.textContent = text || "";
+  if (els.log) els.log.textContent = text || "";
 }
 
 function appendLog(text) {
+  if (!els.log) return;
   els.log.textContent = `${els.log.textContent}${els.log.textContent ? "\n" : ""}${text}`;
 }
 
@@ -639,7 +694,7 @@ function renderUpdateLogs(logs = []) {
   els.updateLogGrid.hidden = items.length === 0;
   if (!items.length) return;
 
-  const artClasses = ["dregora-art", "patch-art", "sync-art"];
+  const artClasses = ["aht-art", "patch-art", "sync-art"];
   for (const [index, log] of items.entries()) {
     const card = document.createElement("article");
     card.className = `feature-card ${index === 0 ? "large" : ""}`.trim();
@@ -685,8 +740,9 @@ function renderAccountGate(status) {
   const shouldGate = !status.developerMode && !status.identity?.minecraftUsername;
   els.accountOverlay.hidden = !shouldGate;
   if (shouldGate) {
-    els.accountError.textContent = "";
     window.setTimeout(() => els.minecraftUsernameInput.focus(), 0);
+  } else {
+    els.accountError.textContent = "";
   }
 }
 
@@ -735,42 +791,50 @@ function renderSetupAssistant(status) {
   const canAutoConfigure = Boolean(setup.canAutoConfigure);
 
   let state = "bad";
-  let label = "Manual setup";
-  let title = "Manual setup required";
+  let label = "Setup needed";
+  let title = "Launcher setup needed";
 
   if (ready) {
     state = "ok";
     label = "Setup ready";
-    title = "Launcher paths are set";
+    title = "Launcher ready";
   } else if (canAutoConfigure) {
     state = "warn";
-    label = "Setup found";
-    title = "Auto setup can fill local paths";
+    label = "Setup available";
+    title = status.developerMode ? "Auto setup can fill local paths" : "Setup can finish automatically";
   }
 
+  const showDiagnostics = Boolean(status.developerMode);
   const feedLine = hasFeed
-    ? `Feed: ${compactPath(latestUrl)}`
-    : setup.localReleaseLatest
+    ? (showDiagnostics ? `Feed: ${compactPath(latestUrl)}` : "Feed: connected")
+    : showDiagnostics && setup.localReleaseLatest
       ? `Local feed: ${compactPath(setup.localReleaseLatest)}`
       : "Feed: missing";
-  const instanceLine = hasInstance
-    ? instanceMissing && setup.detectedInstanceDir
-      ? `Detected instance: ${compactPath(setup.detectedInstanceDir)}`
-      : `Instance: ${compactPath(instanceDir)}${instanceMissing ? " (not found)" : ""}`
-    : setup.detectedInstanceDir
-      ? `Detected instance: ${compactPath(setup.detectedInstanceDir)}`
-      : `Default instance: ${compactPath(setup.defaultInstanceDir)}`;
-  const cacheLine = setup.cacheModsDir ? `Cache mods: ${compactPath(setup.cacheModsDir)}` : "Cache mods: not detected";
+  const instanceLine = showDiagnostics
+    ? hasInstance
+      ? instanceMissing && setup.detectedInstanceDir
+        ? `Detected instance: ${compactPath(setup.detectedInstanceDir)}`
+        : `Instance: ${compactPath(instanceDir)}${instanceMissing ? " (not found)" : ""}`
+      : setup.detectedInstanceDir
+        ? `Detected instance: ${compactPath(setup.detectedInstanceDir)}`
+        : `Default instance: ${compactPath(setup.defaultInstanceDir)}`
+    : hasInstance
+      ? `Install folder: ${instanceMissing ? "missing" : "ready"}`
+      : "Install folder: not selected";
+  const detailParts = [feedLine, instanceLine];
+  if (showDiagnostics) {
+    detailParts.push(setup.cacheModsDir ? `Cache mods: ${compactPath(setup.cacheModsDir)}` : "Cache mods: not detected");
+  }
 
   els.setupAssistantCard.className = `setup-assistant-card ${state}`.trim();
   els.setupAssistantState.textContent = label;
   els.setupAssistantTitle.textContent = title;
-  els.setupAssistantDetail.textContent = `${feedLine} | ${instanceLine} | ${cacheLine}`;
+  els.setupAssistantDetail.textContent = detailParts.join(" | ");
   setUnavailable(els.setupAutoButton, !canAutoConfigure);
   setUnavailable(els.settingsAutoSetupButton, !canAutoConfigure);
   const autoTitle = canAutoConfigure
-    ? "Apply detected release and instance paths"
-    : "No local release or instance paths were detected";
+    ? (status.developerMode ? "Apply detected release and instance paths" : "Finish launcher setup")
+    : (status.developerMode ? "No local release or instance paths were detected" : "Launcher setup is not available");
   els.setupAutoButton.title = autoTitle;
   els.settingsAutoSetupButton.title = autoTitle;
 }
@@ -803,6 +867,31 @@ function playerSafeFeedProblem(status = currentStatus) {
 function playerSafeBlockedReason(status = currentStatus) {
   if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return playerSafeFeedProblem(status);
   return status?.launchBlockedReason || "";
+}
+
+function playerSafeErrorMessage(message = "", status = currentStatus) {
+  const value = cleanErrorMessage(message);
+  if (status?.developerMode) return value;
+  if (/Release feed cannot be checked|latest\.json|GET https?:\/\//i.test(value)) {
+    return playerSafeFeedProblem({ ...status, latestError: status?.latestError || value });
+  }
+  return value;
+}
+
+function launchBlockedBadge(status = currentStatus) {
+  if (status?.launchReady) return { text: "Ready", state: "ok" };
+  const reason = playerSafeBlockedReason(status);
+  if (status?.updateBlockedReason || /Update package is not ready/i.test(reason)) return { text: "Update unavailable", state: "warn" };
+  if (status?.integrity?.counts?.corrupted > 0 || /Repair required|corrupt|mod file issue/i.test(reason)) return { text: "Repair needed", state: "warn" };
+  if (status?.updateRequired || /^Update required/i.test(reason)) return { text: "Update required", state: "warn" };
+  if (!status?.installed || /Install the pack before playing/i.test(reason)) return { text: "Not Installed", state: "warn" };
+  if (status?.latestError || /Release feed|update service|latest\.json|metadata/i.test(reason)) return { text: "Service unavailable", state: "warn" };
+  return { text: "Setup needed", state: "warn" };
+}
+
+function setLaunchStatusBadge(status = currentStatus) {
+  const badge = launchBlockedBadge(status);
+  setBadge(badge.text, badge.state);
 }
 
 function setReleaseCheck(state, label, title, detail) {
@@ -852,8 +941,11 @@ function inputValue(input, fallback = "") {
   return input ? input.value.trim() : fallback;
 }
 
-function setInputValue(input, value) {
-  if (input) input.value = value || "";
+function setInputValue(input, value, options = {}) {
+  if (!input) return;
+  if (!options.force && document.activeElement === input) return;
+  const nextValue = value == null ? "" : String(value);
+  if (input.value !== nextValue) input.value = nextValue;
 }
 
 function formatMemory(mb) {
@@ -987,18 +1079,15 @@ function queueDeveloperSecretSave() {
 
 function publishBlockReason() {
   if (!developerAuthenticated) return "Developer login is required before publishing releases.";
-  if (!selectedPackZip()) return "Choose a CurseForge export ZIP first.";
-  if (!/^https?:\/\//i.test(playerFeedUrl()) && !localCurseForgeApiKey() && !cacheOnlyMode()) {
-    return "Enter the CurseForge API key, or enable cache-only mode before first cloud setup.";
+  if (!selectedPackZip()) return "Choose an exact AHT client ZIP from Modpack ZIP first.";
+  if (!/^https?:\/\//i.test(playerFeedUrl())) {
+    return setupCloudBlockReason();
   }
   return "";
 }
 
 function setupCloudBlockReason() {
   if (!developerAuthenticated) return "Developer login is required before cloud setup.";
-  if (!localCurseForgeApiKey() && !cacheOnlyMode()) {
-    return "Enter the CurseForge API key, or enable cache-only mode before cloud setup.";
-  }
   if (!localLauncherProofSecret()) {
     return "Enter the Launcher Proof Secret before cloud setup. The server must use the same value.";
   }
@@ -1042,7 +1131,7 @@ function updateReleaseUploadState() {
   }
 }
 
-function invalidateReleaseValidation(label = "Ready", detail = "Pick a CurseForge export ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.") {
+function invalidateReleaseValidation(label = "Ready", detail = "Pick an exact AHT client ZIP from Modpack ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.") {
   releaseValidation = null;
   setReleaseUploadProgress(null, true);
   setReleaseCheck("warn", label, selectedPackZip() ? "Publish update" : "Choose a ZIP", detail);
@@ -1165,7 +1254,10 @@ async function buildReleaseFromSelectedZip(reason = "Building release") {
   setReleaseCheck("warn", reason, "Preparing selected ZIP", packZip);
   const inspected = await window.aht.devInspectPackZip(packZip);
   if (inspected.versionMismatch) {
-    throw new Error(`ZIP filename says ${inspected.versionHint}, but manifest.json says ${inspected.version}. Fix the CurseForge export manifest before upload.`);
+    throw new Error(`ZIP filename says ${inspected.versionHint}, but release metadata says ${inspected.version}. Fix the ZIP version before upload.`);
+  }
+  if (!inspected.fullClientZip) {
+    throw new Error("Legacy CurseForge export ZIPs are blocked for normal player releases. Use the Modpack ZIP tab to create an exact AHT client ZIP, then publish that ZIP.");
   }
   const result = await window.aht.devBuildRelease({
     packZip,
@@ -1176,11 +1268,12 @@ async function buildReleaseFromSelectedZip(reason = "Building release") {
   });
   releaseValidation = null;
   const cacheCount = result.report?.cacheSummary?.matchedManifestFiles ?? 0;
+  const exactZip = inspected.fullClientZip || result.latest?.installMode === "full-client-zip";
   setReleaseCheck(
     "warn",
     "Release built",
     `${inspected.name || result.report?.name || "Pack"} ${inspected.version || result.report?.version || ""}`.trim(),
-    `${cacheCount} cache entries matched. Running validation next.`
+    exactZip ? `${inspected.fileCount || result.latest?.clientZip?.fileCount || 0} exact client files. Running validation next.` : `${cacheCount} cache entries matched. Running validation next.`
   );
   setDevLog(result.report);
   return result;
@@ -1234,14 +1327,16 @@ function setMiniProgress(bar, percent = 0) {
 function restoreStatusBadge(status = currentStatus) {
   if (!status) return;
   const developerBypass = Boolean(status.developerClientBypass || status.developerMode);
-  if (!developerBypass && (status.integrity?.counts?.corrupted > 0 || status.launchBlockedReason?.startsWith("Repair required"))) {
+  if (!developerBypass && status.updateBlockedReason) {
+    setBadge("Update unavailable", "warn");
+  } else if (!developerBypass && (status.integrity?.counts?.corrupted > 0 || status.launchBlockedReason?.startsWith("Repair required"))) {
     setBadge("Repair needed", "warn");
   } else if (status.latestError && !(developerBypass && status.installed)) {
-    setBadge(isFirstPublishPending(status) ? "Not Installed" : (status.developerMode ? "Config error" : "Service unavailable"), isFirstPublishPending(status) ? "warn" : (status.developerMode ? "bad" : "warn"));
+    setBadge(isFirstPublishPending(status) ? "Not Installed" : (status.developerMode ? "Feed unavailable" : "Service unavailable"), isFirstPublishPending(status) ? "warn" : (status.developerMode ? "bad" : "warn"));
   } else if (status.updateRequired) {
     setBadge("Update required", "warn");
   } else if (status.latest || (developerBypass && status.installed)) {
-    setBadge(status.launchReady ? "Ready" : "Launch locked", status.launchReady ? "ok" : "warn");
+    setLaunchStatusBadge(status);
   } else {
     setBadge("Setup required", "warn");
   }
@@ -1269,7 +1364,8 @@ function terminalUpdateAgeMs(state) {
 
 function shouldShowUpdateProgress(state) {
   if (!state) return false;
-  if (state.running || state.error) return true;
+  if (state.running) return true;
+  if (state.error) return terminalUpdateAgeMs(ensureTerminalUpdateTimestamp(state)) < DOWNLOAD_ERROR_VISIBLE_MS;
   return isSuccessfulUpdateState(state) && terminalUpdateAgeMs(state) < DOWNLOAD_COMPLETE_VISIBLE_MS;
 }
 
@@ -1298,16 +1394,28 @@ function clearCompletedUpdateState() {
 
 function scheduleCompletedUpdateClear(delay = DOWNLOAD_COMPLETE_VISIBLE_MS) {
   window.clearTimeout(updateCompleteHideTimer);
-  if (!isSuccessfulUpdateState(lastUpdateState)) return;
+  if (!isTerminalUpdateState(lastUpdateState) || updatePoll) return;
+  const visibleMs = lastUpdateState.error ? DOWNLOAD_ERROR_VISIBLE_MS : DOWNLOAD_COMPLETE_VISIBLE_MS;
   const completedAt = lastUpdateState.completedAt || lastUpdateState.clientCompletedAt || "";
-  const remaining = Math.max(0, Math.min(delay, DOWNLOAD_COMPLETE_VISIBLE_MS - terminalUpdateAgeMs(lastUpdateState)));
+  const remaining = Math.max(0, Math.min(delay, visibleMs - terminalUpdateAgeMs(lastUpdateState)));
   if (remaining === 0) {
-    clearCompletedUpdateState();
+    if (isSuccessfulUpdateState(lastUpdateState)) clearCompletedUpdateState();
+    else {
+      setProgress(false);
+      renderDownloads(lastUpdateState);
+      restoreStatusBadge();
+    }
     return;
   }
   updateCompleteHideTimer = window.setTimeout(() => {
     const sameCompletion = lastUpdateState && (lastUpdateState.completedAt || lastUpdateState.clientCompletedAt || "") === completedAt;
-    if (sameCompletion) clearCompletedUpdateState();
+    if (!sameCompletion) return;
+    if (isSuccessfulUpdateState(lastUpdateState)) clearCompletedUpdateState();
+    else {
+      setProgress(false);
+      renderDownloads(lastUpdateState);
+      restoreStatusBadge();
+    }
   }, remaining);
 }
 
@@ -1315,7 +1423,7 @@ function clearScanProgressSoon(delay = 1400) {
   window.clearTimeout(scanProgressHideTimer);
   scanProgressHideTimer = window.setTimeout(() => {
     scanProgressHideTimer = null;
-    if (updatePoll || shouldShowUpdateProgress(lastUpdateState)) return;
+    if (updatePoll || lastUpdateState?.running) return;
     setProgress(false);
   }, delay);
 }
@@ -1337,7 +1445,7 @@ function downloadStateLabel(status, state) {
   if (state?.error) return "Needs attention";
   if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state)) return "Complete";
   if (!status?.config?.latestUrl) return "Setup required";
-  if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return isFirstPublishPending(status) ? "Not installed" : (status.developerMode ? "Config error" : "Service unavailable");
+  if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return isFirstPublishPending(status) ? "Not installed" : (status.developerMode ? "Feed unavailable" : "Service unavailable");
   if (status?.developerClientBypass && status?.installed) return "Developer client";
   if (status?.updateRequired) return "Game update required";
   if (status?.latest) return "No update required";
@@ -1877,12 +1985,12 @@ async function publishLauncherUpdate() {
 
 function serverTransferPayload() {
   return {
-    sourceDir: inputValue(els.serverSourceInput, "C:\\RL CRAFT SERVER LIST\\New folder - Copy"),
-    host: inputValue(els.serverHostInput, "192.168.1.121"),
+    sourceDir: inputValue(els.serverSourceInput, ""),
+    host: inputValue(els.serverHostInput, ""),
     port: Number(inputValue(els.serverPortInput, 22)),
-    username: inputValue(els.serverUsernameInput, "notevil"),
+    username: inputValue(els.serverUsernameInput, ""),
     password: inputValue(els.serverPasswordInput, ""),
-    remoteDir: inputValue(els.serverRemoteDirInput, "/home/notevil/Desktop/AHT Server Files"),
+    remoteDir: inputValue(els.serverRemoteDirInput, ""),
     excludeDirs: ["DregoraRL"],
     includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
     includeRootFiles: true
@@ -1947,16 +2055,19 @@ async function pollServerTransfer() {
   if (!state.running) {
     clearInterval(serverTransferPoll);
     serverTransferPoll = null;
+    setUnavailable(els.uploadServerFilesButton, false);
+    setUnavailable(els.planServerTransferButton, false);
   }
 }
 
 async function uploadServerFiles() {
   if (serverTransferPoll || lastServerTransferState?.running) return;
   setUnavailable(els.uploadServerFilesButton, true);
+  setUnavailable(els.planServerTransferButton, true);
   try {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings());
-    setServerTransferStatus("warn", "Starting upload", "Connecting to Linux PC", "This is local SFTP only. No Cloudflare is used.");
+    setServerTransferStatus("warn", "Starting upload", "Connecting to server", "This is local SFTP only. No Cloudflare is used.");
     setServerTransferProgress({ phase: "Connecting", percent: 0 });
     els.serverTransferLog.textContent = "Starting server file upload...\nScope: root files, mods, scripts, config, ForgeEssentials.\nDregoraRL is excluded.";
     window.aht.devSyncServerFiles(serverTransferPayload()).catch((error) => {
@@ -1968,18 +2079,23 @@ async function uploadServerFiles() {
         lastResult: null
       };
       renderServerTransferState(lastServerTransferState);
+      setUnavailable(els.uploadServerFilesButton, false);
+      setUnavailable(els.planServerTransferButton, false);
     });
     serverTransferPoll = setInterval(pollServerTransfer, 1000);
     await pollServerTransfer();
-  } finally {
+  } catch (error) {
     setUnavailable(els.uploadServerFilesButton, false);
+    setUnavailable(els.planServerTransferButton, false);
+    throw error;
   }
 }
 
 function activateDeveloperSection(targetId) {
   els.devTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.devTarget === targetId));
-  const target = document.getElementById(targetId);
-  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  els.devPanels.forEach((panel) => {
+    panel.hidden = panel.id !== targetId;
+  });
 }
 
 function serializeSettings() {
@@ -1990,7 +2106,7 @@ function serializeSettings() {
   const feedUrl = playerFeedUrl();
   const workerBase = workerBaseFromFeedUrl(feedUrl);
   const proxyBase = workerUrlFromFeedUrl(feedUrl, "cf/");
-  return {
+  const next = {
     latestUrl: feedUrl || els.latestUrlInput.value.trim(),
     instanceDir: els.instanceInput.value.trim(),
     curseforge: {
@@ -2002,30 +2118,15 @@ function serializeSettings() {
       baseUrl: els.syncUrlInput.value.trim() || workerBase || existingSync.baseUrl || "",
       playerLabel: username
     },
-    developer: {
-      adminBaseUrl: inputValue(els.adminUrlInput, "") || workerBase || existingDeveloper.adminBaseUrl || "",
-      defaultOutDir: inputValue(els.outDirInput, existingDeveloper.defaultOutDir || ""),
-      defaultCacheModsDir: els.cacheModsInput?.value.trim() || "",
-      r2Bucket: inputValue(els.bucketInput, existingDeveloper.r2Bucket || "ahtlauncher"),
-      r2AccountId: inputValue(els.r2AccountIdInput, existingDeveloper.r2AccountId || ""),
-      cacheOnlyMode: cacheOnlyMode(),
-      githubRepo: inputValue(els.githubRepoInput, existingDeveloper.githubRepo || "svre-mc/aht-launcher"),
-      githubBranch: inputValue(els.githubBranchInput, existingDeveloper.githubBranch || "main"),
-      githubWorkflow: inputValue(els.githubWorkflowInput, existingDeveloper.githubWorkflow || "build-macos.yml")
-    },
     launcherUpdate: {
       enabled: true,
       latestUrl: workerBase ? new URL("launcher/latest.json", workerBase).toString() : (currentStatus?.config?.launcherUpdate?.latestUrl || "")
     },
-    serverTransfer: {
-      sourceDir: inputValue(els.serverSourceInput, currentStatus?.config?.serverTransfer?.sourceDir || "C:\\RL CRAFT SERVER LIST\\New folder - Copy"),
-      host: inputValue(els.serverHostInput, currentStatus?.config?.serverTransfer?.host || "192.168.1.121"),
-      port: Number(inputValue(els.serverPortInput, currentStatus?.config?.serverTransfer?.port || 22)),
-      username: inputValue(els.serverUsernameInput, currentStatus?.config?.serverTransfer?.username || "notevil"),
-      remoteDir: inputValue(els.serverRemoteDirInput, currentStatus?.config?.serverTransfer?.remoteDir || "/home/notevil/Desktop/AHT Server Files"),
-      excludeDirs: ["DregoraRL"],
-      includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
-      includeRootFiles: true
+    launcherProof: {
+      enabled: true,
+      required: true,
+      baseUrl: workerBase || currentStatus?.config?.launcherProof?.baseUrl || currentStatus?.config?.sync?.baseUrl || "",
+      keyId: "aht-launcher-proof-v1"
     },
     minecraftLauncher: {
       enabled: els.minecraftProfileEnabledInput.checked,
@@ -2039,8 +2140,32 @@ function serializeSettings() {
       cwd: els.instanceInput.value.trim()
     }
   };
+  if (currentStatus?.developerMode) {
+    next.developer = {
+      adminBaseUrl: inputValue(els.adminUrlInput, "") || workerBase || existingDeveloper.adminBaseUrl || "",
+      defaultOutDir: inputValue(els.outDirInput, existingDeveloper.defaultOutDir || ""),
+      defaultCacheModsDir: els.cacheModsInput?.value.trim() || "",
+      clientModpackDir: els.clientModpackDirInput?.value.trim() || "",
+      r2Bucket: inputValue(els.bucketInput, existingDeveloper.r2Bucket || "ahtlauncher"),
+      r2AccountId: inputValue(els.r2AccountIdInput, existingDeveloper.r2AccountId || ""),
+      cacheOnlyMode: cacheOnlyMode(),
+      githubRepo: inputValue(els.githubRepoInput, existingDeveloper.githubRepo || "svre-mc/aht-launcher"),
+      githubBranch: inputValue(els.githubBranchInput, existingDeveloper.githubBranch || "main"),
+      githubWorkflow: inputValue(els.githubWorkflowInput, existingDeveloper.githubWorkflow || "build-macos.yml")
+    };
+    next.serverTransfer = {
+      sourceDir: inputValue(els.serverSourceInput, currentStatus?.config?.serverTransfer?.sourceDir || ""),
+      host: inputValue(els.serverHostInput, currentStatus?.config?.serverTransfer?.host || ""),
+      port: Number(inputValue(els.serverPortInput, currentStatus?.config?.serverTransfer?.port || 22)),
+      username: inputValue(els.serverUsernameInput, currentStatus?.config?.serverTransfer?.username || ""),
+      remoteDir: inputValue(els.serverRemoteDirInput, currentStatus?.config?.serverTransfer?.remoteDir || ""),
+      excludeDirs: ["DregoraRL"],
+      includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
+      includeRootFiles: true
+    };
+  }
+  return next;
 }
-
 function fillSettings(status) {
   const config = status.config;
   const username = status.identity?.minecraftUsername || config.sync?.playerLabel || "";
@@ -2061,17 +2186,22 @@ function fillSettings(status) {
   setInputValue(els.adminUrlInput, config.developer?.adminBaseUrl || config.sync?.baseUrl || "");
   setInputValue(els.outDirInput, config.developer?.defaultOutDir || "");
   setInputValue(els.cacheModsInput, config.developer?.defaultCacheModsDir || "");
+  setInputValue(els.clientModpackDirInput, config.developer?.clientModpackDir || config.developer?.defaultCacheModsDir?.replace(/[\\/]mods$/i, "") || "");
+  if (els.clientZipVersionInput && !els.clientZipVersionInput.value) setInputValue(els.clientZipVersionInput, status.latest?.version || status.installed?.version || "");
   setInputValue(els.bucketInput, config.developer?.r2Bucket || "ahtlauncher");
-  setInputValue(els.r2AccountIdInput, config.developer?.r2AccountId || status.developerSecrets?.r2AccountId || "");
+  const savedR2AccountId = config.developer?.r2AccountId || status.developerSecrets?.r2AccountId || "";
+  if (els.r2AccountIdInput && document.activeElement !== els.r2AccountIdInput && (savedR2AccountId || !els.r2AccountIdInput.value)) {
+    setInputValue(els.r2AccountIdInput, savedR2AccountId);
+  }
   setInputValue(els.githubRepoInput, config.developer?.githubRepo || "svre-mc/aht-launcher");
   setInputValue(els.githubBranchInput, config.developer?.githubBranch || "main");
   setInputValue(els.githubWorkflowInput, config.developer?.githubWorkflow || "build-macos.yml");
   if (els.cacheOnlyInput) els.cacheOnlyInput.checked = Boolean(config.developer?.cacheOnlyMode);
-  setInputValue(els.serverSourceInput, config.serverTransfer?.sourceDir || "C:\\RL CRAFT SERVER LIST\\New folder - Copy");
-  setInputValue(els.serverHostInput, config.serverTransfer?.host || "192.168.1.121");
+  setInputValue(els.serverSourceInput, config.serverTransfer?.sourceDir || "");
+  setInputValue(els.serverHostInput, config.serverTransfer?.host || "");
   setInputValue(els.serverPortInput, config.serverTransfer?.port || 22);
-  setInputValue(els.serverUsernameInput, config.serverTransfer?.username || "notevil");
-  setInputValue(els.serverRemoteDirInput, config.serverTransfer?.remoteDir || "/home/notevil/Desktop/AHT Server Files");
+  setInputValue(els.serverUsernameInput, config.serverTransfer?.username || "");
+  setInputValue(els.serverRemoteDirInput, config.serverTransfer?.remoteDir || "");
   if (
     els.curseforgeApiKeyInput
     && status.developerSecrets?.curseforgeApiKey
@@ -2128,21 +2258,22 @@ function renderStatus(status) {
   const installedLabel = installedVersion ? `v.${installedVersion}` : "Not Installed";
   const platformProfile = status.platformProfile || {};
   if (els.platformTargetView) {
-    els.platformTargetView.textContent = `${platformProfile.displayName || "Desktop"} build - ${platformProfile.packageTarget || "Minecraft Launcher profile and play options"}.`;
+    const platformName = platformProfile.displayName || "This device";
+    els.platformTargetView.textContent = `${platformName} install and Minecraft Launcher profile settings.`;
   }
   els.versionLine.textContent = installedLabel;
   els.installedVersion.textContent = installedVersion || "Not Installed";
   els.latestVersion.textContent = latestVersion;
-  els.sideLatestVersion.textContent = latestVersion;
-  els.instanceDir.textContent = status.config.instanceDir || "-";
+  els.sideInstalledVersion.textContent = installedLabel;
+  if (els.instanceDir) els.instanceDir.textContent = status.config.instanceDir || "-";
   if (status.minecraftProfile?.versionId) {
     const profileState = status.minecraftProfile.loaderInstalled ? "ready" : "loader missing";
     const accountState = status.minecraftProfile.accountReuseAvailable ? "account saved" : "sign-in needed";
-    els.minecraftProfile.textContent = `${status.minecraftProfile.profileName || status.minecraftProfile.profileId} (${status.minecraftProfile.versionId}, ${profileState}, ${accountState})`;
+    if (els.minecraftProfile) els.minecraftProfile.textContent = `${status.minecraftProfile.profileName || status.minecraftProfile.profileId} (${status.minecraftProfile.versionId}, ${profileState}, ${accountState})`;
   } else {
-    els.minecraftProfile.textContent = status.minecraftProfile?.enabled === false ? "Disabled" : "Waiting for pack metadata";
+    if (els.minecraftProfile) els.minecraftProfile.textContent = status.minecraftProfile?.enabled === false ? "Disabled" : "Waiting for pack metadata";
   }
-  els.installId.textContent = shortId(status.identity.installId);
+  if (els.installId) els.installId.textContent = shortId(status.identity.installId);
   els.playerLabelView.textContent = accountUsername(status) || "Player";
   setSyncLine(status.config.sync?.enabled === false ? "Sync off" : "Sync on");
   els.developerTab.hidden = !status.developerMode;
@@ -2157,7 +2288,7 @@ function renderStatus(status) {
       "warn",
       status.developerMode ? "Release feed missing" : "Setup incomplete",
       status.developerMode ? "Configure latest.json" : "Update service unavailable",
-      status.developerMode ? "Enter the hosted latest.json URL or a local latest.json path before updating." : "Reinstall the launcher or contact the server owner."
+      status.developerMode ? "Enter the hosted latest.json URL or a local latest.json path before updating." : "Try again later or reinstall the launcher."
     );
   } else if (status.latestError) {
     setSettingsFeed(
@@ -2167,47 +2298,58 @@ function renderStatus(status) {
       playerSafeFeedProblem(status)
     );
   } else if (status.latest) {
-    const modCount = status.latest.curseforge?.fileCount;
-    const modText = Number.isFinite(modCount) ? `${modCount} CurseForge files` : "CurseForge manifest ready";
-    const cacheText = status.latest.cacheManifest ? "fallback cache listed" : "no fallback cache listed";
-    setSettingsFeed("ok", "Feed connected", `${displayPackName(status.latest.name || "Pack")} ${latestVersion}`, `${modText}; ${cacheText}.`);
+    const fullClientZip = status.latest.installMode === "full-client-zip" || status.latest.zipFormat === "aht-full-client-zip";
+    if (!status.developerMode && status.updateBlockedReason) {
+      setSettingsFeed("warn", "Update unavailable", "Waiting for verified package", status.updateBlockedReason);
+    } else {
+      const modCount = status.latest.curseforge?.fileCount;
+      const detail = status.developerMode
+        ? `${fullClientZip ? "Exact AHT client ZIP" : (Number.isFinite(modCount) ? `${modCount} CurseForge files` : "CurseForge manifest ready")}; ${fullClientZip ? "no CurseForge fallback needed" : (status.latest.cacheManifest ? "fallback cache listed" : "no fallback cache listed")}.`
+        : "Verified AHT package ready.";
+      setSettingsFeed("ok", "Feed connected", `${displayPackName(status.latest.name || "Pack")} ${latestVersion}`, detail);
+    }
   } else {
     setSettingsFeed("warn", "Feed pending", "Waiting for latest.json", "Save settings or test the feed.");
   }
 
   if (status.latestError && !(developerBypass && status.installed)) {
-    setBadge(isFirstPublishPending(status) ? "Not Installed" : (status.developerMode ? "Config error" : "Service unavailable"), isFirstPublishPending(status) ? "warn" : (status.developerMode ? "bad" : "warn"));
+    setBadge(isFirstPublishPending(status) ? "Not Installed" : (status.developerMode ? "Feed unavailable" : "Service unavailable"), isFirstPublishPending(status) ? "warn" : (status.developerMode ? "bad" : "warn"));
     setLog(playerSafeFeedProblem(status));
   } else if (developerBypass && status.installed) {
-    setBadge(status.launchReady ? "Ready" : "Launch locked", status.launchReady ? "ok" : "warn");
+    setLaunchStatusBadge(status);
     els.diffSummary.textContent = "Bypassed";
-    if (!els.log.textContent) setLog(status.launchReady ? "Developer client bypass active. Local mods and configs are allowed." : (status.launchBlockedReason || "Developer client bypass active."));
+    if (logIsEmpty()) setLog(status.launchReady ? "Developer client bypass active. Local mods and configs are allowed." : (playerSafeBlockedReason(status) || "Developer client bypass active."));
+  } else if (status.updateBlockedReason) {
+    setBadge("Update unavailable", "warn");
+    els.diffSummary.textContent = "-";
+    if (logIsEmpty()) setLog(status.updateBlockedReason);
   } else if (status.updateRequired) {
     setBadge("Update required", "warn");
-    if (!els.log.textContent) setLog("A newer pack version is available.");
+    if (logIsEmpty()) setLog("A newer pack version is available.");
   } else if (!developerBypass && (status.integrity?.counts?.corrupted > 0 || status.launchBlockedReason?.startsWith("Repair required"))) {
     setBadge("Repair needed", "warn");
     els.diffSummary.textContent = `${status.integrity?.counts?.corrupted || "Files"} corrupted`;
-    if (!els.log.textContent) setLog(status.launchBlockedReason || "Repair corrupted files before playing.");
+    if (logIsEmpty()) setLog(playerSafeBlockedReason(status) || "Repair corrupted files before playing.");
   } else if (status.latest) {
     if (status.launchReady) {
       setBadge("Ready", "ok");
-      if (!els.log.textContent) setLog("Pack is current.");
+      if (logIsEmpty()) setLog("Pack is current.");
     } else {
-      setBadge("Launch locked", "warn");
-      if (!els.log.textContent) setLog(status.launchBlockedReason || "Launch is locked until setup is complete.");
+      setLaunchStatusBadge(status);
+      if (logIsEmpty()) setLog(playerSafeBlockedReason(status) || "Setup must finish before playing.");
     }
   } else {
     setBadge("Setup required", "warn");
-    if (!els.log.textContent) setLog("Release feed required before updates can begin.");
+    if (logIsEmpty()) setLog("Release feed required before updates can begin.");
   }
 
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
-  setUnavailable(els.updateButton, launcherUpdateRequired || !status.latest || !status.updateRequired || updateRunning);
+  setUnavailable(els.updateButton, launcherUpdateRequired || Boolean(status.updateBlockedReason) || !status.latest || !status.updateRequired || updateRunning);
   setUnavailable(els.playButton, launcherUpdateRequired || !status.launchReady || updateRunning);
   setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
-  els.playButton.title = status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Launch is locked.");
+  els.updateButton.title = status.updateBlockedReason || (status.updateRequired ? "Update pack" : "No update available.");
+  els.playButton.title = status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing.");
   if (shouldShowUpdateProgress(lastUpdateState)) {
     setProgress(true, estimateProgress(lastUpdateState), updateProgressLabel(lastUpdateState));
   } else {
@@ -2242,7 +2384,8 @@ function activateTab(name) {
 
 function focusActivityPanel(message) {
   activateTab("player");
-  if (message && !els.log.textContent.trim()) setLog(message);
+  if (message && logIsEmpty()) setLog(message);
+  if (!els.activityPanel) return;
   els.activityPanel.scrollIntoView({ behavior: "smooth", block: "center" });
   els.activityPanel.classList.remove("is-focused");
   window.requestAnimationFrame(() => {
@@ -2267,7 +2410,7 @@ async function pollUpdate() {
   }
   lastUpdateState = state;
   const lines = [...state.lines];
-  els.activityState.textContent = state.running ? "Running" : "Idle";
+  if (els.activityState) els.activityState.textContent = state.running ? "Running" : "Idle";
   setProgress(shouldShowUpdateProgress(state), estimateProgress(state), updateProgressLabel(state));
   if (state.error) lines.push(`ERROR: ${state.error}`);
   if (isSuccessfulUpdateState(state) && state.lastResult?.installed?.version) lines.push(`Installed ${state.lastResult.installed.version}`);
@@ -2295,11 +2438,11 @@ async function pollUpdate() {
       els.diffSummary.textContent = "Clean";
       restoreStatusBadge();
     }
-    if (isSuccessfulUpdateState(lastUpdateState)) scheduleCompletedUpdateClear();
+    if (isTerminalUpdateState(lastUpdateState)) scheduleCompletedUpdateClear();
   }
 }
 
-async function startUpdate(forceRepair) {
+async function startUpdate(forceRepair, options = {}) {
   if (updatePoll || lastUpdateState?.running) {
     showToast("Install already running", "The launcher is already installing files. Leave it open until it finishes.", "info");
     return;
@@ -2322,7 +2465,7 @@ async function startUpdate(forceRepair) {
     progress: { phase: forceRepair ? "Preparing repair" : "Preparing update", completed: 0, total: 0, percent: 3 }
   };
   setBadge(forceRepair ? "Repairing" : "Updating", "warn");
-  els.activityState.textContent = forceRepair ? "Repairing" : "Updating";
+  if (els.activityState) els.activityState.textContent = forceRepair ? "Repairing" : "Updating";
   setProgress(true, 3, forceRepair ? "Preparing repair" : "Preparing update");
   setUnavailable(els.updateButton, true);
   setUnavailable(els.playButton, true);
@@ -2330,7 +2473,7 @@ async function startUpdate(forceRepair) {
   setLog("");
   renderDownloads(lastUpdateState);
   showToast(forceRepair ? "Repair started" : "Update started", "Progress is shown in the sidebar.", "info");
-  window.aht.startUpdate(forceRepair).catch((error) => {
+  window.aht.startUpdate({ forceRepair, replaceGameSettings: Boolean(options.replaceGameSettings) }).catch((error) => {
     const message = cleanErrorMessage(error);
     lastUpdateState = ensureTerminalUpdateTimestamp({
       ...(lastUpdateState || {}),
@@ -2344,10 +2487,30 @@ async function startUpdate(forceRepair) {
     clearInterval(updatePoll);
     updatePoll = null;
     activeUpdateKind = "";
+    scheduleCompletedUpdateClear(DOWNLOAD_ERROR_VISIBLE_MS);
     refresh().catch(() => {});
   });
   updatePoll = setInterval(pollUpdate, 500);
   await pollUpdate();
+}
+
+function closeUpdateOptions() {
+  if (els.updateOptionsOverlay) els.updateOptionsOverlay.hidden = true;
+}
+
+function openUpdateOptions() {
+  if (!els.updateOptionsOverlay) {
+    startUpdate(false);
+    return;
+  }
+  const latest = currentStatus?.latest;
+  const installed = currentStatus?.installed;
+  const versionText = latest?.version ? `Version ${latest.version}` : "current release";
+  const installedText = installed?.version ? `Installed ${installed.version}. ` : "";
+  els.updateOptionsSummary.textContent = `${installedText}The launcher will download ${versionText}.`;
+  if (els.replaceGameSettingsInput) els.replaceGameSettingsInput.checked = false;
+  els.updateOptionsOverlay.hidden = false;
+  els.updateOptionsUpdateButton?.focus();
 }
 
 function integrityIssueSummary(scan) {
@@ -2357,6 +2520,7 @@ function integrityIssueSummary(scan) {
   const parts = [];
   if (counts.changed) parts.push(`${counts.changed} changed`);
   if (counts.missing) parts.push(`${counts.missing} missing`);
+  if (counts.added) parts.push(`${counts.added} extra`);
   return `${counts.corrupted} corrupted files found (${parts.join(", ")}).`;
 }
 
@@ -2367,6 +2531,7 @@ function formatIntegrityScan(scan) {
   ];
   const changed = scan?.changed || [];
   const missing = scan?.missing || [];
+  const added = scan?.added || [];
   if (changed.length) {
     lines.push("", "Changed:");
     for (const item of changed.slice(0, 20)) lines.push(`  ${item.path}`);
@@ -2374,6 +2539,10 @@ function formatIntegrityScan(scan) {
   if (missing.length) {
     lines.push("", "Missing:");
     for (const item of missing.slice(0, 20)) lines.push(`  ${item.path}`);
+  }
+  if (added.length) {
+    lines.push("", "Extra mods:");
+    for (const item of added.slice(0, 20)) lines.push(`  ${item.path}`);
   }
   if (scan?.truncated) lines.push("", "More files were found than are shown here.");
   return lines.join("\n");
@@ -2383,11 +2552,13 @@ function showRepairPrompt(scan) {
   if (!els.repairPromptOverlay) return;
   const changed = scan?.changed || [];
   const missing = scan?.missing || [];
+  const added = scan?.added || [];
   els.repairPromptSummary.textContent = `${integrityIssueSummary(scan)} Do you want to repair them now?`;
   els.repairPromptList.innerHTML = "";
   const items = [
     ...missing.map((item) => ({ type: "Missing", path: item.path })),
-    ...changed.map((item) => ({ type: "Changed", path: item.path }))
+    ...changed.map((item) => ({ type: "Changed", path: item.path })),
+    ...added.map((item) => ({ type: "Extra", path: item.path }))
   ];
   for (const item of items.slice(0, 12)) {
     const row = document.createElement("div");
@@ -2459,11 +2630,11 @@ async function scanFilesForRepair() {
     if (currentStatus) {
       const updateRunning = Boolean(lastUpdateState?.running);
       const repairNeeded = (lastIntegrityScan?.counts?.corrupted || 0) > 0 || (lastIntegrityScan?.counts?.managed === 0 && Boolean(currentStatus.installed));
-      setUnavailable(els.updateButton, !currentStatus.latest || !currentStatus.updateRequired || updateRunning);
+      setUnavailable(els.updateButton, Boolean(currentStatus.updateBlockedReason) || !currentStatus.latest || !currentStatus.updateRequired || updateRunning);
       setUnavailable(els.playButton, !currentStatus.launchReady || updateRunning || repairNeeded);
     }
     if (scanCompleted) {
-      const scanLog = els.log.textContent;
+      const scanLog = currentLogText();
       await refresh();
       if (scanLog) setLog(scanLog);
     }
@@ -2509,13 +2680,14 @@ els.downloadsOverlay.addEventListener("click", (event) => {
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.downloadsOverlay.hidden) closeDownloads();
   if (event.key === "Escape" && els.repairPromptOverlay && !els.repairPromptOverlay.hidden) closeRepairPrompt();
+  if (event.key === "Escape" && els.updateOptionsOverlay && !els.updateOptionsOverlay.hidden) closeUpdateOptions();
 });
 els.updateButton.addEventListener("click", () => {
-  if (!isUnavailable(els.updateButton)) startUpdate(false);
+  if (!isUnavailable(els.updateButton)) openUpdateOptions();
 });
 if (els.downloadsUpdateIconButton) {
   els.downloadsUpdateIconButton.addEventListener("click", () => {
-    if (!isUnavailable(els.downloadsUpdateIconButton)) startUpdate(false);
+    if (!isUnavailable(els.downloadsUpdateIconButton)) openUpdateOptions();
   });
 }
 els.playButton.addEventListener("click", () => {
@@ -2530,9 +2702,12 @@ els.playButton.addEventListener("click", () => {
         );
       })
       .catch((error) => {
-        const message = cleanErrorMessage(error);
+        const message = playerSafeErrorMessage(error);
         setLog(message);
         showToast("Launch failed", message, "error");
+        refresh()
+          .then(() => setLog(message))
+          .catch(() => {});
       });
   }
 });
@@ -2563,14 +2738,29 @@ if (els.repairPromptRepairButton) {
     startUpdate(true);
   });
 }
+if (els.updateOptionsBackButton) {
+  els.updateOptionsBackButton.addEventListener("click", closeUpdateOptions);
+}
+if (els.updateOptionsOverlay) {
+  els.updateOptionsOverlay.addEventListener("click", (event) => {
+    if (event.target === els.updateOptionsOverlay) closeUpdateOptions();
+  });
+}
+if (els.updateOptionsUpdateButton) {
+  els.updateOptionsUpdateButton.addEventListener("click", () => {
+    const replaceGameSettings = Boolean(els.replaceGameSettingsInput?.checked);
+    closeUpdateOptions();
+    startUpdate(false, { replaceGameSettings });
+  });
+}
 if (els.pickInstanceButton) {
   els.pickInstanceButton.addEventListener("click", async () => {
-    const folder = await window.aht.selectFolder();
+    const folder = await window.aht.selectFolder(els.instanceInput.value.trim() || currentStatus?.config?.instanceDir || "");
     if (folder) els.instanceInput.value = folder;
   });
 }
 els.pickMinecraftRootButton.addEventListener("click", async () => {
-  const folder = await window.aht.selectFolder();
+  const folder = await window.aht.selectFolder(els.minecraftRootInput.value.trim() || currentStatus?.config?.minecraftLauncher?.rootDir || "");
   if (folder) els.minecraftRootInput.value = folder;
 });
 if (els.minecraftMemoryInput) {
@@ -2589,14 +2779,16 @@ els.testFeedButton.addEventListener("click", async () => {
   setSettingsFeed("warn", "Checking feed", "Contacting latest.json", "Validating the current Settings values.");
   try {
     const result = await window.aht.testFeed(serializeSettings());
+    const fullClientZip = Boolean(result.latest?.fullClientZip || result.latest?.installMode === "full-client-zip");
     const modCount = result.latest?.curseforgeFileCount;
-    const modText = Number.isFinite(modCount) ? `${modCount} CurseForge files` : "CurseForge manifest ready";
-    const cacheText = result.latest?.hasCacheManifest ? "fallback cache available" : "fallback cache not listed";
+    const detail = currentStatus?.developerMode
+      ? `${fullClientZip ? "Exact AHT client ZIP" : (Number.isFinite(modCount) ? `${modCount} CurseForge files` : "CurseForge manifest ready")}; ${fullClientZip ? "no CurseForge fallback needed" : (result.latest?.hasCacheManifest ? "fallback cache available" : "fallback cache not listed")}.`
+      : "Verified AHT package ready.";
     setSettingsFeed(
       "ok",
       "Feed connected",
       `${displayPackName(result.latest?.name || "Pack")} ${result.latest?.version || ""}`.trim(),
-      `${modText}; ${cacheText}.`
+      detail
     );
     showToast("Release feed connected", result.message || "latest.json validated.", "success");
   } catch (error) {
@@ -2666,7 +2858,7 @@ async function loginDeveloper() {
         : result.remoteError
           ? `Worker data not connected: ${result.remoteError}`
           : "";
-    showToast("Developer login successful", remoteDetail || (result.expiresAt ? `Expires ${new Date(result.expiresAt).toLocaleString()}` : ""), result.remoteAuthenticated ? "success" : "warn");
+    showToast("Developer login successful", remoteDetail || (result.expiresAt ? `Expires ${new Date(result.expiresAt).toLocaleString()}` : ""), "success");
     refresh().catch((error) => {
       const message = cleanErrorMessage(error);
       setDevLog(message);
@@ -2731,7 +2923,7 @@ els.pickZipButton.addEventListener("click", async () => {
 });
 if (els.pickOutButton) {
   els.pickOutButton.addEventListener("click", async () => {
-    const folder = await window.aht.selectFolder();
+    const folder = await window.aht.selectFolder(els.outDirInput.value.trim());
     if (folder) {
       els.outDirInput.value = folder;
       invalidateReleaseValidation();
@@ -2739,14 +2931,78 @@ if (els.pickOutButton) {
   });
 }
 els.pickCacheModsButton.addEventListener("click", async () => {
-  const folder = await window.aht.selectFolder();
+  const folder = await window.aht.selectFolder(els.cacheModsInput.value.trim() || currentStatus?.config?.developer?.cacheModsDir || "");
   if (folder) {
     els.cacheModsInput.value = folder;
     invalidateReleaseValidation();
   }
 });
+if (els.pickClientModpackDirButton) {
+  els.pickClientModpackDirButton.addEventListener("click", async () => {
+    const folder = await window.aht.selectFolder(els.clientModpackDirInput.value.trim() || currentStatus?.config?.developer?.clientModpackDir || "");
+    if (folder) {
+      els.clientModpackDirInput.value = folder;
+      await window.aht.saveSettings(serializeSettings()).catch(() => {});
+    }
+  });
+}
+
+function setClientZipStatus(state, title, detail = "") {
+  if (!els.clientZipStatus) return;
+  els.clientZipStatus.className = `release-check-card ${state}`.trim();
+  const label = els.clientZipStatus.querySelector("span");
+  const strong = els.clientZipStatus.querySelector("strong");
+  const paragraph = els.clientZipStatus.querySelector("p");
+  if (label) label.textContent = "Exact client package";
+  if (strong) strong.textContent = title;
+  if (paragraph) paragraph.textContent = detail;
+}
+
+async function buildClientZipFromSelectedFolder() {
+  const sourceDir = els.clientModpackDirInput?.value.trim() || "";
+  const version = els.clientZipVersionInput?.value.trim() || currentStatus?.latest?.version || currentStatus?.installed?.version || "";
+  if (!sourceDir) {
+    setClientZipStatus("bad", "Folder required", "Choose the client modpack folder first.");
+    showToast("Client folder required", "Choose the modpack instance folder before creating a ZIP.", "warn");
+    return;
+  }
+  if (!version) {
+    setClientZipStatus("bad", "Version required", "Enter the pack version before creating a ZIP.");
+    showToast("Version required", "Enter the modpack version for latest.json.", "warn");
+    return;
+  }
+  setUnavailable(els.buildClientZipButton, true);
+  setClientZipStatus("warn", "Creating ZIP", sourceDir);
+  try {
+    await window.aht.saveSettings(serializeSettings());
+    const result = await window.aht.devBuildClientZip({
+      sourceDir,
+      version,
+      outDir: developerOutDir(),
+      name: "A Hard Time",
+      packId: currentStatus?.config?.packId || currentStatus?.latest?.packId || currentStatus?.installed?.packId || "a-hard-time-dregora",
+      minecraft: currentStatus?.latest?.minecraft || currentStatus?.installed?.minecraft || null
+    });
+    els.packZipInput.value = result.zipPath;
+    invalidateReleaseValidation("AHT client ZIP ready", "Release Builder is now pointed at the exact client ZIP.");
+    setClientZipStatus("ok", "ZIP created", `${result.fileCount} files, ${formatBytes(result.totalBytes)}. Release Builder now uses this ZIP.`);
+    setDevLog(result);
+    showToast("Modpack ZIP created", result.zipPath, "success");
+  } catch (error) {
+    const message = cleanErrorMessage(error);
+    setClientZipStatus("bad", "ZIP failed", message);
+    setDevLog(message);
+    showToast("ZIP failed", message, "error");
+  } finally {
+    setUnavailable(els.buildClientZipButton, false);
+  }
+}
+
+if (els.buildClientZipButton) {
+  els.buildClientZipButton.addEventListener("click", () => buildClientZipFromSelectedFolder());
+}
 els.pickServerSourceButton.addEventListener("click", async () => {
-  const folder = await window.aht.selectFolder();
+  const folder = await window.aht.selectFolder(els.serverSourceInput.value.trim() || currentStatus?.config?.serverTransfer?.sourceDir || "");
   if (folder) {
     els.serverSourceInput.value = folder;
   }
@@ -2762,11 +3018,12 @@ function requireOk(result, label) {
   throw new Error(summary);
 }
 
-async function writePlayerDefaultsForCurrentFeed() {
+async function writePlayerDefaultsForCurrentFeed(options = {}) {
   if (!/^https?:\/\//i.test(playerFeedUrl())) return null;
   const result = await window.aht.devWritePlayerDefaults({
     publicLatestUrl: playerFeedUrl(),
-    bucket: releaseBucketName()
+    bucket: releaseBucketName(),
+    cacheOnlyMode: options.cacheOnlyMode ?? cacheOnlyMode()
   });
   const locations = (result.written || []).map((item) => item.path).join("\n");
   if (locations) {
@@ -2808,6 +3065,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
     showToast("Cloud setup locked", setupReason, "warn");
     return null;
   }
+  const setupCacheOnlyMode = cacheOnlyMode();
   if (!keepBusy) setReleaseBusy(true);
   try {
     await saveDeveloperSecrets();
@@ -2826,7 +3084,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
     });
     requireOk(buckets, "R2 bucket setup");
 
-    setReleaseCheck("warn", "Cloud setup", "Saving Worker secrets", cacheOnlyMode() ? "Writing developer login and launcher proof secrets; CurseForge API is disabled." : "Writing CurseForge, developer login, and launcher proof secrets.");
+    setReleaseCheck("warn", "Cloud setup", "Saving Worker secrets", localCurseForgeApiKey() ? "Writing CurseForge, developer login, and launcher proof secrets." : "Writing developer login and launcher proof secrets; CurseForge proxy is disabled unless a key is added later.");
     const secrets = await window.aht.devCloudSetupSecrets({
       curseforgeApiKey: localCurseForgeApiKey(),
       launcherProofSecret: localLauncherProofSecret(),
@@ -2834,7 +3092,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
       adminPassword: inputValue(els.adminPasswordInput, ""),
       releaseBucket: releaseBucketName(),
       dataBucket: dataBucketName(),
-      cacheOnlyMode: cacheOnlyMode()
+      cacheOnlyMode: setupCacheOnlyMode
     });
     requireOk(secrets, "Worker secrets");
 
@@ -2846,7 +3104,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
     if (deploy.latestUrl) {
       setInputValue(els.playerFeedUrlInput, deploy.latestUrl);
       await window.aht.saveSettings(serializeSettings());
-      await writePlayerDefaultsForCurrentFeed().catch(() => null);
+      await writePlayerDefaultsForCurrentFeed({ cacheOnlyMode: setupCacheOnlyMode }).catch(() => null);
     }
     setDevLog({ cloudAccount: login.summary || login.output || '', login, buckets, secrets, deploy });
     setReleaseCheck("ok", "Cloud ready", deploy.latestUrl || deploy.workerUrl || "Cloudflare Worker ready", "The player feed URL is saved for this launcher.");
@@ -2955,7 +3213,7 @@ els.publishReleaseButton.addEventListener("click", () => {
   publishSelectedRelease();
 });
 
-[els.packZipInput, els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.channelInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
+[els.packZipInput, els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.clientModpackDirInput, els.clientZipVersionInput, els.baseUrlInput, els.channelInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
   input.addEventListener("input", () => invalidateReleaseValidation());
   input.addEventListener("change", () => invalidateReleaseValidation());
 });

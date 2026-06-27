@@ -43,20 +43,22 @@ Keychain notarization fallback:
 
 Local download folder for manually downloaded macOS builds:
 
-- `C:\Users\evil\Documents\Codex\2026-06-23\i-w\outputs\macos`
+- `release-builds\macos`
 
 Expected macOS GitHub Release asset names after the next build:
 
-- `AHT-Launcher-macOS-arm64-0.1.1.dmg`
-- `AHT-Launcher-macOS-x64-0.1.1.dmg`
+- `AHT-Launcher-macOS-arm64-<version>.dmg`
+- `AHT-Launcher-macOS-x64-<version>.dmg`
+- `AHT-Launcher-macOS-arm64-<version>.zip`
+- `AHT-Launcher-macOS-x64-<version>.zip`
+
+The DMGs are for website/manual downloads. The ZIPs are required for in-app macOS launcher self-updates.
 
 Recommended website paths:
 
 - `/downloads/AHT-Launcher-macOS-arm64.dmg`
 - `/downloads/AHT-Launcher-macOS-x64.dmg`
 - `/downloads/AHT-Launcher-Windows-10-11.exe`
-- `/downloads/AHT-Launcher-Ubuntu-x64.AppImage`
-- `/downloads/AHT-Launcher-Ubuntu-x64.deb`
 
 ## Prompt for Website Codex Chat
 
@@ -64,8 +66,8 @@ Recommended website paths:
 Use the AHT launcher builds from the GitHub repository `https://github.com/svre-mc/aht-launcher`.
 
 For macOS, pull the latest `launcher-v<version>` GitHub Release assets. It contains:
-- Apple Silicon: `AHT-Launcher-macOS-arm64-0.1.1.dmg`
-- Intel: `AHT-Launcher-macOS-x64-0.1.1.dmg`
+- Apple Silicon: `AHT-Launcher-macOS-arm64-<version>.dmg`
+- Intel: `AHT-Launcher-macOS-x64-<version>.dmg`
 
 Upload/serve them from these website paths:
 - `/downloads/AHT-Launcher-macOS-arm64.dmg`
@@ -75,10 +77,8 @@ Use these labels on the website:
 - `Download for macOS Apple Silicon`
 - `Download for macOS Intel`
 
-Also reserve these paths for the other platform builds:
+Also reserve this path for the Windows build:
 - Windows 10/11: `/downloads/AHT-Launcher-Windows-10-11.exe`
-- Ubuntu/Linux AppImage: `/downloads/AHT-Launcher-Ubuntu-x64.AppImage`
-- Ubuntu/Linux deb: `/downloads/AHT-Launcher-Ubuntu-x64.deb`
 
 When the launcher version changes, replace the files behind the same stable website paths so website download links do not need to change.
 ```

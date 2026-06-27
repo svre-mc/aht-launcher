@@ -1,21 +1,107 @@
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const commonBuilder = require('../build/electron-builder.common.cjs');
 const windowsInstallerInclude = fs.readFileSync(new URL('../build/windows-installer.nsh', import.meta.url), 'utf8');
 const rendererApp = fs.readFileSync(new URL('../desktop/renderer/app.js', import.meta.url), 'utf8');
+const preloadScript = fs.readFileSync(new URL('../desktop/preload.cjs', import.meta.url), 'utf8');
+const rendererHtml = fs.readFileSync(new URL('../desktop/renderer/index.html', import.meta.url), 'utf8');
+const rendererCss = fs.readFileSync(new URL('../desktop/renderer/style.css', import.meta.url), 'utf8');
 const desktopMain = fs.readFileSync(new URL('../desktop/main.js', import.meta.url), 'utf8');
+const installerSource = fs.readFileSync(new URL('../src/installer.js', import.meta.url), 'utf8');
+const utilsSource = fs.readFileSync(new URL('../src/utils.js', import.meta.url), 'utf8');
+const githubActionsSource = fs.readFileSync(new URL('../src/githubActions.js', import.meta.url), 'utf8');
 const releaseWorkflow = fs.readFileSync(new URL('../.github/workflows/build-macos.yml', import.meta.url), 'utf8');
+const verifyLocalScript = fs.readFileSync(new URL('../scripts/verify-local.mjs', import.meta.url), 'utf8');
+const smokePlayerDefaults = fs.readFileSync(new URL('../scripts/smoke-player-defaults-feed.mjs', import.meta.url), 'utf8');
+const smokePlayerLayout = fs.readFileSync(new URL('../scripts/smoke-player-layout.mjs', import.meta.url), 'utf8');
+const smokePlayerUpdatePlay = fs.readFileSync(new URL('../scripts/smoke-player-update-play-flow.mjs', import.meta.url), 'utf8');
+const checkProductionReadiness = fs.readFileSync(new URL('../scripts/check-production-readiness.mjs', import.meta.url), 'utf8');
+const prepareLauncherUpdateScript = fs.readFileSync(new URL('../scripts/prepare-launcher-update.mjs', import.meta.url), 'utf8');
+const launcherUpdateManifestTest = fs.readFileSync(new URL('../scripts/test-launcher-update-manifest.mjs', import.meta.url), 'utf8');
+const launcherUpdateManifestValidator = fs.readFileSync(new URL('../scripts/validate-launcher-update-manifest.mjs', import.meta.url), 'utf8');
+const launcherUpdateManifestSource = fs.readFileSync(new URL('../src/launcherUpdateManifest.js', import.meta.url), 'utf8');
+const workerTelemetryTest = fs.readFileSync(new URL('../scripts/test-worker-telemetry.mjs', import.meta.url), 'utf8');
+const packageScripts = packageJson.scripts || {};
+const playerDefaultsStart = desktopMain.indexOf('function playerDefaultsForCloud');
+const playerDefaultsEnd = desktopMain.indexOf('function playerDefaultsTargets');
+const playerDefaultsFunction = playerDefaultsStart >= 0 && playerDefaultsEnd > playerDefaultsStart
+  ? desktopMain.slice(playerDefaultsStart, playerDefaultsEnd)
+  : '';
 
 const configs = {
   windows: require('../build/electron-builder.windows.cjs'),
   macos: require('../build/electron-builder.macos.cjs')
 };
+const developerOnlySourceFiles = commonBuilder.developerOnlySourceFiles || [];
+const developerOnlyNodeModules = commonBuilder.developerOnlyNodeModules || [];
+const developerOnlyRuntimeDependencies = [
+  '@aws-sdk/client-s3',
+  '@aws-sdk/lib-storage',
+  'ssh2',
+  'yauzl',
+  'yazl'
+];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+function collectFiles(target, extensions) {
+  const stat = fs.statSync(target, { throwIfNoEntry: false });
+  if (!stat) return [];
+  if (stat.isFile()) {
+    return extensions.has(path.extname(target).toLowerCase()) ? [target] : [];
+  }
+  if (!stat.isDirectory()) return [];
+  const files = [];
+  for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+    files.push(...collectFiles(path.join(target, entry.name), extensions));
+  }
+  return files;
+}
+
+function repoPath(...segments) {
+  return path.resolve(new URL('..', import.meta.url).pathname, ...segments);
+}
+
+function scriptTargetExists(command) {
+  const missing = [];
+  for (const match of command.matchAll(/\bnode\s+((?:scripts|src)\/[^\s]+?\.(?:mjs|js))/g)) {
+    const target = new URL(`../${match[1]}`, import.meta.url);
+    if (!fs.existsSync(target)) {
+      missing.push(match[1]);
+    }
+  }
+  return missing;
+}
+
+function pngColorType(relativePath) {
+  const bytes = fs.readFileSync(new URL(`../${relativePath}`, import.meta.url));
+  return bytes[25];
+}
+
+function icoLayers(relativePath) {
+  const bytes = fs.readFileSync(new URL(`../${relativePath}`, import.meta.url));
+  const count = bytes.readUInt16LE(4);
+  const layers = [];
+  for (let index = 0; index < count; index += 1) {
+    const offset = 6 + (index * 16);
+    layers.push({
+      width: bytes[offset] === 0 ? 256 : bytes[offset],
+      height: bytes[offset + 1] === 0 ? 256 : bytes[offset + 1],
+      bytes: bytes.readUInt32LE(offset + 8)
+    });
+  }
+  return layers;
+}
+
+const sensitiveExtensions = new Set(['.cjs', '.html', '.js', '.json', '.md', '.mjs', '.toml', '.yml']);
+const sensitiveRoots = ['desktop', 'src', 'config', 'docs', 'scripts', 'cloudflare', '.github'];
+const sensitiveFiles = ['README.md', 'package.json'];
 
 assert(configs.windows.productName === 'A Hard Time Launcher Windows', 'Windows product name is not tailored.');
 assert(configs.windows.directories?.output === 'release-builds/windows', 'Windows output folder is wrong.');
@@ -28,16 +114,222 @@ assert(configs.windows.nsis?.include === 'build/windows-installer.nsh', 'Windows
 assert(windowsInstallerInclude.includes('Create a desktop shortcut'), 'Windows installer include must expose the desktop shortcut option.');
 assert(!/CreateShortCut[\s\S]*--developer/.test(windowsInstallerInclude), 'Public Windows installer must not create private-mode shortcuts.');
 assert(!windowsInstallerInclude.includes('"--developer"'), 'Public Windows installer must not expose private-mode args.');
+assert(preloadScript.includes("selectFolder: (defaultPath = '') => ipcRenderer.invoke('dialog:folder', defaultPath)"), 'Folder picker preload API must accept a starting folder path.');
+assert(preloadScript.includes('function developerApiAllowed()') && preloadScript.includes("new URLSearchParams(window.location.search || '').get('mode') === 'developer'"), 'Preload developer APIs must be gated by the main-controlled developer window mode.');
+assert(preloadScript.includes('const developerApi = {') && preloadScript.includes('if (developerApiAllowed())'), 'Preload must keep developer IPC methods out of the default player API.');
+assert(desktopMain.includes("ipcMain.handle('dialog:folder', async (_event, defaultPath = '')") && desktopMain.includes('options.defaultPath = startingPath'), 'Native folder picker must pass the supplied starting path to Electron defaultPath.');
+assert(desktopMain.includes("process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_DIALOG_ECHO_DEFAULT_PATH === '1'"), 'Dialog test hook must require the explicit AHT_TEST_HOOKS gate.');
+assert(desktopMain.includes('function configureTestRemoteDebugPort()') && desktopMain.includes("process.env.AHT_TEST_HOOKS !== '1'") && desktopMain.includes('AHT_TEST_REMOTE_DEBUG_PORT'), 'Packaged smoke remote-debug hook must be gated by AHT_TEST_HOOKS and an explicit port env var.');
+assert(desktopMain.includes('function writeTestStartupProbe') && desktopMain.includes('AHT_TEST_STARTUP_PROBE_PATH'), 'Packaged startup diagnostics must be gated behind AHT_TEST_HOOKS and an explicit probe path.');
+assert(smokePlayerUpdatePlay.includes('AHT_TEST_REMOTE_DEBUG_PORT: String(port)') && smokePlayerUpdatePlay.includes('AHT_TEST_STARTUP_PROBE_PATH: startupProbePath') && smokePlayerUpdatePlay.includes('? [`--user-data-dir=${userData}`]'), 'Installed player update/play smoke must use the gated main-process remote-debug hook and startup probe.');
+assert(smokePlayerDefaults.includes('const minecraftRoot = path.join(root, \'.minecraft\')') && smokePlayerDefaults.includes('enabled: true') && smokePlayerDefaults.includes('rootDir: minecraftRoot'), 'Player defaults smoke must exercise enabled Minecraft Launcher profile integration against an isolated temp root.');
+assert(smokePlayerLayout.includes('const minecraftRoot = path.join(root, \'.minecraft\')') && smokePlayerLayout.includes('enabled: true') && smokePlayerLayout.includes('minecraftProfileEnabledInput') && smokePlayerLayout.includes('Player layout did not render Minecraft profile integration as enabled'), 'Player layout smoke must visually prove Minecraft Launcher profile integration is enabled.');
+const verifyInstalledPlayer = fs.readFileSync(new URL('../scripts/verify-installed-player.mjs', import.meta.url), 'utf8');
+for (const installedPlayerCheck of [
+  'test:player-defaults',
+  'test:player-privacy',
+  'test:player-layout',
+  'test:settings-profile',
+  'test:account-duplicate',
+  'test:account-switch',
+  'test:update-logs',
+  'test:single-instance',
+  'test:play-gate',
+  'test:player-update-play',
+  'test:launcher-self-update'
+]) {
+  assert(verifyInstalledPlayer.includes(`['${installedPlayerCheck}']`), `Installed player verifier must include ${installedPlayerCheck}.`);
+}
+
+assert(rendererApp.includes('window.aht.selectFolder(els.instanceInput.value.trim() || currentStatus?.config?.instanceDir || "")'), 'Modpack Folder Browse must open at the folder path currently listed in Game Settings.');
+assert(!rendererApp.includes('els.pickInstanceButton.addEventListener("click", async () => {\n    const folder = await window.aht.selectFolder();'), 'Modpack Folder Browse must not call selectFolder without a default path.');
+assert(!rendererApp.includes('Config error'), 'Renderer must not show the technical Config error label in player or developer UI.');
+assert(!rendererApp.includes('packageTarget') && !rendererApp.includes('build - ${platformProfile'), 'Renderer settings subtitle must not expose package/build target jargon in the player UI.');
+assert(!rendererApp.includes('server owner') && !desktopMain.includes('server owner'), 'Player-facing update/feed messages must not use internal server-owner wording.');
+assert(rendererApp.includes('"Verified AHT package ready."') && rendererApp.includes('status.developerMode') && rendererApp.includes('currentStatus?.developerMode'), 'Renderer must show simple verified-package feed wording to players while keeping release-source diagnostics in developer mode.');
+assert(rendererApp.includes('els.sideInstalledVersion.textContent = installedLabel'), 'Sidebar pack tile must show the same v.x installed-version label as the main hero.');
+const gameTileButtonStart = rendererHtml.indexOf('id="gameTileButton"');
+const gameTileButtonEnd = rendererHtml.indexOf('coming-soon', gameTileButtonStart);
+const gameTileButtonHtml = gameTileButtonStart >= 0 && gameTileButtonEnd > gameTileButtonStart
+  ? rendererHtml.slice(gameTileButtonStart, gameTileButtonEnd)
+  : '';
+assert(gameTileButtonHtml.includes('sidebar-version-dot') && !gameTileButtonHtml.includes('icon-download'), 'Sidebar installed-version label must use a neutral status dot, not a download icon.');
+assert(!rendererApp.includes('Launch locked'), 'Renderer must use specific player-facing status labels instead of the vague Launch locked badge.');
+assert(!rendererApp.includes('"Launch is locked."') && rendererApp.includes('"Finish setup before playing."'), 'Play button tooltip must use a specific setup fallback instead of the vague locked label.');
+assert(rendererApp.includes('function launchBlockedBadge') && rendererApp.includes('function setLaunchStatusBadge'), 'Renderer must classify non-ready launch states into specific player-facing badge labels.');
+assert(rendererApp.includes('developerMode: bootDeveloperMode,'), 'Renderer fallback mock must not boot as developer mode by default.');
+assert(rendererApp.includes('delete mockStatus.config.developer') && rendererApp.includes('delete mockStatus.serverTransfer'), 'Renderer fallback mock must strip private developer/server-transfer config outside developer preview mode.');
+assert(rendererApp.includes('key.startsWith("dev")') && rendererApp.includes('delete window.aht[key]'), 'Renderer fallback mock must not expose developer APIs outside developer preview mode.');
+assert(!rendererHtml.includes('Launcher Log') && !rendererHtml.includes('id="activityPanel"') && !rendererHtml.includes('id="instanceDir"'), 'Regular launcher must not ship the stale Instance/Launcher Log panel.');
+assert(rendererApp.includes('function logIsEmpty()') && rendererApp.includes('if (!els.activityPanel) return;'), 'Renderer must tolerate the removed stale activity panel.');
+assert(rendererApp.includes('function playerSafeErrorMessage') && rendererApp.includes('const message = playerSafeErrorMessage(error);'), 'Renderer must sanitize player-facing launch/feed errors before showing logs or toasts.');
+assert(!rendererApp.includes('setLog(status.launchBlockedReason || "Launch is locked until setup is complete.")'), 'Renderer must not write raw launchBlockedReason for normal player lock messages.');
 assert(!rendererApp.includes('update.updateRequired && !status?.developerMode'), 'Developer mode must not suppress required launcher update overlay.');
 assert(!rendererApp.includes('status.launcherUpdate?.updateRequired && !status.developerMode'), 'Developer mode must not bypass launcher update gating.');
-assert(!desktopMain.includes('@312Princ'), 'Developer password must not be hardcoded in public source.');
+assert(desktopMain.includes("password: String(process.env.AHT_DEVELOPER_PASSWORD || localCredentials.password || '')"), 'Developer credentials must come from local env or local app-data credentials only.');
+assert(!/DEFAULT_DEVELOPER_PASSWORD|developerPassword\s*=/.test(desktopMain), 'Developer password must not have a public source default.');
+for (const key of ['curseforgeApiKey', 'serverSshPassword', 'launcherProofSecret', 'githubToken']) {
+  assert(!new RegExp(`${key}:\\s*["'](?!["'])[^"']+["']`).test(rendererApp), `Renderer fallback mock must not ship a fake ${key} secret literal.`);
+}
+assert(rendererHtml.includes('class="brand-mark bill-art"'), 'Brand mark must use the transparent bill asset.');
+assert(rendererHtml.includes('class="profile-avatar bill-art"'), 'Player avatar must use the transparent bill asset.');
+assert(!rendererHtml.includes('class="brand-mark aht-art"'), 'Brand mark must not use the full cover art.');
+assert(!rendererHtml.includes('class="profile-avatar aht-art"'), 'Player avatar must not use the full cover art.');
+assert(rendererHtml.includes('class="game-thumb aht-art"'), 'AHT modpack tile must keep the full cover art.');
+assert(rendererHtml.includes('class="game-thumb alt aht-art"'), 'AHT 3.0 tile must keep the full cover art.');
+assert(rendererHtml.includes('class="game-thumb download-thumb aht-art"'), 'Downloads tile must keep the full cover art.');
+assert(rendererCss.includes('assets/aht-cover.png'), 'Full cover art CSS must stay available for modpack tiles.');
+assert(rendererCss.includes('assets/aht-bill-transparent.png'), 'Transparent bill art CSS must stay available for app/profile marks.');
+assert(rendererCss.includes('.feature-art.aht-art::after') && !rendererCss.includes('\n.aht-art::after'), 'AHT cover-art title overlay must only apply to large update-log art, not sidebar thumbnails.');
+assert(rendererCss.includes('.feature-art.aht-art::before') && !rendererCss.includes('\n.aht-art::before'), 'AHT cover-art lighting overlay must only apply to large update-log art, not sidebar thumbnails.');
+assert(fs.existsSync(new URL('../desktop/renderer/assets/aht-cover.png', import.meta.url)), 'Full cover art asset must exist.');
+assert(fs.existsSync(new URL('../desktop/renderer/assets/aht-bill-transparent.png', import.meta.url)), 'Transparent bill art asset must exist.');
+assert(pngColorType('build/icon.png') === 6, 'Windows app icon PNG must preserve alpha transparency.');
+assert(pngColorType('build/icon-mac.png') === 6, 'macOS app icon PNG must preserve alpha transparency.');
+assert(pngColorType('desktop/renderer/assets/aht-bill-transparent.png') === 6, 'Transparent bill art must be an alpha PNG.');
+const iconLayers = icoLayers('build/icon.ico');
+assert(iconLayers.length >= 6, 'Windows ICO must contain multiple icon sizes.');
+assert(iconLayers.some((layer) => layer.width === 256 && layer.height === 256 && layer.bytes > 50000), 'Windows ICO must include a real 256px alpha layer.');
+const packageWorkRefs = Object.entries(packageScripts)
+  .filter(([, command]) => String(command).includes('work/') || String(command).includes('work\\'))
+  .map(([name]) => name);
+assert(packageWorkRefs.length === 0, `Package scripts must not depend on local work/ files: ${packageWorkRefs.join(', ')}`);
+for (const staleScript of ['build-release', 'install-pack', 'serve-release', 'preview:renderer', 'start:web']) {
+  assert(!packageScripts[staleScript], `${staleScript} terminal/web launcher script must not be exposed.`);
+}
+assert(!configs.windows.files?.includes('public/**/*') && !configs.macos.files?.includes('public/**/*'), 'Regular launcher builds must not package the removed web UI.');
+assert(!configs.windows.files?.includes('cloudflare/**/*') && !configs.macos.files?.includes('cloudflare/**/*'), 'Regular player builds must not package Cloudflare Worker source.');
+assert(!configs.windows.files?.some((item) => String(item).startsWith('server-lock-mod/')) && !configs.macos.files?.some((item) => String(item).startsWith('server-lock-mod/')), 'Regular player builds must not package server-lock-mod artifacts.');
+assert(!configs.windows.asarUnpack?.some((item) => String(item).startsWith('server-lock-mod/')) && !configs.macos.asarUnpack?.some((item) => String(item).startsWith('server-lock-mod/')), 'Regular player builds must not unpack server-lock-mod artifacts.');
+assert(configs.windows.files?.includes('config/app.defaults.json') && configs.macos.files?.includes('config/app.defaults.json'), 'Regular launcher builds must package only the player app defaults file.');
+assert(!configs.windows.files?.includes('config/**/*') && !configs.macos.files?.includes('config/**/*'), 'Regular launcher builds must not package every config file.');
+assert(!packageJson.build?.files?.includes('config/**/*'), 'Legacy package build config must not package every config file.');
+assert(!packageJson.build?.files?.includes('cloudflare/**/*'), 'Legacy package build config must not package Cloudflare Worker source.');
+assert(!packageJson.build?.files?.some((item) => String(item).startsWith('server-lock-mod/')), 'Legacy package build config must not package server-lock-mod artifacts.');
+assert(!packageJson.build?.asarUnpack?.some((item) => String(item).startsWith('server-lock-mod/')), 'Legacy package build config must not unpack server-lock-mod artifacts.');
+assert(developerOnlySourceFiles.length === 5, 'Regular player package developer-only source files must be declared.');
+for (const relativePath of developerOnlySourceFiles) {
+  const exclusion = `!${relativePath}`;
+  assert(configs.windows.files?.includes(exclusion), `Windows regular player package must exclude ${relativePath}.`);
+  assert(configs.macos.files?.includes(exclusion), `macOS regular player package must exclude ${relativePath}.`);
+  assert(packageJson.build?.files?.includes(exclusion), `Legacy package build config must exclude ${relativePath}.`);
+}
+assert(developerOnlyNodeModules.length === 6, 'Regular player package developer-only node modules must be declared.');
+for (const moduleGlob of developerOnlyNodeModules) {
+  const exclusion = `!${moduleGlob}`;
+  assert(configs.windows.files?.includes(exclusion), `Windows regular player package must exclude ${moduleGlob}.`);
+  assert(configs.macos.files?.includes(exclusion), `macOS regular player package must exclude ${moduleGlob}.`);
+  assert(packageJson.build?.files?.includes(exclusion), `Legacy package build config must exclude ${moduleGlob}.`);
+}
+assert(packageJson.dependencies?.['adm-zip'], 'adm-zip must remain a player runtime dependency for ZIP install and Forge Java extraction.');
+for (const dependency of developerOnlyRuntimeDependencies) {
+  assert(!packageJson.dependencies?.[dependency], `${dependency} must stay out of dependencies; it is developer-only and excluded from player packages.`);
+  assert(packageJson.devDependencies?.[dependency], `${dependency} must be available as a devDependency for local developer tooling/tests.`);
+}
+assert(desktopMain.includes('async function resolveWorkerSourceFile()') && desktopMain.includes('process.env.AHT_LAUNCHER_SOURCE_ROOT') && desktopMain.includes('process.env.INIT_CWD'), 'Packaged developer cloud setup must find Worker source from the local repo without packaging cloudflare files.');
+assert(fs.readFileSync(new URL('../src/releaseBuilder.js', import.meta.url), 'utf8').includes('process.env.AHT_LAUNCHER_SOURCE_ROOT') && fs.readFileSync(new URL('../src/releaseBuilder.js', import.meta.url), 'utf8').includes('process.env.INIT_CWD'), 'Packaged developer release builder must find local server helper jars without packaging server-lock-mod.');
+assert(!fs.existsSync(new URL('../config/launcher.config.example.json', import.meta.url)), 'Stale developer-shaped launcher.config.example.json must stay removed.');
+assert(!releaseWorkflow.includes('public/**'), 'Launcher build workflow must not trigger on removed web UI files.');
+for (const stalePath of ['../installer.js', '../main.js', '../clientPackFormat.js', '../src/cli.js', '../src/web.js', '../public/index.html', '../scripts/build-release.sh', '../scripts/serve-release.sh', '../scripts/start-ui.sh', '../src/previewRenderer.js']) {
+  assert(!fs.existsSync(new URL(stalePath, import.meta.url)), `${stalePath} must stay removed; use the Electron app and developer UI instead.`);
+}
+assert(packageScripts['verify:local'] === 'node scripts/verify-local.mjs', 'verify:local must use scripts/verify-local.mjs.');
+assert(packageScripts['verify:installed-player'] === 'node scripts/verify-installed-player.mjs', 'verify:installed-player must run the installed player launcher smoke suite.');
+assert(packageScripts['test:player-update-play'] === 'node scripts/smoke-player-update-play-flow.mjs', 'Regular player update/play smoke must stay wired as an npm script.');
+assert(verifyLocalScript.includes("['test:player-update-play']"), 'verify:local must run the fresh-player update/play smoke.');
+assert(verifyLocalScript.includes("['test:download-retry']"), 'verify:local must run the retrying download smoke.');
+assert(!rendererHtml.includes('legacy CurseForge export ZIP'), 'Release Builder UI must not advertise legacy CurseForge ZIPs for normal player releases.');
+assert(!rendererApp.includes('legacy CurseForge ZIP first'), 'Release Builder publish lock must require an exact AHT client ZIP.');
+assert(!workerTelemetryTest.includes('CurseForge-style installs'), 'Worker telemetry update-log fixture must describe exact AHT client ZIP installs, not the legacy CurseForge flow.');
+assert(!desktopMain.includes("name: 'CurseForge exports'") && desktopMain.includes("name: 'Exact AHT client ZIPs'"), 'Pack ZIP picker must request exact AHT client ZIPs, not legacy CurseForge exports.');
+assert(rendererApp.includes('Legacy CurseForge export ZIPs are blocked for normal player releases.'), 'Renderer must block legacy CurseForge ZIP publishes before build.');
+assert(desktopMain.includes('allowLegacyCurseForge') && desktopMain.includes('assertFullClientReleaseAllowed'), 'Main process must block legacy CurseForge releases by default with an explicit test/tooling allow flag.');
+assert(desktopMain.includes("add('error', 'legacy CurseForge release blocked'"), 'Release validation must block legacy CurseForge artifacts before R2 upload.');
+assert(checkProductionReadiness.includes('live pack release is exact AHT client ZIP') && checkProductionReadiness.includes("from '../src/clientPackFormat.js'") && !checkProductionReadiness.includes("const CLIENT_PACK_FORMAT = 'aht-full-client-zip';"), 'Production readiness must import the shared client pack format instead of duplicating the full-client ZIP string.');
+assert(desktopMain.includes("from '../src/clientPackFormat.js'") && !desktopMain.includes("const CLIENT_PACK_FORMAT = 'aht-full-client-zip';") && !desktopMain.includes("const CLIENT_PACK_METADATA_ENTRY = 'aht-client-pack.json';"), 'Main process must import shared client pack constants instead of duplicating them.');
+assert(checkProductionReadiness.includes('function nextRequiredStep') && checkProductionReadiness.includes('publish an exact AHT client ZIP release') && checkProductionReadiness.includes('report.nextRequiredStep'), 'Production readiness must print blocker-specific next steps instead of generic cloud setup guidance.');
+assert(!checkProductionReadiness.includes("console.log('Next required step: run Developer > Setup Cloud after Cloudflare login, then re-run this check.');"), 'Production readiness must not always print the cloud setup next step for unrelated blockers.');
+assert(checkProductionReadiness.includes('live launcher update feed matches local version') && checkProductionReadiness.includes('liveLauncherVersion === localLauncherVersion'), 'Production readiness must block when the hosted launcher update feed is older than the local package version.');
+assert(checkProductionReadiness.includes('stalePackFeed && staleLauncherFeed') && checkProductionReadiness.includes('publish an exact AHT client ZIP release and a launcher update'), 'Production readiness must report both stale pack and launcher feed blockers when both are present.');
+assert(checkProductionReadiness.includes("from './validate-launcher-update-manifest.mjs'") && checkProductionReadiness.includes('function validateLauncherDownloads') && checkProductionReadiness.includes('validateLauncherUpdateManifest(manifest') && checkProductionReadiness.includes('live launcher update feed has Windows and macOS downloads'), 'Production readiness must use the reusable strict launcher manifest validator for live launcher update feeds.');
+assert(checkProductionReadiness.includes("names.includes('live launcher update feed has Windows and macOS downloads')"), 'Production readiness next-step guidance must route missing launcher downloads to a launcher update publish.');
+assert(launcherUpdateManifestTest.includes('validateLauncherUpdateManifest(manifest') && launcherUpdateManifestTest.includes('generated launcher manifest failed reusable validation'), 'Launcher update manifest test must reuse the manifest validator.');
+assert(launcherUpdateManifestValidator.includes("from '../src/launcherUpdateManifest.js'") && launcherUpdateManifestValidator.includes('validateLauncherUpdateManifestFile'), 'Launcher update manifest CLI must wrap the shared runtime validator.');
+assert(launcherUpdateManifestSource.includes("REQUIRED_DOWNLOAD_KEYS = ['windows-x64', 'macos-arm64', 'macos-x64']") && launcherUpdateManifestSource.includes('manual downloads must use website-facing keys only') && launcherUpdateManifestSource.includes('platforms must not publish Linux artifacts') && launcherUpdateManifestSource.includes('must include /S silent install args'), 'Launcher update manifest validator must lock website-facing download keys, hashes, silent install args, and no-Linux artifacts.');
+assert(prepareLauncherUpdateScript.includes('escapeRegExp(version)') && prepareLauncherUpdateScript.includes('AHT-Launcher-Windows-10-11-${artifactVersion}') && prepareLauncherUpdateScript.includes('AHT-Launcher-macOS-arm64-${artifactVersion}'), 'Launcher update prep must only select artifacts matching the package version.');
+assert(prepareLauncherUpdateScript.includes('function requireHttpsLatestUrl') && prepareLauncherUpdateScript.includes('Launcher update latest URL must be HTTPS'), 'Launcher update prep must reject non-HTTPS latest URLs before generating manifests.');
+assert(launcherUpdateManifestSource.includes('fileNameMatchesVersion') && launcherUpdateManifestSource.includes('fileName must include launcher version'), 'Launcher update validator must reject stale artifact filenames that do not match the manifest version.');
+assert(launcherUpdateManifestSource.includes('path basename must match fileName') && launcherUpdateManifestSource.includes('url basename must match fileName'), 'Launcher update validator must ensure paths and URLs point to the declared artifact fileName.');
+assert(launcherUpdateManifestSource.includes('function isAllowedArtifactUrl') && launcherUpdateManifestSource.includes("url.protocol === 'https:'") && launcherUpdateManifestSource.includes('allowInsecureLocalhost'), 'Launcher update validator must require HTTPS artifact URLs except explicit localhost smoke tests.');
+assert(launcherUpdateManifestTest.includes('stale launcher artifact filenames') && launcherUpdateManifestTest.includes('path basename must match fileName') && launcherUpdateManifestTest.includes('non-HTTPS launcher artifact URLs') && launcherUpdateManifestTest.includes('non-HTTPS latest URLs') && launcherUpdateManifestTest.includes('artifacts that do not match the manifest/package version'), 'Launcher update manifest test must cover stale artifact filename, path, URL, and HTTPS rejection.');
+assert(releaseWorkflow.includes('name: Test launcher update manifest') && releaseWorkflow.includes('npm run test:launcher-update-manifest'), 'GitHub launcher publish workflow must run the launcher update manifest test before publishing release data.');
+assert(releaseWorkflow.includes('name: Validate generated launcher update manifest') && releaseWorkflow.includes('node scripts/validate-launcher-update-manifest.mjs ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"'), 'GitHub launcher publish workflow must validate the generated launcher/latest.json before creating releases or uploading R2.');
+assert(releaseWorkflow.includes('"scripts/validate-launcher-update-manifest.mjs"'), 'GitHub workflow path triggers must include the generated-manifest validator.');
+assert(!releaseWorkflow.includes('launcher_version') && !releaseWorkflow.includes('set-package-version.mjs'), 'GitHub launcher workflow must not expose or apply a manual launcher version override.');
+assert(!githubActionsSource.includes('launcher_version') && !desktopMain.includes('launcherVersion: version'), 'Developer launcher update dispatch must let GitHub Actions read package.json from the selected branch.');
+assert(desktopMain.includes('function isFullClientRelease') && desktopMain.includes('function requirePlayerFullClientRelease') && desktopMain.includes('playerUpdateBlockedReason'), 'Regular player update/play must block non-exact client ZIP releases before download or launch.');
+assert(desktopMain.includes('updateBlockedReason') && rendererApp.includes('status.updateBlockedReason'), 'Renderer status must expose and honor player update blocks.');
+assert(smokePlayerUpdatePlay.includes('Legacy feed should be blocked before player install') && smokePlayerUpdatePlay.includes('Legacy feed started downloading pack files before being blocked'), 'Fresh-player smoke must prove legacy feeds are blocked before download.');
+assert(smokePlayerUpdatePlay.includes('function waitForCleanScanUiReset') && smokePlayerUpdatePlay.includes('clean scan UI reset after update') && smokePlayerUpdatePlay.includes("document.querySelector('#scanButton')?.click()") && smokePlayerUpdatePlay.includes("document.querySelector('#sidebarProgress')") && smokePlayerUpdatePlay.includes("last.badge === 'Ready' && last.diff === 'Clean' && last.progressHidden && !last.scanDisabled && !last.playDisabled"), 'Fresh-player smoke must prove a clean Scan returns the UI to Ready/Clean with progress hidden and buttons enabled.');
+assert(!installerSource.includes("from './clientModpackZip.js'") && installerSource.includes("from './clientPackFormat.js'"), 'Player installer must import full-client ZIP constants from packaged runtime source, not developer-only clientModpackZip.');
+assert(checkProductionReadiness.includes('function forbiddenRuntimeImportHits') && checkProductionReadiness.includes('src/installer.js') && checkProductionReadiness.includes('clientModpackZip.js') && checkProductionReadiness.includes('includes required player runtime modules') && checkProductionReadiness.includes('src/clientPackFormat.js'), 'Production readiness must catch packaged ASAR runtime imports of missing developer-only modules.');
+const verifyScripts = [...verifyLocalScript.matchAll(/\['([^']+)'\]/g)].map((match) => match[1]);
+const missingVerifyScripts = verifyScripts.filter((name) => !packageScripts[name]);
+assert(missingVerifyScripts.length === 0, `verify:local references missing npm scripts: ${missingVerifyScripts.join(', ')}`);
+const missingScriptTargets = Object.entries(packageScripts)
+  .flatMap(([name, command]) => scriptTargetExists(String(command)).map((target) => `${name}:${target}`));
+assert(missingScriptTargets.length === 0, `Package scripts point at missing node targets: ${missingScriptTargets.join(', ')}`);
+const packagedDeveloperSmokeScripts = [
+  'scripts/smoke-cache-only-cloud-setup.mjs',
+  'scripts/smoke-cloud-login-required.mjs',
+  'scripts/smoke-developer-modpack-zip-ui.mjs',
+  'scripts/smoke-developer-secret-persistence.mjs',
+  'scripts/smoke-developer-update-log-auth-refresh.mjs',
+  'scripts/smoke-launcher-update-publish.mjs',
+  'scripts/smoke-r2-release-flow.mjs',
+  'scripts/smoke-r2-release-ui-flow.mjs',
+  'scripts/smoke-write-player-defaults-button.mjs'
+];
+for (const relativePath of packagedDeveloperSmokeScripts) {
+  const source = fs.readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
+  assert(
+    source.includes("AHT_ALLOW_DEVELOPER: '1'"),
+    `${relativePath} must set AHT_ALLOW_DEVELOPER for packaged developer smoke runs.`
+  );
+  assert(
+    source.includes('AHT_LAUNCHER_SOURCE_ROOT: process.cwd()'),
+    `${relativePath} must set AHT_LAUNCHER_SOURCE_ROOT for packaged developer module fallback.`
+  );
+}
 assert(desktopMain.includes("launcherBuildMode() !== 'player'"), 'Player packaged builds must disable developer mode.');
+for (const developerOnlyImport of [
+  "../src/releaseBuilder.js",
+  "../src/clientModpackZip.js",
+  "../src/serverTransfer.js",
+  "../src/githubActions.js",
+  "../src/r2DirectUpload.js"
+]) {
+  assert(!desktopMain.includes(`from '${developerOnlyImport}'`) && !desktopMain.includes(`from \"${developerOnlyImport}\"`), `${developerOnlyImport} must not be imported at main-process startup.`);
+}
+assert(desktopMain.includes('async function importDeveloperModule(appRelativePath)') && desktopMain.includes('pathToFileURL'), 'Developer-only modules must resolve from the local source repo when excluded from the public player package.');
+assert(desktopMain.includes("function loadReleaseBuilderModule()") && desktopMain.includes("importDeveloperModule('../src/releaseBuilder.js')"), 'Release builder must be lazy-loaded for developer actions.');
+assert(desktopMain.includes("function loadClientModpackZipModule()") && desktopMain.includes("importDeveloperModule('../src/clientModpackZip.js')"), 'Exact client ZIP helpers must be lazy-loaded for developer actions.');
+assert(desktopMain.includes("function loadR2DirectUploadModule()") && desktopMain.includes("importDeveloperModule('../src/r2DirectUpload.js')"), 'Direct R2 upload must be lazy-loaded for developer actions.');
+assert(desktopMain.includes("function loadGithubActionsModule()") && desktopMain.includes("importDeveloperModule('../src/githubActions.js')"), 'GitHub workflow helpers must be lazy-loaded for developer actions.');
+assert(desktopMain.includes("function loadServerTransferModule()") && desktopMain.includes("importDeveloperModule('../src/serverTransfer.js')"), 'Server transfer helpers must be lazy-loaded for developer actions.');
 assert(desktopMain.includes("import fsSync from 'node:fs';"), 'Launcher mode detection must import fsSync.');
 assert(desktopMain.includes("app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'))"), 'Developer mode must use separate local app data.');
 assert(desktopMain.includes("app.requestSingleInstanceLock({ mode: launchMode })"), 'Single-instance lock must be split by launch mode.');
 assert(desktopMain.includes("legacyDeveloperSecretsPath()"), 'Developer mode must migrate existing local secrets from the old app data folder.');
 assert(desktopMain.includes("migrateDeveloperEncryptionProfile()"), 'Developer mode must migrate the old Electron encryption profile before decrypting old secrets.');
 assert(desktopMain.includes("saveDeveloperSecretField(next, secrets, 'launcherProofSecret')"), 'Developer secrets must not be wiped by empty password fields.');
+assert(desktopMain.includes('launcherProof: { ...current.launcherProof, ...nextConfig.launcherProof }'), 'Saved settings must merge launcher proof settings instead of replacing them.');
+assert(desktopMain.includes('function rendererStatusConfig(config = {})') && desktopMain.includes('const { developer, serverTransfer, ...safeConfig } = config;'), 'Player status must not expose developer or server-transfer config.');
+for (const [label, source] of Object.entries({ desktopMain, rendererApp, rendererHtml })) {
+  for (const privateFragment of ['C:\\RL CRAFT SERVER LIST', '192.168.1.121', 'notevil', '/home/notevil']) {
+    assert(!source.includes(privateFragment), `${label} must not ship private local server-transfer defaults: ${privateFragment}`);
+  }
+}
 assert(desktopMain.includes("openMacMinecraftLauncher(cwd, env)"), 'macOS play must use the macOS Minecraft Launcher opener.');
 assert(desktopMain.includes("'/Applications/Minecraft.app'"), 'macOS opener must try the normal Minecraft.app path.');
 assert(desktopMain.includes("['-a', 'Minecraft']"), 'macOS opener must fall back to the Minecraft app name.');
@@ -49,17 +341,38 @@ assert(desktopMain.includes('return openWindowsStoreMinecraftLauncher(cwd, env);
 assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = null)'), 'Launcher must gather all synced Minecraft profile roots before installing loaders.');
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');
 assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update and Play must install Forge into synced launcher roots.');
-assert(desktopMain.includes('javaCacheDir') || fs.readFileSync(new URL('../src/forgeInstaller.js', import.meta.url), 'utf8').includes('ensureManagedJava8Runtime'), 'Forge installer must have managed Java 8 fallback for stale jre-legacy certificates.');
-assert(desktopMain.includes('{ skipLoaderCheck: true }'), 'Status and initial Play gate must allow Play to self-repair missing synced loaders.');
+assert(desktopMain.includes('function isCurseForgeMinecraftRoot') && desktopMain.includes('Number(a.fallback) - Number(b.fallback)') && desktopMain.includes("isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir)"), 'Regular player setup must prefer normal Minecraft Launcher roots and migrate old CurseForge launcher roots.');
+const forgeInstaller = fs.readFileSync(new URL('../src/forgeInstaller.js', import.meta.url), 'utf8');
+assert(desktopMain.includes('javaCacheDir') || forgeInstaller.includes('ensureManagedJava8Runtime'), 'Forge installer must have managed Java 8 fallback for stale jre-legacy certificates.');
+assert(forgeInstaller.includes('windowsJavaInstallRoots') && forgeInstaller.includes('Eclipse Adoptium'), 'Forge installer must prefer installed Temurin/Adoptium Java 8 before stale bundled Minecraft Java.');
+assert(forgeInstaller.includes("resolved === 'java' || isLegacyJavaPath(resolved) || !(await isJava8Candidate(resolved))"), 'Forge installer must use managed Java 8 when bare java would spawn ENOENT or a non-Java-8 runtime would be selected.');
+assert(utilsSource.includes('Download failed after') && utilsSource.includes('replaceFileWithDownload'), 'Player downloads must retry and replace files atomically.');
+assert(forgeInstaller.includes("process.env.AHT_TEST_HOOKS !== '1' || process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS !== '1'"), 'Forge installer test hook must require the explicit AHT_TEST_HOOKS gate.');
+assert(forgeInstaller.includes('const DEFAULT_FORGE_VERSION_WAIT_MS = 5 * 60_000') && forgeInstaller.includes('options.versionWaitMs ?? DEFAULT_FORGE_VERSION_WAIT_MS'), 'Forge installer must wait long enough for slow PCs to finish writing version metadata.');
+assert(desktopMain.includes('installerUrl: target.loaderInstallerUrl'), 'Update and Play must pass release-provided Forge installer mirrors into Forge setup.');
+assert(desktopMain.includes('skipLoaderCheck: true') && desktopMain.includes('allowLegacyRelease: developerClientBypass'), 'Status and initial Play gate must allow Play to self-repair missing synced loaders while preserving developer bypass.');
 assert(!desktopMain.includes("if (profile.loaderId?.startsWith('forge-') && !profile.loaderInstalled)"), 'Forge install flow must not only check the primary Minecraft root.');
 assert(!desktopMain.includes("spawnDetached('explorer.exe', ['shell:AppsFolder\\\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft'], cwd, env)"), 'Windows Store fallback must not spawn plain explorer.exe directly.');
 assert(rendererApp.includes('els.r2AccountIdInput.addEventListener("input", queueDeveloperSecretSave)'), 'R2 Account ID input must persist in developer mode.');
+assert(rendererApp.includes('savedR2AccountId || !els.r2AccountIdInput.value'), 'Settings refresh must not clear an unsaved R2 Account ID before debounce persistence runs.');
+assert(/launcherProof:\s*\{[\s\S]*enabled:\s*true[\s\S]*required:\s*true[\s\S]*baseUrl:\s*workerBase/.test(desktopMain), 'Player defaults must require launcher proof against the Worker endpoint.');
+assert(playerDefaultsFunction && !playerDefaultsFunction.includes('developer: {'), 'Generated player defaults must not include developer config.');
+assert(!Object.hasOwn(JSON.parse(fs.readFileSync(new URL('../config/app.defaults.json', import.meta.url), 'utf8')), 'developer'), 'Packaged player defaults must not include developer config.');
+assert(desktopMain.includes('function validateLatestReleaseFeed') && desktopMain.includes('zip.url or zip.path'), 'Live latest.json reads must reject malformed release feeds.');
+assert(rendererApp.includes('if (currentStatus?.developerMode) {') && rendererApp.includes('next.serverTransfer = {'), 'Renderer settings must only serialize developer/server-transfer fields in developer mode.');
+assert(/launcherProof:\s*\{[\s\S]*enabled:\s*true[\s\S]*required:\s*true[\s\S]*baseUrl:/.test(rendererApp), 'Renderer settings must preserve required launcher proof in regular player settings.');
 
 assert(configs.macos.productName === 'A Hard Time Launcher macOS', 'macOS product name is not tailored.');
 assert(configs.macos.directories?.output === 'release-builds/macos', 'macOS output folder is wrong.');
-assert(configs.macos.mac?.target?.[0]?.target === 'dmg', 'macOS regular launcher must build DMG.');
-assert(configs.macos.mac?.target?.[0]?.arch?.includes('arm64'), 'macOS regular launcher should include Apple Silicon.');
-assert(configs.macos.mac?.target?.[0]?.arch?.includes('x64'), 'macOS regular launcher should include Intel.');
+const macTargets = configs.macos.mac?.target || [];
+const macDmgTarget = macTargets.find((target) => target.target === 'dmg');
+const macZipTarget = macTargets.find((target) => target.target === 'zip');
+assert(macDmgTarget, 'macOS regular launcher must build DMG installers.');
+assert(macZipTarget, 'macOS regular launcher must build ZIP update artifacts.');
+assert(macDmgTarget.arch?.includes('arm64') && macZipTarget.arch?.includes('arm64'), 'macOS regular launcher should include Apple Silicon.');
+assert(macDmgTarget.arch?.includes('x64') && macZipTarget.arch?.includes('x64'), 'macOS regular launcher should include Intel.');
+assert(releaseWorkflow.includes('release-builds/macos/*.zip'), 'GitHub macOS workflow must upload ZIP self-update artifacts.');
+assert(desktopMain.includes('launchMacLauncherUpdateHelper'), 'macOS launcher self-update must use the app-bundle restart helper.');
 
 assert(!fs.existsSync(new URL('../build/electron-builder.ubuntu.cjs', import.meta.url)), 'Ubuntu builder config must not exist.');
 assert(!packageJson.scripts['dist:linux'], 'Linux package script must not exist.');
@@ -69,6 +382,14 @@ assert(!releaseWorkflow.includes('id: ubuntu'), 'GitHub workflow must not includ
 assert(!releaseWorkflow.includes('ubuntu-'), 'GitHub workflow must not use Ubuntu runners.');
 assert(!releaseWorkflow.includes('dist:regular:ubuntu'), 'GitHub workflow must not call the Ubuntu build script.');
 assert(!releaseWorkflow.includes('aht-launcher-ubuntu'), 'GitHub workflow must not upload Ubuntu launcher artifacts.');
+const platformProfileSource = fs.readFileSync(new URL('../src/platformProfile.js', import.meta.url), 'utf8');
+assert(platformProfileSource.includes('Unsupported AHT launcher platform'), 'Platform profile must reject unsupported platforms instead of keeping a generic Linux/Desktop fallback.');
+assert(desktopMain.includes("import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';"), 'Main process must use the shared platform policy for platform-specific paths.');
+assert(desktopMain.includes('platformKey(process.platform);') && !desktopMain.includes("return path.join(app.getPath('userData'), 'A Hard Time Developer');"), 'Developer playable instance must reject unsupported platforms instead of keeping a generic Linux fallback.');
+assert(!platformProfileSource.includes('XDG_DATA_HOME'), 'Platform profile must not keep an XDG/Linux instance path after Linux build removal.');
+assert(!platformProfileSource.includes('Desktop package'), 'Platform profile must not advertise a generic desktop/Linux package target.');
+assert(!rendererHtml.includes('Actions builds Windows, macOS, and Ubuntu'), 'Developer launcher update UI must not advertise Ubuntu/Linux builds.');
+assert(!rendererApp.includes('launcherUbuntuPathInput'), 'Renderer must not keep stale Ubuntu launcher artifact inputs.');
 assert(packageJson.scripts['dist:regular:windows']?.includes('--win'), 'Windows regular script must force --win.');
 assert(packageJson.scripts['dist:regular:macos']?.includes('--mac'), 'macOS regular script must force --mac.');
 

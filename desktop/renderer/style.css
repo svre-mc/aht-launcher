@@ -105,6 +105,51 @@ body::before {
   box-shadow: var(--bevel), 0 16px 32px rgba(0, 0, 0, 0.28);
 }
 
+.aht-art {
+  position: relative;
+  overflow: hidden;
+  background: #151819 url("assets/aht-cover.png") center / cover no-repeat !important;
+  color: transparent !important;
+  text-shadow: none !important;
+}
+
+.bill-art {
+  position: relative;
+  overflow: visible;
+  background: transparent url("assets/aht-bill-transparent.png") center / contain no-repeat !important;
+  color: transparent !important;
+  text-shadow: none !important;
+  image-rendering: auto;
+}
+
+.aht-art > span,
+.bill-art > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.brand-mark.bill-art,
+.profile-avatar.bill-art {
+  border: 0;
+  background-color: transparent !important;
+  box-shadow: none;
+}
+
+.brand-mark.aht-art {
+  background-size: cover !important;
+  background-position: center !important;
+}
+
+.game-thumb.aht-art,
+.profile-avatar.aht-art,
+.download-thumb.aht-art {
+  background-size: cover !important;
+  background-position: center !important;
+}
 .brand-copy {
   display: grid;
   gap: 2px;
@@ -235,6 +280,15 @@ body.dev-mode .game-tile.coming-soon {
   overflow: hidden;
   color: var(--quiet);
   font-size: 12px;
+}
+
+.sidebar-version-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(244, 240, 230, 0.46);
+  box-shadow: 0 0 8px rgba(244, 240, 230, 0.2);
 }
 
 .sidebar-progress {
@@ -581,9 +635,9 @@ h2 {
   min-height: 166px;
 }
 
-.dregora-art::before,
-.patch-art::before,
-.sync-art::before {
+.feature-art.aht-art::before,
+.feature-art.patch-art::before,
+.feature-art.sync-art::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -593,7 +647,7 @@ h2 {
   opacity: 0.9;
 }
 
-.dregora-art::after {
+.feature-art.aht-art::after {
   content: "A HARD TIME";
   position: absolute;
   left: 24px;
@@ -700,14 +754,12 @@ h2 {
 }
 
 .summary-grid,
-.details-grid,
 .developer-grid,
 .form-grid {
   display: grid;
   gap: 12px;
 }
 
-.details-grid,
 .developer-grid {
   grid-template-columns: minmax(280px, 0.85fr) minmax(0, 1.15fr);
   margin: 0 30px 24px;
@@ -2251,7 +2303,6 @@ body.dev-mode .button.strong.is-disabled {
   }
 
   .launch-strip,
-  .details-grid,
   .developer-grid,
   .settings-feed-card,
   .setup-assistant-card,

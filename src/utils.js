@@ -151,20 +151,77 @@ export async function fetchJson(source, headers = {}) {
   return response.json();
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function abortSignal(timeoutMs) {
+  if (!timeoutMs || !globalThis.AbortSignal?.timeout) {
+    return undefined;
+  }
+  return globalThis.AbortSignal.timeout(timeoutMs);
+}
+
+function retryableHttpStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+async function replaceFileWithDownload(tmp, dest) {
+  await fs.rm(dest, { force: true }).catch((error) => {
+    if (error?.code !== 'ENOENT') throw error;
+  });
+  await fs.rename(tmp, dest);
+}
+
 export async function downloadToFile(source, dest, options = {}) {
   await ensureDir(path.dirname(dest));
   const tmp = `${dest}.download`;
-  if (isHttpUrl(source)) {
-    const response = await fetch(source, { headers: options.headers || {} });
-    if (!response.ok) {
-      throw new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+  const attempts = Math.max(1, positiveInteger(options.retries, 3) + 1);
+  const retryDelayMs = positiveInteger(options.retryDelayMs, 750);
+  const timeoutMs = positiveInteger(options.timeoutMs, 15 * 60_000);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fs.rm(tmp, { force: true }).catch(() => {});
+      if (isHttpUrl(source)) {
+        const response = await fetch(source, {
+          headers: options.headers || {},
+          cache: 'no-store',
+          signal: abortSignal(timeoutMs)
+        });
+        if (!response.ok) {
+          const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+          error.retryable = retryableHttpStatus(response.status);
+          throw error;
+        }
+        await pipeline(Readable.fromWeb(response.body), createWriteStream(tmp));
+      } else {
+        const localPath = isFileUrl(source) ? fileURLToPath(source) : source;
+        await fs.copyFile(localPath, tmp);
+      }
+      await replaceFileWithDownload(tmp, dest);
+      return;
+    } catch (error) {
+      lastError = error;
+      await fs.rm(tmp, { force: true }).catch(() => {});
+      if (error?.retryable === false || attempt >= attempts) {
+        const reason = error?.message || String(error);
+        throw new Error(`Download failed after ${attempt} attempt${attempt === 1 ? '' : 's'} for ${source}: ${reason}`);
+      }
+      if (options.logger?.log) {
+        options.logger.log(`Download attempt ${attempt} failed for ${source}; retrying. ${error?.message || error}`);
+      }
+      await sleep(retryDelayMs * attempt);
     }
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(tmp));
-  } else {
-    const localPath = isFileUrl(source) ? fileURLToPath(source) : source;
-    await fs.copyFile(localPath, tmp);
   }
-  await fs.rename(tmp, dest);
+
+  throw lastError || new Error(`Download failed for ${source}`);
 }
 
 export async function removeFileIfExists(filePath) {

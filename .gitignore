@@ -7,9 +7,15 @@ config/app.defaults.json
 *.log.err
 release-builds/
 server-lock-mod/.gradle/
-server-lock-mod/build/
+server-lock-mod/build/*
 !server-lock-mod/build/
 !server-lock-mod/build/libs/
 !server-lock-mod/build/libs/aht-version-lock-*.jar
 server-lock-mod/run/
 tools/
+launch-gate-*-test-instance/
+systemd/
+server-lock-mod/build/libs/*-sources.jar
+work/
+work-screenshots/
+launch-gate-test-instance/

@@ -1,10 +1,18 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('aht', {
+function developerApiAllowed() {
+  try {
+    return new URLSearchParams(window.location.search || '').get('mode') === 'developer';
+  } catch {
+    return false;
+  }
+}
+
+const playerApi = {
   getStatus: () => ipcRenderer.invoke('status:get'),
   saveSettings: (config) => ipcRenderer.invoke('settings:save', config),
   testFeed: (config) => ipcRenderer.invoke('settings:testFeed', config),
-  startUpdate: (forceRepair) => ipcRenderer.invoke('update:start', { forceRepair }),
+  startUpdate: (payload) => ipcRenderer.invoke('update:start', typeof payload === 'object' && payload ? payload : { forceRepair: Boolean(payload) }),
   getUpdateState: () => ipcRenderer.invoke('update:state'),
   startLauncherUpdate: () => ipcRenderer.invoke('launcher:updateStart'),
   getLauncherUpdateState: () => ipcRenderer.invoke('launcher:updateState'),
@@ -17,8 +25,12 @@ contextBridge.exposeInMainWorld('aht', {
   setupApply: () => ipcRenderer.invoke('setup:apply'),
   selectJson: () => ipcRenderer.invoke('dialog:json'),
   selectZip: () => ipcRenderer.invoke('dialog:zip'),
-  selectFolder: () => ipcRenderer.invoke('dialog:folder'),
-  openPath: (target) => ipcRenderer.invoke('shell:openPath', target),
+  selectFolder: (defaultPath = '') => ipcRenderer.invoke('dialog:folder', defaultPath),
+  openPath: (target) => ipcRenderer.invoke('shell:openPath', target)
+};
+
+const developerApi = {
+  devBuildClientZip: (payload) => ipcRenderer.invoke('dev:buildClientZip', payload),
   devBuildRelease: (payload) => ipcRenderer.invoke('dev:buildRelease', payload),
   devInspectPackZip: (packZip) => ipcRenderer.invoke('dev:inspectPackZip', packZip),
   devValidateRelease: (payload) => ipcRenderer.invoke('dev:validateRelease', payload),
@@ -44,4 +56,11 @@ contextBridge.exposeInMainWorld('aht', {
   devEvents: (limit) => ipcRenderer.invoke('dev:events', limit),
   devUpdateLogs: (limit) => ipcRenderer.invoke('dev:updateLogs', limit),
   devPublishUpdateLog: (payload) => ipcRenderer.invoke('dev:publishUpdateLog', payload)
-});
+};
+
+const api = { ...playerApi };
+if (developerApiAllowed()) {
+  Object.assign(api, developerApi);
+}
+
+contextBridge.exposeInMainWorld('aht', api);

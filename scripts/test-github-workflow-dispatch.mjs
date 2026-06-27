@@ -45,14 +45,13 @@ const dispatch = await dispatchGithubWorkflow({
   workflow: 'build-macos.yml',
   ref: 'main',
   token: 'test-token',
-  launcherVersion: '0.1.3',
   publishToR2: true,
   fetchImpl
 });
 assert(dispatch.ok, 'dispatch did not return ok');
 const body = JSON.parse(calls[0].options.body);
 assert(body.ref === 'main', 'dispatch ref mismatch');
-assert(body.inputs.launcher_version === '0.1.3', 'dispatch version input missing');
+assert(!Object.hasOwn(body.inputs, 'launcher_version'), 'dispatch must not send a manual launcher_version override');
 assert(body.inputs.publish_to_r2 === true, 'dispatch publish_to_r2 input missing');
 assert(calls[0].options.headers.Authorization === 'Bearer test-token', 'authorization header mismatch');
 
@@ -78,7 +77,6 @@ const triggered = await triggerLauncherReleaseWorkflow({
   workflow: 'build-macos.yml',
   ref: 'main',
   token: 'test-token',
-  launcherVersion: '0.1.3',
   fetchImpl,
   waitForRunMs: 1,
   pollIntervalMs: 1

@@ -58,7 +58,7 @@ export function launcherProofJavaArgs(proofFile = '') {
 
 export function buildLauncherProofPayload({ config = {}, identity = {}, latest = null, installed = null, now = new Date() }) {
   const issuedAt = now instanceof Date ? now : new Date(now);
-  const expiresAt = new Date(issuedAt.getTime() + 10 * 60 * 1000);
+  const expiresAt = new Date(issuedAt.getTime() + 60 * 60 * 1000);
   const minecraft = latest?.minecraft || installed?.minecraft || null;
   return {
     protocol: LAUNCHER_PROOF_PROTOCOL,

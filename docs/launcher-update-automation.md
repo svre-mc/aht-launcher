@@ -10,11 +10,11 @@ It does this in order:
 
 1. Builds the Windows 10/11 installer on a Windows runner.
 2. Builds macOS Apple Silicon and Intel DMGs on a macOS runner.
-3. Builds Ubuntu/Linux AppImage and deb packages on an Ubuntu runner.
+3. Reads the launcher version from the selected branch's `package.json`.
 4. Creates or updates the GitHub Release named `launcher-v<package.json version>`.
-5. Uploads all launcher installers to that GitHub Release.
-6. Generates `launcher/latest.json`.
-7. Uploads launcher installer files to Cloudflare R2.
+5. Uploads all launcher installers and macOS self-update ZIPs to that GitHub Release.
+6. Generates and validates `launcher/latest.json`.
+7. Uploads launcher files to Cloudflare R2.
 8. Uploads `launcher/latest.json` last, so player launchers only see the update after every installer is already available.
 
 Player launchers read:
@@ -40,8 +40,8 @@ Release assets:
 - `AHT-Launcher-Windows-10-11-<version>.exe`
 - `AHT-Launcher-macOS-arm64-<version>.dmg`
 - `AHT-Launcher-macOS-x64-<version>.dmg`
-- `AHT-Launcher-Ubuntu-<version>-x64.AppImage`
-- `AHT-Launcher-Ubuntu-<version>-x64.deb`
+- `AHT-Launcher-macOS-arm64-<version>.zip`
+- `AHT-Launcher-macOS-x64-<version>.zip`
 - `launcher-latest.json`
 
 If the release already exists, the workflow updates the release notes and replaces the assets.
@@ -80,7 +80,7 @@ Optional repo variables:
 
 ## Manual Run
 
-The workflow can be run manually from GitHub Actions. Manual runs can disable R2 upload with `publish_to_r2=false`; GitHub Release assets are still created or updated.
+The workflow can be run manually from GitHub Actions. It always uses the selected branch's committed `package.json` version; there is no manual version input. Manual runs can disable R2 upload with `publish_to_r2=false`; GitHub Release assets are still created or updated.
 
 ## Local Validation
 

@@ -1,20 +1,32 @@
+const developerOnlySourceFiles = [
+  'src/releaseBuilder.js',
+  'src/clientModpackZip.js',
+  'src/serverTransfer.js',
+  'src/githubActions.js',
+  'src/r2DirectUpload.js'
+];
+const developerOnlyNodeModules = [
+  'node_modules/@aws-sdk/**',
+  'node_modules/@smithy/**',
+  'node_modules/@aws-crypto/**',
+  'node_modules/ssh2/**',
+  'node_modules/yauzl/**',
+  'node_modules/yazl/**'
+];
+
 const files = [
   'build/**/*',
   'pack-fixes/**/*',
   'desktop/**/*',
   'src/**/*',
-  'public/**/*',
-  'cloudflare/**/*',
-  'config/**/*',
-  'server-lock-mod/build/libs/aht-version-lock-*.jar',
-  '!server-lock-mod/build/libs/*-sources.jar',
-  'server-lock-mod/README.md',
+  ...developerOnlySourceFiles.map((file) => `!${file}`),
+  ...developerOnlyNodeModules.map((folder) => `!${folder}`),
+  'config/app.defaults.json',
   'package.json',
   'README.md'
 ];
 
 const asarUnpack = [
-  'server-lock-mod/build/libs/aht-version-lock-*.jar',
   'pack-fixes/*.jar'
 ];
 
@@ -38,5 +50,7 @@ function regularPlayerConfig({ productName, output, target }) {
 }
 
 module.exports = {
-  regularPlayerConfig
+  regularPlayerConfig,
+  developerOnlySourceFiles,
+  developerOnlyNodeModules
 };

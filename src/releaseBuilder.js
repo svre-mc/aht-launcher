@@ -13,6 +13,7 @@ import {
   slugify,
   writeJsonFile
 } from './utils.js';
+import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from './clientPackFormat.js';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -497,10 +498,17 @@ async function findBundledJar({ explicitPath = '', dirName, pattern }) {
 
   const bundledDir = path.join(appRoot, dirName);
   const unpackedDir = bundledDir.replace(/app\.asar([\\/]|$)/, 'app.asar.unpacked$1');
+  const sourceRoots = [
+    process.env.AHT_LAUNCHER_SOURCE_ROOT,
+    process.env.INIT_CWD,
+    process.env.npm_config_local_prefix,
+    process.cwd()
+  ].filter(Boolean);
   const candidates = [
     unpackedDir,
     bundledDir,
-    process.resourcesPath ? path.join(process.resourcesPath, dirName) : ''
+    process.resourcesPath ? path.join(process.resourcesPath, dirName) : '',
+    ...sourceRoots.map((root) => path.join(root, dirName))
   ].filter(Boolean);
 
   for (const candidatesDir of [...new Set(candidates)]) {
@@ -603,9 +611,175 @@ function serverLockConfig({ packId, version }) {
   ].join('\n');
 }
 
+function clientPackMetadataEntry(zip) {
+  const direct = zip.getEntry(CLIENT_PACK_METADATA_ENTRY);
+  if (direct) return direct;
+  const matches = zip.getEntries()
+    .filter((entry) => !entry.isDirectory)
+    .filter((entry) => normalizeRelPath(entry.entryName).endsWith(`/${CLIENT_PACK_METADATA_ENTRY}`));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function clientPackRootPrefix(zip) {
+  const entry = clientPackMetadataEntry(zip);
+  if (!entry) return '';
+  const name = normalizeRelPath(entry.entryName);
+  return name.endsWith(CLIENT_PACK_METADATA_ENTRY) ? name.slice(0, -CLIENT_PACK_METADATA_ENTRY.length) : '';
+}
+
+function readClientPackMetadata(zip) {
+  const entry = clientPackMetadataEntry(zip);
+  if (!entry) return null;
+  const metadata = JSON.parse(entry.getData().toString('utf8'));
+  if (metadata?.format !== CLIENT_PACK_FORMAT) {
+    throw new Error(`${CLIENT_PACK_METADATA_ENTRY} has unsupported format: ${metadata?.format || 'missing'}`);
+  }
+  return metadata;
+}
+
+async function prepareReleaseOutput(outDir) {
+  await ensureDir(outDir);
+  for (const rel of ['packs', 'cache', 'server']) {
+    await fs.rm(path.join(outDir, rel), { recursive: true, force: true });
+  }
+  for (const rel of ['latest.json', 'release-report.json']) {
+    await fs.rm(path.join(outDir, rel), { force: true });
+  }
+}
+
+function stripClientPackRoot(relPath = '', rootPrefix = '') {
+  const normalized = normalizeRelPath(relPath);
+  if (!rootPrefix) return normalized;
+  return normalized.startsWith(rootPrefix) ? normalizeRelPath(normalized.slice(rootPrefix.length)) : '';
+}
+
+function zipFileEntries(zip, rootPrefix = '') {
+  return zip.getEntries()
+    .filter((entry) => !entry.isDirectory)
+    .map((entry) => stripClientPackRoot(entry.entryName, rootPrefix))
+    .filter(Boolean);
+}
+
+function findFullClientMod(zip, pattern, rootPrefix = '') {
+  return zipFileEntries(zip, rootPrefix).find((name) => name.startsWith('mods/') && pattern.test(path.posix.basename(name))) || null;
+}
+
+async function buildFullClientRelease(options, zip, metadata) {
+  const {
+    packZip,
+    outDir,
+    baseUrl = '',
+    channel = 'stable',
+    copyZip = true,
+    versionLockJar = ''
+  } = options;
+
+  const packId = slugify(metadata.packId || metadata.name || 'a-hard-time');
+  const name = String(metadata.name || 'A Hard Time');
+  const version = String(metadata.version || '0.0.0');
+  const zipFileName = `${packId}-${slugify(version)}.zip`;
+  const zipRelPath = `packs/${zipFileName}`;
+  const serverLockRelPath = 'server/aht_version_lock.cfg';
+  const versionLockJarPath = await findVersionLockJar(versionLockJar);
+  const serverLockModRelPath = versionLockJarPath ? `server/mods/${path.basename(versionLockJarPath)}` : null;
+  const zipDest = path.join(outDir, zipRelPath);
+
+  await prepareReleaseOutput(outDir);
+  await ensureDir(path.join(outDir, 'packs'));
+  await ensureDir(path.join(outDir, 'server'));
+  await ensureDir(path.join(outDir, 'server', 'mods'));
+
+  if (copyZip) {
+    await fs.copyFile(packZip, zipDest);
+  }
+  if (versionLockJarPath) {
+    await fs.copyFile(versionLockJarPath, path.join(outDir, serverLockModRelPath));
+  }
+
+  const artifactPath = await pathExists(zipDest) ? zipDest : packZip;
+  const stats = await fs.stat(artifactPath);
+  const sha256 = await hashFile(artifactPath, 'sha256');
+  const rootPrefix = clientPackRootPrefix(zip);
+  const entries = zipFileEntries(zip, rootPrefix).filter((entry) => entry !== CLIENT_PACK_METADATA_ENTRY);
+  const modEntries = entries.filter((entry) => entry.toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entry));
+  const clientVersionLockPath = findFullClientMod(zip, /^aht-version-lock-.+\.jar$/i, rootPrefix);
+  const clientItemFireFixPath = findFullClientMod(zip, /^aht-item-fire-fix-.+\.jar$/i, rootPrefix);
+
+  const latest = {
+    schemaVersion: 1,
+    packId,
+    name,
+    version,
+    channel,
+    createdAt: new Date().toISOString(),
+    minecraft: metadata.minecraft || null,
+    installMode: 'full-client-zip',
+    zipFormat: CLIENT_PACK_FORMAT,
+    zip: {
+      fileName: zipFileName,
+      path: zipRelPath,
+      url: artifactUrl(baseUrl, zipRelPath),
+      sha256,
+      size: stats.size
+    },
+    curseforge: {
+      fileCount: 0,
+      disabled: true
+    },
+    clientZip: {
+      metadataPath: CLIENT_PACK_METADATA_ENTRY,
+      includedRoots: metadata.includedRoots || [],
+      missingRoots: metadata.missingRoots || [],
+      fileCount: entries.length,
+      modFileCount: modEntries.length
+    },
+    serverLock: {
+      configPath: serverLockRelPath,
+      modPath: serverLockModRelPath,
+      clientModPath: clientVersionLockPath,
+      injected: false
+    },
+    itemFireFix: {
+      clientModPath: clientItemFireFixPath,
+      injected: false
+    },
+    required: true
+  };
+
+  const report = {
+    schemaVersion: 1,
+    releaseMode: 'full-client-zip',
+    packId,
+    name,
+    version,
+    sourceZip: {
+      path: packZip,
+      fileName: path.basename(packZip),
+      versionHint: versionHintFromFileName(packZip)
+    },
+    minecraft: latest.minecraft,
+    clientZipSummary: latest.clientZip,
+    output: {
+      latest: 'latest.json',
+      packZip: zipRelPath,
+      serverLockConfig: serverLockRelPath,
+      serverLockMod: serverLockModRelPath,
+      clientVersionLockMod: clientVersionLockPath,
+      clientItemFireFixMod: clientItemFireFixPath
+    }
+  };
+
+  await writeJsonFile(path.join(outDir, 'latest.json'), latest);
+  await fs.writeFile(path.join(outDir, serverLockRelPath), serverLockConfig({ packId, version }), 'utf8');
+  await writeJsonFile(path.join(outDir, 'release-report.json'), report);
+
+  return { latest, report, outDir };
+}
+
 function versionHintFromFileName(filePath = '') {
   const name = path.basename(filePath).replace(/\.zip$/i, '');
-  const match = name.match(/(?:^|[\s_-])v?(\d+(?:\.\d+){1,4}(?:[-_+][A-Za-z0-9][A-Za-z0-9._-]*)?)$/i);
+  const normalizedName = name.replace(/(?:[\s_-](?:aht-client|client-zip|full-client|client))$/i, '');
+  const match = normalizedName.match(/(?:^|[\s_-])v?(\d+(?:\.\d+){1,4}(?:[-_+][A-Za-z0-9][A-Za-z0-9._-]*)?)$/i);
   return match?.[1]?.replace(/_/g, '-') || '';
 }
 
@@ -628,6 +802,17 @@ export async function buildRelease(options) {
   }
 
   const zip = new AdmZip(packZip);
+  const clientPackMetadata = readClientPackMetadata(zip);
+  if (clientPackMetadata) {
+    return buildFullClientRelease({
+      packZip,
+      outDir,
+      baseUrl,
+      channel,
+      copyZip,
+      versionLockJar
+    }, zip, clientPackMetadata);
+  }
   const manifest = readManifest(zip);
   const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
   const packId = slugify(manifest.name);
@@ -656,6 +841,7 @@ export async function buildRelease(options) {
     addInjectedModToOverrideSummary(overrideSummary, clientItemFireFixPath, jarStats.size);
   }
 
+  await prepareReleaseOutput(outDir);
   await ensureDir(path.join(outDir, 'packs'));
   await ensureDir(path.join(outDir, 'cache'));
   await ensureDir(path.join(outDir, 'cache', 'files'));

@@ -194,7 +194,7 @@ function createRemoteDirEnsurer(sftp) {
   return async function ensureRemoteDir(remoteDir) {
     const clean = toRemotePath(remoteDir).replace(/\/+$/, '');
     if (!clean.startsWith('/')) {
-      throw new Error(`Remote folder must be an absolute Linux path: ${remoteDir}`);
+      throw new Error(`Remote folder must be an absolute remote path: ${remoteDir}`);
     }
     if (clean === '') {
       return;
@@ -226,7 +226,7 @@ function createRemoteDirEnsurer(sftp) {
 async function ensureRemoteDir(sftp, remoteDir) {
   const clean = toRemotePath(remoteDir).replace(/\/+$/, '');
   if (!clean.startsWith('/')) {
-    throw new Error(`Remote folder must be an absolute Linux path: ${remoteDir}`);
+    throw new Error(`Remote folder must be an absolute remote path: ${remoteDir}`);
   }
   const parts = clean.split('/').filter(Boolean);
   let current = '';
@@ -279,10 +279,10 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
     chunkSize = 256 * 1024
   } = options;
 
-  if (!host) throw new Error('Linux host/IP is required.');
-  if (!username) throw new Error('Linux username is required.');
-  if (!password) throw new Error('Linux password is required.');
-  if (!remoteDir) throw new Error('Linux destination folder is required.');
+  if (!host) throw new Error('Server host/IP is required.');
+  if (!username) throw new Error('Server username is required.');
+  if (!password) throw new Error('Server password is required.');
+  if (!remoteDir) throw new Error('Remote destination folder is required.');
 
   const plan = await collectServerTransferFiles(sourceDir, { excludeDirs, includeDirs, includeRootFiles });
   hooks.onProgress?.({

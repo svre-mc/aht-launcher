@@ -4,9 +4,9 @@ import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import AdmZip from 'adm-zip';
-import { buildRelease } from '../src/releaseBuilder.js';
+import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from '../src/clientPackFormat.js';
 import { installPack } from '../src/installer.js';
 import { scanLocalChanges, scanManagedIntegrity } from '../src/localChanges.js';
 import {
@@ -18,25 +18,10 @@ import {
 } from '../src/minecraftLauncherProfile.js';
 import { installForgeLoader } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
-import { collectServerTransferFiles, DEFAULT_INCLUDED_DIRS, uploadServerFiles } from '../src/serverTransfer.js';
-import { defaultInstanceDirForPlatform, platformProfile } from '../src/platformProfile.js';
+import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
 import { writeLauncherProof } from '../src/launcherProof.js';
-import {
-  cleanGithubRepo,
-  cleanRef,
-  cleanWorkflowId,
-  findRecentWorkflowRun,
-  launcherWorkflowDefaults,
-  readGithubPackageVersion,
-  triggerLauncherReleaseWorkflow
-} from '../src/githubActions.js';
-import {
-  cleanR2AccountId,
-  directR2CredentialsReady,
-  headR2ObjectDirect,
-  missingDirectR2CredentialLabels,
-  uploadR2ObjectDirect
-} from '../src/r2DirectUpload.js';
+import { selectLauncherArtifact, validateLauncherUpdateManifest } from '../src/launcherUpdateManifest.js';
+
 import {
   ensureDir,
   downloadToFile,
@@ -52,7 +37,122 @@ import {
   writeJsonFile
 } from '../src/utils.js';
 
+const DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS = ['mods', 'scripts', 'config', 'ForgeEssentials'];
+const LAUNCHER_WORKFLOW_DEFAULTS = {
+  repo: 'svre-mc/aht-launcher',
+  branch: 'main',
+  workflow: 'build-macos.yml'
+};
+
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function writeTestStartupProbe(stage, extra = {}) {
+  if (process.env.AHT_TEST_HOOKS !== '1') return;
+  const probePath = String(process.env.AHT_TEST_STARTUP_PROBE_PATH || '').trim();
+  if (!probePath) return;
+  try {
+    const dir = path.dirname(probePath);
+    if (dir) fsSync.mkdirSync(dir, { recursive: true });
+    const payload = {
+      stage,
+      argv: process.argv,
+      execPath: process.execPath,
+      cwd: process.cwd(),
+      appRoot,
+      userData: app.getPath('userData'),
+      testRemoteDebugPort: process.env.AHT_TEST_REMOTE_DEBUG_PORT || '',
+      testHooks: process.env.AHT_TEST_HOOKS || '',
+      ...extra
+    };
+    fsSync.appendFileSync(probePath, `${JSON.stringify(payload)}\n`, 'utf8');
+  } catch {
+    // Test-only diagnostics must never block normal launcher startup.
+  }
+}
+
+function configureTestRemoteDebugPort() {
+  if (process.env.AHT_TEST_HOOKS !== '1') return;
+  const rawPort = String(process.env.AHT_TEST_REMOTE_DEBUG_PORT || '').trim();
+  writeTestStartupProbe('before-remote-debug-hook', { rawPort });
+  if (!/^\d{2,5}$/.test(rawPort)) return;
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+  app.commandLine.appendSwitch('remote-debugging-port', String(port));
+  writeTestStartupProbe('after-remote-debug-hook', { port });
+}
+
+configureTestRemoteDebugPort();
+
+let releaseBuilderModulePromise = null;
+let clientModpackZipModulePromise = null;
+let serverTransferModulePromise = null;
+let githubActionsModulePromise = null;
+let r2DirectUploadModulePromise = null;
+
+function developerModuleRelativePath(appRelativePath = '') {
+  return String(appRelativePath || '').replace(/^[.][.][\\/]/, '');
+}
+
+function developerSourceRoots() {
+  const roots = [
+    process.env.AHT_LAUNCHER_SOURCE_ROOT,
+    process.env.INIT_CWD,
+    process.env.npm_config_local_prefix,
+    process.cwd()
+  ].filter(Boolean);
+  return [...new Set(roots.map((item) => path.resolve(item)))];
+}
+
+async function importDeveloperModule(appRelativePath) {
+  const relativePath = developerModuleRelativePath(appRelativePath);
+  const packagedPath = path.join(appRoot, relativePath);
+  try {
+    return await import(appRelativePath);
+  } catch (error) {
+    if (await pathExists(packagedPath)) {
+      throw error;
+    }
+    const attempted = [];
+    for (const root of developerSourceRoots()) {
+      const candidate = path.join(root, relativePath);
+      attempted.push(candidate);
+      if (await pathExists(candidate)) {
+        return import(pathToFileURL(candidate).href);
+      }
+    }
+    const wrapped = new Error(
+      `Developer module ${relativePath} is not packaged in the public player app. ` +
+      `Set AHT_LAUNCHER_SOURCE_ROOT to the local aht-launcher repo for private developer mode. ` +
+      `Tried: ${attempted.join('; ') || 'none'}. Original error: ${error.message}`
+    );
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+function loadReleaseBuilderModule() {
+  releaseBuilderModulePromise ||= importDeveloperModule('../src/releaseBuilder.js');
+  return releaseBuilderModulePromise;
+}
+
+function loadClientModpackZipModule() {
+  clientModpackZipModulePromise ||= importDeveloperModule('../src/clientModpackZip.js');
+  return clientModpackZipModulePromise;
+}
+
+function loadServerTransferModule() {
+  serverTransferModulePromise ||= importDeveloperModule('../src/serverTransfer.js');
+  return serverTransferModulePromise;
+}
+
+function loadGithubActionsModule() {
+  githubActionsModulePromise ||= importDeveloperModule('../src/githubActions.js');
+  return githubActionsModulePromise;
+}
+
+function loadR2DirectUploadModule() {
+  r2DirectUploadModulePromise ||= importDeveloperModule('../src/r2DirectUpload.js');
+  return r2DirectUploadModulePromise;
+}
 let mainWindow = null;
 let updateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
@@ -506,6 +606,11 @@ function isCurseForgeInstanceDir(value = '') {
   return normalized.includes('/curseforge/minecraft/instances/');
 }
 
+function isCurseForgeMinecraftRoot(value = '') {
+  const normalized = String(value || '').replace(/\\/g, '/').toLowerCase();
+  return normalized.includes('/curseforge/minecraft/install');
+}
+
 function isOldLauncherInstanceDir(value = '') {
   if (!value) return false;
   const resolved = path.resolve(value);
@@ -535,9 +640,9 @@ function defaultConfig() {
       defaultCacheModsDir: defaultCacheModsDir(),
       r2Bucket: 'ahtlauncher',
       r2AccountId: '',
-      githubRepo: launcherWorkflowDefaults.repo,
-      githubBranch: launcherWorkflowDefaults.branch,
-      githubWorkflow: launcherWorkflowDefaults.workflow
+      githubRepo: LAUNCHER_WORKFLOW_DEFAULTS.repo,
+      githubBranch: LAUNCHER_WORKFLOW_DEFAULTS.branch,
+      githubWorkflow: LAUNCHER_WORKFLOW_DEFAULTS.workflow
     },
     launcherUpdate: {
       enabled: true,
@@ -550,13 +655,13 @@ function defaultConfig() {
       keyId: 'aht-launcher-proof-v1'
     },
     serverTransfer: {
-      sourceDir: 'C:\\RL CRAFT SERVER LIST\\New folder - Copy',
-      host: '192.168.1.121',
+      sourceDir: process.env.AHT_SERVER_TRANSFER_SOURCE_DIR || '',
+      host: process.env.AHT_SERVER_TRANSFER_HOST || '',
       port: 22,
-      username: 'notevil',
-      remoteDir: '/home/notevil/Desktop/AHT Server Files',
+      username: process.env.AHT_SERVER_TRANSFER_USERNAME || '',
+      remoteDir: process.env.AHT_SERVER_TRANSFER_REMOTE_DIR || '',
       excludeDirs: ['DregoraRL'],
-      includeDirs: DEFAULT_INCLUDED_DIRS,
+      includeDirs: DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS,
       includeRootFiles: true,
       concurrency: 8
     },
@@ -575,12 +680,30 @@ function defaultConfig() {
   };
 }
 
-function defaultInstanceDir() {
+function defaultPlayerInstanceDir() {
   return defaultInstanceDirForPlatform(process.platform, {
     ...process.env,
     HOME: process.env.HOME || app.getPath('home'),
     USERPROFILE: process.env.USERPROFILE || app.getPath('home')
   });
+}
+
+function defaultDeveloperInstanceDir() {
+  if (process.platform === 'win32') {
+    return path.join(ahtInstallRoot(), 'A Hard Time Developer');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(app.getPath('appData'), 'A Hard Time', 'Developer Instance');
+  }
+  platformKey(process.platform);
+}
+
+function defaultInstanceDir() {
+  return isDeveloperMode() ? defaultDeveloperInstanceDir() : defaultPlayerInstanceDir();
+}
+
+function isPlayerDefaultInstanceDir(value = '') {
+  return Boolean(value) && samePath(value, defaultPlayerInstanceDir());
 }
 
 function localInstanceCandidates() {
@@ -597,14 +720,15 @@ function localInstanceCandidates() {
 function localMinecraftLauncherCandidates() {
   const home = app.getPath('home');
   const documents = app.getPath('documents');
+  const normalRoots = minecraftRootCandidates(process.platform, {
+    ...process.env,
+    HOME: process.env.HOME || app.getPath('home'),
+    USERPROFILE: process.env.USERPROFILE || app.getPath('home')
+  });
   return [...new Set([
+    ...normalRoots,
     path.join(home, 'curseforge', 'minecraft', 'Install'),
-    path.join(documents, 'CurseForge', 'minecraft', 'Install'),
-    ...minecraftRootCandidates(process.platform, {
-      ...process.env,
-      HOME: process.env.HOME || app.getPath('home'),
-      USERPROFILE: process.env.USERPROFILE || app.getPath('home')
-    })
+    path.join(documents, 'CurseForge', 'minecraft', 'Install')
   ])];
 }
 
@@ -631,6 +755,7 @@ async function firstExistingMinecraftLauncherRoot(paths) {
         const hasVersions = await pathExists(path.join(item, 'versions'));
         candidates.push({
           rootDir: item,
+          fallback: isCurseForgeMinecraftRoot(item),
           score:
             (auth.signedIn ? 1000 : 0)
             + (hasLauncherExe ? 250 : 0)
@@ -644,7 +769,7 @@ async function firstExistingMinecraftLauncherRoot(paths) {
       }
     } catch {}
   }
-  candidates.sort((a, b) => b.score - a.score);
+  candidates.sort((a, b) => Number(a.fallback) - Number(b.fallback) || b.score - a.score);
   return candidates[0]?.rootDir || '';
 }
 
@@ -745,17 +870,26 @@ async function loadConfig() {
   const defaults = await packagedDefaults();
   if (!(await pathExists(file))) {
     await ensureDir(defaults.instanceDir);
-    await writeJsonFile(file, defaults);
+    await writeJsonFile(file, configForStorage(defaults));
     return defaults;
   }
   const stored = await readJsonFile(file);
   const config = mergeConfig(defaults, stored);
   let changed = false;
-  if (!stored.instanceDir || isCurseForgeInstanceDir(stored.instanceDir) || isOldLauncherInstanceDir(stored.instanceDir)) {
+  if (!isDeveloperMode() && ('developer' in (stored || {}) || 'serverTransfer' in (stored || {}))) {
+    changed = true;
+  }
+  const migrateDeveloperPlayableDir = isDeveloperMode() && isPlayerDefaultInstanceDir(stored.instanceDir);
+  if (!stored.instanceDir || isCurseForgeInstanceDir(stored.instanceDir) || isOldLauncherInstanceDir(stored.instanceDir) || migrateDeveloperPlayableDir) {
     config.instanceDir = defaultInstanceDir();
     changed = true;
   }
-  if (!config.playCommand?.cwd || isCurseForgeInstanceDir(config.playCommand.cwd) || isOldLauncherInstanceDir(config.playCommand.cwd)) {
+  if (
+    !config.playCommand?.cwd
+    || isCurseForgeInstanceDir(config.playCommand.cwd)
+    || isOldLauncherInstanceDir(config.playCommand.cwd)
+    || (isDeveloperMode() && isPlayerDefaultInstanceDir(config.playCommand.cwd))
+  ) {
     config.playCommand = { ...config.playCommand, cwd: config.instanceDir };
     changed = true;
   }
@@ -767,9 +901,22 @@ async function loadConfig() {
     config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir;
     changed = true;
   }
+  if (!isDeveloperMode() && isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir) && !isCurseForgeMinecraftRoot(defaults.minecraftLauncher?.rootDir)) {
+    config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir || defaultMinecraftRoot();
+    changed = true;
+  }
   if (!Number.isFinite(Number(stored.minecraftLauncher?.memoryMb))) {
     config.minecraftLauncher.memoryMb = 4096;
     changed = true;
+  }
+  if (!isDeveloperMode()) {
+    for (const key of ['enabled', 'required', 'baseUrl', 'keyId']) {
+      const value = defaults.launcherProof?.[key];
+      if (value !== undefined && config.launcherProof?.[key] !== value) {
+        config.launcherProof = { ...config.launcherProof, [key]: value };
+        changed = true;
+      }
+    }
   }
   if (!Object.prototype.hasOwnProperty.call(stored.developer || {}, 'defaultCacheModsDir') && defaults.developer?.defaultCacheModsDir) {
     config.developer.defaultCacheModsDir = defaults.developer.defaultCacheModsDir;
@@ -781,7 +928,7 @@ async function loadConfig() {
   }
   await ensureDir(config.instanceDir);
   if (changed) {
-    await writeJsonFile(file, config);
+    await writeJsonFile(file, configForStorage(config));
   }
   return config;
 }
@@ -795,6 +942,7 @@ async function saveConfig(nextConfig) {
     sync: { ...current.sync, ...nextConfig.sync },
     developer: { ...current.developer, ...nextConfig.developer },
     launcherUpdate: { ...current.launcherUpdate, ...nextConfig.launcherUpdate },
+    launcherProof: { ...current.launcherProof, ...nextConfig.launcherProof },
     serverTransfer: { ...current.serverTransfer, ...nextConfig.serverTransfer },
     minecraftLauncher: { ...current.minecraftLauncher, ...nextConfig.minecraftLauncher },
     playCommand: { ...current.playCommand, ...nextConfig.playCommand }
@@ -812,7 +960,7 @@ async function saveConfig(nextConfig) {
   delete merged.developer.githubToken;
   delete merged.developer.r2AccessKeyId;
   delete merged.developer.r2SecretAccessKey;
-  await writeJsonFile(configPath(), merged);
+  await writeJsonFile(configPath(), configForStorage(merged));
   return merged;
 }
 
@@ -851,14 +999,15 @@ async function refreshMinecraftLauncherProfile(config) {
 
 async function saveSettings(configPatch) {
   const config = await saveConfig(configPatch);
+  const safeConfig = rendererStatusConfig(config);
   try {
     return {
-      config,
-      ...(await refreshMinecraftLauncherProfile(config))
+      config: safeConfig,
+      ...minecraftProfileResultForRenderer(await refreshMinecraftLauncherProfile(config))
     };
   } catch (error) {
     return {
-      config,
+      config: safeConfig,
       profileUpdated: false,
       profileError: error.message
     };
@@ -916,7 +1065,7 @@ async function applyRecommendedSetup() {
     },
     playCommand: {
       ...current.playCommand,
-      cwd: !playCwd || isCurseForgeInstanceDir(playCwd) || isOldLauncherInstanceDir(playCwd) ? instanceDir : playCwd
+      cwd: !playCwd || isCurseForgeInstanceDir(playCwd) || isOldLauncherInstanceDir(playCwd) || (isDeveloperMode() && isPlayerDefaultInstanceDir(playCwd)) ? instanceDir : playCwd
     }
   });
   return getStatus(nextConfig);
@@ -1055,11 +1204,51 @@ async function registerMinecraftUsername(username, options = {}) {
   };
 }
 
+function validateLatestReleaseFeed(latest, source = 'latest.json') {
+  if (!latest || typeof latest !== 'object' || Array.isArray(latest)) {
+    throw new Error(`Release feed is invalid: ${source} must be a JSON object.`);
+  }
+  const missing = [];
+  if (!latest.name) missing.push('name');
+  if (!latest.version) missing.push('version');
+  if (!latest.zip?.url && !latest.zip?.path) missing.push('zip.url or zip.path');
+  if (missing.length) {
+    throw new Error(`Release feed is missing: ${missing.join(', ')}.`);
+  }
+  return latest;
+}
+
+function isFullClientRelease(latest = null) {
+  return Boolean(latest && (
+    latest.installMode === 'full-client-zip'
+    || latest.zipFormat === CLIENT_PACK_FORMAT
+  ));
+}
+
+function playerFullClientReleaseBlockReason(latest = null) {
+  const versionText = latest?.version ? ` version ${latest.version}` : ' this version';
+  return `Update package is not ready. A verified AHT client package has not been published for${versionText} yet.`;
+}
+
+function playerUpdateBlockedReason(latest = null, options = {}) {
+  if (!latest || options.allowLegacyRelease || latest.required === false || isFullClientRelease(latest)) {
+    return '';
+  }
+  return playerFullClientReleaseBlockReason(latest);
+}
+
+function requirePlayerFullClientRelease(latest = null, options = {}) {
+  const reason = playerUpdateBlockedReason(latest, options);
+  if (reason) {
+    throw new Error(reason);
+  }
+}
+
 async function readLatest(config) {
   if (!config.latestUrl) {
     return null;
   }
-  return readJsonFromSource(config.latestUrl);
+  return validateLatestReleaseFeed(await readJsonFromSource(config.latestUrl), config.latestUrl);
 }
 
 async function expectedCacheExtraManagedFiles(config, latest = null) {
@@ -1067,6 +1256,9 @@ async function expectedCacheExtraManagedFiles(config, latest = null) {
     return [];
   }
   const release = latest || await readLatest(config);
+  if (isFullClientRelease(release)) {
+    return [];
+  }
   const preferLocalPaths = !isHttpUrl(config.latestUrl);
   const cacheRef = preferLocalPaths
     ? (release?.cacheManifest?.path || release?.cacheManifest?.url)
@@ -1206,7 +1398,12 @@ function integrityBlockReason(integrity) {
     return 'Repair required. The installed file manifest is missing.';
   }
   if (counts.corrupted > 0) {
-    return `Repair required. ${counts.corrupted} managed file${counts.corrupted === 1 ? '' : 's'} failed validation.`;
+    const parts = [];
+    if (counts.changed) parts.push(`${counts.changed} changed`);
+    if (counts.missing) parts.push(`${counts.missing} missing`);
+    if (counts.added) parts.push(`${counts.added} extra`);
+    const detail = parts.length ? ` (${parts.join(', ')})` : '';
+    return `Repair required. ${counts.corrupted} mod file issue${counts.corrupted === 1 ? '' : 's'} found${detail}.`;
   }
   return '';
 }
@@ -1253,6 +1450,7 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
     const forgeLines = [];
     await installForgeLoader(target, {
       javaPath: config.minecraftLauncher?.javaPath || 'java',
+      installerUrl: target.loaderInstallerUrl || latest?.minecraft?.forgeInstallerUrl || latest?.minecraft?.loaderInstallerUrl || '',
       logger: { log: (line) => forgeLines.push(String(line)) }
     });
     if (operationState) {
@@ -1309,6 +1507,18 @@ function evaluateLaunchState(config, latest, latestError, installed, minecraftPr
 
   if (latest.required === false) {
     return { playConfigured, launchReady: true, launchMode: 'minecraftLauncher', launchBlockedReason: '' };
+  }
+
+  const updateBlockedReason = playerUpdateBlockedReason(latest, {
+    allowLegacyRelease: Boolean(options.allowLegacyRelease)
+  });
+  if (updateBlockedReason) {
+    return {
+      playConfigured,
+      launchReady: false,
+      launchMode: 'minecraftLauncher',
+      launchBlockedReason: updateBlockedReason
+    };
   }
 
   if (!installed) {
@@ -1369,7 +1579,7 @@ async function testReleaseFeed(configPatch = null) {
     throw new Error('Latest URL is required before the launcher can check for updates.');
   }
 
-  const latest = await readJsonFromSource(latestUrl);
+  const latest = validateLatestReleaseFeed(await readJsonFromSource(latestUrl), latestUrl);
   const missing = [];
   if (!latest || typeof latest !== 'object') missing.push('feed object');
   if (!latest?.name) missing.push('name');
@@ -1395,6 +1605,10 @@ async function testReleaseFeed(configPatch = null) {
       version: latest.version,
       packId: latest.packId || config.packId,
       required: latest.required !== false,
+      installMode: latest.installMode || '',
+      fullClientZip: isFullClientRelease(latest),
+      playerInstallReady: isFullClientRelease(latest),
+      playerBlockedReason: playerUpdateBlockedReason(latest),
       curseforgeFileCount: latest.curseforge?.fileCount ?? null,
       hasCacheManifest: Boolean(cacheSource),
       packSource,
@@ -1422,6 +1636,15 @@ async function readLauncherUpdate(config = {}) {
   }
   try {
     const manifest = await fetchRemoteJson(latestUrl);
+    const validation = validateLauncherUpdateManifest(manifest, {
+      latestUrl,
+      requireDownloads: false,
+      requireAllPlatforms: false,
+      allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
+    });
+    if (!validation.ok) {
+      throw new Error(`Launcher update feed is invalid: ${validation.errors.join('; ')}`);
+    }
     const artifact = selectLauncherArtifact(manifest);
     const latestVersion = String(manifest.version || '').trim();
     const required = manifest.required !== false;
@@ -1441,6 +1664,80 @@ async function readLauncherUpdate(config = {}) {
       error: error.message || String(error)
     };
   }
+}
+
+function playerSafeConfig(config = {}) {
+  const { developer, serverTransfer, ...safeConfig } = config;
+  return safeConfig;
+}
+
+function configForStorage(config = {}) {
+  return isDeveloperMode() ? config : playerSafeConfig(config);
+}
+
+function rendererStatusConfig(config = {}) {
+  return isDeveloperMode() ? config : playerSafeConfig(config);
+}
+
+function setupForRenderer(setup = {}) {
+  if (isDeveloperMode()) {
+    return setup;
+  }
+  return {
+    instanceExists: Boolean(setup.instanceExists),
+    latestConfigured: Boolean(setup.latestConfigured),
+    canAutoConfigure: Boolean(setup.canAutoConfigure),
+    minecraftAccountReuseAvailable: Boolean(setup.minecraftAccountReuseAvailable)
+  };
+}
+
+function platformProfileForRenderer(profile = {}) {
+  if (isDeveloperMode()) {
+    return profile;
+  }
+  const { instanceDir, ...safeProfile } = profile;
+  return safeProfile;
+}
+
+function configPathForRenderer() {
+  return isDeveloperMode() ? configPath() : '';
+}
+
+function minecraftProfileForRenderer(profile = null) {
+  if (!profile || isDeveloperMode()) {
+    return profile;
+  }
+  return {
+    enabled: profile.enabled !== false,
+    profileId: profile.profileId || '',
+    profileName: profile.profileName || '',
+    profileExists: Boolean(profile.profileExists),
+    versionId: profile.versionId || '',
+    loaderInstalled: Boolean(profile.loaderInstalled),
+    minecraftVersion: profile.minecraftVersion || '',
+    loaderId: profile.loaderId || '',
+    accountReuseAvailable: Boolean(profile.accountReuseAvailable)
+  };
+}
+
+function minecraftProfileResultForRenderer(result = {}) {
+  if (isDeveloperMode() || !result?.minecraftProfile) {
+    return result;
+  }
+  return {
+    ...result,
+    minecraftProfile: minecraftProfileForRenderer(result.minecraftProfile)
+  };
+}
+
+function launcherProofForRenderer(proof = {}) {
+  if (isDeveloperMode()) {
+    return proof;
+  }
+  return {
+    trusted: Boolean(proof.trusted),
+    source: proof.source || ''
+  };
 }
 
 async function getStatus(configOverride = null) {
@@ -1471,19 +1768,26 @@ async function getStatus(configOverride = null) {
   const launchLatestError = developerClientBypass && installed ? null : latestError;
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   const launchIntegrity = developerClientBypass ? null : integrity;
-  const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, { skipLoaderCheck: true });
+  const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
+  const updateRequired = !developerClientBypass && !updateBlockedReason && latest && latest.required !== false
+    ? installed?.version !== latest.version
+    : false;
+  const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
+    skipLoaderCheck: true,
+    allowLegacyRelease: developerClientBypass
+  });
   const launcherUpdate = await readLauncherUpdate(config);
   return {
     developerMode: isDeveloperMode(),
     developerClientBypass,
     appVersion: app.getVersion(),
-    platformProfile: platformProfile(process.platform, {
+    platformProfile: platformProfileForRenderer(platformProfile(process.platform, {
       ...process.env,
       HOME: process.env.HOME || app.getPath('home'),
       USERPROFILE: process.env.USERPROFILE || app.getPath('home')
-    }),
-    config,
-    configPath: configPath(),
+    })),
+    config: rendererStatusConfig(config),
+    configPath: configPathForRenderer(),
     identity,
     developerAuthenticated: isDeveloperAuthenticated(),
     developerSessionExpiresAt: developerSession?.expiresAt ? new Date(developerSession.expiresAt).toISOString() : '',
@@ -1502,8 +1806,8 @@ async function getStatus(configOverride = null) {
         r2SecretAccessKey: ''
       }))
       : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
-    setup: await setupRecommendations(config),
-    minecraftProfile,
+    setup: setupForRenderer(await setupRecommendations(config)),
+    minecraftProfile: minecraftProfileForRenderer(minecraftProfile),
     latest,
     latestError,
     updateLogs,
@@ -1511,12 +1815,13 @@ async function getStatus(configOverride = null) {
     launcherUpdate,
     installed,
     integrity,
-    updateRequired: !developerClientBypass && latest && latest.required !== false ? installed?.version !== latest.version : false,
+    updateBlockedReason,
+    updateRequired,
     ...launchState
   };
 }
 
-async function runUpdate(forceRepair = false) {
+async function runUpdate(forceRepair = false, options = {}) {
   if (updateState.running) {
     updateState.lines.push(`${forceRepair ? 'Repair' : 'Update'} request ignored because an install is already running.`);
     return updateState;
@@ -1530,6 +1835,10 @@ async function runUpdate(forceRepair = false) {
     if (!config.latestUrl) {
       throw new Error('latestUrl is not configured');
     }
+    const latestBeforeInstall = await readLatest(config);
+    if (!developerClientBypassAllowed()) {
+      requirePlayerFullClientRelease(latestBeforeInstall);
+    }
     await sendLauncherEvent(config, identity, {
       type: forceRepair ? 'repair_started' : 'install_started',
       version: null
@@ -1540,6 +1849,7 @@ async function runUpdate(forceRepair = false) {
       cfProxyBaseUrl: config.curseforge?.proxyBaseUrl || '',
       cfApiKey: process.env[config.curseforge?.apiKeyEnv || 'CURSEFORGE_API_KEY'] || '',
       forceRepair,
+      replaceGameSettings: Boolean(options.replaceGameSettings),
       onProgress: (progress) => {
         updateState.progress = progress;
       },
@@ -1611,13 +1921,258 @@ function defaultLauncherInstallerArgs(artifact = {}) {
   return [];
 }
 
-async function launchDownloadedLauncherUpdate(filePath, artifact = {}) {
+function windowsPowerShellPath() {
+  return process.env.SystemRoot
+    ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : 'powershell.exe';
+}
+
+function launcherUpdateInstalledExePath() {
+  if (process.platform !== 'win32') return '';
+  return process.execPath || '';
+}
+
+function launcherUpdateHelperScript(payloadPath) {
+  return `
+$ErrorActionPreference = 'Stop'
+$payloadPath = ${JSON.stringify(payloadPath)}
+$payload = Get-Content -LiteralPath $payloadPath -Raw | ConvertFrom-Json
+$logPath = [string]$payload.logPath
+function Write-UpdateLog([string]$message) {
+  try {
+    $parent = Split-Path -Parent $logPath
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    Add-Content -LiteralPath $logPath -Value ((Get-Date).ToString('o') + ' ' + $message) -Encoding UTF8
+  } catch {}
+}
+try {
+  Write-UpdateLog ('Waiting for old launcher PID ' + $payload.oldPid)
+  if ([int]$payload.oldPid -gt 0) {
+    try {
+      $old = Get-Process -Id ([int]$payload.oldPid) -ErrorAction SilentlyContinue
+      if ($old) { Wait-Process -Id ([int]$payload.oldPid) -Timeout 120 -ErrorAction SilentlyContinue }
+    } catch {}
+  }
+  Start-Sleep -Milliseconds 600
+  $installerArgs = @()
+  if ($payload.installerArgs) {
+    foreach ($arg in $payload.installerArgs) { $installerArgs += [string]$arg }
+  }
+  Write-UpdateLog ('Running installer ' + $payload.installerPath)
+  $installer = Start-Process -FilePath ([string]$payload.installerPath) -ArgumentList $installerArgs -Wait -PassThru -WindowStyle Hidden
+  $exitCode = 0
+  if ($null -ne $installer.ExitCode) { $exitCode = [int]$installer.ExitCode }
+  if ($exitCode -ne 0) { throw ('Installer exited with code ' + $exitCode) }
+  $target = [string]$payload.targetExe
+  $expected = [string]$payload.expectedVersion
+  $ready = $false
+  for ($i = 0; $i -lt 160; $i += 1) {
+    if ($target -and (Test-Path -LiteralPath $target)) {
+      $versionOk = $true
+      if ($expected) {
+        try {
+          $productVersion = [string](Get-Item -LiteralPath $target).VersionInfo.ProductVersion
+          if ($productVersion) { $versionOk = $productVersion.StartsWith($expected) }
+        } catch {}
+      }
+      if ($versionOk) { $ready = $true; break }
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $ready) { throw ('Updated launcher executable was not ready: ' + $target) }
+  try {
+    $iconRefresh = Join-Path $env:windir 'System32\\ie4uinit.exe'
+    if (Test-Path -LiteralPath $iconRefresh) { Start-Process -FilePath $iconRefresh -ArgumentList '-show' -Wait -WindowStyle Hidden }
+  } catch {}
+  Start-Sleep -Milliseconds 500
+  Write-UpdateLog ('Starting updated launcher ' + $target)
+  Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target)
+  Write-UpdateLog 'Launcher update handoff complete.'
+  exit 0
+} catch {
+  Write-UpdateLog ('Launcher update helper failed: ' + $_.Exception.Message)
+  exit 1
+}
+`.trimStart();
+}
+
+async function writeWindowsLauncherUpdateHelper({ filePath, artifact, latestVersion, downloadDir }) {
+  const targetExe = launcherUpdateInstalledExePath();
+  if (!targetExe) {
+    throw new Error('Could not resolve installed launcher executable for restart.');
+  }
+  const helperDir = path.join(downloadDir, 'handoff');
+  await ensureDir(helperDir);
+  const payloadPath = path.join(helperDir, 'payload.json');
+  const scriptPath = path.join(helperDir, 'apply-launcher-update.ps1');
+  const logPath = path.join(helperDir, 'handoff.log');
+  const installerArgs = defaultLauncherInstallerArgs(artifact);
+  await writeJsonFile(payloadPath, {
+    installerPath: filePath,
+    installerArgs,
+    targetExe,
+    expectedVersion: latestVersion || '',
+    oldPid: process.pid,
+    logPath,
+    createdAt: new Date().toISOString()
+  });
+  await fs.writeFile(scriptPath, launcherUpdateHelperScript(payloadPath), 'utf8');
+  return { scriptPath, payloadPath, logPath, targetExe, installerArgs };
+}
+
+async function launchWindowsLauncherUpdateHelper(filePath, artifact = {}, options = {}) {
+  const helper = await writeWindowsLauncherUpdateHelper({
+    filePath,
+    artifact,
+    latestVersion: options.latestVersion || '',
+    downloadDir: options.downloadDir || path.dirname(filePath)
+  });
+  const command = windowsPowerShellPath();
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper.scriptPath];
   if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
-    return { ok: true, skipped: true, command: filePath, args: defaultLauncherInstallerArgs(artifact) };
+    return { ok: true, skipped: true, strategy: 'windows-helper', command, args, ...helper };
+  }
+  const launched = await spawnDetached(command, args, path.dirname(helper.scriptPath), process.env);
+  return { ...launched, strategy: 'windows-helper', ...helper };
+}
+
+function shellSingleQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function launcherUpdateInstalledMacAppPath() {
+  if (process.platform !== 'darwin') return '';
+  const executable = process.execPath || '';
+  const marker = '.app/Contents/MacOS/';
+  const markerIndex = executable.indexOf(marker);
+  if (markerIndex >= 0) return executable.slice(0, markerIndex + 4);
+  let current = executable;
+  while (current && current !== path.dirname(current)) {
+    if (current.toLowerCase().endsWith('.app')) return current;
+    current = path.dirname(current);
+  }
+  return '';
+}
+
+function macLauncherUpdateHelperScript(payload) {
+  return `#!/bin/sh
+set -eu
+zip_path=${shellSingleQuote(payload.installerPath)}
+target_app=${shellSingleQuote(payload.targetApp)}
+old_pid=${Number(payload.oldPid) || 0}
+log_path=${shellSingleQuote(payload.logPath)}
+work_dir=${shellSingleQuote(payload.workDir)}
+write_log() {
+  parent_dir=$(dirname "$log_path")
+  mkdir -p "$parent_dir" 2>/dev/null || true
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$log_path" 2>/dev/null || true
+}
+fail_update() {
+  write_log "Launcher update helper failed: $1"
+  /usr/bin/open "$zip_path" 2>/dev/null || true
+  exit 1
+}
+write_log "Waiting for old launcher PID $old_pid"
+if [ "$old_pid" -gt 0 ]; then
+  waits=0
+  while kill -0 "$old_pid" 2>/dev/null; do
+    waits=$((waits + 1))
+    if [ "$waits" -ge 240 ]; then break; fi
+    sleep 0.5
+  done
+fi
+sleep 0.6
+[ -n "$zip_path" ] && [ -f "$zip_path" ] || fail_update "Update ZIP was not found: $zip_path"
+[ -n "$target_app" ] || fail_update "Target app path is empty"
+case "$target_app" in *.app) ;; *) fail_update "Target app is not a .app bundle: $target_app" ;; esac
+[ -n "$work_dir" ] && [ "$work_dir" != "/" ] || fail_update "Unsafe work dir: $work_dir"
+rm -rf "$work_dir"
+mkdir -p "$work_dir" || fail_update "Could not create extraction directory"
+write_log "Extracting update ZIP $zip_path"
+/usr/bin/ditto -x -k "$zip_path" "$work_dir" || fail_update "Could not extract update ZIP"
+source_app=""
+for candidate in "$work_dir"/*.app "$work_dir"/*/*.app; do
+  if [ -d "$candidate" ]; then source_app="$candidate"; break; fi
+done
+[ -n "$source_app" ] || fail_update "No .app bundle was found in update ZIP"
+parent_dir=$(dirname "$target_app")
+mkdir -p "$parent_dir" || fail_update "Could not create target app parent directory"
+backup_app="${target_app}.previous-update"
+rm -rf "$backup_app"
+if [ -d "$target_app" ]; then
+  mv "$target_app" "$backup_app" || fail_update "Could not move old app bundle"
+fi
+if /usr/bin/ditto "$source_app" "$target_app"; then
+  rm -rf "$backup_app"
+else
+  rm -rf "$target_app"
+  if [ -d "$backup_app" ]; then mv "$backup_app" "$target_app" || true; fi
+  fail_update "Could not install updated app bundle"
+fi
+chmod -R u+rwX "$target_app" 2>/dev/null || true
+xattr -dr com.apple.quarantine "$target_app" 2>/dev/null || true
+write_log "Starting updated launcher $target_app"
+/usr/bin/open "$target_app" || fail_update "Could not reopen updated launcher"
+write_log "Launcher update handoff complete."
+exit 0
+`;
+}
+
+async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadDir }) {
+  const helperDir = path.join(downloadDir, 'handoff');
+  await ensureDir(helperDir);
+  const targetApp = launcherUpdateInstalledMacAppPath() || path.join(app.getPath('userData'), 'A Hard Time Launcher macOS.app');
+  if (!launcherUpdateInstalledMacAppPath() && process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
+    throw new Error('Could not resolve installed macOS .app bundle for restart.');
+  }
+  const payloadPath = path.join(helperDir, 'macos-payload.json');
+  const scriptPath = path.join(helperDir, 'apply-launcher-update-macos.sh');
+  const logPath = path.join(helperDir, 'macos-handoff.log');
+  const payload = {
+    installerPath: filePath,
+    targetApp,
+    expectedVersion: latestVersion || '',
+    oldPid: process.pid,
+    logPath,
+    workDir: path.join(helperDir, 'macos-extract'),
+    createdAt: new Date().toISOString()
+  };
+  await writeJsonFile(payloadPath, payload);
+  await fs.writeFile(scriptPath, macLauncherUpdateHelperScript(payload), 'utf8');
+  await fs.chmod(scriptPath, 0o755).catch(() => {});
+  return { scriptPath, payloadPath, logPath, targetApp, expectedVersion: payload.expectedVersion };
+}
+
+async function launchMacLauncherUpdateHelper(filePath, artifact = {}, options = {}) {
+  const helper = await writeMacLauncherUpdateHelper({
+    filePath,
+    artifact,
+    latestVersion: options.latestVersion || '',
+    downloadDir: options.downloadDir || path.dirname(filePath)
+  });
+  const command = '/bin/sh';
+  const args = [helper.scriptPath];
+  if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
+    return { ok: true, skipped: true, strategy: 'macos-helper', command, args, ...helper };
+  }
+  const launched = await spawnDetached(command, args, path.dirname(helper.scriptPath), process.env);
+  return { ...launched, strategy: 'macos-helper', ...helper };
+}
+
+async function launchDownloadedLauncherUpdate(filePath, artifact = {}, options = {}) {
+  const fileName = String(artifact.fileName || artifact.path || artifact.url || filePath).toLowerCase();
+  if (process.platform === 'win32' && fileName.endsWith('.exe')) {
+    return launchWindowsLauncherUpdateHelper(filePath, artifact, options);
+  }
+  if (process.platform === 'darwin' && fileName.endsWith('.zip')) {
+    return launchMacLauncherUpdateHelper(filePath, artifact, options);
   }
 
   const cwd = path.dirname(filePath);
   const args = defaultLauncherInstallerArgs(artifact);
+  if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
+    return { ok: true, skipped: true, strategy: 'direct', command: filePath, args };
+  }
   if (process.platform === 'darwin') {
     return spawnDetached('open', [filePath], cwd, process.env);
   }
@@ -1659,8 +2214,8 @@ async function runLauncherUpdate() {
       }
     }
     launcherUpdateState.lines.push('Launcher update downloaded and verified.');
-    launcherUpdateState.progress = { phase: 'Starting installer', completed: 2, total: 3, percent: 92 };
-    const launched = await launchDownloadedLauncherUpdate(target, update.artifact);
+    launcherUpdateState.progress = { phase: 'Preparing restart handoff', completed: 2, total: 3, percent: 92 };
+    const launched = await launchDownloadedLauncherUpdate(target, update.artifact, { latestVersion: update.latestVersion, downloadDir });
     const result = {
       ok: true,
       version: update.latestVersion,
@@ -1672,9 +2227,11 @@ async function runLauncherUpdate() {
     launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Ready' : 'Restarting launcher', completed: 3, total: 3, percent: 100 };
     launcherUpdateState.lines.push(process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
       ? 'Test mode skipped installer launch and app quit.'
-      : 'Installer started. The launcher will close so the update can finish.');
+      : ['windows-helper', 'macos-helper'].includes(launched.strategy)
+        ? 'Update handoff is ready. The launcher will close and reopen automatically after installation finishes.'
+        : 'Installer started. The launcher will close so the update can finish.');
     if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
-      setTimeout(() => app.quit(), 900);
+      setTimeout(() => app.quit(), ['windows-helper', 'macos-helper'].includes(launched.strategy) ? 350 : 900);
     }
     return result;
   } catch (error) {
@@ -1688,13 +2245,13 @@ async function runLauncherUpdate() {
 function serverTransferOptions(config = {}, payload = {}, password = '') {
   const configured = config.serverTransfer || {};
   const excludeDirs = [...new Set(['DregoraRL', ...(configured.excludeDirs || []), ...(payload.excludeDirs || [])])];
-  const includeDirs = [...new Set([...(payload.includeDirs || configured.includeDirs || DEFAULT_INCLUDED_DIRS)])];
+  const includeDirs = [...new Set([...(payload.includeDirs || configured.includeDirs || DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS)])];
   return {
-    sourceDir: payload.sourceDir || configured.sourceDir || 'C:\\RL CRAFT SERVER LIST\\New folder - Copy',
-    host: payload.host || configured.host || '192.168.1.121',
+    sourceDir: payload.sourceDir || configured.sourceDir || process.env.AHT_SERVER_TRANSFER_SOURCE_DIR || '',
+    host: payload.host || configured.host || process.env.AHT_SERVER_TRANSFER_HOST || '',
     port: Number(payload.port || configured.port || 22),
-    username: payload.username || configured.username || 'notevil',
-    remoteDir: payload.remoteDir || configured.remoteDir || '/home/notevil/Desktop/AHT Server Files',
+    username: payload.username || configured.username || process.env.AHT_SERVER_TRANSFER_USERNAME || '',
+    remoteDir: payload.remoteDir || configured.remoteDir || process.env.AHT_SERVER_TRANSFER_REMOTE_DIR || '',
     password,
     excludeDirs,
     includeDirs,
@@ -1705,6 +2262,7 @@ function serverTransferOptions(config = {}, payload = {}, password = '') {
 
 async function planServerTransfer(payload = {}) {
   assertDeveloperAuthenticated();
+  const { collectServerTransferFiles } = await loadServerTransferModule();
   const config = await loadConfig();
   const options = serverTransferOptions(config, payload);
   return collectServerTransferFiles(options.sourceDir, {
@@ -1725,6 +2283,7 @@ async function syncServerFiles(payload = {}) {
   const secrets = await loadDeveloperSecrets();
   const config = await loadConfig();
   const options = serverTransferOptions(config, payload, payload.password || secrets.serverSshPassword || '');
+  const { uploadServerFiles } = await loadServerTransferModule();
   serverTransferState = {
     running: true,
     lines: [
@@ -1843,7 +2402,8 @@ function contentType(filePath) {
 
 function versionHintFromFileName(filePath = '') {
   const name = path.basename(filePath).replace(/\.zip$/i, '');
-  const match = name.match(/(?:^|[\s_-])v?(\d+(?:\.\d+){1,4}(?:[-_+][A-Za-z0-9][A-Za-z0-9._-]*)?)$/i);
+  const normalizedName = name.replace(/(?:[\s_-](?:aht-client|client-zip|full-client|client))$/i, '');
+  const match = normalizedName.match(/(?:^|[\s_-])v?(\d+(?:\.\d+){1,4}(?:[-_+][A-Za-z0-9][A-Za-z0-9._-]*)?)$/i);
   return match?.[1]?.replace(/_/g, '-') || '';
 }
 
@@ -1908,23 +2468,6 @@ function compareVersions(left = '', right = '') {
   return normalizedVersion(left).localeCompare(normalizedVersion(right));
 }
 
-function launcherPlatformKeys(platform = process.platform, arch = process.arch) {
-  const keys = [`${platform}-${arch}`, platform];
-  if (platform === 'win32') keys.push('windows', 'windows-x64');
-  if (platform === 'darwin') keys.push(arch === 'arm64' ? 'macos-arm64' : 'macos-x64', 'macos');
-  return [...new Set(keys)];
-}
-
-function selectLauncherArtifact(manifest, platform = process.platform, arch = process.arch) {
-  const platforms = manifest?.platforms || {};
-  for (const key of launcherPlatformKeys(platform, arch)) {
-    if (platforms[key]) {
-      return { key, ...platforms[key] };
-    }
-  }
-  return null;
-}
-
 function cacheBustUrl(value) {
   const url = new URL(value);
   url.searchParams.set('aht_verify', `${Date.now()}`);
@@ -1979,13 +2522,27 @@ function wranglerToml({ releaseBucket = 'ahtlauncher', dataBucket = '' } = {}) {
   ].join('\n');
 }
 
+async function resolveWorkerSourceFile() {
+  const candidateRoots = [
+    appRoot,
+    process.env.AHT_LAUNCHER_SOURCE_ROOT,
+    process.env.INIT_CWD,
+    process.env.npm_config_local_prefix,
+    process.cwd()
+  ].filter(Boolean);
+  for (const root of [...new Set(candidateRoots.map((item) => path.resolve(item)))]) {
+    const candidate = path.join(root, 'cloudflare', 'curseforge-proxy-worker.js');
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error('Cloudflare project file missing. Set AHT_LAUNCHER_SOURCE_ROOT to the local aht-launcher repo before running developer cloud setup from a packaged app.');
+}
+
 async function prepareWranglerProject(options = {}) {
   const cwd = wranglerWorkDir();
   await ensureDir(cwd);
-  const workerSource = path.join(appRoot, 'cloudflare', 'curseforge-proxy-worker.js');
-  if (!(await pathExists(workerSource))) {
-    throw new Error(`Cloudflare project file missing: ${workerSource}`);
-  }
+  const workerSource = await resolveWorkerSourceFile();
   await fs.copyFile(workerSource, path.join(cwd, 'curseforge-proxy-worker.js'));
   await fs.writeFile(path.join(cwd, 'wrangler.toml'), wranglerToml(options), 'utf8');
   return cwd;
@@ -2188,7 +2745,7 @@ async function cloudSetupSecrets({
     ['ADMIN_TOKEN_SECRET', adminTokenSecret || randomSecret()],
     ['LAUNCHER_PROOF_SECRET', launcherProofSecret]
   ];
-  if (curseforgeApiKey || !cacheOnlyMode) {
+  if (curseforgeApiKey) {
     secrets.unshift(['CURSEFORGE_API_KEY', curseforgeApiKey]);
   }
   const results = [];
@@ -2287,14 +2844,15 @@ async function cloudPreflight({ publicLatestUrl = '', bucket = '' }) {
   };
 }
 
-function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '' } = {}) {
+function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '', cacheOnlyMode = null } = {}) {
   const latestUrl = latestUrlFromWorkerInput(publicLatestUrl || config.latestUrl);
   if (!latestUrl) {
     throw new Error('Player Feed URL is required before writing player defaults.');
   }
   const workerBase = workerBaseUrlFromLatest(latestUrl);
-  const releaseBucket = cleanBucketName(bucket || config.developer?.r2Bucket, 'ahtlauncher');
-  const cacheOnly = Boolean(config.developer?.cacheOnlyMode);
+  const cacheOnly = cacheOnlyMode === null || cacheOnlyMode === undefined
+    ? Boolean(config.developer?.cacheOnlyMode)
+    : Boolean(cacheOnlyMode);
   return {
     packId: config.packId || 'a-hard-time-dregora',
     latestUrl,
@@ -2308,14 +2866,16 @@ function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '' } = 
       baseUrl: workerBase,
       playerLabel: ''
     },
-    developer: {
-      adminBaseUrl: workerBase,
-      r2Bucket: releaseBucket,
-      cacheOnlyMode: cacheOnly
-    },
+
     launcherUpdate: {
       enabled: true,
       latestUrl: workerBase ? new URL('launcher/latest.json', workerBase).toString() : ''
+    },
+    launcherProof: {
+      enabled: true,
+      required: true,
+      baseUrl: workerBase,
+      keyId: 'aht-launcher-proof-v1'
     },
     minecraftLauncher: {
       enabled: true,
@@ -2470,6 +3030,35 @@ async function uploadR2Object({ bucket, rel, file, wranglerCwd, onOutput = null 
   });
 }
 
+function cleanR2AccountId(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    if (host.endsWith('.r2.cloudflarestorage.com')) {
+      return host.replace(/\.r2\.cloudflarestorage\.com$/, '');
+    }
+  } catch {}
+  return raw.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/\.r2\.cloudflarestorage\.com$/i, '').trim();
+}
+
+function directR2CredentialsReady(credentials = {}) {
+  return Boolean(
+    cleanR2AccountId(credentials.accountId)
+    && String(credentials.accessKeyId || '').trim()
+    && String(credentials.secretAccessKey || '').trim()
+  );
+}
+
+function missingDirectR2CredentialLabels(credentials = {}) {
+  const missing = [];
+  if (!cleanR2AccountId(credentials.accountId)) missing.push('R2 Account ID');
+  if (!String(credentials.accessKeyId || '').trim()) missing.push('R2 Access Key ID');
+  if (!String(credentials.secretAccessKey || '').trim()) missing.push('R2 Secret Access Key');
+  return missing;
+}
+
 function r2DirectCredentials({ payload = {}, config = {}, secrets = {} } = {}) {
   return {
     accountId: cleanR2AccountId(
@@ -2574,15 +3163,42 @@ function launcherArtifactDescriptors(payload = {}) {
       label: 'Windows 10/11',
       kind: 'nsis',
       installArgs: ['/S'],
+      downloadKey: 'windows-x64',
       file: payload.windowsPath || payload.win32Path || ''
     },
     {
-      key: 'darwin',
-      aliases: ['macos'],
-      label: 'macOS',
+      key: 'darwin-arm64',
+      aliases: ['macos-arm64'],
+      label: 'macOS Apple Silicon update ZIP',
+      kind: 'zip',
+      installArgs: [],
+      file: payload.macosArmZipPath || payload.darwinArm64ZipPath || ''
+    },
+    {
+      key: 'darwin-x64',
+      aliases: ['macos-x64', 'darwin', 'macos'],
+      label: 'macOS Intel update ZIP',
+      kind: 'zip',
+      installArgs: [],
+      file: payload.macosX64ZipPath || payload.darwinX64ZipPath || payload.macosZipPath || payload.darwinZipPath || ''
+    },
+    {
+      key: 'darwin-arm64',
+      label: 'macOS Apple Silicon DMG',
       kind: 'dmg',
       installArgs: [],
-      file: payload.macosPath || payload.darwinPath || ''
+      downloadKey: 'macos-arm64',
+      platform: false,
+      file: payload.macosArmDmgPath || payload.darwinArm64DmgPath || ''
+    },
+    {
+      key: 'darwin-x64',
+      label: 'macOS Intel DMG',
+      kind: 'dmg',
+      installArgs: [],
+      downloadKey: 'macos-x64',
+      platform: false,
+      file: payload.macosX64DmgPath || payload.darwinX64DmgPath || payload.macosPath || payload.darwinPath || ''
     }
   ].filter((item) => String(item.file || '').trim());
 }
@@ -2595,6 +3211,7 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     throw new Error('Launcher update version is required.');
   }
   const platforms = {};
+  const downloads = {};
   const uploads = [];
   for (const descriptor of artifacts) {
     const file = path.resolve(descriptor.file);
@@ -2618,9 +3235,14 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
       size: stat.size,
       installArgs: descriptor.installArgs || []
     };
-    platforms[descriptor.key] = entry;
-    for (const alias of descriptor.aliases || []) {
-      platforms[alias] = entry;
+    if (descriptor.platform !== false) {
+      platforms[descriptor.key] = entry;
+      for (const alias of descriptor.aliases || []) {
+        platforms[alias] = entry;
+      }
+    }
+    if (descriptor.downloadKey) {
+      downloads[descriptor.downloadKey] = entry;
     }
     uploads.push({ rel, file, label: descriptor.label, size: stat.size });
   }
@@ -2635,8 +3257,16 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     required: true,
     createdAt: new Date().toISOString(),
     currentVersion: app.getVersion(),
-    platforms
+    platforms,
+    downloads
   };
+  const validation = validateLauncherUpdateManifest(manifest, {
+    latestUrl: launcherLatestUrlFromInput(publicLatestUrl || config.launcherUpdate?.latestUrl || config.latestUrl || ''),
+    allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
+  });
+  if (!validation.ok) {
+    throw new Error(`Launcher update manifest is invalid: ${validation.errors.join('; ')}`);
+  }
   return { manifest, uploads, rootUrl };
 }
 
@@ -2656,15 +3286,20 @@ async function findNewestFile(roots, pattern) {
 
 async function findLauncherBuilds() {
   assertDeveloperAuthenticated();
+  const macosRoots = [
+    path.join(appRoot, 'release-builds', 'macos')
+  ];
   return {
     version: app.getVersion(),
     windowsPath: await findNewestFile([
       path.join(appRoot, 'release-builds', 'windows'),
       path.join(appRoot, 'release-builds')
     ], /\.exe$/i),
-    macosPath: await findNewestFile([
-      path.join(appRoot, 'release-builds', 'macos')
-    ], /\.dmg$/i)
+    macosArmZipPath: await findNewestFile(macosRoots, /(?:arm64|aarch64).*\.zip$/i),
+    macosX64ZipPath: await findNewestFile(macosRoots, /(?:x64|x86_64|intel).*\.zip$/i),
+    macosArmDmgPath: await findNewestFile(macosRoots, /(?:arm64|aarch64).*\.dmg$/i),
+    macosX64DmgPath: await findNewestFile(macosRoots, /(?:x64|x86_64|intel).*\.dmg$/i),
+    macosPath: await findNewestFile(macosRoots, /\.dmg$/i)
   };
 }
 
@@ -2689,20 +3324,22 @@ async function resolveGithubToken(payload = {}) {
   throw new Error('GitHub token is required. Paste a token in the Launcher Updates tab, or sign in with GitHub CLI.');
 }
 
-function githubWorkflowPayload(payload = {}, config = {}) {
+async function githubWorkflowPayload(payload = {}, config = {}) {
+  const { cleanGithubRepo, cleanRef, cleanWorkflowId } = await loadGithubActionsModule();
   const developer = config.developer || {};
   return {
-    repo: cleanGithubRepo(payload.githubRepo || payload.repo || developer.githubRepo || launcherWorkflowDefaults.repo),
-    ref: cleanRef(payload.githubBranch || payload.branch || developer.githubBranch || launcherWorkflowDefaults.branch),
-    workflow: cleanWorkflowId(payload.githubWorkflow || payload.workflow || developer.githubWorkflow || launcherWorkflowDefaults.workflow)
+    repo: cleanGithubRepo(payload.githubRepo || payload.repo || developer.githubRepo || LAUNCHER_WORKFLOW_DEFAULTS.repo),
+    ref: cleanRef(payload.githubBranch || payload.branch || developer.githubBranch || LAUNCHER_WORKFLOW_DEFAULTS.branch),
+    workflow: cleanWorkflowId(payload.githubWorkflow || payload.workflow || developer.githubWorkflow || LAUNCHER_WORKFLOW_DEFAULTS.workflow)
   };
 }
 
 async function checkLauncherWorkflow(payload = {}) {
   assertDeveloperAuthenticated();
   const config = await loadConfig();
-  const workflow = githubWorkflowPayload(payload, config);
+  const workflow = await githubWorkflowPayload(payload, config);
   const { token, source } = await resolveGithubToken(payload);
+  const { findRecentWorkflowRun, readGithubPackageVersion } = await loadGithubActionsModule();
   const packageVersion = await readGithubPackageVersion({
     repo: workflow.repo,
     ref: workflow.ref,
@@ -2727,8 +3364,9 @@ async function checkLauncherWorkflow(payload = {}) {
 async function dispatchLauncherWorkflow(payload = {}) {
   assertDeveloperAuthenticated();
   const config = await loadConfig();
-  const workflow = githubWorkflowPayload(payload, config);
+  const workflow = await githubWorkflowPayload(payload, config);
   const { token, source } = await resolveGithubToken(payload);
+  const { readGithubPackageVersion, triggerLauncherReleaseWorkflow } = await loadGithubActionsModule();
   const version = await readGithubPackageVersion({
     repo: workflow.repo,
     ref: workflow.ref,
@@ -2737,7 +3375,6 @@ async function dispatchLauncherWorkflow(payload = {}) {
   const result = await triggerLauncherReleaseWorkflow({
     ...workflow,
     token,
-    launcherVersion: version,
     publishToR2: payload.publishToR2 !== false,
     waitForRunMs: 24_000,
     pollIntervalMs: 2_000
@@ -2757,6 +3394,13 @@ async function verifyRemoteLauncherUpdate({ publicLatestUrl, localManifest }) {
     throw new Error('Public launcher feed URL is invalid.');
   }
   const remote = await fetchRemoteJson(latestUrl);
+  const validation = validateLauncherUpdateManifest(remote, {
+    latestUrl,
+    allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
+  });
+  if (!validation.ok) {
+    throw new Error(`remote launcher latest is invalid: ${validation.errors.join('; ')}`);
+  }
   if (remote.version !== localManifest.version || remote.product !== localManifest.product) {
     throw new Error(`remote launcher latest is ${remote.product || 'unknown'} ${remote.version || 'unknown'}, expected ${localManifest.product} ${localManifest.version}`);
   }
@@ -2855,7 +3499,7 @@ async function syncR2(payload = {}) {
   if (!bucket) {
     throw new Error('R2 bucket is required');
   }
-  const validation = await validateRelease({ outDir, publicLatestUrl });
+  const validation = await validateRelease({ outDir, publicLatestUrl, allowLegacyCurseForge: payload.allowLegacyCurseForge === true });
   if (!validation.ok) {
     const summary = validation.errors.map((error) => error.label).join(', ') || 'release validation failed';
     throw new Error(`Release blocked: ${summary}`);
@@ -2888,6 +3532,7 @@ async function syncR2(payload = {}) {
   if (!fastUpload && totalBytes >= largeUploadThreshold && !payload.allowSlowWranglerUpload) {
     throw new Error(`Fast R2 upload credentials are required for large releases (${formatBytes(totalBytes)}). Missing ${missingFastUpload.join(', ')}. Add the R2 Account ID, Access Key ID, and Secret Access Key in Release Builder.`);
   }
+  const r2Direct = fastUpload ? await loadR2DirectUploadModule() : null;
   const npx = fastUpload ? '' : wranglerCommand();
   const wranglerCwd = fastUpload ? '' : wranglerWorkDir();
   if (!fastUpload) {
@@ -2945,7 +3590,7 @@ async function syncR2(payload = {}) {
         uploadState.lines.push(`Checking remote ${rel}`);
         trimUploadLines();
         const sha256 = await releaseObjectSha256({ rel, file, localLatest });
-        const remote = await headR2ObjectDirect({
+        const remote = await r2Direct.headR2ObjectDirect({
           ...directCredentials,
           bucket,
           key: rel
@@ -2954,7 +3599,7 @@ async function syncR2(payload = {}) {
           uploaded.push({ path: rel, output: `skipped ${rel}; remote object already matches`, method: 'direct-skip', skipped: true, size: stat.size });
           uploadState.lines.push(`Skipped ${rel}; remote already matches.`);
         } else {
-          const result = await uploadR2ObjectDirect({
+          const result = await r2Direct.uploadR2ObjectDirect({
             ...directCredentials,
             bucket,
             key: rel,
@@ -3106,7 +3751,60 @@ function addReleaseCheck(checks, level, label, detail = '') {
   checks.push({ level, label, detail });
 }
 
-async function validateRelease({ outDir, publicLatestUrl = '' }) {
+function legacyCurseForgeReleaseMessage() {
+  return 'Legacy CurseForge export ZIPs are blocked for normal player releases. Use the Modpack ZIP tab to create an exact AHT client ZIP, then publish that ZIP.';
+}
+
+function assertFullClientReleaseAllowed(inspected, allowLegacyCurseForge = false) {
+  if (inspected?.fullClientZip || allowLegacyCurseForge) return;
+  throw new Error(legacyCurseForgeReleaseMessage());
+}
+
+function inspectPackZipFile(packZip) {
+  if (!packZip) {
+    throw new Error('Pack ZIP is required');
+  }
+  const zip = new AdmZip(packZip);
+  const versionHint = versionHintFromFileName(packZip);
+  const clientMetadataEntry = zip.getEntry(CLIENT_PACK_METADATA_ENTRY);
+  if (clientMetadataEntry) {
+    const metadata = JSON.parse(clientMetadataEntry.getData().toString('utf8'));
+    if (metadata.format !== CLIENT_PACK_FORMAT) {
+      throw new Error(`${CLIENT_PACK_METADATA_ENTRY} has unsupported format: ${metadata.format || 'missing'}`);
+    }
+    const version = String(metadata.version || '');
+    return {
+      name: metadata.name || 'A Hard Time',
+      version,
+      fileName: path.basename(packZip),
+      versionHint,
+      versionMismatch: Boolean(versionHint && version && normalizedVersion(versionHint) !== normalizedVersion(version)),
+      minecraft: metadata.minecraft || null,
+      fileCount: Number(metadata.fileCount || 0),
+      installMode: 'full-client-zip',
+      fullClientZip: true
+    };
+  }
+  const manifestEntry = zip.getEntry('manifest.json');
+  if (!manifestEntry) {
+    throw new Error(`ZIP does not contain manifest.json or ${CLIENT_PACK_METADATA_ENTRY}`);
+  }
+  const manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
+  const version = String(manifest.version || '');
+  return {
+    name: manifest.name || '',
+    version,
+    fileName: path.basename(packZip),
+    versionHint,
+    versionMismatch: Boolean(versionHint && version && normalizedVersion(versionHint) !== normalizedVersion(version)),
+    minecraft: manifest.minecraft || null,
+    fileCount: Array.isArray(manifest.files) ? manifest.files.length : 0,
+    installMode: 'curseforge',
+    fullClientZip: false
+  };
+}
+
+async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseForge = false }) {
   if (!outDir) {
     throw new Error('Output directory is required');
   }
@@ -3194,6 +3892,10 @@ async function validateRelease({ outDir, publicLatestUrl = '' }) {
     missing: [],
     complete: true
   };
+  const fullClientRelease = latest.installMode === 'full-client-zip' || latest.zipFormat === CLIENT_PACK_FORMAT;
+  if (!fullClientRelease && !allowLegacyCurseForge) {
+    add('error', 'legacy CurseForge release blocked', legacyCurseForgeReleaseMessage());
+  }
   const packPath = localReleasePath(outDir, packRef);
   if (!packPath && packRef) {
     add('warning', 'pack ZIP is remote-only', packRef);
@@ -3224,42 +3926,75 @@ async function validateRelease({ outDir, publicLatestUrl = '' }) {
 
       try {
         const zip = new AdmZip(packPath);
-        const manifestEntry = zip.getEntry('manifest.json');
-        if (!manifestEntry) {
-          add('error', 'CurseForge manifest missing', 'manifest.json was not found in the pack ZIP.');
-        } else {
-          const manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
-          const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
-          manifestFileCount = manifestFiles.length;
-          manifestKeys = new Set(manifestFiles.map((file) => {
-            const projectId = file.projectID ?? file.projectId;
-            const fileId = file.fileID ?? file.fileId;
-            return projectId && fileId ? `${projectId}:${fileId}` : '';
-          }).filter(Boolean));
-          cacheCoverage = {
-            total: manifestKeys.size,
-            covered: 0,
-            missing: [...manifestKeys],
-            complete: manifestKeys.size === 0
-          };
-          const overridesDir = manifest.overrides || latest.overrides || 'overrides';
-          const prefix = `${String(overridesDir).replace(/\/+$/, '')}/`;
-          const entries = zip.getEntries();
-          overrideFileCount = entries.filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix)).length;
-          add('ok', 'CurseForge manifest parsed', `${manifestFileCount} mod entries, ${overrideFileCount} override files`);
-          const versionLockEntry = entries.find((entry) => {
-            const name = entry.entryName.replaceAll('\\', '/');
-            return !entry.isDirectory && name.startsWith(`${prefix}mods/`) && /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name));
-          });
-          if (versionLockEntry) {
-            add('ok', 'client version lock mod included', versionLockEntry.entryName);
+        const entries = zip.getEntries();
+        if (fullClientRelease) {
+          const metadataEntry = zip.getEntry(CLIENT_PACK_METADATA_ENTRY);
+          if (!metadataEntry) {
+            add('error', 'AHT client metadata missing', `${CLIENT_PACK_METADATA_ENTRY} was not found in the pack ZIP.`);
           } else {
-            add('error', 'client version lock mod missing', `${prefix}mods/aht-version-lock-*.jar is required so stale clients cannot bypass the launcher.`);
+            const metadata = JSON.parse(metadataEntry.getData().toString('utf8'));
+            if (metadata.format !== CLIENT_PACK_FORMAT) {
+              add('error', 'AHT client metadata invalid', `format=${metadata.format || 'missing'}`);
+            } else {
+              const fileEntries = entries.filter((entry) => !entry.isDirectory && entry.entryName.replaceAll('\\', '/') !== CLIENT_PACK_METADATA_ENTRY);
+              const modEntries = fileEntries.filter((entry) => entry.entryName.replaceAll('\\', '/').toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entry.entryName));
+              manifestFileCount = 0;
+              overrideFileCount = fileEntries.length;
+              cacheCoverage = { total: 0, covered: 0, missing: [], complete: true };
+              add('ok', 'AHT full client ZIP parsed', `${fileEntries.length} files, ${modEntries.length} mod archives`);
+              const versionLockEntry = entries.find((entry) => {
+                const name = entry.entryName.replaceAll('\\', '/');
+                return !entry.isDirectory && name.startsWith('mods/') && /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name));
+              });
+              if (versionLockEntry) {
+                add('ok', 'client version lock mod included', versionLockEntry.entryName);
+              } else {
+                add('error', 'client version lock mod missing', 'mods/aht-version-lock-*.jar is required so stale clients cannot bypass the launcher.');
+              }
+              if (metadata.minecraft?.version || latest.minecraft?.version) {
+                add('ok', 'Minecraft version present', metadata.minecraft?.version || latest.minecraft?.version);
+              } else {
+                add('warning', 'Minecraft version missing', `${CLIENT_PACK_METADATA_ENTRY} minecraft.version is not set.`);
+              }
+            }
           }
-          if (manifest.minecraft?.version) {
-            add('ok', 'Minecraft version present', manifest.minecraft.version);
+        } else {
+          const manifestEntry = zip.getEntry('manifest.json');
+          if (!manifestEntry) {
+            add('error', 'CurseForge manifest missing', 'manifest.json was not found in the pack ZIP.');
           } else {
-            add('warning', 'Minecraft version missing', 'manifest.minecraft.version is not set.');
+            const manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
+            const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+            manifestFileCount = manifestFiles.length;
+            manifestKeys = new Set(manifestFiles.map((file) => {
+              const projectId = file.projectID ?? file.projectId;
+              const fileId = file.fileID ?? file.fileId;
+              return projectId && fileId ? `${projectId}:${fileId}` : '';
+            }).filter(Boolean));
+            cacheCoverage = {
+              total: manifestKeys.size,
+              covered: 0,
+              missing: [...manifestKeys],
+              complete: manifestKeys.size === 0
+            };
+            const overridesDir = manifest.overrides || latest.overrides || 'overrides';
+            const prefix = `${String(overridesDir).replace(/\/+$/, '')}/`;
+            overrideFileCount = entries.filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix)).length;
+            add('ok', 'CurseForge manifest parsed', `${manifestFileCount} mod entries, ${overrideFileCount} override files`);
+            const versionLockEntry = entries.find((entry) => {
+              const name = entry.entryName.replaceAll('\\', '/');
+              return !entry.isDirectory && name.startsWith(`${prefix}mods/`) && /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name));
+            });
+            if (versionLockEntry) {
+              add('ok', 'client version lock mod included', versionLockEntry.entryName);
+            } else {
+              add('error', 'client version lock mod missing', `${prefix}mods/aht-version-lock-*.jar is required so stale clients cannot bypass the launcher.`);
+            }
+            if (manifest.minecraft?.version) {
+              add('ok', 'Minecraft version present', manifest.minecraft.version);
+            } else {
+              add('warning', 'Minecraft version missing', 'manifest.minecraft.version is not set.');
+            }
           }
         }
       } catch (error) {
@@ -3268,6 +4003,10 @@ async function validateRelease({ outDir, publicLatestUrl = '' }) {
     }
   }
 
+  let cachePath = null;
+  if (fullClientRelease) {
+    add('ok', 'fallback cache not required', 'Full client ZIP releases install exact files without CurseForge fallback resolution.');
+  } else {
   const cacheRef = latest.cacheManifest?.path || latest.cacheManifest?.url;
   validateAbsoluteReleaseUrl({
     add,
@@ -3276,7 +4015,7 @@ async function validateRelease({ outDir, publicLatestUrl = '' }) {
     url: latest.cacheManifest?.url || '',
     pathRef: latest.cacheManifest?.path || ''
   });
-  const cachePath = localReleasePath(outDir, cacheRef);
+  cachePath = localReleasePath(outDir, cacheRef);
   if (!cacheRef) {
     cacheCoverage = {
       total: manifestKeys.size,
@@ -3394,6 +4133,8 @@ async function validateRelease({ outDir, publicLatestUrl = '' }) {
     }
   }
 
+  }
+
   if (releaseReport) {
     add('ok', 'release report found', reportPath);
   } else {
@@ -3434,7 +4175,8 @@ async function validateRelease({ outDir, publicLatestUrl = '' }) {
       name: latest.name || '',
       version: latest.version || '',
       channel: latest.channel || '',
-      required: latest.required !== false
+      required: latest.required !== false,
+      installMode: latest.installMode || ''
     } : null,
     artifacts: {
       outDir,
@@ -3531,7 +4273,8 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
       cwd,
       env,
       detached: true,
-      stdio: 'ignore'
+      stdio: 'ignore',
+      windowsHide: true
     });
     child.once('error', reject);
     child.once('spawn', () => {
@@ -3684,7 +4427,9 @@ function focusMainWindow() {
 ipcMain.handle('status:get', async () => getStatus());
 ipcMain.handle('settings:save', async (_event, config) => saveSettings(config));
 ipcMain.handle('settings:testFeed', async (_event, config) => testReleaseFeed(config));
-ipcMain.handle('update:start', async (_event, payload = {}) => runUpdate(Boolean(payload.forceRepair)));
+ipcMain.handle('update:start', async (_event, payload = {}) => runUpdate(Boolean(payload.forceRepair), {
+  replaceGameSettings: Boolean(payload.replaceGameSettings)
+}));
 ipcMain.handle('update:state', async () => updateState);
 ipcMain.handle('launcher:updateStart', async () => runLauncherUpdate());
 ipcMain.handle('launcher:updateState', async () => launcherUpdateState);
@@ -3738,12 +4483,15 @@ ipcMain.handle('play:start', async () => {
     ? null
     : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest), 'play-check');
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
-  const initialLaunchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, { skipLoaderCheck: true });
+  const initialLaunchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
+    skipLoaderCheck: true,
+    allowLegacyRelease: developerClientBypass
+  });
   if (!initialLaunchState.launchReady) {
     throw new Error(initialLaunchState.launchBlockedReason);
   }
 
-  keepOpenUntil = Date.now() + 20_000;
+  keepOpenUntil = Date.now() + 5 * 60_000;
   const identity = await identityPayload(config);
   const launcherProof = await writeLauncherProof({
     config,
@@ -3754,24 +4502,26 @@ ipcMain.handle('play:start', async () => {
   });
   let profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   profile = await installMinecraftProfileLoaders(profile, { config, latest: launchLatest, installed });
-  const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity);
+  const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity, {
+    allowLegacyRelease: developerClientBypass
+  });
   if (!finalLaunchState.launchReady) {
     throw new Error(finalLaunchState.launchBlockedReason);
   }
   return {
     ...(await openMinecraftLauncher(config)),
-    minecraftProfile: profile,
-    launcherProof: {
+    minecraftProfile: minecraftProfileForRenderer(profile),
+    launcherProof: launcherProofForRenderer({
       proofFile: launcherProof.proofFile || '',
       trusted: Boolean(launcherProof.trusted),
       source: launcherProof.source || ''
-    }
+    })
   };
 });
 ipcMain.handle('dialog:zip', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
-    filters: [{ name: 'CurseForge exports', extensions: ['zip'] }]
+    filters: [{ name: 'Exact AHT client ZIPs', extensions: ['zip'] }]
   });
   return result.canceled ? '' : result.filePaths[0];
 });
@@ -3782,15 +4532,39 @@ ipcMain.handle('dialog:json', async () => {
   });
   return result.canceled ? '' : result.filePaths[0];
 });
-ipcMain.handle('dialog:folder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] });
+ipcMain.handle('dialog:folder', async (_event, defaultPath = '') => {
+  const options = { properties: ['openDirectory', 'createDirectory'] };
+  const startingPath = typeof defaultPath === 'string' ? defaultPath.trim() : '';
+  if (process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_DIALOG_ECHO_DEFAULT_PATH === '1') {
+    return startingPath ? path.join(startingPath, '__aht_dialog_default_path__') : '';
+  }
+  if (startingPath) options.defaultPath = startingPath;
+  const result = await dialog.showOpenDialog(mainWindow, options);
   return result.canceled ? '' : result.filePaths[0];
 });
 ipcMain.handle('shell:openPath', async (_event, target) => shell.openPath(target));
-ipcMain.handle('setup:recommend', async () => setupRecommendations());
+ipcMain.handle('setup:recommend', async () => setupForRenderer(await setupRecommendations()));
 ipcMain.handle('setup:apply', async () => applyRecommendedSetup());
+ipcMain.handle('dev:buildClientZip', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const { createClientModpackZip } = await loadClientModpackZipModule();
+  const config = await loadConfig();
+  const outDir = path.join(resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir), 'client-zips');
+  const result = await createClientModpackZip({
+    sourceDir: payload.sourceDir || config.developer?.clientModpackDir || '',
+    outDir,
+    version: payload.version || '',
+    name: payload.name || 'A Hard Time',
+    packId: payload.packId || config.packId || 'a-hard-time-dregora',
+    minecraft: payload.minecraft || config.minecraftLauncher?.minecraft || {}
+  });
+  return result;
+});
 ipcMain.handle('dev:buildRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
+  const inspected = inspectPackZipFile(payload?.packZip || '');
+  assertFullClientReleaseAllowed(inspected, payload?.allowLegacyCurseForge === true);
+  const { buildRelease } = await loadReleaseBuilderModule();
   const config = await loadConfig();
   const outDir = resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir);
   await ensureDir(outDir);
@@ -3804,26 +4578,7 @@ ipcMain.handle('dev:buildRelease', async (_event, payload) => {
 });
 ipcMain.handle('dev:inspectPackZip', async (_event, packZip) => {
   assertDeveloperAuthenticated();
-  if (!packZip) {
-    throw new Error('Pack ZIP is required');
-  }
-  const zip = new AdmZip(packZip);
-  const manifestEntry = zip.getEntry('manifest.json');
-  if (!manifestEntry) {
-    throw new Error('ZIP does not contain manifest.json');
-  }
-  const manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
-  const versionHint = versionHintFromFileName(packZip);
-  const version = String(manifest.version || '');
-  return {
-    name: manifest.name || '',
-    version,
-    fileName: path.basename(packZip),
-    versionHint,
-    versionMismatch: Boolean(versionHint && version && normalizedVersion(versionHint) !== normalizedVersion(version)),
-    minecraft: manifest.minecraft || null,
-    fileCount: Array.isArray(manifest.files) ? manifest.files.length : 0
-  };
+  return inspectPackZipFile(packZip);
 });
 ipcMain.handle('dev:validateRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
@@ -3868,26 +4623,25 @@ ipcMain.handle('dev:login', async (_event, { username, password }) => {
   developerSession = { username: normalizedUsername, expiresAt };
   adminToken = '';
   const config = await loadConfig();
-  const remotePromise = remoteAdminLogin(config, normalizedUsername, password).catch((error) => ({
-    ok: false,
-    error: error.message
-  }));
-  const remote = await Promise.race([
-    remotePromise,
-    sleep(650).then(() => ({ ok: false, pending: true, error: 'Worker admin login is still connecting' }))
-  ]);
-  if (remote.pending) {
-    remotePromise.then((lateRemote) => {
-      if (!lateRemote.ok) console.warn(`Worker admin login failed after local developer login: ${lateRemote.error || 'unknown error'}`);
-    }).catch(() => {});
+  const base = config.developer?.adminBaseUrl || config.sync?.baseUrl;
+  const skipRemote = process.env.AHT_SKIP_REMOTE_DEVELOPER_LOGIN === '1';
+  const remotePending = Boolean(base && !skipRemote);
+  if (remotePending) {
+    remoteAdminLogin(config, normalizedUsername, password)
+      .then((remote) => {
+        if (!remote.ok) console.warn(`Worker admin login failed after local developer login: ${remote.error || 'unknown error'}`);
+      })
+      .catch((error) => {
+        console.warn(`Worker admin login failed after local developer login: ${error.message || error}`);
+      });
   }
   return {
     ok: true,
     expiresAt: new Date(expiresAt).toISOString(),
-    remoteAuthenticated: Boolean(remote.ok),
-    remotePending: Boolean(remote.pending),
-    remoteExpiresAt: remote.expiresAt || '',
-    remoteError: remote.ok || remote.pending ? '' : remote.error
+    remoteAuthenticated: false,
+    remotePending,
+    remoteExpiresAt: '',
+    remoteError: base || skipRemote ? '' : 'Developer admin URL is not configured'
   };
 });
 ipcMain.handle('dev:summary', async () => adminFetch(await loadConfig(), 'admin/summary'));
@@ -3906,7 +4660,10 @@ if (!singleInstanceLock) {
     focusMainWindow();
   });
 
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => {
+    writeTestStartupProbe('app-ready', { userData: app.getPath('userData') });
+    createWindow();
+  });
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
       app.quit();

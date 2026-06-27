@@ -1,118 +1,130 @@
 {
-    "name": "aht-launcher",
-    "version": "0.1.24",
-    "private": true,
-    "type": "module",
-    "main": "desktop/main.js",
-    "desktopName": "aht-launcher",
-    "description": "A Hard Time launcher for installing and updating the A Hard Time Minecraft modpack.",
-    "homepage": "https://aht.local",
-    "author": {
-        "name": "au Savant",
-        "email": "launcher@aht.local"
+  "name": "aht-launcher",
+  "version": "0.1.26",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.js",
+  "desktopName": "aht-launcher",
+  "description": "A Hard Time launcher for installing and updating the A Hard Time Minecraft modpack.",
+  "homepage": "https://aht.local",
+  "author": {
+    "name": "au Savant",
+    "email": "launcher@aht.local"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test:platforms": "node scripts/test-platform-profiles.mjs",
+    "test:platform-builds": "node scripts/test-platform-build-configs.mjs",
+    "test:profile": "node scripts/test-minecraft-profile.mjs",
+    "test:telemetry": "node scripts/test-worker-telemetry.mjs",
+    "test:worker": "node scripts/test-worker-release-hosting.mjs",
+    "test:player-privacy": "node scripts/test-player-privacy.mjs",
+    "test:player-defaults": "node scripts/smoke-player-defaults-feed.mjs",
+    "test:player-layout": "node scripts/smoke-player-layout.mjs",
+    "test:settings-profile": "node scripts/smoke-settings-profile-save.mjs",
+    "test:write-defaults": "node scripts/smoke-write-player-defaults-button.mjs",
+    "test:developer-secret": "node scripts/smoke-developer-secret-persistence.mjs",
+    "test:developer-update-log-auth": "node scripts/smoke-developer-update-log-auth-refresh.mjs",
+    "test:cloud-login": "node scripts/smoke-cloud-login-required.mjs",
+    "test:cache-only-cloud": "node scripts/smoke-cache-only-cloud-setup.mjs",
+    "test:launcher-self-update": "node scripts/smoke-launcher-self-update.mjs",
+    "test:launcher-update-publish": "node scripts/smoke-launcher-update-publish.mjs",
+    "test:launcher-update-manifest": "node scripts/test-launcher-update-manifest.mjs",
+    "test:github-workflow": "node scripts/test-github-workflow-dispatch.mjs",
+    "test:r2-direct-upload": "node scripts/test-r2-direct-upload-config.mjs",
+    "test:server-transfer-plan": "node scripts/smoke-server-transfer-plan.mjs",
+    "test:mod-only-changes": "node scripts/smoke-mod-only-changes.mjs",
+    "test:play-gate": "node scripts/smoke-play-integrity-gate.mjs",
+    "test:play-integrity-gate": "node scripts/smoke-play-integrity-gate.mjs",
+    "test:player-update-play": "node scripts/smoke-player-update-play-flow.mjs",
+    "test:developer-client-bypass": "node scripts/test-developer-client-bypass.mjs",
+    "test:developer-instance-dir": "node scripts/smoke-developer-instance-dir.mjs",
+    "test:account-duplicate": "node scripts/smoke-account-duplicate-ui.mjs",
+    "test:account-switch": "node scripts/smoke-launcher-account-switch.mjs",
+    "test:cache-fallback": "node scripts/smoke-cache-fallback-install.mjs",
+    "test:full-client-zip": "node scripts/test-full-client-zip-release.mjs",
+    "test:cache-extra-integrity": "node scripts/smoke-cache-extra-integrity.mjs",
+    "test:download-retry": "node scripts/test-download-retry.mjs",
+    "test:resourcepack-placement": "node scripts/test-resourcepack-placement.mjs",
+    "test:resourcepack-keyed-cache": "node scripts/test-resourcepack-keyed-cache.mjs",
+    "test:release-builder-default-outdir": "node scripts/test-release-builder-default-outdir.mjs",
+    "test:update-repair-state": "node scripts/test-update-repair-state.mjs",
+    "test:update-logs": "node scripts/smoke-player-update-logs.mjs",
+    "test:item-fire-fix-release": "node scripts/smoke-item-fire-fix-release.mjs",
+    "test:release-flow": "node scripts/smoke-r2-release-flow.mjs",
+    "test:release-ui-flow": "node scripts/smoke-r2-release-ui-flow.mjs",
+    "test:single-instance": "node scripts/smoke-single-instance.mjs",
+    "verify:local": "node scripts/verify-local.mjs",
+    "verify:installed-player": "node scripts/verify-installed-player.mjs",
+    "check:production": "node scripts/check-production-readiness.mjs",
+    "check:production:strict": "node scripts/check-production-readiness.mjs --strict",
+    "cloudflare:login": "npx --yes wrangler login",
+    "cloudflare:deploy": "npx --yes wrangler deploy --config cloudflare/wrangler.toml",
+    "dist:win": "electron-builder --win nsis",
+    "dist:mac": "electron-builder --mac dmg zip",
+    "dist:regular:windows": "electron-builder --config build/electron-builder.windows.cjs --win --publish never",
+    "dist:regular:macos": "electron-builder --config build/electron-builder.macos.cjs --mac --publish never",
+    "pack": "electron-builder --dir",
+    "test:launcher-proof": "node scripts/test-launcher-proof.mjs",
+    "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1075.0",
+    "@aws-sdk/lib-storage": "^3.1075.0",
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
+    "lucide-static": "^1.21.0",
+    "ssh2": "^1.17.0",
+    "yauzl": "^3.4.0",
+    "yazl": "^3.3.1"
+  },
+  "build": {
+    "appId": "com.ahardtime.launcher",
+    "productName": "A Hard Time Launcher",
+    "icon": "build/icon",
+    "directories": {
+      "output": "release-builds"
     },
-    "scripts": {
-        "build-release": "node src/cli.js build-release",
-        "install-pack": "node src/cli.js install",
-        "serve-release": "node src/cli.js serve-release",
-        "start": "electron .",
-        "start:web": "node src/web.js",
-        "test:platforms": "node scripts/test-platform-profiles.mjs",
-        "test:platform-builds": "node scripts/test-platform-build-configs.mjs",
-        "test:profile": "node scripts/test-minecraft-profile.mjs",
-        "test:telemetry": "node scripts/test-worker-telemetry.mjs",
-        "test:worker": "node scripts/test-worker-release-hosting.mjs",
-        "test:player-defaults": "node work/smoke-player-defaults-feed.mjs",
-        "test:settings-profile": "node work/smoke-settings-profile-save.mjs",
-        "test:write-defaults": "node work/smoke-write-player-defaults-button.mjs",
-        "test:developer-secret": "node work/smoke-developer-secret-persistence.mjs",
-        "test:cloud-login": "node work/smoke-cloud-login-required.mjs",
-        "test:cache-only-cloud": "node work/smoke-cache-only-cloud-setup.mjs",
-        "test:launcher-self-update": "node work/smoke-launcher-self-update.mjs",
-        "test:launcher-update-publish": "node work/smoke-launcher-update-publish.mjs",
-        "test:launcher-update-manifest": "node scripts/test-launcher-update-manifest.mjs",
-        "test:github-workflow": "node scripts/test-github-workflow-dispatch.mjs",
-        "test:r2-direct-upload": "node scripts/test-r2-direct-upload-config.mjs",
-        "test:server-transfer-plan": "node work/smoke-server-transfer-plan.mjs",
-        "test:mod-only-changes": "node work/smoke-mod-only-changes.mjs",
-        "test:play-gate": "node work/smoke-play-integrity-gate.mjs",
-        "test:developer-client-bypass": "node scripts/test-developer-client-bypass.mjs",
-        "test:account-duplicate": "node work/smoke-account-duplicate-ui.mjs",
-        "test:cache-fallback": "node work/smoke-cache-fallback-install.mjs",
-        "test:resourcepack-placement": "node scripts/test-resourcepack-placement.mjs",
-        "test:resourcepack-keyed-cache": "node scripts/test-resourcepack-keyed-cache.mjs",
-        "test:release-builder-default-outdir": "node scripts/test-release-builder-default-outdir.mjs",
-        "test:update-repair-state": "node scripts/test-update-repair-state.mjs",
-        "test:update-logs": "node work/smoke-player-update-logs.mjs",
-        "test:item-fire-fix-release": "node work/smoke-item-fire-fix-release.mjs",
-        "test:release-flow": "node work/smoke-r2-release-flow.mjs",
-        "test:release-ui-flow": "node work/smoke-r2-release-ui-flow.mjs",
-        "test:single-instance": "node work/smoke-single-instance.mjs",
-        "verify:local": "node work/verify-local.mjs",
-        "check:production": "node scripts/check-production-readiness.mjs",
-        "check:production:strict": "node scripts/check-production-readiness.mjs --strict",
-        "preview:renderer": "node src/previewRenderer.js",
-        "cloudflare:login": "npx --yes wrangler login",
-        "cloudflare:deploy": "npx --yes wrangler deploy --config cloudflare/wrangler.toml",
-        "dist:win": "electron-builder --win nsis",
-        "dist:mac": "electron-builder --mac dmg",
-        "dist:regular:windows": "electron-builder --config build/electron-builder.windows.cjs --win --publish never",
-        "dist:regular:macos": "electron-builder --config build/electron-builder.macos.cjs --mac --publish never",
-        "pack": "electron-builder --dir",
-        "test:launcher-proof": "node scripts/test-launcher-proof.mjs"
+    "files": [
+      "build/**/*",
+      "pack-fixes/**/*",
+      "desktop/**/*",
+      "src/**/*",
+      "!src/releaseBuilder.js",
+      "!src/clientModpackZip.js",
+      "!src/serverTransfer.js",
+      "!src/githubActions.js",
+      "!src/r2DirectUpload.js",
+      "!node_modules/@aws-sdk/**",
+      "!node_modules/@smithy/**",
+      "!node_modules/@aws-crypto/**",
+      "!node_modules/ssh2/**",
+      "!node_modules/yauzl/**",
+      "!node_modules/yazl/**",
+      "config/app.defaults.json",
+      "package.json",
+      "README.md"
+    ],
+    "win": {
+      "target": "nsis"
     },
-    "dependencies": {
-        "@aws-sdk/client-s3": "^3.1075.0",
-        "@aws-sdk/lib-storage": "^3.1075.0",
-        "adm-zip": "^0.5.16",
-        "ssh2": "^1.17.0",
-        "yauzl": "^3.4.0",
-        "yazl": "^3.3.1"
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.games"
     },
-    "devDependencies": {
-        "electron": "^42.5.0",
-        "electron-builder": "^26.15.3",
-        "lucide-static": "^1.21.0"
-    },
-    "build": {
-        "appId": "com.ahardtime.launcher",
-        "productName": "A Hard Time Launcher",
-        "icon": "build/icon",
-        "directories": {
-            "output": "release-builds"
-        },
-        "files": [
-            "build/**/*",
-            "pack-fixes/**/*",
-            "desktop/**/*",
-            "src/**/*",
-            "public/**/*",
-            "cloudflare/**/*",
-            "config/**/*",
-            "server-lock-mod/build/libs/aht-version-lock-*.jar",
-            "!server-lock-mod/build/libs/*-sources.jar",
-            "server-lock-mod/README.md",
-            "package.json",
-            "README.md"
-        ],
-        "win": {
-            "target": "nsis"
-        },
-        "mac": {
-            "target": "dmg",
-            "category": "public.app-category.games"
-        },
-        "asarUnpack": [
-            "server-lock-mod/build/libs/aht-version-lock-*.jar",
-            "pack-fixes/*.jar"
-        ],
-        "nsis": {
-            "oneClick": false,
-            "allowToChangeInstallationDirectory": true,
-            "runAfterFinish": true,
-            "createDesktopShortcut": true,
-            "createStartMenuShortcut": true,
-            "include": "build/windows-installer.nsh"
-        }
+    "asarUnpack": [
+      "pack-fixes/*.jar"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "build/windows-installer.nsh"
     }
+  }
 }

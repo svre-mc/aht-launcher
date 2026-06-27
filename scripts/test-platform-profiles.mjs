@@ -30,6 +30,19 @@ if (profiles.macos.displayName !== 'macOS' || !profiles.macos.packageTarget.incl
   throw new Error(`macOS profile is not tailored: ${JSON.stringify(profiles.macos)}`);
 }
 
+function assertUnsupported(fn, label) {
+  try {
+    fn();
+  } catch (error) {
+    if (/Unsupported AHT launcher platform/.test(error.message)) return;
+    throw new Error(`${label} threw the wrong error: ${error.message}`);
+  }
+  throw new Error(`${label} accepted an unsupported platform.`);
+}
+
+assertUnsupported(() => defaultInstanceDirForPlatform('linux', { HOME: '/home/player' }), 'linux instance dir');
+assertUnsupported(() => platformProfile('linux', { HOME: '/home/player' }), 'linux platform profile');
+
 console.log(JSON.stringify({
   ok: true,
   instanceDirs: {

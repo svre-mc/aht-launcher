@@ -54,6 +54,30 @@ async function walkFiles(root, rel = '') {
   return files;
 }
 
+async function scanAddedModFiles(instanceDir, managedSet, limit) {
+  const added = [];
+  for (const root of MONITORED_ROOTS) {
+    const rootPath = safeJoin(instanceDir, root);
+    for (const file of await walkFiles(rootPath)) {
+      const rel = root.includes('.') ? root : `${root}/${file.rel}`;
+      if (!managedSet.has(rel)) {
+        added.push({
+          path: rel,
+          size: file.size,
+          sha256: await hashFile(file.abs, 'sha256')
+        });
+      }
+      if (added.length >= limit) {
+        break;
+      }
+    }
+    if (added.length >= limit) {
+      break;
+    }
+  }
+  return added;
+}
+
 async function loadManaged(instanceDir) {
   const managedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
   if (!(await pathExists(managedPath))) {
@@ -94,25 +118,7 @@ export async function scanLocalChanges(instanceDir, options = {}) {
     }
   }
 
-  for (const root of MONITORED_ROOTS) {
-    const rootPath = safeJoin(instanceDir, root);
-    for (const file of await walkFiles(rootPath)) {
-      const rel = root.includes('.') ? root : `${root}/${file.rel}`;
-      if (!managedSet.has(rel)) {
-        added.push({
-          path: rel,
-          size: file.size,
-          sha256: await hashFile(file.abs, 'sha256')
-        });
-      }
-      if (added.length >= limit) {
-        break;
-      }
-    }
-    if (added.length >= limit) {
-      break;
-    }
-  }
+  added.push(...await scanAddedModFiles(instanceDir, managedSet, limit));
 
   return {
     generatedAt: new Date().toISOString(),
@@ -133,6 +139,7 @@ export async function scanLocalChanges(instanceDir, options = {}) {
 export async function scanManagedIntegrity(instanceDir, options = {}) {
   const limit = options.limit || 500;
   const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
+  const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
   const missing = [];
   let checked = 0;
@@ -162,7 +169,8 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
     }
   }
 
-  const corruptCount = changed.length + missing.length;
+  const added = await scanAddedModFiles(instanceDir, managedSet, limit);
+  const corruptCount = changed.length + missing.length + added.length;
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,
@@ -173,10 +181,12 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
       ok: Math.max(0, checked - changed.length),
       changed: changed.length,
       missing: missing.length,
+      added: added.length,
       corrupted: corruptCount
     },
     changed: changed.slice(0, limit),
     missing: missing.slice(0, limit),
-    truncated: changed.length > limit || missing.length > limit
+    added: added.slice(0, limit),
+    truncated: changed.length > limit || missing.length > limit || added.length > limit
   };
 }

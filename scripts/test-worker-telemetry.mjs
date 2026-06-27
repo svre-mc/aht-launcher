@@ -247,7 +247,7 @@ const publishedLog = await jsonRequest('/admin/update-logs', {
   body: JSON.stringify({
     version: '2.8.2',
     title: 'AHT Update Feed',
-    text: 'CurseForge-style installs and local change reports are now visible in the launcher.'
+    text: 'Exact AHT client ZIP installs and launcher proof telemetry are now visible in the launcher.'
   })
 });
 const publicLogs = await jsonRequest('/api/update-logs?limit=3');
