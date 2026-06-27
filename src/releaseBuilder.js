@@ -689,21 +689,40 @@ async function buildFullClientRelease(options, zip, metadata) {
   await ensureDir(path.join(outDir, 'server'));
   await ensureDir(path.join(outDir, 'server', 'mods'));
 
-  if (copyZip) {
-    await fs.copyFile(packZip, zipDest);
-  }
   if (versionLockJarPath) {
     await fs.copyFile(versionLockJarPath, path.join(outDir, serverLockModRelPath));
+  }
+
+  const rootPrefix = clientPackRootPrefix(zip);
+  const existingClientVersionLockPath = findFullClientMod(zip, /^aht-version-lock-.+\.jar$/i, rootPrefix);
+  const injectClientVersionLock = Boolean(versionLockJarPath && !existingClientVersionLockPath);
+  const clientVersionLockPath = existingClientVersionLockPath || (injectClientVersionLock ? `mods/${path.basename(versionLockJarPath)}` : null);
+  const fullClientZipInjections = [
+    injectClientVersionLock ? {
+      sourceZip: packZip,
+      injectPath: versionLockJarPath,
+      injectAs: rootPrefix ? `${rootPrefix}${clientVersionLockPath}` : clientVersionLockPath
+    } : null
+  ].filter(Boolean);
+
+  if (fullClientZipInjections.length) {
+    await writeZipWithInjectedFiles({
+      sourceZip: packZip,
+      destZip: zipDest,
+      injections: fullClientZipInjections
+    });
+  } else if (copyZip) {
+    await fs.copyFile(packZip, zipDest);
   }
 
   const artifactPath = await pathExists(zipDest) ? zipDest : packZip;
   const stats = await fs.stat(artifactPath);
   const sha256 = await hashFile(artifactPath, 'sha256');
-  const rootPrefix = clientPackRootPrefix(zip);
-  const entries = zipFileEntries(zip, rootPrefix).filter((entry) => entry !== CLIENT_PACK_METADATA_ENTRY);
+  const artifactZip = artifactPath === packZip ? zip : new AdmZip(artifactPath);
+  const artifactRootPrefix = clientPackRootPrefix(artifactZip);
+  const entries = zipFileEntries(artifactZip, artifactRootPrefix).filter((entry) => entry !== CLIENT_PACK_METADATA_ENTRY);
   const modEntries = entries.filter((entry) => entry.toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entry));
-  const clientVersionLockPath = findFullClientMod(zip, /^aht-version-lock-.+\.jar$/i, rootPrefix);
-  const clientItemFireFixPath = findFullClientMod(zip, /^aht-item-fire-fix-.+\.jar$/i, rootPrefix);
+  const clientItemFireFixPath = findFullClientMod(artifactZip, /^aht-item-fire-fix-.+\.jar$/i, artifactRootPrefix);
 
   const latest = {
     schemaVersion: 1,
@@ -737,7 +756,7 @@ async function buildFullClientRelease(options, zip, metadata) {
       configPath: serverLockRelPath,
       modPath: serverLockModRelPath,
       clientModPath: clientVersionLockPath,
-      injected: false
+      injected: injectClientVersionLock
     },
     itemFireFix: {
       clientModPath: clientItemFireFixPath,
@@ -765,6 +784,7 @@ async function buildFullClientRelease(options, zip, metadata) {
       serverLockConfig: serverLockRelPath,
       serverLockMod: serverLockModRelPath,
       clientVersionLockMod: clientVersionLockPath,
+      clientVersionLockInjected: injectClientVersionLock,
       clientItemFireFixMod: clientItemFireFixPath
     }
   };

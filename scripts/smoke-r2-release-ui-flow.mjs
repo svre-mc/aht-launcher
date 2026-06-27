@@ -198,11 +198,10 @@ const clientMetadata = {
   includedRoots: ['config', 'mods', 'resourcepacks', 'scripts'],
   missingRoots: [],
   settingsFiles: [],
-  fileCount: 4
+  fileCount: 3
 };
 const zip = new AdmZip();
 zip.addFile('aht-client-pack.json', Buffer.from(JSON.stringify(clientMetadata, null, 2)));
-zip.addFile('mods/aht-version-lock-2.8.3.jar', Buffer.from(`version-lock=${crypto.randomUUID()}\n`));
 zip.addFile('config/aht-ui-test.cfg', Buffer.from(`ui=${crypto.randomUUID()}\n`));
 zip.addFile('resourcepacks/aht-ui-test.zip', Buffer.from('fake-resourcepack\n'));
 zip.addFile('scripts/aht-ui.zs', Buffer.from('print("aht ui smoke");\n'));
@@ -332,7 +331,7 @@ try {
     throw new Error(`Player update failed after UI publish: ${JSON.stringify(updateResult)}`);
   }
   for (const requiredPath of [
-    path.join(instanceDir, 'mods', 'aht-version-lock-2.8.3.jar'),
+    path.join(instanceDir, 'mods', 'aht-version-lock-1.0.0.jar'),
     path.join(instanceDir, 'config', 'aht-ui-test.cfg'),
     path.join(instanceDir, 'resourcepacks', 'aht-ui-test.zip'),
     path.join(instanceDir, 'scripts', 'aht-ui.zs')

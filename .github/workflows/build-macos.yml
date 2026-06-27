@@ -177,7 +177,17 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
           fi
 
-          for asset in ci-artifacts/* ci-launcher-update/launcher-latest.json; do
+          shopt -s nullglob
+          release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-launcher-update/launcher-latest.json)
+          if [ "${#release_assets[@]}" -eq 0 ]; then
+            echo "No public release assets found."
+            exit 1
+          fi
+          echo "Public GitHub release assets:"
+          printf ' - %s\n' "${release_assets[@]}"
+          echo "macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only."
+
+          for asset in "${release_assets[@]}"; do
             name="$(basename "$asset")"
             for attempt in 1 2 3; do
               if gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber; then

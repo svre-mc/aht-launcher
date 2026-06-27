@@ -13,6 +13,7 @@ const workerEndpoint = `http://127.0.0.1:${workerPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-launcher-self-update-'));
 const userData = path.join(root, 'userData');
 const pendingUpdatePath = path.join(userData, 'launcher-updates', 'pending-launcher-update.json');
+const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const artifactName = process.platform === 'win32'
   ? 'AHT-Launcher-Windows-10-11-9.9.9.exe'
   : process.platform === 'darwin'
@@ -34,6 +35,22 @@ const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForExit(childProcess, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    if (!childProcess || childProcess.exitCode !== null || childProcess.signalCode) {
+      resolve({ code: childProcess?.exitCode ?? null, signal: childProcess?.signalCode ?? null });
+      return;
+    }
+    const timer = setTimeout(() => {
+      reject(new Error(`process ${childProcess.pid || 'unknown'} did not exit within ${timeoutMs}ms`));
+    }, timeoutMs);
+    childProcess.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+  });
 }
 
 async function writeJson(file, value) {
@@ -197,11 +214,13 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
-const child = spawn(electronBin, electronArgs, {
+let child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    AHT_TEST_HOOKS: '1',
     AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE: '1',
+    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_LAUNCHER_UPDATE_NO_QUIT: '1',
     AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY: '1',
     ELECTRON_ENABLE_LOGGING: '0'
@@ -331,6 +350,43 @@ try {
       }
     }
   }
+  await client.call('Browser.close').catch(() => {});
+  client.close();
+  client = null;
+  child.kill();
+  await waitForExit(child, 10000).catch(() => {});
+  child = null;
+
+  const guardPort = port + 2;
+  const guardArgs = smokeExe
+    ? [`--user-data-dir=${userData}`]
+    : ['.', `--user-data-dir=${userData}`];
+  const guardChild = spawn(electronBin, guardArgs, {
+    cwd: electronCwd,
+    env: {
+      ...process.env,
+      AHT_TEST_HOOKS: '1',
+      AHT_TEST_REMOTE_DEBUG_PORT: String(guardPort),
+      AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+      ELECTRON_ENABLE_LOGGING: '0'
+    },
+    stdio: 'ignore',
+    windowsHide: true
+  });
+  const guardExit = await waitForExit(guardChild, 10000).catch((error) => {
+    guardChild.kill();
+    throw new Error(`reopened old launcher did not exit during pending install: ${error.message}`);
+  });
+  if (guardExit.code !== 0) {
+    throw new Error(`reopened old launcher exited with unexpected status during pending install: ${JSON.stringify(guardExit)}`);
+  }
+  const probeLines = fs.existsSync(startupProbePath)
+    ? fs.readFileSync(startupProbePath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    : [];
+  if (!probeLines.some((line) => line.stage === 'launcher-update-install-pending-exit')) {
+    throw new Error(`reopened old launcher did not use pending install exit guard: ${JSON.stringify(probeLines)}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -341,7 +397,8 @@ try {
       progress: proof.progress,
       downloadedPath: proof.state.lastResult.downloadedPath,
       latestVersion: proof.status.launcherUpdate.latestVersion,
-      launcherStrategy: proof.state.lastResult.launched?.strategy || 'direct'
+      launcherStrategy: proof.state.lastResult.launched?.strategy || 'direct',
+      pendingInstallReopenExit: guardExit
     }
   }, null, 2));
 } finally {
@@ -349,6 +406,6 @@ try {
     await client.call('Browser.close').catch(() => {});
     client.close();
   }
-  child.kill();
+  if (child) child.kill();
   await new Promise((resolve) => server.close(resolve));
 }

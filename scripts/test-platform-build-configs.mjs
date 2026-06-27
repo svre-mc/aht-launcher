@@ -19,6 +19,7 @@ const verifyLocalScript = fs.readFileSync(new URL('../scripts/verify-local.mjs',
 const smokePlayerDefaults = fs.readFileSync(new URL('../scripts/smoke-player-defaults-feed.mjs', import.meta.url), 'utf8');
 const smokePlayerLayout = fs.readFileSync(new URL('../scripts/smoke-player-layout.mjs', import.meta.url), 'utf8');
 const smokePlayerUpdatePlay = fs.readFileSync(new URL('../scripts/smoke-player-update-play-flow.mjs', import.meta.url), 'utf8');
+const smokeLauncherSelfUpdate = fs.readFileSync(new URL('../scripts/smoke-launcher-self-update.mjs', import.meta.url), 'utf8');
 const checkProductionReadiness = fs.readFileSync(new URL('../scripts/check-production-readiness.mjs', import.meta.url), 'utf8');
 const prepareLauncherUpdateScript = fs.readFileSync(new URL('../scripts/prepare-launcher-update.mjs', import.meta.url), 'utf8');
 const launcherUpdateManifestTest = fs.readFileSync(new URL('../scripts/test-launcher-update-manifest.mjs', import.meta.url), 'utf8');
@@ -154,6 +155,8 @@ assert(rendererApp.includes('Ready to Install') && rendererApp.includes('Install
 assert(desktopMain.includes('pending-launcher-update.json') && desktopMain.includes('pending-launcher-update.failed') && desktopMain.includes('shouldExitForPendingLauncherInstall') && desktopMain.includes('launcher-update-install-pending-exit'), 'Launcher self-update must persist handoff state, recover helper failures, and close old copies that reopen while the installer is running.');
 assert(desktopMain.includes('waitForLauncherUpdateHelperStart') && desktopMain.includes('Launcher update helper did not start') && desktopMain.includes('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'), 'Launcher restart must verify the handoff helper starts before quitting.');
 assert(desktopMain.includes('function windowsLauncherInstallerArgs') && desktopMain.includes('`/D=${targetDir}`'), 'Windows launcher self-update must install into the current launcher directory.');
+assert(smokeLauncherSelfUpdate.includes('launcher-update-install-pending-exit') && smokeLauncherSelfUpdate.includes('reopened old launcher did not exit during pending install'), 'Launcher self-update smoke must prove reopened old copies exit during an installing handoff.');
+assert(!desktopMain.includes('/usr/bin/open "$zip_path"'), 'macOS self-update helper must not open the update ZIP on failure.');
 const gameTileButtonStart = rendererHtml.indexOf('id="gameTileButton"');
 const gameTileButtonEnd = rendererHtml.indexOf('coming-soon', gameTileButtonStart);
 const gameTileButtonHtml = gameTileButtonStart >= 0 && gameTileButtonEnd > gameTileButtonStart
@@ -378,6 +381,7 @@ assert(macZipTarget, 'macOS regular launcher must build ZIP update artifacts.');
 assert(macDmgTarget.arch?.includes('arm64') && macZipTarget.arch?.includes('arm64'), 'macOS regular launcher should include Apple Silicon.');
 assert(macDmgTarget.arch?.includes('x64') && macZipTarget.arch?.includes('x64'), 'macOS regular launcher should include Intel.');
 assert(releaseWorkflow.includes('release-builds/macos/*.zip'), 'GitHub macOS workflow must upload ZIP self-update artifacts.');
+assert(releaseWorkflow.includes('release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-launcher-update/launcher-latest.json)') && releaseWorkflow.includes('macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only.') && !releaseWorkflow.includes('for asset in ci-artifacts/* ci-launcher-update/launcher-latest.json'), 'GitHub public releases must expose only manual installers while keeping macOS ZIPs for R2 self-update.');
 assert(desktopMain.includes('launchMacLauncherUpdateHelper'), 'macOS launcher self-update must use the app-bundle restart helper.');
 
 assert(!fs.existsSync(new URL('../build/electron-builder.ubuntu.cjs', import.meta.url)), 'Ubuntu builder config must not exist.');

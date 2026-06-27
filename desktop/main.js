@@ -2280,7 +2280,6 @@ fail_update() {
     mkdir -p "$(dirname "$pending_failure_path")" 2>/dev/null || true
     printf '%s\n' "$1" > "$pending_failure_path" 2>/dev/null || true
   fi
-  /usr/bin/open "$zip_path" 2>/dev/null || true
   exit 1
 }
 write_log "Waiting for old launcher PID $old_pid"
@@ -2549,7 +2548,7 @@ async function restartLauncherUpdate() {
       launched
     };
     launcherUpdateState.lastResult = result;
-    launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Restart verified' : 'Restarting launcher', completed: 3, total: 3, percent: 100 };
+    launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Restart verified' : 'Installing launcher update', completed: 3, total: 3, percent: 100 };
     launcherUpdateState.lines.push(process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
       ? 'Test mode verified the restart helper without closing the launcher.'
       : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
