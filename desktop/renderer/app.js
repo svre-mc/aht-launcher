@@ -1505,7 +1505,7 @@ function setLauncherUpdateButton(restartReady = false) {
   const icon = document.createElement("span");
   icon.className = `button-icon ${restartReady ? "icon-sync" : "icon-download"}`;
   icon.setAttribute("aria-hidden", "true");
-  els.launcherUpdateNowButton.replaceChildren(icon, document.createTextNode(restartReady ? "Restart Launcher" : "Update Launcher"));
+  els.launcherUpdateNowButton.replaceChildren(icon, document.createTextNode(restartReady ? "Install and Restart" : "Update Launcher"));
 }
 
 function renderLauncherUpdateOverlay(status = currentStatus, state = lastLauncherUpdateState) {
@@ -1517,12 +1517,12 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   const restartReady = Boolean(state?.lastResult?.restartRequired && !state?.error);
   const current = update.currentVersion || status?.appVersion || "-";
   const latest = update.latestVersion || "-";
-  els.launcherUpdateTitle.textContent = restartReady ? "Update Is Done, Restart Required" : "Launcher update required";
+  els.launcherUpdateTitle.textContent = restartReady ? "Ready to Install" : "Launcher update required";
   els.launcherUpdateSummary.textContent = restartReady
-    ? `AHT Launcher ${latest} is ready. Click Restart Launcher to install it and reopen AHT Launcher.`
+    ? `AHT Launcher ${latest} is downloaded and verified. Click Install and Restart to close AHT Launcher, install it, and reopen when finished.`
     : `AHT Launcher ${latest} is required. Installed launcher version: ${current}.`;
   const percent = launcherUpdatePercent(state);
-  const phase = state?.progress?.phase || (state?.error ? "Update failed" : restartReady ? "Restart required" : state?.lastResult ? "Installer ready" : "Preparing");
+  const phase = state?.progress?.phase || (state?.error ? "Update failed" : restartReady ? "Ready to install" : state?.lastResult ? "Installer ready" : "Preparing");
   els.launcherUpdateProgressLabel.textContent = phase;
   els.launcherUpdateProgressCount.textContent = `${Math.round(percent)}%`;
   setMiniProgress(els.launcherUpdateProgressBar, percent);
@@ -1605,8 +1605,8 @@ async function restartLauncherSelfUpdate() {
   lastLauncherUpdateState = {
     ...lastLauncherUpdateState,
     running: true,
-    lines: [...(lastLauncherUpdateState.lines || []), "Restarting launcher update."],
-    progress: { phase: "Starting restart helper", percent: 100 },
+    lines: [...(lastLauncherUpdateState.lines || []), "Installing launcher update."],
+    progress: { phase: "Starting install helper", percent: 100 },
     error: null
   };
   renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);

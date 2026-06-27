@@ -12,6 +12,7 @@ const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-launcher-self-update-'));
 const userData = path.join(root, 'userData');
+const pendingUpdatePath = path.join(userData, 'launcher-updates', 'pending-launcher-update.json');
 const artifactName = process.platform === 'win32'
   ? 'AHT-Launcher-Windows-10-11-9.9.9.exe'
   : process.platform === 'darwin'
@@ -217,8 +218,8 @@ try {
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && document.querySelector('#launcherUpdateOverlay')", 'launcher update DOM');
   await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false", 'launcher update overlay visible');
-  await waitFor(client, "document.querySelector('#launcherUpdateTitle').textContent.includes('Update Is Done, Restart Required')", 'launcher update staged', 240);
-  await waitFor(client, "document.querySelector('#launcherUpdateNowButton').textContent.includes('Restart Launcher')", 'restart launcher button');
+  await waitFor(client, "document.querySelector('#launcherUpdateTitle').textContent.includes('Ready to Install')", 'launcher update staged', 240);
+  await waitFor(client, "document.querySelector('#launcherUpdateNowButton').textContent.includes('Install and Restart')", 'install and restart button');
   const stagedProof = await evaluate(client, `(async () => ({
     hidden: document.querySelector('#launcherUpdateOverlay').hidden,
     title: document.querySelector('#launcherUpdateTitle').textContent,
@@ -232,6 +233,13 @@ try {
   if (!stagedProof.state.lastResult?.restartRequired || !stagedProof.state.lastResult?.preparedRestart) {
     throw new Error(`Launcher update was not staged for explicit restart: ${JSON.stringify(stagedProof.state)}`);
   }
+  if (!fs.existsSync(pendingUpdatePath)) {
+    throw new Error(`Launcher update did not write pending handoff state at ${pendingUpdatePath}`);
+  }
+  const stagedPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
+  if (stagedPending.status !== 'staged' || stagedPending.version !== '9.9.9' || !stagedPending.preparedRestart) {
+    throw new Error(`Pending launcher update was not staged correctly: ${JSON.stringify(stagedPending)}`);
+  }
   await evaluate(client, `document.querySelector('#launcherUpdateNowButton').click(); true`);
   await sleep(1500);
   const clickProof = await evaluate(client, `(async () => ({
@@ -241,8 +249,12 @@ try {
     state: await window.aht.getLauncherUpdateState(),
     hasRestartApi: typeof window.aht.restartLauncherUpdate === 'function'
   }))()`);
-  if (!clickProof.log.includes('Restarting launcher update.') && !clickProof.log.includes('Test mode verified the restart helper')) {
-    throw new Error(`Restart button click did not start restart flow: ${JSON.stringify(clickProof)}`);
+  if (!clickProof.log.includes('Installing launcher update.') && !clickProof.log.includes('Test mode verified the restart helper')) {
+    throw new Error(`Install and Restart button click did not start install flow: ${JSON.stringify(clickProof)}`);
+  }
+  const installingPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
+  if (installingPending.status !== 'installing' || installingPending.version !== '9.9.9' || !installingPending.installingStartedAt) {
+    throw new Error(`Pending launcher update was not marked installing before quit: ${JSON.stringify(installingPending)}`);
   }
   await waitFor(client, "document.querySelector('#launcherUpdateLog').textContent.includes('Test mode verified the restart helper')", 'launcher restart helper verified', 80);
   const proof = await evaluate(client, `(async () => ({
@@ -279,7 +291,7 @@ try {
     if (payload.expectedVersion !== proof.status.launcherUpdate.latestVersion) {
       throw new Error(`Helper payload has wrong expected version: ${JSON.stringify(payload)}`);
     }
-    if (!payload.targetExe || !payload.oldPid || !payload.installerArgs?.includes('/S') || !payload.installerArgs?.some((arg) => String(arg).startsWith('/D='))) {
+    if (!payload.targetExe || !payload.oldPid || !payload.pendingFailurePath || !payload.installerArgs?.includes('/S') || !payload.installerArgs?.some((arg) => String(arg).startsWith('/D='))) {
       throw new Error(`Helper payload is missing restart details: ${JSON.stringify(payload)}`);
     }
     const helperLog = fs.readFileSync(launched.logPath, 'utf8');
@@ -287,7 +299,7 @@ try {
       throw new Error(`Helper did not write startup confirmation: ${helperLog}`);
     }
     const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
-    for (const required of ['Wait-Process', 'Start-Process -FilePath ([string]$payload.installerPath)', 'Start-Process -FilePath $target']) {
+    for (const required of ['Wait-Process', 'Get-BlockingLauncherProcesses', 'Waiting for launcher processes to close', 'Write-PendingFailure', 'Start-Process -FilePath ([string]$payload.installerPath)', 'Start-Process -FilePath $target']) {
       if (!scriptText.includes(required)) {
         throw new Error(`Helper script is missing ${required}: ${scriptText}`);
       }
@@ -305,7 +317,7 @@ try {
       }
     }
     const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
-    if (payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app')) {
+    if (payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app') || !payload.pendingFailurePath) {
       throw new Error(`macOS helper payload is missing update details: ${JSON.stringify(payload)}`);
     }
     const helperLog = fs.readFileSync(launched.logPath, 'utf8');
@@ -313,7 +325,7 @@ try {
       throw new Error(`Helper did not write startup confirmation: ${helperLog}`);
     }
     const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
-    for (const required of ['/usr/bin/ditto -x -k', '/usr/bin/open "$target_app"', 'No .app bundle was found in update ZIP']) {
+    for (const required of ['/usr/bin/ditto -x -k', '/usr/bin/open "$target_app"', 'pending_failure_path', 'No .app bundle was found in update ZIP']) {
       if (!scriptText.includes(required)) {
         throw new Error(`macOS helper script is missing ${required}: ${scriptText}`);
       }

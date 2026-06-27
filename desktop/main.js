@@ -161,6 +161,7 @@ let uploadState = { running: false, total: 0, completed: 0, current: '', lines: 
 let adminToken = '';
 let developerSession = null;
 let keepOpenUntil = 0;
+const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
@@ -1776,7 +1777,19 @@ async function getStatus(configOverride = null) {
     skipLoaderCheck: true,
     allowLegacyRelease: developerClientBypass
   });
-  const launcherUpdate = await readLauncherUpdate(config);
+  const pendingLauncherUpdate = await hydratePendingLauncherUpdateState();
+  let launcherUpdate = await readLauncherUpdate(config);
+  if (pendingLauncherUpdate?.version && compareVersions(pendingLauncherUpdate.version, app.getVersion()) > 0) {
+    launcherUpdate = {
+      ...launcherUpdate,
+      latestVersion: pendingLauncherUpdate.version,
+      required: true,
+      updateRequired: true,
+      artifact: pendingLauncherUpdate.artifact || launcherUpdate.artifact,
+      pendingStatus: pendingLauncherUpdate.status || 'staged',
+      error: ''
+    };
+  }
   return {
     developerMode: isDeveloperMode(),
     developerClientBypass,
@@ -1946,6 +1959,118 @@ function launcherUpdateInstalledExePath() {
   return process.execPath || '';
 }
 
+function launcherUpdatePendingPath() {
+  return path.join(app.getPath('userData'), 'launcher-updates', 'pending-launcher-update.json');
+}
+
+function launcherUpdatePendingFailurePath() {
+  return path.join(app.getPath('userData'), 'launcher-updates', 'pending-launcher-update.failed');
+}
+
+async function readPendingLauncherUpdate() {
+  try {
+    const pending = await readJsonFile(launcherUpdatePendingPath());
+    return pending && typeof pending === 'object' ? pending : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writePendingLauncherUpdate(pending = {}) {
+  await writeJsonFile(launcherUpdatePendingPath(), {
+    schemaVersion: 1,
+    product: 'aht-launcher',
+    updatedAt: new Date().toISOString(),
+    ...pending
+  });
+  await fs.rm(launcherUpdatePendingFailurePath(), { force: true }).catch(() => {});
+}
+
+async function clearPendingLauncherUpdate() {
+  await fs.rm(launcherUpdatePendingPath(), { force: true }).catch(() => {});
+  await fs.rm(launcherUpdatePendingFailurePath(), { force: true }).catch(() => {});
+}
+
+function launcherUpdateResultFromPending(pending = {}) {
+  if (!pending?.version || !pending?.preparedRestart) return null;
+  return {
+    ok: true,
+    version: pending.version,
+    downloadedPath: pending.downloadedPath || '',
+    artifact: pending.artifact || null,
+    restartRequired: true,
+    pendingStatus: pending.status || 'staged',
+    stagedAt: pending.stagedAt || pending.createdAt || '',
+    installingStartedAt: pending.installingStartedAt || '',
+    preparedRestart: pending.preparedRestart
+  };
+}
+
+async function hydratePendingLauncherUpdateState() {
+  const pending = await readPendingLauncherUpdate();
+  if (!pending?.version) return null;
+  if (compareVersions(app.getVersion(), pending.version) >= 0) {
+    await clearPendingLauncherUpdate();
+    if (launcherUpdateState.lastResult?.version === pending.version) {
+      launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
+    }
+    return null;
+  }
+  const lastResult = launcherUpdateResultFromPending(pending);
+  if (!lastResult) return null;
+  if (!launcherUpdateState.lastResult || launcherUpdateState.lastResult.version !== pending.version) {
+    launcherUpdateState = {
+      running: false,
+      lines: Array.isArray(pending.lines) && pending.lines.length
+        ? pending.lines
+        : [
+          `Launcher update ${app.getVersion()} -> ${pending.version}`,
+          pending.status === 'installing'
+            ? 'Launcher update install is already in progress.'
+            : 'Launcher update is downloaded and ready to install.'
+        ],
+      lastResult,
+      error: null,
+      progress: {
+        phase: pending.status === 'installing' ? 'Installing launcher update' : 'Ready to install',
+        completed: 3,
+        total: 3,
+        percent: 100
+      }
+    };
+  }
+  return pending;
+}
+
+async function shouldExitForPendingLauncherInstall() {
+  const pending = await readPendingLauncherUpdate();
+  if (pending?.status !== 'installing' || !pending.version) return false;
+  if (compareVersions(app.getVersion(), pending.version) >= 0) {
+    await clearPendingLauncherUpdate();
+    return false;
+  }
+  const started = Date.parse(pending.installingStartedAt || pending.updatedAt || '');
+  const age = Number.isFinite(started) ? Date.now() - started : 0;
+  const helperFailure = await fs.readFile(launcherUpdatePendingFailurePath(), 'utf8').catch(() => '');
+  if (helperFailure || age > LAUNCHER_UPDATE_INSTALLING_STALE_MS || process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
+    const retryLine = helperFailure
+      ? `Previous install helper failed: ${helperFailure.trim() || 'unknown error'}`
+      : 'Previous install handoff did not finish. The update is ready to retry.';
+    await writePendingLauncherUpdate({
+      ...pending,
+      status: 'staged',
+      installingStartedAt: '',
+      lines: [
+        `Launcher update ${app.getVersion()} -> ${pending.version}`,
+        retryLine
+      ]
+    });
+    await hydratePendingLauncherUpdateState();
+    return false;
+  }
+  return true;
+}
+
 function launcherUpdateHelperBatch(scriptPath, bootstrapLogPath) {
   return [
     '@echo off',
@@ -1964,11 +2089,20 @@ $ErrorActionPreference = 'Stop'
 $payloadPath = ${JSON.stringify(payloadPath)}
 $payload = Get-Content -LiteralPath $payloadPath -Raw | ConvertFrom-Json
 $logPath = [string]$payload.logPath
+$pendingFailurePath = [string]$payload.pendingFailurePath
 function Write-UpdateLog([string]$message) {
   try {
     $parent = Split-Path -Parent $logPath
     if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     Add-Content -LiteralPath $logPath -Value ((Get-Date).ToString('o') + ' ' + $message) -Encoding UTF8
+  } catch {}
+}
+function Write-PendingFailure([string]$message) {
+  try {
+    if (-not $pendingFailurePath) { return }
+    $parent = Split-Path -Parent $pendingFailurePath
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    Set-Content -LiteralPath $pendingFailurePath -Value $message -Encoding UTF8
   } catch {}
 }
 try {
@@ -1977,11 +2111,45 @@ try {
     Write-UpdateLog 'Test mode helper startup confirmed.'
     exit 0
   }
+  $target = [string]$payload.targetExe
   if ([int]$payload.oldPid -gt 0) {
     try {
       $old = Get-Process -Id ([int]$payload.oldPid) -ErrorAction SilentlyContinue
       if ($old) { Wait-Process -Id ([int]$payload.oldPid) -Timeout 120 -ErrorAction SilentlyContinue }
     } catch {}
+  }
+  function Get-BlockingLauncherProcesses {
+    $targetPath = [string]$target
+    if (-not $targetPath) { return @() }
+    $targetName = [System.IO.Path]::GetFileNameWithoutExtension($targetPath)
+    $targetFull = ''
+    try { $targetFull = [System.IO.Path]::GetFullPath($targetPath).ToLowerInvariant() } catch {}
+    $matches = @()
+    foreach ($process in Get-Process -Name $targetName -ErrorAction SilentlyContinue) {
+      if ($process.Id -eq $PID) { continue }
+      $processPath = ''
+      try { $processPath = [string]$process.Path } catch {}
+      if (-not $processPath) {
+        $matches += $process
+        continue
+      }
+      try {
+        if ([System.IO.Path]::GetFullPath($processPath).ToLowerInvariant() -eq $targetFull) {
+          $matches += $process
+        }
+      } catch {}
+    }
+    return $matches
+  }
+  Write-UpdateLog ('Waiting for launcher processes to close for ' + $target)
+  $remaining = @()
+  for ($i = 0; $i -lt 240; $i += 1) {
+    $remaining = @(Get-BlockingLauncherProcesses)
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if ($remaining.Count -gt 0) {
+    throw ('Timed out waiting for launcher processes to close: ' + (($remaining | ForEach-Object { $_.Id }) -join ', '))
   }
   Start-Sleep -Milliseconds 600
   $installerArgs = @()
@@ -1993,7 +2161,6 @@ try {
   $exitCode = 0
   if ($null -ne $installer.ExitCode) { $exitCode = [int]$installer.ExitCode }
   if ($exitCode -ne 0) { throw ('Installer exited with code ' + $exitCode) }
-  $target = [string]$payload.targetExe
   $expected = [string]$payload.expectedVersion
   $ready = $false
   for ($i = 0; $i -lt 160; $i += 1) {
@@ -2020,7 +2187,9 @@ try {
   Write-UpdateLog 'Launcher update handoff complete.'
   exit 0
 } catch {
-  Write-UpdateLog ('Launcher update helper failed: ' + $_.Exception.Message)
+  $reason = [string]$_.Exception.Message
+  Write-UpdateLog ('Launcher update helper failed: ' + $reason)
+  Write-PendingFailure $reason
   exit 1
 }
 `.trimStart();
@@ -2048,6 +2217,7 @@ async function writeWindowsLauncherUpdateHelper({ filePath, artifact, latestVers
     oldPid: process.pid,
     logPath,
     bootstrapLogPath,
+    pendingFailurePath: launcherUpdatePendingFailurePath(),
     createdAt: new Date().toISOString()
   });
   await fs.writeFile(scriptPath, launcherUpdateHelperScript(payloadPath), 'utf8');
@@ -2097,6 +2267,7 @@ zip_path=${shellSingleQuote(payload.installerPath)}
 target_app=${shellSingleQuote(payload.targetApp)}
 old_pid=${Number(payload.oldPid) || 0}
 log_path=${shellSingleQuote(payload.logPath)}
+pending_failure_path=${shellSingleQuote(payload.pendingFailurePath)}
 work_dir=${shellSingleQuote(payload.workDir)}
 write_log() {
   parent_dir=$(dirname "$log_path")
@@ -2105,6 +2276,10 @@ write_log() {
 }
 fail_update() {
   write_log "Launcher update helper failed: $1"
+  if [ -n "$pending_failure_path" ]; then
+    mkdir -p "$(dirname "$pending_failure_path")" 2>/dev/null || true
+    printf '%s\n' "$1" > "$pending_failure_path" 2>/dev/null || true
+  fi
   /usr/bin/open "$zip_path" 2>/dev/null || true
   exit 1
 }
@@ -2174,6 +2349,7 @@ async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadD
     expectedVersion: latestVersion || '',
     oldPid: process.pid,
     logPath,
+    pendingFailurePath: launcherUpdatePendingFailurePath(),
     workDir: path.join(helperDir, 'macos-extract'),
     createdAt: new Date().toISOString()
   };
@@ -2267,6 +2443,11 @@ async function runLauncherUpdate() {
     launcherUpdateState.lines.push('Launcher update request ignored because an app update is already running.');
     return launcherUpdateState;
   }
+  const pending = await hydratePendingLauncherUpdateState();
+  if (pending && launcherUpdateState.lastResult?.restartRequired) {
+    launcherUpdateState.lines.push('Launcher update is already downloaded and ready to install.');
+    return launcherUpdateState.lastResult;
+  }
   const config = await loadConfig();
   const update = await readLauncherUpdate(config);
   if (!update.updateRequired || !update.artifact) {
@@ -2306,10 +2487,23 @@ async function runLauncherUpdate() {
       restartRequired: true,
       preparedRestart
     };
+    await writePendingLauncherUpdate({
+      status: 'staged',
+      version: update.latestVersion,
+      downloadedPath: target,
+      artifact: update.artifact,
+      preparedRestart,
+      stagedAt: new Date().toISOString(),
+      lines: [
+        `Launcher update ${app.getVersion()} -> ${update.latestVersion}`,
+        'Launcher update downloaded and verified.',
+        'Ready to install. Click Install and Restart to close AHT Launcher, install the update, and reopen it.'
+      ]
+    });
     launcherUpdateState.lastResult = result;
-    launcherUpdateState.progress = { phase: 'Update Is Done, Restart Required', completed: 3, total: 3, percent: 100 };
-    launcherUpdateState.lines.push('Update Is Done, Restart Required.');
-    launcherUpdateState.lines.push('Click Restart Launcher to install the update and reopen AHT Launcher.');
+    launcherUpdateState.progress = { phase: 'Ready to install', completed: 3, total: 3, percent: 100 };
+    launcherUpdateState.lines.push('Ready to install.');
+    launcherUpdateState.lines.push('Click Install and Restart to close AHT Launcher, install the update, and reopen it.');
     return result;
   } catch (error) {
     launcherUpdateState.error = error.message || String(error);
@@ -2330,13 +2524,27 @@ async function restartLauncherUpdate() {
   }
   launcherUpdateState.running = true;
   launcherUpdateState.error = null;
-  launcherUpdateState.progress = { phase: 'Starting restart helper', completed: 3, total: 3, percent: 100 };
-  launcherUpdateState.lines.push('Restart requested. Starting launcher update helper.');
+  launcherUpdateState.progress = { phase: 'Starting install helper', completed: 3, total: 3, percent: 100 };
+  launcherUpdateState.lines.push('Install and restart requested. Starting launcher update helper.');
   try {
+    await writePendingLauncherUpdate({
+      status: 'installing',
+      version: staged.version,
+      downloadedPath: staged.downloadedPath,
+      artifact: staged.artifact,
+      preparedRestart: staged.preparedRestart,
+      stagedAt: staged.stagedAt || '',
+      installingStartedAt: new Date().toISOString(),
+      lines: [
+        `Launcher update ${app.getVersion()} -> ${staged.version}`,
+        'Installing launcher update. If this copy opens before installation finishes, it will close so the helper can complete.'
+      ]
+    });
     const launched = await launchPreparedLauncherUpdate(staged.preparedRestart);
     const result = {
       ...staged,
       restartRequired: false,
+      pendingStatus: 'installing',
       restartStartedAt: new Date().toISOString(),
       launched
     };
@@ -2344,7 +2552,7 @@ async function restartLauncherUpdate() {
     launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Restart verified' : 'Restarting launcher', completed: 3, total: 3, percent: 100 };
     launcherUpdateState.lines.push(process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
       ? 'Test mode verified the restart helper without closing the launcher.'
-      : 'Restart helper is running. Closing AHT Launcher so the update can install and reopen.');
+      : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
     if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
       setTimeout(() => app.quit(), 250);
     } else {
@@ -2352,6 +2560,20 @@ async function restartLauncherUpdate() {
     }
     return result;
   } catch (error) {
+    await writePendingLauncherUpdate({
+      status: 'staged',
+      version: staged.version,
+      downloadedPath: staged.downloadedPath,
+      artifact: staged.artifact,
+      preparedRestart: staged.preparedRestart,
+      stagedAt: staged.stagedAt || new Date().toISOString(),
+      installingStartedAt: '',
+      lines: [
+        `Launcher update ${app.getVersion()} -> ${staged.version}`,
+        `Install helper failed to start: ${error.message || String(error)}`,
+        'The update is still downloaded and can be retried.'
+      ]
+    }).catch(() => {});
     launcherUpdateState.error = error.message || String(error);
     launcherUpdateState.progress = { ...(launcherUpdateState.progress || {}), phase: 'Restart failed', percent: 100 };
     launcherUpdateState.running = false;
@@ -4557,7 +4779,10 @@ ipcMain.handle('update:start', async (_event, payload = {}) => runUpdate(Boolean
 ipcMain.handle('update:state', async () => updateState);
 ipcMain.handle('launcher:updateStart', async () => runLauncherUpdate());
 ipcMain.handle('launcher:updateRestart', async () => restartLauncherUpdate());
-ipcMain.handle('launcher:updateState', async () => launcherUpdateState);
+ipcMain.handle('launcher:updateState', async () => {
+  await hydratePendingLauncherUpdateState();
+  return launcherUpdateState;
+});
 ipcMain.handle('account:register', async (_event, username) => registerMinecraftUsername(username));
 ipcMain.handle('changes:scan', async () => {
   const config = await loadConfig();
@@ -4786,8 +5011,13 @@ if (!singleInstanceLock) {
     focusMainWindow();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     writeTestStartupProbe('app-ready', { userData: app.getPath('userData') });
+    if (await shouldExitForPendingLauncherInstall()) {
+      writeTestStartupProbe('launcher-update-install-pending-exit', { version: app.getVersion() });
+      app.exit(0);
+      return;
+    }
     createWindow();
   });
   app.on('window-all-closed', () => {
