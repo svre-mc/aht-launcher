@@ -2260,11 +2260,32 @@ function launcherUpdateInstalledMacAppPath() {
   return '';
 }
 
+function macAppPathLooksTransient(appPath = '') {
+  const normalized = String(appPath || '').replaceAll('\\', '/').toLowerCase();
+  return normalized.startsWith('/volumes/') || normalized.includes('/apptranslocation/');
+}
+
+function defaultMacLauncherAppName(currentApp = '') {
+  const name = path.basename(String(currentApp || ''));
+  return name && name.toLowerCase().endsWith('.app') ? name : 'A Hard Time Launcher macOS.app';
+}
+
+function macLauncherUpdateTargetApp(currentApp = '') {
+  const appName = defaultMacLauncherAppName(currentApp);
+  const systemApp = path.join('/Applications', appName);
+  const userApp = path.join(app.getPath('home'), 'Applications', appName);
+  if (!currentApp || macAppPathLooksTransient(currentApp)) {
+    return fsSync.existsSync(systemApp) ? systemApp : userApp;
+  }
+  return currentApp;
+}
+
 function macLauncherUpdateHelperScript(payload) {
   return `#!/bin/sh
 set -eu
 zip_path=${shellSingleQuote(payload.installerPath)}
 target_app=${shellSingleQuote(payload.targetApp)}
+fallback_app=${shellSingleQuote(payload.fallbackApp)}
 old_pid=${Number(payload.oldPid) || 0}
 log_path=${shellSingleQuote(payload.logPath)}
 pending_failure_path=${shellSingleQuote(payload.pendingFailurePath)}
@@ -2296,6 +2317,14 @@ if [ "$old_pid" -gt 0 ]; then
   done
 fi
 sleep 0.6
+case "$target_app" in
+  /Volumes/*|*/AppTranslocation/*)
+    if [ -n "$fallback_app" ]; then
+      write_log "Current launcher path is transient. Installing update to $fallback_app"
+      target_app="$fallback_app"
+    fi
+    ;;
+esac
 [ -n "$zip_path" ] && [ -f "$zip_path" ] || fail_update "Update ZIP was not found: $zip_path"
 [ -n "$target_app" ] || fail_update "Target app path is empty"
 case "$target_app" in *.app) ;; *) fail_update "Target app is not a .app bundle: $target_app" ;; esac
@@ -2309,19 +2338,34 @@ for candidate in "$work_dir"/*.app "$work_dir"/*/*.app; do
   if [ -d "$candidate" ]; then source_app="$candidate"; break; fi
 done
 [ -n "$source_app" ] || fail_update "No .app bundle was found in update ZIP"
-parent_dir=$(dirname "$target_app")
-mkdir -p "$parent_dir" || fail_update "Could not create target app parent directory"
-backup_app="${target_app}.previous-update"
-rm -rf "$backup_app"
-if [ -d "$target_app" ]; then
-  mv "$target_app" "$backup_app" || fail_update "Could not move old app bundle"
-fi
-if /usr/bin/ditto "$source_app" "$target_app"; then
+install_to_target() {
+  parent_dir=$(dirname "$target_app")
+  mkdir -p "$parent_dir" || return 11
+  backup_app="${target_app}.previous-update"
   rm -rf "$backup_app"
-else
+  if [ -d "$target_app" ]; then
+    mv "$target_app" "$backup_app" || return 12
+  fi
+  if /usr/bin/ditto "$source_app" "$target_app"; then
+    rm -rf "$backup_app"
+    return 0
+  fi
   rm -rf "$target_app"
   if [ -d "$backup_app" ]; then mv "$backup_app" "$target_app" || true; fi
-  fail_update "Could not install updated app bundle"
+  return 13
+}
+if install_to_target; then
+  write_log "Installed update to $target_app"
+else
+  install_status=$?
+  if [ -n "$fallback_app" ] && [ "$target_app" != "$fallback_app" ]; then
+    write_log "Primary install target failed with $install_status. Trying fallback $fallback_app"
+    target_app="$fallback_app"
+    install_to_target || fail_update "Could not install updated app bundle to fallback: $target_app"
+    write_log "Installed update to fallback $target_app"
+  else
+    fail_update "Could not install updated app bundle"
+  fi
 fi
 chmod -R u+rwX "$target_app" 2>/dev/null || true
 xattr -dr com.apple.quarantine "$target_app" 2>/dev/null || true
@@ -2335,7 +2379,9 @@ exit 0
 async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadDir }) {
   const helperDir = path.join(downloadDir, 'handoff');
   await ensureDir(helperDir);
-  const targetApp = launcherUpdateInstalledMacAppPath() || path.join(app.getPath('userData'), 'A Hard Time Launcher macOS.app');
+  const currentApp = launcherUpdateInstalledMacAppPath();
+  const targetApp = macLauncherUpdateTargetApp(currentApp);
+  const fallbackApp = path.join(app.getPath('home'), 'Applications', defaultMacLauncherAppName(currentApp || targetApp));
   if (!launcherUpdateInstalledMacAppPath() && process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
     throw new Error('Could not resolve installed macOS .app bundle for restart.');
   }
@@ -2345,6 +2391,7 @@ async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadD
   const payload = {
     installerPath: filePath,
     targetApp,
+    fallbackApp,
     expectedVersion: latestVersion || '',
     oldPid: process.pid,
     logPath,

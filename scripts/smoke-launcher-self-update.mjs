@@ -344,7 +344,7 @@ try {
       throw new Error(`Helper did not write startup confirmation: ${helperLog}`);
     }
     const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
-    for (const required of ['/usr/bin/ditto -x -k', '/usr/bin/open "$target_app"', 'pending_failure_path', 'No .app bundle was found in update ZIP']) {
+    for (const required of ['/usr/bin/ditto -x -k', '/usr/bin/open "$target_app"', 'pending_failure_path', 'fallback_app', 'AppTranslocation', 'Primary install target failed', 'No .app bundle was found in update ZIP']) {
       if (!scriptText.includes(required)) {
         throw new Error(`macOS helper script is missing ${required}: ${scriptText}`);
       }
