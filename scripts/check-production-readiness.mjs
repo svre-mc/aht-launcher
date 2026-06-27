@@ -18,7 +18,7 @@ const outputsDir = path.resolve(rootDir, '..', '..', 'outputs');
 const releaseDir = path.join(rootDir, 'release-builds');
 const checks = [];
 const developerOnlyAsarSourcePattern = /^src\/(?:releaseBuilder|clientModpackZip|serverTransfer|githubActions|r2DirectUpload)\.js$/;
-const developerOnlyAsarDependencyPattern = /^node_modules\/(?:@aws-sdk|@smithy|@aws-crypto|ssh2|yauzl|yazl)(?:\/|$)/;
+const developerOnlyAsarDependencyPattern = /^node_modules\/(?:@aws-sdk|@smithy|@aws-crypto|ssh2|yazl)(?:\/|$)/;
 const forbiddenPublicAsarRootPattern = /^(?:cloudflare|server-lock-mod)(?:\/|$)/;
 const privateServerTransferFragments = [
   'C:\\RL CRAFT SERVER LIST',

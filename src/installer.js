@@ -1,7 +1,12 @@
+import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import AdmZip from 'adm-zip';
+import yauzl from 'yauzl';
 import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from './clientPackFormat.js';
 import { getHash, getModFile, getModFileDownloadUrl } from './curseforge.js';
 import {
@@ -24,32 +29,6 @@ function isFullClientZipRelease(latest = {}) {
   return latest?.installMode === 'full-client-zip' || latest?.zipFormat === CLIENT_PACK_FORMAT;
 }
 
-function clientPackMetadataEntry(zip) {
-  const direct = zip.getEntry(CLIENT_PACK_METADATA_ENTRY);
-  if (direct) return direct;
-  const matches = zip.getEntries()
-    .filter((entry) => !entry.isDirectory)
-    .filter((entry) => normalizeRelPath(entry.entryName).endsWith(`/${CLIENT_PACK_METADATA_ENTRY}`));
-  return matches.length === 1 ? matches[0] : null;
-}
-
-function clientPackRootPrefix(zip) {
-  const entry = clientPackMetadataEntry(zip);
-  if (!entry) return '';
-  const name = normalizeRelPath(entry.entryName);
-  return name.endsWith(CLIENT_PACK_METADATA_ENTRY) ? name.slice(0, -CLIENT_PACK_METADATA_ENTRY.length) : '';
-}
-
-function readClientPackMetadata(zip) {
-  const entry = clientPackMetadataEntry(zip);
-  if (!entry) return null;
-  const metadata = JSON.parse(entry.getData().toString('utf8'));
-  if (metadata?.format !== CLIENT_PACK_FORMAT) {
-    throw new Error(`${CLIENT_PACK_METADATA_ENTRY} has unsupported format: ${metadata?.format || 'missing'}`);
-  }
-  return metadata;
-}
-
 function isGameSettingsRelPath(relPath = '') {
   const normalized = normalizeRelPath(relPath).toLowerCase();
   return normalized === 'options.txt' || normalized === 'optionsof.txt';
@@ -61,11 +40,172 @@ function stripClientPackRoot(relPath = '', rootPrefix = '') {
   return normalized.startsWith(rootPrefix) ? normalizeRelPath(normalized.slice(rootPrefix.length)) : '';
 }
 
-function collectFullClientZipFiles(zip, rootPrefix = clientPackRootPrefix(zip)) {
-  return zip.getEntries()
-    .filter((entry) => !entry.isDirectory)
-    .map((entry) => ({ entry, relPath: stripClientPackRoot(entry.entryName, rootPrefix) }))
-    .filter(({ relPath }) => relPath && relPath !== CLIENT_PACK_METADATA_ENTRY && !relPath.startsWith('../') && !relPath.includes('/../') && !path.isAbsolute(relPath));
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function zipEntryIsFile(entry) {
+  return entry && !String(entry.fileName || '').endsWith('/');
+}
+
+function safeClientZipRelPath(entryName = '', rootPrefix = '') {
+  const relPath = stripClientPackRoot(entryName, rootPrefix);
+  if (!relPath || relPath === CLIENT_PACK_METADATA_ENTRY || relPath.startsWith('../') || relPath.includes('/../') || path.isAbsolute(relPath)) {
+    return '';
+  }
+  return relPath;
+}
+
+function openZipFile(filePath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(filePath, { lazyEntries: true }, (error, zipFile) => {
+      if (error) reject(error);
+      else resolve(zipFile);
+    });
+  });
+}
+
+function openZipEntryStream(zipFile, entry) {
+  return new Promise((resolve, reject) => {
+    zipFile.openReadStream(entry, (error, readStream) => {
+      if (error) reject(error);
+      else resolve(readStream);
+    });
+  });
+}
+
+async function forEachZipEntry(filePath, handler) {
+  const zipFile = await openZipFile(filePath);
+  try {
+    await new Promise((resolve, reject) => {
+      let stopped = false;
+      const fail = (error) => {
+        if (stopped) return;
+        stopped = true;
+        reject(error);
+      };
+      zipFile.on('entry', (entry) => {
+        Promise.resolve(handler(entry, zipFile))
+          .then(() => {
+            if (!stopped) {
+              zipFile.readEntry();
+            }
+          })
+          .catch(fail);
+      });
+      zipFile.on('end', () => {
+        if (!stopped) {
+          stopped = true;
+          resolve();
+        }
+      });
+      zipFile.on('error', fail);
+      zipFile.readEntry();
+    });
+  } finally {
+    zipFile.close();
+  }
+}
+
+async function readZipEntryBuffer(zipFile, entry, maxBytes = 5 * 1024 * 1024) {
+  const stream = await openZipEntryStream(zipFile, entry);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      throw new Error(`ZIP entry too large to inspect: ${entry.fileName}`);
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function readClientPackMetadataFromFile(packZipPath) {
+  const matches = [];
+  await forEachZipEntry(packZipPath, async (entry, zipFile) => {
+    if (!zipEntryIsFile(entry)) {
+      return;
+    }
+    const entryName = normalizeRelPath(entry.fileName);
+    if (entryName !== CLIENT_PACK_METADATA_ENTRY && !entryName.endsWith(`/${CLIENT_PACK_METADATA_ENTRY}`)) {
+      return;
+    }
+    const metadata = JSON.parse((await readZipEntryBuffer(zipFile, entry)).toString('utf8'));
+    if (metadata?.format !== CLIENT_PACK_FORMAT) {
+      throw new Error(`${CLIENT_PACK_METADATA_ENTRY} has unsupported format: ${metadata?.format || 'missing'}`);
+    }
+    matches.push({ entryName, metadata });
+  });
+  if (!matches.length) {
+    return null;
+  }
+  const direct = matches.find((match) => match.entryName === CLIENT_PACK_METADATA_ENTRY);
+  if (direct) {
+    return { ...direct, rootPrefix: '' };
+  }
+  if (matches.length > 1) {
+    throw new Error(`Found multiple ${CLIENT_PACK_METADATA_ENTRY} files in full client ZIP.`);
+  }
+  const entryName = matches[0].entryName;
+  return {
+    ...matches[0],
+    rootPrefix: entryName.endsWith(CLIENT_PACK_METADATA_ENTRY) ? entryName.slice(0, -CLIENT_PACK_METADATA_ENTRY.length) : ''
+  };
+}
+
+async function inspectFullClientZipFile(packZipPath) {
+  const metadataRecord = await readClientPackMetadataFromFile(packZipPath);
+  if (!metadataRecord) {
+    throw new Error(`${CLIENT_PACK_METADATA_ENTRY} missing from full client ZIP.`);
+  }
+  let fileCount = 0;
+  let modFileCount = 0;
+  await forEachZipEntry(packZipPath, async (entry) => {
+    if (!zipEntryIsFile(entry)) {
+      return;
+    }
+    const relPath = safeClientZipRelPath(entry.fileName, metadataRecord.rootPrefix);
+    if (!relPath) {
+      return;
+    }
+    fileCount += 1;
+    if (relPath.toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(relPath)) {
+      modFileCount += 1;
+    }
+    if (fileCount % 250 === 0) {
+      await yieldToEventLoop();
+    }
+  });
+  return { ...metadataRecord, fileCount, modFileCount };
+}
+
+async function extractZipEntryToFile(zipFile, entry, target, shouldHash) {
+  const readStream = await openZipEntryStream(zipFile, entry);
+  const output = createWriteStream(target);
+  if (!shouldHash) {
+    try {
+      await pipeline(readStream, output);
+      return null;
+    } catch (error) {
+      await removeFileIfExists(target);
+      throw error;
+    }
+  }
+  const hash = createHash('sha256');
+  const hashStream = new Transform({
+    transform(chunk, encoding, callback) {
+      hash.update(chunk);
+      callback(null, chunk);
+    }
+  });
+  try {
+    await pipeline(readStream, hashStream, output);
+    return hash.digest('hex');
+  } catch (error) {
+    await removeFileIfExists(target);
+    throw error;
+  }
 }
 
 async function walkInstanceFiles(root, rel = '') {
@@ -124,85 +264,289 @@ async function removeUnexpectedModFiles(instanceDir, nextManagedSet) {
   return removed;
 }
 
-async function installFullClientZip({ zip, latest, instanceDir, previousManaged, forceRepair, replaceGameSettings, logger, onProgress }) {
-  const metadata = readClientPackMetadata(zip);
-  if (!metadata) {
-    throw new Error(`${CLIENT_PACK_METADATA_ENTRY} missing from full client ZIP.`);
+const PLAYER_PRESERVED_DIRS = [
+  'saves',
+  'screenshots',
+  'shaderpacks',
+  'journeymap',
+  'schematics',
+  'replay_videos'
+];
+const PLAYER_PRESERVED_FILES = [
+  'servers.dat',
+  'servers.dat_old'
+];
+
+function installSiblingPrefix(instanceDir, label) {
+  const resolved = path.resolve(instanceDir);
+  const base = path.basename(resolved).replace(/[^a-zA-Z0-9._-]+/g, '-') || 'instance';
+  return `.${base}.aht-${label}-`;
+}
+
+function uniqueInstallSiblingDir(instanceDir, label) {
+  const resolved = path.resolve(instanceDir);
+  const parent = path.dirname(resolved);
+  const nonce = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  return path.join(parent, `${installSiblingPrefix(resolved, label)}${nonce}`);
+}
+
+function assertSafeInstanceRoot(instanceDir) {
+  const resolved = path.resolve(instanceDir);
+  const parsed = path.parse(resolved);
+  const forbidden = [
+    parsed.root,
+    os.homedir(),
+    process.env.APPDATA,
+    process.env.LOCALAPPDATA,
+    process.env.USERPROFILE,
+    process.cwd()
+  ]
+    .filter(Boolean)
+    .map((item) => path.resolve(item));
+  const comparable = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  for (const target of forbidden) {
+    const forbiddenComparable = process.platform === 'win32' ? target.toLowerCase() : target;
+    if (comparable === forbiddenComparable) {
+      throw new Error(`Refusing to replace unsafe install directory: ${resolved}`);
+    }
   }
-  const files = collectFullClientZipFiles(zip);
+  if (!path.basename(resolved) || resolved.length <= parsed.root.length + 1) {
+    throw new Error(`Refusing to replace unsafe install directory: ${resolved}`);
+  }
+  return resolved;
+}
+
+function preservedFilesForInstall(replaceGameSettings) {
+  return replaceGameSettings
+    ? PLAYER_PRESERVED_FILES
+    : [...PLAYER_PRESERVED_FILES, 'options.txt', 'optionsof.txt'];
+}
+
+async function copyPathIfPresent(source, dest) {
+  if (!(await pathExists(source))) {
+    return false;
+  }
+  await ensureDir(path.dirname(dest));
+  await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
+  await fs.cp(source, dest, { recursive: true, force: true });
+  return true;
+}
+
+async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger) {
+  const preserved = [];
+  for (const relPath of PLAYER_PRESERVED_DIRS) {
+    const source = safeJoin(instanceDir, relPath);
+    const dest = safeJoin(stagingDir, relPath);
+    if (await copyPathIfPresent(source, dest)) {
+      preserved.push(relPath);
+    }
+  }
+  for (const relPath of preservedFilesForInstall(replaceGameSettings)) {
+    const source = safeJoin(instanceDir, relPath);
+    const dest = safeJoin(stagingDir, relPath);
+    if (await copyPathIfPresent(source, dest)) {
+      preserved.push(relPath);
+    }
+  }
+  if (preserved.length) {
+    logger.log(`Preserved player data: ${preserved.join(', ')}`);
+  }
+  return preserved;
+}
+
+async function copyCurrentPackToStagingCache(packZipPath, stagingDir, logger) {
+  const dest = path.join(stagingDir, '.aht-launcher', 'downloads', path.basename(packZipPath));
+  if (path.resolve(packZipPath) === path.resolve(dest)) {
+    return;
+  }
+  try {
+    await ensureDir(path.dirname(dest));
+    await fs.copyFile(packZipPath, dest);
+  } catch (error) {
+    logger.log(`Could not preserve downloaded ZIP cache: ${error?.message || error}`);
+  }
+}
+
+async function installSiblingDirs(instanceDir, label) {
+  const resolved = path.resolve(instanceDir);
+  const parent = path.dirname(resolved);
+  const prefix = installSiblingPrefix(resolved, label);
+  const entries = await fs.readdir(parent, { withFileTypes: true }).catch(() => []);
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(prefix)) {
+      continue;
+    }
+    const abs = path.join(parent, entry.name);
+    const stat = await fs.stat(abs).catch(() => null);
+    matches.push({ name: entry.name, abs, mtimeMs: stat?.mtimeMs || 0 });
+  }
+  matches.sort((left, right) => right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name));
+  return matches;
+}
+
+async function removeInstallSiblings(items, logger, label) {
+  let removed = 0;
+  for (const item of items) {
+    try {
+      await fs.rm(item.abs, { recursive: true, force: true });
+      removed += 1;
+    } catch (error) {
+      logger?.log?.(`Could not remove stale ${label} folder ${item.abs}: ${error?.message || error}`);
+    }
+  }
+  return removed;
+}
+
+async function recoverInterruptedCleanInstall(instanceDir, logger) {
+  const resolvedInstanceDir = assertSafeInstanceRoot(instanceDir);
+  await ensureDir(path.dirname(resolvedInstanceDir));
+  const stagingDirs = await installSiblingDirs(resolvedInstanceDir, 'staging');
+  const backupDirs = await installSiblingDirs(resolvedInstanceDir, 'backup');
+  const removedStaging = await removeInstallSiblings(stagingDirs, logger, 'staging');
+  let removedBackups = 0;
+  let restoredBackup = '';
+
+  if (await pathExists(resolvedInstanceDir)) {
+    removedBackups = await removeInstallSiblings(backupDirs, logger, 'backup');
+  } else if (backupDirs.length) {
+    const [newestBackup, ...olderBackups] = backupDirs;
+    await fs.rename(newestBackup.abs, resolvedInstanceDir);
+    restoredBackup = newestBackup.abs;
+    removedBackups = await removeInstallSiblings(olderBackups, logger, 'backup');
+  }
+
+  if (removedStaging || removedBackups || restoredBackup) {
+    logger?.log?.(`Recovered clean install state: removed ${removedStaging} staging folder(s), removed ${removedBackups} backup folder(s)${restoredBackup ? `, restored ${restoredBackup}` : ''}.`);
+  }
+  return { removedStaging, removedBackups, restoredBackup };
+}
+
+async function replaceInstallWithStaging(instanceDir, stagingDir) {
+  const resolvedInstanceDir = assertSafeInstanceRoot(instanceDir);
+  const resolvedStagingDir = path.resolve(stagingDir);
+  const backupDir = uniqueInstallSiblingDir(resolvedInstanceDir, 'backup');
+  let oldInstallMoved = false;
+
+  await ensureDir(path.dirname(resolvedInstanceDir));
+  await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
+  try {
+    if (await pathExists(resolvedInstanceDir)) {
+      await fs.rename(resolvedInstanceDir, backupDir);
+      oldInstallMoved = true;
+    }
+    await fs.rename(resolvedStagingDir, resolvedInstanceDir);
+    if (oldInstallMoved) {
+      await fs.rm(backupDir, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if (oldInstallMoved && !(await pathExists(resolvedInstanceDir)) && await pathExists(backupDir)) {
+      await fs.rename(backupDir, resolvedInstanceDir).catch(() => {});
+    }
+    throw error;
+  }
+}
+
+async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, previousManaged, forceRepair, replaceGameSettings, logger, onProgress, progressBase = 0, progressSpan = 100 }) {
+  const inspection = await inspectFullClientZipFile(packZipPath);
+  const filesTotal = inspection.fileCount;
   const nextManaged = [];
   const nextManagedSet = new Set();
   let completedWork = 0;
-  const totalWork = files.length;
   const emitProgress = (phase, currentPath = '') => {
     if (onProgress) {
       onProgress({
         phase,
         currentPath,
         completed: completedWork,
-        total: totalWork,
-        percent: totalWork ? Math.round((completedWork / totalWork) * 100) : 0
+        total: filesTotal,
+        percent: weightedProgress(filesTotal ? Math.round((completedWork / filesTotal) * 100) : 0, progressBase, progressSpan)
       });
     }
   };
 
-  await ensureDir(instanceDir);
+  assertSafeInstanceRoot(instanceDir);
+  await recoverInterruptedCleanInstall(instanceDir, logger);
+  const stagingDir = uniqueInstallSiblingDir(instanceDir, 'staging');
+  await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+  await ensureDir(stagingDir);
   emitProgress('Preparing');
-  logger.log(`Installing exact client ZIP with ${files.length} files`);
-  for (const file of files) {
-    const target = safeJoin(instanceDir, file.relPath);
-    const settingsFile = isGameSettingsRelPath(file.relPath);
-    if (settingsFile && !replaceGameSettings && await pathExists(target)) {
-      logger.log(`Preserving local game settings ${file.relPath}`);
+  try {
+    logger.log(`Installing exact client ZIP with ${filesTotal} files into staging`);
+    await forEachZipEntry(packZipPath, async (entry, zipFile) => {
+      if (!zipEntryIsFile(entry)) {
+        return;
+      }
+      const relPath = safeClientZipRelPath(entry.fileName, inspection.rootPrefix);
+      if (!relPath) {
+        return;
+      }
+      const target = safeJoin(stagingDir, relPath);
+      const settingsFile = isGameSettingsRelPath(relPath);
+
+      await ensureDir(path.dirname(target));
+      const sha256 = await extractZipEntryToFile(zipFile, entry, target, !settingsFile);
+      if (!settingsFile) {
+        const managed = {
+          relativePath: relPath,
+          source: 'full-client-zip',
+          sha256
+        };
+        nextManaged.push(managed);
+        nextManagedSet.add(managed.relativePath);
+      }
       completedWork += 1;
-      emitProgress('Full client ZIP', file.relPath);
-      continue;
+      emitProgress('Full client ZIP', relPath);
+      if (completedWork % 25 === 0) {
+        await yieldToEventLoop();
+      }
+    });
+
+    const installed = {
+      schemaVersion: 1,
+      packId: latest.packId,
+      name: latest.name,
+      version: latest.version,
+      installMode: 'full-client-zip',
+      installedAt: new Date().toISOString(),
+      latestSource: latest.source || null,
+      minecraft: latest.minecraft || inspection.metadata.minecraft || null,
+      manifestFileCount: 0,
+      overrideFileCount: filesTotal
+    };
+
+    await copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger);
+    await copyCurrentPackToStagingCache(packZipPath, stagingDir, logger);
+    await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'installed.json'), installed);
+    await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
+
+    const removed = previousManaged
+      .filter((item) => item?.relativePath && !isGameSettingsRelPath(item.relativePath) && !nextManagedSet.has(item.relativePath))
+      .map((item) => item.relativePath);
+
+    emitProgress('Replacing install');
+    await replaceInstallWithStaging(instanceDir, stagingDir);
+    if (onProgress) {
+      onProgress({
+        phase: 'Finalizing',
+        completed: filesTotal,
+        total: filesTotal,
+        percent: Math.min(97, weightedProgress(100, progressBase, progressSpan))
+      });
     }
-    await ensureDir(path.dirname(target));
-    await fs.writeFile(target, file.entry.getData());
-    if (!settingsFile) {
-      const managed = {
-        relativePath: file.relPath,
-        source: 'full-client-zip',
-        sha256: await hashFile(target, 'sha256')
-      };
-      nextManaged.push(managed);
-      nextManagedSet.add(managed.relativePath);
-    }
-    completedWork += 1;
-    emitProgress('Full client ZIP', file.relPath);
+
+    return {
+      dryRun: false,
+      installed,
+      downloadedModCount: nextManaged.filter((item) => item.relativePath.startsWith('mods/')).length,
+      overrideFileCount: filesTotal,
+      removedStaleCount: removed.length,
+      removedStale: removed,
+      cleanInstall: true
+    };
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
   }
-
-  const removed = [
-    ...await removeStaleManagedFiles(instanceDir, previousManaged, nextManagedSet),
-    ...await removeUnexpectedModFiles(instanceDir, nextManagedSet)
-  ];
-  emitProgress('Finalizing');
-
-  const installed = {
-    schemaVersion: 1,
-    packId: latest.packId,
-    name: latest.name,
-    version: latest.version,
-    installMode: 'full-client-zip',
-    installedAt: new Date().toISOString(),
-    latestSource: latest.source || null,
-    minecraft: latest.minecraft || metadata.minecraft || null,
-    manifestFileCount: 0,
-    overrideFileCount: files.length
-  };
-
-  await writeJsonFile(path.join(instanceDir, '.aht-launcher', 'installed.json'), installed);
-  await writeJsonFile(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), nextManaged);
-
-  return {
-    dryRun: false,
-    installed,
-    downloadedModCount: nextManaged.filter((item) => item.relativePath.startsWith('mods/')).length,
-    overrideFileCount: files.length,
-    removedStaleCount: removed.length,
-    removedStale: removed
-  };
 }
 
 function manifestFileKey(file) {
@@ -244,18 +588,100 @@ async function verifyExisting(filePath, expected) {
   return (await hashFile(filePath, algo)).toLowerCase() === expected.toLowerCase();
 }
 
-async function downloadVerified(source, dest, expectedHash) {
-  await downloadToFile(source, dest);
-  if (expectedHash) {
-    const algo = expectedHash.length === 40 ? 'sha1' : expectedHash.length === 64 ? 'sha256' : null;
-    if (algo) {
-      const actual = await hashFile(dest, algo);
-      if (actual.toLowerCase() !== expectedHash.toLowerCase()) {
-        await removeFileIfExists(dest);
-        throw new Error(`Hash mismatch for ${dest}: expected ${expectedHash}, got ${actual}`);
+function weightedProgress(percent, base = 0, span = 100) {
+  const normalizedPercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  return Math.max(0, Math.min(100, Math.round(base + ((normalizedPercent / 100) * span))));
+}
+
+function byteInstallProgress(phase, currentPath, progress, base, span) {
+  const completedBytes = Math.max(0, Number(progress.loaded || progress.completed || 0));
+  const totalBytes = Math.max(0, Number(progress.total || 0));
+  return {
+    phase,
+    currentPath,
+    unit: 'bytes',
+    completed: completedBytes,
+    total: totalBytes,
+    completedBytes,
+    totalBytes,
+    percent: weightedProgress(progress.percent, base, span),
+    currentPercent: Number.isFinite(Number(progress.percent)) ? Number(progress.percent) : 0,
+    speedBytesPerSecond: progress.speedBytesPerSecond || 0
+  };
+}
+
+async function downloadVerified(source, dest, expectedHash, options = {}) {
+  const currentPath = options.currentPath || path.basename(dest);
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const algo = expectedHash?.length === 40 ? 'sha1' : expectedHash?.length === 64 ? 'sha256' : null;
+  if (algo && await pathExists(dest)) {
+    try {
+      const cachedHash = await hashFile(dest, algo, {
+        onProgress: onProgress
+          ? (progress) => onProgress(byteInstallProgress(
+            options.cacheVerifyPhase || 'Verifying cached download',
+            currentPath,
+            progress,
+            options.cacheVerifyBase ?? options.downloadBase ?? 0,
+            options.cacheVerifySpan ?? ((options.downloadSpan || 0) + (options.verifySpan || 0) || 100)
+          ))
+          : null
+      });
+      if (cachedHash.toLowerCase() === expectedHash.toLowerCase()) {
+        if (options.logger?.log) {
+          options.logger.log(`Using cached download ${currentPath}`);
+        }
+        return { reused: true, verified: true, path: dest };
+      }
+      await removeFileIfExists(dest);
+      if (options.logger?.log) {
+        options.logger.log(`Cached download ${currentPath} failed verification; downloading a fresh copy.`);
+      }
+    } catch (error) {
+      await removeFileIfExists(dest).catch(() => {});
+      if (options.logger?.log) {
+        options.logger.log(`Cached download ${currentPath} could not be verified; downloading a fresh copy. ${error.message || error}`);
       }
     }
   }
+
+  await downloadToFile(source, dest, {
+    logger: options.logger,
+    retries: options.retries,
+    retryDelayMs: options.retryDelayMs,
+    timeoutMs: options.timeoutMs,
+    multipart: Boolean(options.multipart),
+    multipartConcurrency: options.multipartConcurrency,
+    multipartPartSizeBytes: options.multipartPartSizeBytes,
+    multipartThresholdBytes: options.multipartThresholdBytes,
+    onProgress: onProgress
+      ? (progress) => onProgress(byteInstallProgress(
+        options.downloadPhase || 'Downloading',
+        currentPath,
+        progress,
+        options.downloadBase ?? 0,
+        options.downloadSpan ?? 100
+      ))
+      : null
+  });
+  if (expectedHash && algo) {
+    const actual = await hashFile(dest, algo, {
+      onProgress: onProgress
+        ? (progress) => onProgress(byteInstallProgress(
+          options.verifyPhase || 'Verifying download',
+          currentPath,
+          progress,
+          options.verifyBase ?? 0,
+          options.verifySpan ?? 100
+        ))
+        : null
+    });
+    if (actual.toLowerCase() !== expectedHash.toLowerCase()) {
+      await removeFileIfExists(dest);
+      throw new Error(`Hash mismatch for ${dest}: expected ${expectedHash}, got ${actual}`);
+    }
+  }
+  return { reused: false, verified: Boolean(algo), path: dest };
 }
 
 function isZipFileName(fileName = '') {
@@ -569,6 +995,9 @@ export async function installPack(options) {
   }
 
   const latest = await readJsonFromSource(latestSource);
+  if (!dryRun && isFullClientZipRelease(latest)) {
+    await recoverInterruptedCleanInstall(instanceDir, logger);
+  }
   const preferLocalPaths = !isHttpUrl(latestSource);
   const packRef = preferLocalPaths ? (latest.zip?.path || latest.zip?.url) : (latest.zip?.url || latest.zip?.path);
   const cacheRef = preferLocalPaths
@@ -584,41 +1013,62 @@ export async function installPack(options) {
   await ensureDir(downloadsDir);
 
   const packZipPath = path.join(downloadsDir, latest.zip?.fileName || `${latest.packId}-${latest.version}.zip`);
+  const packZipSize = Number(latest.zip?.size || 0);
+  const packMultipartThresholdBytes = (Number(process.env.AHT_PACK_DOWNLOAD_THRESHOLD_MB) || 16) * 1024 * 1024;
   logger.log(`Fetching pack ${latest.name} ${latest.version}`);
-  await downloadVerified(packSource, packZipPath, latest.zip?.sha256 || null);
+  await downloadVerified(packSource, packZipPath, latest.zip?.sha256 || null, {
+    logger,
+    currentPath: path.basename(packZipPath),
+    onProgress,
+    cacheVerifyPhase: 'Verifying cached pack',
+    cacheVerifyBase: 3,
+    cacheVerifySpan: 42,
+    multipart: isHttpUrl(packSource) && (!packZipSize || packZipSize >= packMultipartThresholdBytes),
+    multipartConcurrency: process.env.AHT_PACK_DOWNLOAD_CONCURRENCY || 6,
+    multipartPartSizeBytes: (Number(process.env.AHT_PACK_DOWNLOAD_PART_MB) || 8) * 1024 * 1024,
+    multipartThresholdBytes: packMultipartThresholdBytes,
+    downloadPhase: 'Downloading pack',
+    downloadBase: 3,
+    downloadSpan: 37,
+    verifyPhase: 'Verifying pack',
+    verifyBase: 40,
+    verifySpan: 5
+  });
 
-  const zip = new AdmZip(packZipPath);
   const previousManagedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
   const previousManaged = !dryRun && await pathExists(previousManagedPath)
     ? await readJsonFile(previousManagedPath)
     : [];
 
   if (isFullClientZipRelease(latest)) {
-    const fullFiles = collectFullClientZipFiles(zip);
+    const fullClientInspection = await inspectFullClientZipFile(packZipPath);
     if (dryRun) {
       return {
         dryRun: true,
         latest,
         installMode: 'full-client-zip',
         manifestFileCount: 0,
-        overrideFileCount: fullFiles.length,
-        embeddedModCount: fullFiles.filter((file) => file.relPath.startsWith('mods/')).length,
+        overrideFileCount: fullClientInspection.fileCount,
+        embeddedModCount: fullClientInspection.modFileCount,
         cacheEntryCount: 0,
         cacheExtraCount: 0
       };
     }
-    return installFullClientZip({
-      zip,
+    return installFullClientZipFromFile({
+      packZipPath,
       latest: { ...latest, source: latestSource },
       instanceDir,
       previousManaged,
       forceRepair,
       replaceGameSettings,
       logger,
-      onProgress
+      onProgress,
+      progressBase: 45,
+      progressSpan: 50
     });
   }
 
+  const zip = new AdmZip(packZipPath);
   const manifest = readManifest(zip);
   const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
   const overridesDir = manifest.overrides || latest.overrides || 'overrides';

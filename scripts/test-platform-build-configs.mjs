@@ -43,7 +43,6 @@ const developerOnlyRuntimeDependencies = [
   '@aws-sdk/client-s3',
   '@aws-sdk/lib-storage',
   'ssh2',
-  'yauzl',
   'yazl'
 ];
 
@@ -153,6 +152,7 @@ assert(rendererHtml.includes('id="launcherVersionLabel"') && rendererApp.include
 assert(preloadScript.includes("restartLauncherUpdate: () => ipcRenderer.invoke('launcher:updateRestart')") && desktopMain.includes("ipcMain.handle('launcher:updateRestart', async () => restartLauncherUpdate())"), 'Launcher self-update must expose a separate explicit restart IPC.');
 assert(rendererApp.includes('Ready to Install') && rendererApp.includes('Install and Restart') && rendererApp.includes('restartLauncherSelfUpdate'), 'Launcher self-update UI must stage the update and require an explicit install/restart button.');
 assert(desktopMain.includes('pending-launcher-update.json') && desktopMain.includes('pending-launcher-update.failed') && desktopMain.includes('shouldExitForPendingLauncherInstall') && desktopMain.includes('launcher-update-install-pending-exit'), 'Launcher self-update must persist handoff state, recover helper failures, and close old copies that reopen while the installer is running.');
+assert(!desktopMain.includes('keepOpenUntil') && !desktopMain.includes("mainWindow.on('close', (event)") && !desktopMain.includes('event.preventDefault();\n      focusMainWindow();'), 'Normal play/update operations must not trap the launcher window open with a timed close guard.');
 assert(desktopMain.includes('waitForLauncherUpdateHelperStart') && desktopMain.includes('Launcher update helper did not start') && desktopMain.includes('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'), 'Launcher restart must verify the handoff helper starts before quitting.');
 assert(desktopMain.includes('function windowsLauncherInstallerArgs') && desktopMain.includes('`/D=${targetDir}`'), 'Windows launcher self-update must install into the current launcher directory.');
 assert(smokeLauncherSelfUpdate.includes('launcher-update-install-pending-exit') && smokeLauncherSelfUpdate.includes('reopened old launcher did not exit during pending install'), 'Launcher self-update smoke must prove reopened old copies exit during an installing handoff.');
@@ -225,14 +225,15 @@ for (const relativePath of developerOnlySourceFiles) {
   assert(configs.macos.files?.includes(exclusion), `macOS regular player package must exclude ${relativePath}.`);
   assert(packageJson.build?.files?.includes(exclusion), `Legacy package build config must exclude ${relativePath}.`);
 }
-assert(developerOnlyNodeModules.length === 6, 'Regular player package developer-only node modules must be declared.');
+assert(developerOnlyNodeModules.length === 5, 'Regular player package developer-only node modules must be declared.');
 for (const moduleGlob of developerOnlyNodeModules) {
   const exclusion = `!${moduleGlob}`;
   assert(configs.windows.files?.includes(exclusion), `Windows regular player package must exclude ${moduleGlob}.`);
   assert(configs.macos.files?.includes(exclusion), `macOS regular player package must exclude ${moduleGlob}.`);
   assert(packageJson.build?.files?.includes(exclusion), `Legacy package build config must exclude ${moduleGlob}.`);
 }
-assert(packageJson.dependencies?.['adm-zip'], 'adm-zip must remain a player runtime dependency for ZIP install and Forge Java extraction.');
+assert(packageJson.dependencies?.['adm-zip'], 'adm-zip must remain a player runtime dependency for legacy ZIP install and Forge Java extraction.');
+assert(packageJson.dependencies?.yauzl, 'yauzl must remain a player runtime dependency for streaming full-client ZIP installs.');
 for (const dependency of developerOnlyRuntimeDependencies) {
   assert(!packageJson.dependencies?.[dependency], `${dependency} must stay out of dependencies; it is developer-only and excluded from player packages.`);
   assert(packageJson.devDependencies?.[dependency], `${dependency} must be available as a devDependency for local developer tooling/tests.`);

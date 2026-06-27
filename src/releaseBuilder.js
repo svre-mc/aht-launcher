@@ -431,6 +431,133 @@ function openZipFile(filePath) {
   });
 }
 
+function zipEntryIsFile(entry) {
+  return entry && !String(entry.fileName || '').endsWith('/');
+}
+
+function openZipEntryStream(zipFile, entry) {
+  return new Promise((resolve, reject) => {
+    zipFile.openReadStream(entry, (error, readStream) => {
+      if (error) reject(error);
+      else resolve(readStream);
+    });
+  });
+}
+
+async function forEachZipEntry(filePath, handler) {
+  const zipFile = await openZipFile(filePath);
+  try {
+    await new Promise((resolve, reject) => {
+      let stopped = false;
+      const fail = (error) => {
+        if (stopped) return;
+        stopped = true;
+        reject(error);
+      };
+      zipFile.on('entry', (entry) => {
+        Promise.resolve(handler(entry, zipFile))
+          .then(() => {
+            if (!stopped) {
+              zipFile.readEntry();
+            }
+          })
+          .catch(fail);
+      });
+      zipFile.on('end', () => {
+        if (!stopped) {
+          stopped = true;
+          resolve();
+        }
+      });
+      zipFile.on('error', fail);
+      zipFile.readEntry();
+    });
+  } finally {
+    zipFile.close();
+  }
+}
+
+async function readZipEntryBuffer(zipFile, entry, maxBytes = 5 * 1024 * 1024) {
+  const stream = await openZipEntryStream(zipFile, entry);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      throw new Error(`ZIP entry too large to inspect: ${entry.fileName}`);
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function readClientPackMetadataFromFile(filePath) {
+  const matches = [];
+  await forEachZipEntry(filePath, async (entry, zipFile) => {
+    if (!zipEntryIsFile(entry)) {
+      return;
+    }
+    const entryName = normalizeRelPath(entry.fileName);
+    if (entryName !== CLIENT_PACK_METADATA_ENTRY && !entryName.endsWith(`/${CLIENT_PACK_METADATA_ENTRY}`)) {
+      return;
+    }
+    const metadata = JSON.parse((await readZipEntryBuffer(zipFile, entry)).toString('utf8'));
+    if (metadata?.format !== CLIENT_PACK_FORMAT) {
+      throw new Error(`${CLIENT_PACK_METADATA_ENTRY} has unsupported format: ${metadata?.format || 'missing'}`);
+    }
+    matches.push({ entryName, metadata });
+  });
+  if (!matches.length) {
+    return null;
+  }
+  const direct = matches.find((match) => match.entryName === CLIENT_PACK_METADATA_ENTRY);
+  if (direct) {
+    return { ...direct, rootPrefix: '' };
+  }
+  if (matches.length > 1) {
+    throw new Error(`Found multiple ${CLIENT_PACK_METADATA_ENTRY} files in full client ZIP.`);
+  }
+  const entryName = matches[0].entryName;
+  return {
+    ...matches[0],
+    rootPrefix: entryName.endsWith(CLIENT_PACK_METADATA_ENTRY) ? entryName.slice(0, -CLIENT_PACK_METADATA_ENTRY.length) : ''
+  };
+}
+
+function safeClientZipRelPath(entryName = '', rootPrefix = '') {
+  const relPath = stripClientPackRoot(entryName, rootPrefix);
+  if (!relPath || relPath === CLIENT_PACK_METADATA_ENTRY || relPath.startsWith('../') || relPath.includes('/../') || path.isAbsolute(relPath)) {
+    return '';
+  }
+  return relPath;
+}
+
+async function inspectFullClientArtifact(filePath, { required = true } = {}) {
+  const metadataRecord = await readClientPackMetadataFromFile(filePath);
+  if (!metadataRecord) {
+    if (!required) return null;
+    throw new Error(`${CLIENT_PACK_METADATA_ENTRY} missing from full client ZIP.`);
+  }
+  const entries = [];
+  await forEachZipEntry(filePath, async (entry) => {
+    if (!zipEntryIsFile(entry)) {
+      return;
+    }
+    const relPath = safeClientZipRelPath(entry.fileName, metadataRecord.rootPrefix);
+    if (relPath) {
+      entries.push(relPath);
+    }
+  });
+  const modEntries = entries.filter((entry) => entry.toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entry));
+  return {
+    ...metadataRecord,
+    entries,
+    modEntries,
+    versionLockPath: modEntries.find((entry) => /aht-version-lock-.+\.jar$/i.test(path.posix.basename(entry))) || null,
+    itemFireFixPath: modEntries.find((entry) => /aht-item-fire-fix-.+\.jar$/i.test(path.posix.basename(entry))) || null
+  };
+}
+
 async function writeZipWithInjectedFiles({ sourceZip, destZip, injections }) {
   await ensureDir(path.dirname(destZip));
   const zipIn = await openZipFile(sourceZip);
@@ -664,7 +791,7 @@ function findFullClientMod(zip, pattern, rootPrefix = '') {
   return zipFileEntries(zip, rootPrefix).find((name) => name.startsWith('mods/') && pattern.test(path.posix.basename(name))) || null;
 }
 
-async function buildFullClientRelease(options, zip, metadata) {
+async function buildFullClientRelease(options, sourceInspection) {
   const {
     packZip,
     outDir,
@@ -674,6 +801,7 @@ async function buildFullClientRelease(options, zip, metadata) {
     versionLockJar = ''
   } = options;
 
+  const metadata = sourceInspection.metadata;
   const packId = slugify(metadata.packId || metadata.name || 'a-hard-time');
   const name = String(metadata.name || 'A Hard Time');
   const version = String(metadata.version || '0.0.0');
@@ -693,8 +821,8 @@ async function buildFullClientRelease(options, zip, metadata) {
     await fs.copyFile(versionLockJarPath, path.join(outDir, serverLockModRelPath));
   }
 
-  const rootPrefix = clientPackRootPrefix(zip);
-  const existingClientVersionLockPath = findFullClientMod(zip, /^aht-version-lock-.+\.jar$/i, rootPrefix);
+  const rootPrefix = sourceInspection.rootPrefix;
+  const existingClientVersionLockPath = sourceInspection.versionLockPath;
   const injectClientVersionLock = Boolean(versionLockJarPath && !existingClientVersionLockPath);
   const clientVersionLockPath = existingClientVersionLockPath || (injectClientVersionLock ? `mods/${path.basename(versionLockJarPath)}` : null);
   const fullClientZipInjections = [
@@ -718,11 +846,10 @@ async function buildFullClientRelease(options, zip, metadata) {
   const artifactPath = await pathExists(zipDest) ? zipDest : packZip;
   const stats = await fs.stat(artifactPath);
   const sha256 = await hashFile(artifactPath, 'sha256');
-  const artifactZip = artifactPath === packZip ? zip : new AdmZip(artifactPath);
-  const artifactRootPrefix = clientPackRootPrefix(artifactZip);
-  const entries = zipFileEntries(artifactZip, artifactRootPrefix).filter((entry) => entry !== CLIENT_PACK_METADATA_ENTRY);
-  const modEntries = entries.filter((entry) => entry.toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entry));
-  const clientItemFireFixPath = findFullClientMod(artifactZip, /^aht-item-fire-fix-.+\.jar$/i, artifactRootPrefix);
+  const artifactInspection = artifactPath === packZip ? sourceInspection : await inspectFullClientArtifact(artifactPath);
+  const entries = artifactInspection.entries.filter((entry) => entry !== CLIENT_PACK_METADATA_ENTRY);
+  const modEntries = artifactInspection.modEntries;
+  const clientItemFireFixPath = artifactInspection.itemFireFixPath;
 
   const latest = {
     schemaVersion: 1,
@@ -821,9 +948,8 @@ export async function buildRelease(options) {
     throw new Error('--out is required');
   }
 
-  const zip = new AdmZip(packZip);
-  const clientPackMetadata = readClientPackMetadata(zip);
-  if (clientPackMetadata) {
+  const clientPackInspection = await inspectFullClientArtifact(packZip, { required: false });
+  if (clientPackInspection) {
     return buildFullClientRelease({
       packZip,
       outDir,
@@ -831,8 +957,9 @@ export async function buildRelease(options) {
       channel,
       copyZip,
       versionLockJar
-    }, zip, clientPackMetadata);
+    }, clientPackInspection);
   }
+  const zip = new AdmZip(packZip);
   const manifest = readManifest(zip);
   const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
   const packId = slugify(manifest.name);

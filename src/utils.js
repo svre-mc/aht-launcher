@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -28,12 +28,19 @@ export async function pathExists(filePath) {
   }
 }
 
-export async function hashFile(filePath, algorithm = 'sha256') {
+export async function hashFile(filePath, algorithm = 'sha256', options = {}) {
   const hash = createHash(algorithm);
   const stream = createReadStream(filePath);
+  const stat = await fs.stat(filePath).catch(() => null);
+  const reportProgress = createByteProgressEmitter(options, stat?.size || 0);
+  let loaded = 0;
+  reportProgress(0, true);
   for await (const chunk of stream) {
     hash.update(chunk);
+    loaded += chunk.length;
+    reportProgress(loaded);
   }
+  reportProgress(loaded, true);
   return hash.digest('hex');
 }
 
@@ -171,6 +178,197 @@ function retryableHttpStatus(status) {
   return status === 408 || status === 429 || status >= 500;
 }
 
+function downloadHeaders(headers = {}, extra = {}) {
+  return {
+    ...headers,
+    ...extra
+  };
+}
+
+function createByteProgressEmitter(options = {}, total = 0) {
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const progressIntervalMs = positiveInteger(options.progressIntervalMs, 250);
+  const startedAt = Date.now();
+  const meta = options.progressMeta && typeof options.progressMeta === 'object' ? options.progressMeta : {};
+  let lastEmitAt = 0;
+  if (!onProgress) {
+    return () => {};
+  }
+  return (loaded, force = false) => {
+    const now = Date.now();
+    const normalizedLoaded = Math.max(0, Number(loaded) || 0);
+    const normalizedTotal = Math.max(0, Number(total) || 0);
+    if (!force && now - lastEmitAt < progressIntervalMs && (!normalizedTotal || normalizedLoaded < normalizedTotal)) {
+      return;
+    }
+    lastEmitAt = now;
+    const elapsedSeconds = Math.max(0.001, (now - startedAt) / 1000);
+    onProgress({
+      ...meta,
+      loaded: normalizedLoaded,
+      total: normalizedTotal,
+      percent: normalizedTotal ? Math.min(100, Math.round((normalizedLoaded / normalizedTotal) * 100)) : 0,
+      speedBytesPerSecond: Math.round(normalizedLoaded / elapsedSeconds)
+    });
+  };
+}
+
+function parseContentRange(value = '') {
+  const match = String(value).match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    start: Number(match[1]),
+    end: Number(match[2]),
+    total: Number(match[3])
+  };
+}
+
+async function runConcurrent(items, concurrency, handler) {
+  const workers = Array.from({ length: Math.max(1, Math.min(items.length || 1, concurrency)) }, async (_, workerIndex) => {
+    for (let index = workerIndex; index < items.length; index += concurrency) {
+      await handler(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function probeRangeDownload(source, options, timeoutMs) {
+  const response = await fetch(source, {
+    headers: downloadHeaders(options.headers || {}, {
+      Range: 'bytes=0-0',
+      'Accept-Encoding': 'identity'
+    }),
+    cache: 'no-store',
+    signal: abortSignal(timeoutMs)
+  });
+  if (response.status === 206) {
+    const range = parseContentRange(response.headers.get('content-range'));
+    await response.body?.cancel().catch(() => {});
+    if (!range || !Number.isFinite(range.total) || range.total <= 1) {
+      return { supported: false, total: 0 };
+    }
+    return { supported: true, total: range.total };
+  }
+  if (!response.ok) {
+    const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+    error.retryable = retryableHttpStatus(response.status);
+    throw error;
+  }
+  await response.body?.cancel().catch(() => {});
+  return { supported: false, total: 0 };
+}
+
+async function downloadRangePart({ source, fileHandle, start, end, total, options, timeoutMs, reportBytes }) {
+  const response = await fetch(source, {
+    headers: downloadHeaders(options.headers || {}, {
+      Range: `bytes=${start}-${end}`,
+      'Accept-Encoding': 'identity'
+    }),
+    cache: 'no-store',
+    signal: abortSignal(timeoutMs)
+  });
+  if (response.status !== 206) {
+    const error = new Error(`Range download failed ${source}: expected 206, got ${response.status} ${response.statusText}`);
+    error.retryable = retryableHttpStatus(response.status);
+    throw error;
+  }
+  const range = parseContentRange(response.headers.get('content-range'));
+  if (!range || range.start !== start || range.end !== end || range.total !== total) {
+    throw new Error(`Range download returned unexpected Content-Range for ${source}: ${response.headers.get('content-range') || 'missing'}`);
+  }
+  if (!response.body) {
+    throw new Error(`Range download failed ${source}: response body is empty`);
+  }
+  const reader = response.body.getReader();
+  let position = start;
+  let bytesRead = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const buffer = Buffer.from(value);
+      await fileHandle.write(buffer, 0, buffer.length, position);
+      position += buffer.length;
+      bytesRead += buffer.length;
+      reportBytes(buffer.length);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const expectedBytes = end - start + 1;
+  if (bytesRead !== expectedBytes) {
+    throw new Error(`Range download ended early for ${source}: expected ${expectedBytes} bytes, got ${bytesRead}`);
+  }
+}
+
+async function downloadMultipartToFile(source, tmp, options, attempt, timeoutMs) {
+  const threshold = positiveInteger(options.multipartThresholdBytes, 16 * 1024 * 1024);
+  const partSize = positiveInteger(options.multipartPartSizeBytes, 8 * 1024 * 1024);
+  const concurrency = Math.min(12, positiveInteger(options.multipartConcurrency, 6));
+  const probe = await probeRangeDownload(source, options, timeoutMs);
+  if (!probe.supported || probe.total < threshold) {
+    return false;
+  }
+
+  const progressMeta = {
+    ...(options.progressMeta || {}),
+    attempt,
+    method: 'multipart-range'
+  };
+  const reportProgress = createByteProgressEmitter({ ...options, progressMeta }, probe.total);
+  let loaded = 0;
+  const reportBytes = (bytes) => {
+    loaded += bytes;
+    reportProgress(loaded);
+  };
+  const ranges = [];
+  for (let start = 0; start < probe.total; start += partSize) {
+    ranges.push({ start, end: Math.min(probe.total - 1, start + partSize - 1) });
+  }
+
+  if (options.logger?.log) {
+    options.logger.log(`Using parallel range download: ${ranges.length} parts, ${concurrency} workers`);
+  }
+  reportProgress(0, true);
+  const fileHandle = await fs.open(tmp, 'w');
+  try {
+    await fileHandle.truncate(probe.total);
+    await runConcurrent(ranges, concurrency, (range) => downloadRangePart({
+      source,
+      fileHandle,
+      start: range.start,
+      end: range.end,
+      total: probe.total,
+      options,
+      timeoutMs,
+      reportBytes
+    }));
+  } finally {
+    await fileHandle.close();
+  }
+  reportProgress(probe.total, true);
+  return true;
+}
+
+function createByteProgressTransform(total, options = {}) {
+  const reportProgress = createByteProgressEmitter(options, total);
+  let loaded = 0;
+  reportProgress(0, true);
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      loaded += chunk.length;
+      reportProgress(loaded);
+      callback(null, chunk);
+    },
+    flush(callback) {
+      reportProgress(loaded, true);
+      callback();
+    }
+  });
+}
+
 async function replaceFileWithDownload(tmp, dest) {
   await fs.rm(dest, { force: true }).catch((error) => {
     if (error?.code !== 'ENOENT') throw error;
@@ -190,20 +388,47 @@ export async function downloadToFile(source, dest, options = {}) {
     try {
       await fs.rm(tmp, { force: true }).catch(() => {});
       if (isHttpUrl(source)) {
-        const response = await fetch(source, {
-          headers: options.headers || {},
-          cache: 'no-store',
-          signal: abortSignal(timeoutMs)
-        });
-        if (!response.ok) {
-          const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
-          error.retryable = retryableHttpStatus(response.status);
-          throw error;
+        let usedMultipart = false;
+        if (options.multipart) {
+          try {
+            usedMultipart = await downloadMultipartToFile(source, tmp, options, attempt, timeoutMs);
+          } catch (error) {
+            await fs.rm(tmp, { force: true }).catch(() => {});
+            if (options.logger?.log) {
+              options.logger.log(`Parallel range download failed; falling back to single stream. ${error?.message || error}`);
+            }
+            usedMultipart = false;
+          }
         }
-        await pipeline(Readable.fromWeb(response.body), createWriteStream(tmp));
+        if (!usedMultipart) {
+          const response = await fetch(source, {
+            headers: options.headers || {},
+            cache: 'no-store',
+            signal: abortSignal(timeoutMs)
+          });
+          if (!response.ok) {
+            const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+            error.retryable = retryableHttpStatus(response.status);
+            throw error;
+          }
+          if (!response.body) {
+            throw new Error(`Download failed ${source}: response body is empty`);
+          }
+          const total = Number(response.headers.get('content-length')) || 0;
+          await pipeline(
+            Readable.fromWeb(response.body),
+            createByteProgressTransform(total, { ...options, progressMeta: { ...(options.progressMeta || {}), attempt, method: 'stream' } }),
+            createWriteStream(tmp)
+          );
+        }
       } else {
         const localPath = isFileUrl(source) ? fileURLToPath(source) : source;
-        await fs.copyFile(localPath, tmp);
+        const stat = await fs.stat(localPath).catch(() => null);
+        await pipeline(
+          createReadStream(localPath),
+          createByteProgressTransform(stat?.size || 0, { ...options, progressMeta: { ...(options.progressMeta || {}), attempt } }),
+          createWriteStream(tmp)
+        );
       }
       await replaceFileWithDownload(tmp, dest);
       return;

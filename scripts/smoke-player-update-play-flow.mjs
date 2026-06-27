@@ -16,6 +16,7 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
+const syncedMcRoot = path.join(root, '.minecraft-synced');
 const packZipPath = path.join(root, 'packs', 'a-hard-time-7.7.7-client.zip');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
@@ -216,6 +217,8 @@ const legacyLatest = {
 };
 let latest = legacyLatest;
 const packRequests = [];
+const registrationRequests = [];
+const proofRequests = [];
 
 const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
 await writeJson(defaultsPath, {
@@ -232,6 +235,8 @@ await writeJson(defaultsPath, {
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
+    syncRoots: [syncedMcRoot],
+    autoImportAccount: false,
     openCommand: process.execPath,
     openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
   },
@@ -266,6 +271,7 @@ const server = http.createServer((request, response) => {
         response.end(JSON.stringify({ error: 'Invalid username registration.' }));
         return;
       }
+      registrationRequests.push({ username, installId });
       registeredUsers.set(username.toLowerCase(), installId);
       response.statusCode = 200;
       response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -284,6 +290,7 @@ const server = http.createServer((request, response) => {
     request.on('data', (chunk) => { body += String(chunk); });
     request.on('end', () => {
       const payload = JSON.parse(body || '{}');
+      proofRequests.push(payload);
       const username = String(payload.minecraftUsername || '').trim().toLowerCase();
       const installId = String(payload.installId || '').trim();
       if (!username || registeredUsers.get(username) !== installId) {
@@ -378,6 +385,7 @@ try {
   }
 
   latest = fullClientLatest;
+  registeredUsers.clear();
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '7.7.7' && !status.updateBlockedReason ? status : false)
   `, 'fresh player exact ZIP status');
@@ -392,6 +400,9 @@ try {
   `);
   if (!updateResult.ok || updateResult.result?.installed?.version !== '7.7.7') {
     throw new Error(`Fresh player update failed: ${JSON.stringify(updateResult)}`);
+  }
+  if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 2 || proofRequests.length < 2) {
+    throw new Error(`Update did not refresh stale launcher proof registration after Worker rejection: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
   }
   const installedFiles = [
     'mods/aht-required.jar',
@@ -408,6 +419,10 @@ try {
   if (!fs.existsSync(forgeVersionJson)) {
     throw new Error(`Forge version JSON missing after update: ${forgeVersionJson}`);
   }
+  const syncedForgeVersionJson = path.join(syncedMcRoot, 'versions', versionId, `${versionId}.json`);
+  if (!fs.existsSync(syncedForgeVersionJson)) {
+    throw new Error(`Forge version JSON missing in synced Minecraft root after update: ${syncedForgeVersionJson}`);
+  }
   const forgeVersion = JSON.parse(fs.readFileSync(forgeVersionJson, 'utf8'));
   if (!forgeVersion.ahtTestForgeInstaller) {
     throw new Error(`Forge install hook did not write expected version metadata: ${JSON.stringify(forgeVersion)}`);
@@ -419,6 +434,11 @@ try {
   }
   if (!profile.javaArgs.includes('-Xmx4096m') || !profile.javaArgs.includes('-Daht.launcher.proofFile=') || !profile.javaArgs.includes('-Dminecraft.applet.TargetDirectory=')) {
     throw new Error(`Minecraft Launcher profile is missing required Java args: ${profile.javaArgs}`);
+  }
+  const syncedProfiles = JSON.parse(fs.readFileSync(path.join(syncedMcRoot, 'launcher_profiles.json'), 'utf8'));
+  const syncedProfile = syncedProfiles.profiles?.['a-hard-time'];
+  if (!syncedProfile || syncedProfile.lastVersionId !== versionId || path.resolve(syncedProfile.gameDir) !== path.resolve(instanceDir)) {
+    throw new Error(`Synced Minecraft Launcher profile was not written for the installed instance: ${JSON.stringify(syncedProfile)}`);
   }
 
   const afterUpdate = await evaluate(client, 'window.aht.getStatus()');
@@ -463,7 +483,8 @@ try {
     profile: {
       id: 'a-hard-time',
       lastVersionId: profile.lastVersionId,
-      gameDir: profile.gameDir
+      gameDir: profile.gameDir,
+      syncedRoot: syncedMcRoot
     },
     cleanScanUi,
     launchCommand: playResult.result.command,

@@ -12,6 +12,16 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function assertMonotonicProgress(events, label) {
+  assert(events.length > 0, `${label} did not report progress`);
+  for (let index = 1; index < events.length; index += 1) {
+    assert(
+      events[index].percent >= events[index - 1].percent,
+      `${label} progress moved backward at ${index}: ${events[index - 1].percent} -> ${events[index].percent} (${events[index].phase})`
+    );
+  }
+}
+
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-full-client-zip-'));
 const source = path.join(root, 'client');
 const outDir = path.join(root, 'release');
@@ -63,18 +73,27 @@ assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.0.0
 
 await fs.mkdir(installDir, { recursive: true });
 await fs.writeFile(path.join(installDir, 'options.txt'), 'player-options\n', 'utf8');
-await installPack({
+await fs.writeFile(path.join(installDir, 'optionsof.txt'), 'player-optionsof\n', 'utf8');
+const firstProgress = [];
+const firstInstall = await installPack({
   latestSource: path.join(outDir, 'latest.json'),
   instanceDir: installDir,
   replaceGameSettings: false,
+  onProgress: (progress) => firstProgress.push(progress),
   logger: { log() {} }
 });
+assert(firstInstall.cleanInstall === true, 'full-client install should use clean staged replacement');
+assert(firstProgress.some((progress) => progress.phase === 'Downloading pack' && progress.unit === 'bytes'), 'full-client install did not report byte download progress');
+assert(firstProgress.some((progress) => progress.phase === 'Verifying pack' && progress.unit === 'bytes'), 'full-client install did not report byte verification progress');
+assert(firstProgress.some((progress) => progress.phase === 'Full client ZIP'), 'full-client install did not report extraction progress');
+assertMonotonicProgress(firstProgress, 'full-client install');
 
 const installedMod = path.join(installDir, 'mods', 'aht-custom-patched.jar');
 assert(await pathExists(installedMod), 'custom local jar was not installed from full client ZIP');
 assert(await fs.readFile(installedMod, 'utf8') === 'patched jar bytes from local client', 'installed jar bytes do not match source client jar');
 assert(await pathExists(path.join(installDir, 'resourcepacks', 'aht-resources.zip')), 'resourcepack folder was not installed correctly');
 assert(await fs.readFile(path.join(installDir, 'options.txt'), 'utf8') === 'player-options\n', 'player options were replaced even though replaceGameSettings=false');
+assert(await fs.readFile(path.join(installDir, 'optionsof.txt'), 'utf8') === 'player-optionsof\n', 'player OptiFine options were replaced even though replaceGameSettings=false');
 
 const managed = await readJsonFile(path.join(installDir, '.aht-launcher', 'managed-files.json'));
 assert(managed.some((item) => item.relativePath === 'mods/aht-custom-patched.jar'), 'custom jar was not recorded as managed');
@@ -84,21 +103,107 @@ const installedHash = await hashFile(installedMod, 'sha256');
 assert(sourceHash === installedHash, 'managed mod hash mismatch after full-client install');
 
 await fs.writeFile(path.join(installDir, 'mods', 'extra-untracked.jar'), 'extra mod should be blocked', 'utf8');
+await fs.mkdir(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'stale-runtime-cache.dat'), 'stale otg cache', 'utf8');
+await fs.writeFile(path.join(installDir, 'config', 'stale-local.cfg'), 'stale local config\n', 'utf8');
+await fs.writeFile(path.join(installDir, 'resourcepacks', 'stale-resourcepack.zip'), 'stale resourcepack\n', 'utf8');
+await fs.mkdir(path.join(installDir, 'saves', 'Player World'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'saves', 'Player World', 'level.dat'), 'player world data', 'utf8');
+await fs.mkdir(path.join(installDir, 'screenshots'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'screenshots', 'proof.png'), 'screenshot bytes', 'utf8');
+await fs.mkdir(path.join(installDir, 'shaderpacks'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'shaderpacks', 'local-shader.zip'), 'player shaderpack', 'utf8');
+await fs.mkdir(path.join(installDir, 'journeymap', 'data'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'journeymap', 'data', 'map.dat'), 'journeymap data', 'utf8');
+await fs.mkdir(path.join(installDir, 'schematics'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'schematics', 'base.schematic'), 'schematic data', 'utf8');
+await fs.mkdir(path.join(installDir, 'replay_videos'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'replay_videos', 'run.mcpr'), 'replay data', 'utf8');
+await fs.writeFile(path.join(installDir, 'servers.dat'), 'player server list', 'utf8');
+await fs.writeFile(path.join(installDir, 'servers.dat_old'), 'player old server list', 'utf8');
+const staleSiblingStaging = path.join(root, '.install.aht-staging-crashed');
+const staleSiblingBackup = path.join(root, '.install.aht-backup-crashed');
+await fs.mkdir(staleSiblingStaging, { recursive: true });
+await fs.writeFile(path.join(staleSiblingStaging, 'partial.tmp'), 'partial staging data', 'utf8');
+await fs.mkdir(staleSiblingBackup, { recursive: true });
+await fs.writeFile(path.join(staleSiblingBackup, 'old.tmp'), 'old backup data', 'utf8');
 const dirtyScan = await scanManagedIntegrity(installDir);
-assert(dirtyScan.counts.added === 1, `extra mod was not detected: ${JSON.stringify(dirtyScan)}`);
-assert(dirtyScan.counts.corrupted === 1, `extra mod should lock launch as corrupted: ${JSON.stringify(dirtyScan)}`);
-await installPack({
+assert(dirtyScan.counts.added >= 2, `extra mod files were not detected: ${JSON.stringify(dirtyScan)}`);
+assert(dirtyScan.counts.corrupted >= 2, `extra mod files should lock launch as corrupted: ${JSON.stringify(dirtyScan)}`);
+const repairProgress = [];
+const repairInstall = await installPack({
   latestSource: path.join(outDir, 'latest.json'),
   instanceDir: installDir,
   replaceGameSettings: true,
   forceRepair: true,
+  onProgress: (progress) => repairProgress.push(progress),
   logger: { log() {} }
 });
+assert(repairInstall.cleanInstall === true, 'full-client repair should use clean staged replacement');
+assert(repairProgress.some((progress) => progress.phase === 'Verifying cached pack' && progress.unit === 'bytes'), 'full-client repair did not verify the cached pack before reinstalling');
+assert(!repairProgress.some((progress) => progress.phase === 'Downloading pack'), 'full-client repair redownloaded the pack instead of reusing the verified cache');
+assertMonotonicProgress(repairProgress, 'full-client repair');
 assert(await fs.readFile(path.join(installDir, 'options.txt'), 'utf8') === 'pack-options\n', 'replaceGameSettings=true did not replace options.txt');
+assert(await fs.readFile(path.join(installDir, 'optionsof.txt'), 'utf8') === 'pack-optionsof\n', 'replaceGameSettings=true did not replace optionsof.txt');
 assert(!(await pathExists(path.join(installDir, 'mods', 'extra-untracked.jar'))), 'repair did not remove an untracked extra mod');
+assert(!(await pathExists(path.join(installDir, 'mods', 'OpenTerrainGenerator'))), 'repair did not remove stale OpenTerrainGenerator runtime folder');
+assert(!(await pathExists(path.join(installDir, 'config', 'stale-local.cfg'))), 'clean full-client repair did not remove stale config files');
+assert(!(await pathExists(path.join(installDir, 'resourcepacks', 'stale-resourcepack.zip'))), 'clean full-client repair did not remove stale resourcepacks');
+assert(await fs.readFile(path.join(installDir, 'saves', 'Player World', 'level.dat'), 'utf8') === 'player world data', 'player saves were not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'screenshots', 'proof.png'), 'utf8') === 'screenshot bytes', 'screenshots were not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'shaderpacks', 'local-shader.zip'), 'utf8') === 'player shaderpack', 'shaderpacks were not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'journeymap', 'data', 'map.dat'), 'utf8') === 'journeymap data', 'journeymap data was not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'schematics', 'base.schematic'), 'utf8') === 'schematic data', 'schematics were not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'replay_videos', 'run.mcpr'), 'utf8') === 'replay data', 'replay videos were not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'servers.dat'), 'utf8') === 'player server list', 'server list was not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'servers.dat_old'), 'utf8') === 'player old server list', 'old server list was not preserved during clean repair');
+const stateDownloads = await fs.readdir(path.join(installDir, '.aht-launcher', 'downloads'));
+assert(stateDownloads.some((name) => name.endsWith('.zip')), 'current pack ZIP cache was not carried into the clean install');
+const cachedPackPath = path.join(installDir, '.aht-launcher', 'downloads', stateDownloads.find((name) => name.endsWith('.zip')));
+await fs.writeFile(cachedPackPath, 'corrupted partial zip from interrupted download', 'utf8');
+const corruptCacheProgress = [];
+const corruptCacheRepair = await installPack({
+  latestSource: path.join(outDir, 'latest.json'),
+  instanceDir: installDir,
+  replaceGameSettings: true,
+  forceRepair: true,
+  onProgress: (progress) => corruptCacheProgress.push(progress),
+  logger: { log() {} }
+});
+assert(corruptCacheRepair.cleanInstall === true, 'corrupt-cache repair should still use clean staged replacement');
+assert(corruptCacheProgress.some((progress) => progress.phase === 'Verifying cached pack' && progress.unit === 'bytes'), 'corrupt-cache repair did not verify the stale cached pack');
+assert(corruptCacheProgress.some((progress) => progress.phase === 'Downloading pack' && progress.unit === 'bytes'), 'corrupt-cache repair did not redownload after cached pack verification failed');
+assert(await hashFile(cachedPackPath, 'sha256') === await hashFile(path.join(outDir, release.latest.zip.path), 'sha256'), 'corrupt cached pack ZIP was not replaced with the release ZIP');
+const repairedAgainScan = await scanManagedIntegrity(installDir);
+assert(repairedAgainScan.counts.corrupted === 0, `corrupt-cache repair did not return to clean integrity: ${JSON.stringify(repairedAgainScan)}`);
+const rootEntriesAfterRepair = await fs.readdir(root);
+assert(!rootEntriesAfterRepair.some((entry) => entry.startsWith('.install.aht-staging-') || entry.startsWith('.install.aht-backup-')), `staging or backup folder was left behind: ${rootEntriesAfterRepair.join(', ')}`);
 const repairedScan = await scanManagedIntegrity(installDir);
 assert(repairedScan.counts.corrupted === 0, `repair did not return to clean integrity: ${JSON.stringify(repairedScan)}`);
 
+const recoveryInstallDir = path.join(root, 'recover-install');
+const recoveryBackupDir = path.join(root, '.recover-install.aht-backup-2000-crashed');
+const recoveryOldBackupDir = path.join(root, '.recover-install.aht-backup-1000-old');
+const recoveryStagingDir = path.join(root, '.recover-install.aht-staging-2000-crashed');
+await fs.mkdir(recoveryOldBackupDir, { recursive: true });
+await fs.writeFile(path.join(recoveryOldBackupDir, 'old.tmp'), 'older backup', 'utf8');
+await fs.mkdir(path.join(recoveryBackupDir, 'saves', 'Recovered World'), { recursive: true });
+await fs.writeFile(path.join(recoveryBackupDir, 'saves', 'Recovered World', 'level.dat'), 'recovered player save', 'utf8');
+await fs.writeFile(path.join(recoveryBackupDir, 'servers.dat'), 'recovered servers', 'utf8');
+await fs.mkdir(recoveryStagingDir, { recursive: true });
+await fs.writeFile(path.join(recoveryStagingDir, 'partial.tmp'), 'partial staging', 'utf8');
+const recoveryInstall = await installPack({
+  latestSource: path.join(outDir, 'latest.json'),
+  instanceDir: recoveryInstallDir,
+  replaceGameSettings: true,
+  forceRepair: true,
+  logger: { log() {} }
+});
+assert(recoveryInstall.cleanInstall === true, 'recovery install should still use clean staged replacement');
+assert(await fs.readFile(path.join(recoveryInstallDir, 'saves', 'Recovered World', 'level.dat'), 'utf8') === 'recovered player save', 'interrupted install backup was not restored before clean repair');
+assert(await fs.readFile(path.join(recoveryInstallDir, 'servers.dat'), 'utf8') === 'recovered servers', 'server list from interrupted install backup was not preserved');
+const recoveryRootEntries = await fs.readdir(root);
+assert(!recoveryRootEntries.some((entry) => entry.startsWith('.recover-install.aht-staging-') || entry.startsWith('.recover-install.aht-backup-')), `recovered install left staging or backup folders behind: ${recoveryRootEntries.join(', ')}`);
 
 const wrappedZipPath = path.join(root, 'wrapped-client.zip');
 const wrapperZip = new AdmZip();

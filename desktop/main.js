@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import AdmZip from 'adm-zip';
+import yauzl from 'yauzl';
 import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from '../src/clientPackFormat.js';
 import { installPack } from '../src/installer.js';
 import { scanLocalChanges, scanManagedIntegrity } from '../src/localChanges.js';
@@ -160,7 +161,6 @@ let serverTransferState = { running: false, lines: [], lastResult: null, error: 
 let uploadState = { running: false, total: 0, completed: 0, current: '', lines: [], lastResult: null, error: null, verification: null };
 let adminToken = '';
 let developerSession = null;
-let keepOpenUntil = 0;
 const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
@@ -202,6 +202,28 @@ function failOperationState(state, error, phase = 'Failed') {
   state.completedAt = new Date().toISOString();
   state.error = error?.message || String(error || 'Unknown error');
   state.progress = { ...previous, phase, percent: 100 };
+}
+
+function weightedOperationPercent(percent, base = 0, span = 100) {
+  const normalizedPercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  return Math.max(0, Math.min(100, Math.round(base + ((normalizedPercent / 100) * span))));
+}
+
+function byteOperationProgress(phase, currentPath, progress, base, span) {
+  const completedBytes = Math.max(0, Number(progress.loaded || progress.completed || 0));
+  const totalBytes = Math.max(0, Number(progress.total || 0));
+  return {
+    phase,
+    currentPath,
+    unit: 'bytes',
+    completed: completedBytes,
+    total: totalBytes,
+    completedBytes,
+    totalBytes,
+    percent: weightedOperationPercent(progress.percent, base, span),
+    currentPercent: Number.isFinite(Number(progress.percent)) ? Number(progress.percent) : 0,
+    speedBytesPerSecond: progress.speedBytesPerSecond || 0
+  };
 }
 
 
@@ -1108,6 +1130,83 @@ function launcherProofIdentity(identity = {}) {
 function launcherProofAuthToken() {
   return developerAdminSessionAllowed() ? adminToken : '';
 }
+
+function runtimeIdentity(identity = {}) {
+  return {
+    ...identity,
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch
+  };
+}
+
+function isLauncherProofRegistrationError(error) {
+  return /not registered to this launcher install/i.test(error?.message || String(error || ''));
+}
+
+function isUsernameUnavailableError(error) {
+  return /username is not available|That username is not available/i.test(error?.message || String(error || ''));
+}
+
+async function clearUnavailableMinecraftUsername(username = '', message = 'That username is not available.') {
+  const normalizedUsername = normalizeMinecraftUsername(username);
+  if (!normalizedUsername) {
+    return;
+  }
+  const current = await loadIdentity();
+  if (normalizeMinecraftUsername(current.minecraftUsername).toLowerCase() !== normalizedUsername.toLowerCase()) {
+    return;
+  }
+  await writeJsonFile(identityPath(), {
+    ...current,
+    minecraftUsername: '',
+    usernameRegistrationMode: '',
+    minecraftUsernameUnavailable: normalizedUsername,
+    minecraftUsernameSyncWarning: message
+  });
+}
+
+async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null } = {}) {
+  const proofIdentity = launcherProofIdentity(runtimeIdentity(identity));
+  try {
+    return await writeLauncherProof({
+      config,
+      identity: proofIdentity,
+      latest,
+      installed,
+      authToken: launcherProofAuthToken()
+    });
+  } catch (error) {
+    if (!isLauncherProofRegistrationError(error)) {
+      throw error;
+    }
+    const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
+    if (!username) {
+      throw error;
+    }
+    try {
+      await registerMinecraftUsername(username, {
+        mode: identity.usernameRegistrationMode || 'proof-refresh',
+        skipLauncherAuthSync: true
+      });
+    } catch (refreshError) {
+      if (isUsernameUnavailableError(refreshError)) {
+        await clearUnavailableMinecraftUsername(username, refreshError.message || String(refreshError));
+        throw new Error('That username is not available. Enter an available Minecraft username to continue.');
+      }
+      throw new Error(`Launcher proof registration refresh failed: ${refreshError.message || refreshError}`);
+    }
+    const refreshedIdentity = runtimeIdentity(await loadIdentity());
+    return writeLauncherProof({
+      config,
+      identity: launcherProofIdentity(refreshedIdentity),
+      latest,
+      installed,
+      authToken: launcherProofAuthToken()
+    });
+  }
+}
+
 async function identityPayload(config = null) {
   const identity = await loadIdentity();
   let nextIdentity = identity;
@@ -1705,7 +1804,7 @@ function configPathForRenderer() {
 }
 
 function minecraftProfileForRenderer(profile = null) {
-  if (!profile || isDeveloperMode()) {
+  if (!profile) {
     return profile;
   }
   return {
@@ -1732,12 +1831,17 @@ function minecraftProfileResultForRenderer(result = {}) {
 }
 
 function launcherProofForRenderer(proof = {}) {
-  if (isDeveloperMode()) {
-    return proof;
-  }
   return {
     trusted: Boolean(proof.trusted),
     source: proof.source || ''
+  };
+}
+
+function minecraftLaunchResultForRenderer(result = {}) {
+  return {
+    ok: Boolean(result.ok),
+    command: String(result.command || ''),
+    args: Array.isArray(result.args) ? result.args.map((arg) => String(arg)) : []
   };
 }
 
@@ -1872,12 +1976,11 @@ async function runUpdate(forceRepair = false, options = {}) {
     if (config.minecraftLauncher?.enabled !== false) {
       try {
         latestAfterInstall = await readLatest(config);
-        const launcherProof = await writeLauncherProof({
+        const launcherProof = await writeRegisteredLauncherProof({
           config,
-          identity: launcherProofIdentity(identity),
           latest: latestAfterInstall,
           installed: result.installed,
-          authToken: launcherProofAuthToken()
+          identity
         });
         result.launcherProof = {
           proofFile: launcherProof.proofFile || '',
@@ -2514,10 +2617,18 @@ async function runLauncherUpdate() {
     progress: { phase: 'Downloading launcher', completed: 0, total: 1, percent: 20 }
   };
   try {
-    await downloadToFile(source, target);
+    await downloadToFile(source, target, {
+      onProgress: (progress) => {
+        launcherUpdateState.progress = byteOperationProgress('Downloading launcher', fileName, progress, 8, 55);
+      }
+    });
     launcherUpdateState.progress = { phase: 'Verifying launcher', completed: 1, total: 3, percent: 70 };
     if (update.artifact.sha256) {
-      const actual = await hashFile(target, 'sha256');
+      const actual = await hashFile(target, 'sha256', {
+        onProgress: (progress) => {
+          launcherUpdateState.progress = byteOperationProgress('Verifying launcher', fileName, progress, 63, 17);
+        }
+      });
       if (actual.toLowerCase() !== String(update.artifact.sha256).toLowerCase()) {
         throw new Error(`Launcher update hash mismatch: expected ${update.artifact.sha256}, got ${actual}`);
       }
@@ -4145,15 +4256,149 @@ function assertFullClientReleaseAllowed(inspected, allowLegacyCurseForge = false
   throw new Error(legacyCurseForgeReleaseMessage());
 }
 
-function inspectPackZipFile(packZip) {
+function openInspectionZipFile(filePath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(filePath, { lazyEntries: true }, (error, zipFile) => {
+      if (error) reject(error);
+      else resolve(zipFile);
+    });
+  });
+}
+
+function openInspectionZipEntryStream(zipFile, entry) {
+  return new Promise((resolve, reject) => {
+    zipFile.openReadStream(entry, (error, readStream) => {
+      if (error) reject(error);
+      else resolve(readStream);
+    });
+  });
+}
+
+async function readInspectionZipEntryBuffer(zipFile, entry, maxBytes = 5 * 1024 * 1024) {
+  const stream = await openInspectionZipEntryStream(zipFile, entry);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      throw new Error(`ZIP metadata entry is too large: ${entry.fileName}`);
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function inspectZipMetadataEntries(packZip) {
+  const zipFile = await openInspectionZipFile(packZip);
+  const result = { clientMetadata: null, manifest: null };
+  try {
+    await new Promise((resolve, reject) => {
+      let stopped = false;
+      const fail = (error) => {
+        if (stopped) return;
+        stopped = true;
+        reject(error);
+      };
+      zipFile.on('entry', (entry) => {
+        Promise.resolve().then(async () => {
+          const entryName = normalizeRelPath(entry.fileName);
+          if (!entryName.endsWith('/')) {
+            if (!result.clientMetadata && (entryName === CLIENT_PACK_METADATA_ENTRY || entryName.endsWith(`/${CLIENT_PACK_METADATA_ENTRY}`))) {
+              result.clientMetadata = JSON.parse((await readInspectionZipEntryBuffer(zipFile, entry)).toString('utf8'));
+            } else if (!result.manifest && entryName === 'manifest.json') {
+              result.manifest = JSON.parse((await readInspectionZipEntryBuffer(zipFile, entry)).toString('utf8'));
+            }
+          }
+        })
+          .then(() => {
+            if (!stopped) {
+              zipFile.readEntry();
+            }
+          })
+          .catch(fail);
+      });
+      zipFile.on('end', () => {
+        if (!stopped) {
+          stopped = true;
+          resolve();
+        }
+      });
+      zipFile.on('error', fail);
+      zipFile.readEntry();
+    });
+  } finally {
+    zipFile.close();
+  }
+  return result;
+}
+
+function stripClientPackRoot(relPath = '', rootPrefix = '') {
+  const normalized = normalizeRelPath(relPath);
+  if (!rootPrefix) return normalized;
+  return normalized.startsWith(rootPrefix) ? normalizeRelPath(normalized.slice(rootPrefix.length)) : '';
+}
+
+async function inspectFullClientZipEntries(packZip) {
+  const zipFile = await openInspectionZipFile(packZip);
+  const rawEntries = [];
+  let metadata = null;
+  let metadataEntryName = '';
+  try {
+    await new Promise((resolve, reject) => {
+      let stopped = false;
+      const fail = (error) => {
+        if (stopped) return;
+        stopped = true;
+        reject(error);
+      };
+      zipFile.on('entry', (entry) => {
+        Promise.resolve().then(async () => {
+          const entryName = normalizeRelPath(entry.fileName);
+          if (entryName.endsWith('/')) {
+            return;
+          }
+          rawEntries.push(entryName);
+          if (!metadata && (entryName === CLIENT_PACK_METADATA_ENTRY || entryName.endsWith(`/${CLIENT_PACK_METADATA_ENTRY}`))) {
+            metadata = JSON.parse((await readInspectionZipEntryBuffer(zipFile, entry)).toString('utf8'));
+            metadataEntryName = entryName;
+          }
+        })
+          .then(() => {
+            if (!stopped) {
+              zipFile.readEntry();
+            }
+          })
+          .catch(fail);
+      });
+      zipFile.on('end', () => {
+        if (!stopped) {
+          stopped = true;
+          resolve();
+        }
+      });
+      zipFile.on('error', fail);
+      zipFile.readEntry();
+    });
+  } finally {
+    zipFile.close();
+  }
+  const rootPrefix = metadataEntryName.endsWith(CLIENT_PACK_METADATA_ENTRY)
+    ? metadataEntryName.slice(0, -CLIENT_PACK_METADATA_ENTRY.length)
+    : '';
+  const entries = rawEntries
+    .map((entryName) => stripClientPackRoot(entryName, rootPrefix))
+    .filter((relPath) => relPath && relPath !== CLIENT_PACK_METADATA_ENTRY && !relPath.startsWith('../') && !relPath.includes('/../') && !path.isAbsolute(relPath));
+  const modEntries = entries.filter((entryName) => entryName.toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entryName));
+  return { metadata, entries, modEntries };
+}
+
+async function inspectPackZipFile(packZip) {
   if (!packZip) {
     throw new Error('Pack ZIP is required');
   }
-  const zip = new AdmZip(packZip);
   const versionHint = versionHintFromFileName(packZip);
-  const clientMetadataEntry = zip.getEntry(CLIENT_PACK_METADATA_ENTRY);
-  if (clientMetadataEntry) {
-    const metadata = JSON.parse(clientMetadataEntry.getData().toString('utf8'));
+  const { clientMetadata: metadata, manifest } = await inspectZipMetadataEntries(packZip);
+  if (metadata) {
     if (metadata.format !== CLIENT_PACK_FORMAT) {
       throw new Error(`${CLIENT_PACK_METADATA_ENTRY} has unsupported format: ${metadata.format || 'missing'}`);
     }
@@ -4170,11 +4415,9 @@ function inspectPackZipFile(packZip) {
       fullClientZip: true
     };
   }
-  const manifestEntry = zip.getEntry('manifest.json');
-  if (!manifestEntry) {
+  if (!manifest) {
     throw new Error(`ZIP does not contain manifest.json or ${CLIENT_PACK_METADATA_ENTRY}`);
   }
-  const manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
   const version = String(manifest.version || '');
   return {
     name: manifest.name || '',
@@ -4310,29 +4553,21 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
       }
 
       try {
-        const zip = new AdmZip(packPath);
-        const entries = zip.getEntries();
         if (fullClientRelease) {
-          const metadataEntry = zip.getEntry(CLIENT_PACK_METADATA_ENTRY);
-          if (!metadataEntry) {
+          const { metadata, entries, modEntries } = await inspectFullClientZipEntries(packPath);
+          if (!metadata) {
             add('error', 'AHT client metadata missing', `${CLIENT_PACK_METADATA_ENTRY} was not found in the pack ZIP.`);
           } else {
-            const metadata = JSON.parse(metadataEntry.getData().toString('utf8'));
             if (metadata.format !== CLIENT_PACK_FORMAT) {
               add('error', 'AHT client metadata invalid', `format=${metadata.format || 'missing'}`);
             } else {
-              const fileEntries = entries.filter((entry) => !entry.isDirectory && entry.entryName.replaceAll('\\', '/') !== CLIENT_PACK_METADATA_ENTRY);
-              const modEntries = fileEntries.filter((entry) => entry.entryName.replaceAll('\\', '/').toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entry.entryName));
               manifestFileCount = 0;
-              overrideFileCount = fileEntries.length;
+              overrideFileCount = entries.length;
               cacheCoverage = { total: 0, covered: 0, missing: [], complete: true };
-              add('ok', 'AHT full client ZIP parsed', `${fileEntries.length} files, ${modEntries.length} mod archives`);
-              const versionLockEntry = entries.find((entry) => {
-                const name = entry.entryName.replaceAll('\\', '/');
-                return !entry.isDirectory && name.startsWith('mods/') && /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name));
-              });
+              add('ok', 'AHT full client ZIP parsed', `${entries.length} files, ${modEntries.length} mod archives`);
+              const versionLockEntry = modEntries.find((name) => /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name)));
               if (versionLockEntry) {
-                add('ok', 'client version lock mod included', versionLockEntry.entryName);
+                add('ok', 'client version lock mod included', versionLockEntry);
               } else {
                 add('error', 'client version lock mod missing', 'mods/aht-version-lock-*.jar is required so stale clients cannot bypass the launcher.');
               }
@@ -4344,6 +4579,8 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
             }
           }
         } else {
+          const zip = new AdmZip(packPath);
+          const entries = zip.getEntries();
           const manifestEntry = zip.getEntry('manifest.json');
           if (!manifestEntry) {
             add('error', 'CurseForge manifest missing', 'manifest.json was not found in the pack ZIP.');
@@ -4784,12 +5021,6 @@ function createWindow() {
       nodeIntegration: false
     }
   });
-  mainWindow.on('close', (event) => {
-    if (Date.now() < keepOpenUntil) {
-      event.preventDefault();
-      focusMainWindow();
-    }
-  });
   mainWindow.loadFile(path.join(appRoot, 'desktop', 'renderer', 'index.html'), {
     query: isDeveloperMode() ? { mode: 'developer' } : {}
   });
@@ -4887,14 +5118,12 @@ ipcMain.handle('play:start', async () => {
     throw new Error(initialLaunchState.launchBlockedReason);
   }
 
-  keepOpenUntil = Date.now() + 5 * 60_000;
   const identity = await identityPayload(config);
-  const launcherProof = await writeLauncherProof({
+  const launcherProof = await writeRegisteredLauncherProof({
     config,
-    identity: launcherProofIdentity(identity),
     latest: launchLatest,
     installed,
-    authToken: launcherProofAuthToken()
+    identity
   });
   let profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   profile = await installMinecraftProfileLoaders(profile, { config, latest: launchLatest, installed });
@@ -4904,8 +5133,9 @@ ipcMain.handle('play:start', async () => {
   if (!finalLaunchState.launchReady) {
     throw new Error(finalLaunchState.launchBlockedReason);
   }
+  const launchResult = await openMinecraftLauncher(config);
   return {
-    ...(await openMinecraftLauncher(config)),
+    ...minecraftLaunchResultForRenderer(launchResult),
     minecraftProfile: minecraftProfileForRenderer(profile),
     launcherProof: launcherProofForRenderer({
       proofFile: launcherProof.proofFile || '',
@@ -4959,7 +5189,7 @@ ipcMain.handle('dev:buildClientZip', async (_event, payload = {}) => {
 });
 ipcMain.handle('dev:buildRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
-  const inspected = inspectPackZipFile(payload?.packZip || '');
+  const inspected = await inspectPackZipFile(payload?.packZip || '');
   assertFullClientReleaseAllowed(inspected, payload?.allowLegacyCurseForge === true);
   const { buildRelease } = await loadReleaseBuilderModule();
   const config = await loadConfig();

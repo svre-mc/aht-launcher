@@ -45,7 +45,8 @@ const electronChecks = [
   ['test:update-logs'],
   ['test:release-flow'],
   ['test:release-ui-flow'],
-  ['test:single-instance']
+  ['test:single-instance'],
+  ['test:close-during-update']
 ];
 
 const verbose = process.argv.includes('--verbose') || process.env.AHT_VERIFY_VERBOSE === '1';

@@ -15,16 +15,16 @@
     "enabled": true,
     "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json"
   },
-  "minecraftLauncher": {
-    "enabled": true,
-    "profileId": "a-hard-time-dregora",
-    "profileName": "A Hard Time",
-    "memoryMb": 4096
-  },
   "launcherProof": {
     "enabled": true,
     "required": true,
     "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
     "keyId": "aht-launcher-proof-v1"
+  },
+  "minecraftLauncher": {
+    "enabled": true,
+    "profileId": "a-hard-time-dregora",
+    "profileName": "A Hard Time",
+    "memoryMb": 4096
   }
 }

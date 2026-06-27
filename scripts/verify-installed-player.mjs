@@ -12,6 +12,7 @@ const checks = [
   ['test:account-switch'],
   ['test:update-logs'],
   ['test:single-instance'],
+  ['test:close-during-update'],
   ['test:play-gate'],
   ['test:player-update-play'],
   ['test:launcher-self-update']

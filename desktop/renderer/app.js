@@ -1377,10 +1377,32 @@ function updateProgressPhase(state) {
   return state?.progress?.phase || "";
 }
 
+function isByteProgress(progress = {}) {
+  return progress.unit === "bytes" || Number(progress.totalBytes || 0) > 0;
+}
+
+function byteProgressDetail(progress = {}) {
+  const completed = Number(progress.completedBytes ?? progress.completed ?? 0);
+  const total = Number(progress.totalBytes ?? progress.total ?? 0);
+  if (!total) return "";
+  const speed = progress.speedBytesPerSecond ? ` at ${formatBytes(progress.speedBytesPerSecond)}/s` : "";
+  return `${formatBytes(completed)}/${formatBytes(total)}${speed}`;
+}
+
+function updateProgressDetail(progress = {}) {
+  if (isByteProgress(progress)) {
+    return byteProgressDetail(progress);
+  }
+  if (progress.total) {
+    return `${progress.completed}/${progress.total}`;
+  }
+  return "";
+}
+
 function updateProgressLabel(state) {
   const phase = updateProgressPhase(state);
-  const count = state?.running && state.progress?.total ? ` ${state.progress.completed}/${state.progress.total}` : "";
-  return `${phase}${count}`.trim();
+  const detail = state?.running ? updateProgressDetail(state.progress || {}) : "";
+  return `${phase}${detail ? ` ${detail}` : ""}`.trim();
 }
 
 function clearCompletedUpdateState() {
@@ -1467,8 +1489,9 @@ function renderDownloads(state = lastUpdateState) {
   const status = currentStatus;
   const progressVisible = shouldShowUpdateProgress(state);
   const percent = progressVisible ? estimateProgress(state) : 0;
-  const progressText = state?.progress?.total && progressVisible
-    ? `${Math.round(percent)}% (${state.progress.completed}/${state.progress.total})`
+  const detail = progressVisible ? updateProgressDetail(state?.progress || {}) : "";
+  const progressText = detail
+    ? `${Math.round(percent)}% (${detail})`
     : `${Math.round(percent)}%`;
   els.downloadsState.textContent = downloadStateLabel(status, state);
   els.downloadsProgressText.textContent = progressText;

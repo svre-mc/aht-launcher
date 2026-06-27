@@ -10,7 +10,6 @@ const developerOnlyNodeModules = [
   'node_modules/@smithy/**',
   'node_modules/@aws-crypto/**',
   'node_modules/ssh2/**',
-  'node_modules/yauzl/**',
   'node_modules/yazl/**'
 ];
 
