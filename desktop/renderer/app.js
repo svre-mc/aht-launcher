@@ -1500,18 +1500,29 @@ function launcherUpdatePercent(state) {
   return state?.running ? 25 : 0;
 }
 
+function setLauncherUpdateButton(restartReady = false) {
+  if (!els.launcherUpdateNowButton) return;
+  const icon = document.createElement("span");
+  icon.className = `button-icon ${restartReady ? "icon-sync" : "icon-download"}`;
+  icon.setAttribute("aria-hidden", "true");
+  els.launcherUpdateNowButton.replaceChildren(icon, document.createTextNode(restartReady ? "Restart Launcher" : "Update Launcher"));
+}
+
 function renderLauncherUpdateOverlay(status = currentStatus, state = lastLauncherUpdateState) {
   if (!els.launcherUpdateOverlay) return;
   const update = status?.launcherUpdate || {};
   const required = Boolean(update.updateRequired);
   els.launcherUpdateOverlay.hidden = !required;
   if (!required) return;
+  const restartReady = Boolean(state?.lastResult?.restartRequired && !state?.error);
   const current = update.currentVersion || status?.appVersion || "-";
   const latest = update.latestVersion || "-";
-  els.launcherUpdateTitle.textContent = "Launcher update required";
-  els.launcherUpdateSummary.textContent = `AHT Launcher ${latest} is required. Installed launcher version: ${current}.`;
+  els.launcherUpdateTitle.textContent = restartReady ? "Update Is Done, Restart Required" : "Launcher update required";
+  els.launcherUpdateSummary.textContent = restartReady
+    ? `AHT Launcher ${latest} is ready. Click Restart Launcher to install it and reopen AHT Launcher.`
+    : `AHT Launcher ${latest} is required. Installed launcher version: ${current}.`;
   const percent = launcherUpdatePercent(state);
-  const phase = state?.progress?.phase || (state?.error ? "Update failed" : state?.lastResult ? "Installer ready" : "Preparing");
+  const phase = state?.progress?.phase || (state?.error ? "Update failed" : restartReady ? "Restart required" : state?.lastResult ? "Installer ready" : "Preparing");
   els.launcherUpdateProgressLabel.textContent = phase;
   els.launcherUpdateProgressCount.textContent = `${Math.round(percent)}%`;
   setMiniProgress(els.launcherUpdateProgressBar, percent);
@@ -1519,6 +1530,7 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   if (state?.error) lines.push(`ERROR: ${state.error}`);
   if (!lines.length) lines.push("Waiting to start launcher update.");
   els.launcherUpdateLog.textContent = lines.join("\n");
+  setLauncherUpdateButton(restartReady);
   setUnavailable(els.launcherUpdateNowButton, Boolean(state?.running));
   if (!launcherUpdateAutoStarted && !state?.running && !state?.lastResult) {
     launcherUpdateAutoStarted = true;
@@ -1542,6 +1554,10 @@ async function pollLauncherUpdate() {
 }
 
 async function startLauncherSelfUpdate() {
+  if (lastLauncherUpdateState?.lastResult?.restartRequired) {
+    await restartLauncherSelfUpdate();
+    return;
+  }
   if (launcherUpdatePoll || lastLauncherUpdateState?.running) return;
   lastLauncherUpdateState = {
     running: true,
@@ -1576,6 +1592,48 @@ async function startLauncherSelfUpdate() {
       }
     });
   launcherUpdatePoll = setInterval(pollLauncherUpdate, 800);
+  await pollLauncherUpdate();
+}
+
+async function restartLauncherSelfUpdate() {
+  if (lastLauncherUpdateState?.running) return;
+  if (!lastLauncherUpdateState?.lastResult?.restartRequired) return;
+  if (launcherUpdatePoll) {
+    clearInterval(launcherUpdatePoll);
+    launcherUpdatePoll = null;
+  }
+  lastLauncherUpdateState = {
+    ...lastLauncherUpdateState,
+    running: true,
+    lines: [...(lastLauncherUpdateState.lines || []), "Restarting launcher update."],
+    progress: { phase: "Starting restart helper", percent: 100 },
+    error: null
+  };
+  renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
+  window.aht.restartLauncherUpdate()
+    .then(async () => {
+      const state = await window.aht.getLauncherUpdateState().catch(() => lastLauncherUpdateState);
+      lastLauncherUpdateState = state;
+      renderLauncherUpdateOverlay(currentStatus, state);
+      if (launcherUpdatePoll) {
+        clearInterval(launcherUpdatePoll);
+        launcherUpdatePoll = null;
+      }
+    })
+    .catch((error) => {
+      lastLauncherUpdateState = {
+        ...lastLauncherUpdateState,
+        running: false,
+        error: cleanErrorMessage(error),
+        progress: { phase: "Restart failed", percent: 100 }
+      };
+      renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
+      if (launcherUpdatePoll) {
+        clearInterval(launcherUpdatePoll);
+        launcherUpdatePoll = null;
+      }
+    });
+  launcherUpdatePoll = setInterval(pollLauncherUpdate, 500);
   await pollLauncherUpdate();
 }
 
@@ -2675,7 +2733,13 @@ els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
 els.downloadsButton.addEventListener("click", openDownloads);
 els.downloadsCloseButton.addEventListener("click", closeDownloads);
 if (els.launcherUpdateNowButton) {
-  els.launcherUpdateNowButton.addEventListener("click", () => startLauncherSelfUpdate());
+  els.launcherUpdateNowButton.addEventListener("click", () => {
+    if (lastLauncherUpdateState?.lastResult?.restartRequired) {
+      restartLauncherSelfUpdate();
+      return;
+    }
+    startLauncherSelfUpdate();
+  });
 }
 els.downloadsOverlay.addEventListener("click", (event) => {
   if (event.target === els.downloadsOverlay) closeDownloads();

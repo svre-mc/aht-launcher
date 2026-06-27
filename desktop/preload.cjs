@@ -15,6 +15,7 @@ const playerApi = {
   startUpdate: (payload) => ipcRenderer.invoke('update:start', typeof payload === 'object' && payload ? payload : { forceRepair: Boolean(payload) }),
   getUpdateState: () => ipcRenderer.invoke('update:state'),
   startLauncherUpdate: () => ipcRenderer.invoke('launcher:updateStart'),
+  restartLauncherUpdate: () => ipcRenderer.invoke('launcher:updateRestart'),
   getLauncherUpdateState: () => ipcRenderer.invoke('launcher:updateState'),
   scanFiles: () => ipcRenderer.invoke('files:scan'),
   scanChanges: () => ipcRenderer.invoke('changes:scan'),

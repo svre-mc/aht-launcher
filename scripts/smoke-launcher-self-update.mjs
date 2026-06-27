@@ -202,6 +202,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE: '1',
     AHT_TEST_LAUNCHER_UPDATE_NO_QUIT: '1',
+    AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY: '1',
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
@@ -216,11 +217,39 @@ try {
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && document.querySelector('#launcherUpdateOverlay')", 'launcher update DOM');
   await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false", 'launcher update overlay visible');
-  await waitFor(client, "document.querySelector('#launcherUpdateLog').textContent.includes('Test mode skipped')", 'launcher update completed', 240);
+  await waitFor(client, "document.querySelector('#launcherUpdateTitle').textContent.includes('Update Is Done, Restart Required')", 'launcher update staged', 240);
+  await waitFor(client, "document.querySelector('#launcherUpdateNowButton').textContent.includes('Restart Launcher')", 'restart launcher button');
+  const stagedProof = await evaluate(client, `(async () => ({
+    hidden: document.querySelector('#launcherUpdateOverlay').hidden,
+    title: document.querySelector('#launcherUpdateTitle').textContent,
+    summary: document.querySelector('#launcherUpdateSummary').textContent,
+    progress: document.querySelector('#launcherUpdateProgressCount').textContent,
+    button: document.querySelector('#launcherUpdateNowButton').textContent,
+    log: document.querySelector('#launcherUpdateLog').textContent,
+    status: await window.aht.getStatus(),
+    state: await window.aht.getLauncherUpdateState()
+  }))()`);
+  if (!stagedProof.state.lastResult?.restartRequired || !stagedProof.state.lastResult?.preparedRestart) {
+    throw new Error(`Launcher update was not staged for explicit restart: ${JSON.stringify(stagedProof.state)}`);
+  }
+  await evaluate(client, `document.querySelector('#launcherUpdateNowButton').click(); true`);
+  await sleep(1500);
+  const clickProof = await evaluate(client, `(async () => ({
+    button: document.querySelector('#launcherUpdateNowButton').textContent,
+    label: document.querySelector('#launcherUpdateProgressLabel').textContent,
+    log: document.querySelector('#launcherUpdateLog').textContent,
+    state: await window.aht.getLauncherUpdateState(),
+    hasRestartApi: typeof window.aht.restartLauncherUpdate === 'function'
+  }))()`);
+  if (!clickProof.log.includes('Restarting launcher update.') && !clickProof.log.includes('Test mode verified the restart helper')) {
+    throw new Error(`Restart button click did not start restart flow: ${JSON.stringify(clickProof)}`);
+  }
+  await waitFor(client, "document.querySelector('#launcherUpdateLog').textContent.includes('Test mode verified the restart helper')", 'launcher restart helper verified', 80);
   const proof = await evaluate(client, `(async () => ({
     hidden: document.querySelector('#launcherUpdateOverlay').hidden,
     title: document.querySelector('#launcherUpdateTitle').textContent,
     summary: document.querySelector('#launcherUpdateSummary').textContent,
+    button: document.querySelector('#launcherUpdateNowButton').textContent,
     progress: document.querySelector('#launcherUpdateProgressCount').textContent,
     log: document.querySelector('#launcherUpdateLog').textContent,
     status: await window.aht.getStatus(),
@@ -234,25 +263,30 @@ try {
   }
   if (process.platform === 'win32') {
     const launched = proof.state.lastResult.launched || {};
+    const prepared = proof.state.lastResult.preparedRestart || {};
     if (launched.strategy !== 'windows-helper') {
       throw new Error(`Windows launcher update did not use the restart helper: ${JSON.stringify(launched)}`);
     }
-    for (const file of [launched.payloadPath, launched.scriptPath]) {
+    for (const file of [prepared.payloadPath, prepared.scriptPath, launched.logPath]) {
       if (!file || !fs.existsSync(file)) {
-        throw new Error(`Windows launcher update helper file was not created: ${JSON.stringify(launched)}`);
+        throw new Error(`Windows launcher update helper file was not created: ${JSON.stringify({ prepared, launched })}`);
       }
     }
-    const payload = JSON.parse(fs.readFileSync(launched.payloadPath, 'utf8'));
+    const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
     if (payload.installerPath !== proof.state.lastResult.downloadedPath) {
       throw new Error(`Helper payload points at the wrong installer: ${JSON.stringify(payload)}`);
     }
     if (payload.expectedVersion !== proof.status.launcherUpdate.latestVersion) {
       throw new Error(`Helper payload has wrong expected version: ${JSON.stringify(payload)}`);
     }
-    if (!payload.targetExe || !payload.oldPid || !payload.installerArgs?.includes('/S')) {
+    if (!payload.targetExe || !payload.oldPid || !payload.installerArgs?.includes('/S') || !payload.installerArgs?.some((arg) => String(arg).startsWith('/D='))) {
       throw new Error(`Helper payload is missing restart details: ${JSON.stringify(payload)}`);
     }
-    const scriptText = fs.readFileSync(launched.scriptPath, 'utf8');
+    const helperLog = fs.readFileSync(launched.logPath, 'utf8');
+    if (!helperLog.includes('Test mode helper startup confirmed.')) {
+      throw new Error(`Helper did not write startup confirmation: ${helperLog}`);
+    }
+    const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
     for (const required of ['Wait-Process', 'Start-Process -FilePath ([string]$payload.installerPath)', 'Start-Process -FilePath $target']) {
       if (!scriptText.includes(required)) {
         throw new Error(`Helper script is missing ${required}: ${scriptText}`);
@@ -261,19 +295,24 @@ try {
   }
   if (process.platform === 'darwin') {
     const launched = proof.state.lastResult.launched || {};
+    const prepared = proof.state.lastResult.preparedRestart || {};
     if (launched.strategy !== 'macos-helper') {
       throw new Error(`macOS launcher update did not use the restart helper: ${JSON.stringify(launched)}`);
     }
-    for (const file of [launched.payloadPath, launched.scriptPath]) {
+    for (const file of [prepared.payloadPath, prepared.scriptPath, launched.logPath]) {
       if (!file || !fs.existsSync(file)) {
-        throw new Error(`macOS launcher update helper file was not created: ${JSON.stringify(launched)}`);
+        throw new Error(`macOS launcher update helper file was not created: ${JSON.stringify({ prepared, launched })}`);
       }
     }
-    const payload = JSON.parse(fs.readFileSync(launched.payloadPath, 'utf8'));
+    const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
     if (payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app')) {
       throw new Error(`macOS helper payload is missing update details: ${JSON.stringify(payload)}`);
     }
-    const scriptText = fs.readFileSync(launched.scriptPath, 'utf8');
+    const helperLog = fs.readFileSync(launched.logPath, 'utf8');
+    if (!helperLog.includes('Test mode helper startup confirmed.')) {
+      throw new Error(`Helper did not write startup confirmation: ${helperLog}`);
+    }
+    const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
     for (const required of ['/usr/bin/ditto -x -k', '/usr/bin/open "$target_app"', 'No .app bundle was found in update ZIP']) {
       if (!scriptText.includes(required)) {
         throw new Error(`macOS helper script is missing ${required}: ${scriptText}`);
@@ -286,6 +325,7 @@ try {
     proof: {
       title: proof.title,
       summary: proof.summary,
+      button: proof.button,
       progress: proof.progress,
       downloadedPath: proof.state.lastResult.downloadedPath,
       latestVersion: proof.status.launcherUpdate.latestVersion,

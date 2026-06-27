@@ -1921,15 +1921,41 @@ function defaultLauncherInstallerArgs(artifact = {}) {
   return [];
 }
 
+function windowsLauncherInstallerArgs(artifact = {}, targetExe = '') {
+  const args = defaultLauncherInstallerArgs(artifact).filter(Boolean);
+  const targetDir = targetExe ? path.dirname(targetExe) : '';
+  const hasTargetDir = args.some((arg) => /^\/D=/i.test(String(arg || '')));
+  if (targetDir && !hasTargetDir) {
+    return [...args, `/D=${targetDir}`];
+  }
+  return args;
+}
+
 function windowsPowerShellPath() {
   return process.env.SystemRoot
     ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
     : 'powershell.exe';
 }
 
+function windowsCommandPromptPath() {
+  return process.env.ComSpec || (process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
+}
+
 function launcherUpdateInstalledExePath() {
   if (process.platform !== 'win32') return '';
   return process.execPath || '';
+}
+
+function launcherUpdateHelperBatch(scriptPath, bootstrapLogPath) {
+  return [
+    '@echo off',
+    'setlocal',
+    `>> "${bootstrapLogPath}" echo %DATE% %TIME% Launcher update helper bootstrap started.`,
+    `"${windowsPowerShellPath()}" -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" >> "${bootstrapLogPath}" 2>&1`,
+    `>> "${bootstrapLogPath}" echo %DATE% %TIME% Launcher update helper bootstrap exited with %ERRORLEVEL%.`,
+    'exit /b %ERRORLEVEL%',
+    ''
+  ].join('\r\n');
 }
 
 function launcherUpdateHelperScript(payloadPath) {
@@ -1947,6 +1973,10 @@ function Write-UpdateLog([string]$message) {
 }
 try {
   Write-UpdateLog ('Waiting for old launcher PID ' + $payload.oldPid)
+  if ($env:AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY -eq '1') {
+    Write-UpdateLog 'Test mode helper startup confirmed.'
+    exit 0
+  }
   if ([int]$payload.oldPid -gt 0) {
     try {
       $old = Get-Process -Id ([int]$payload.oldPid) -ErrorAction SilentlyContinue
@@ -2005,35 +2035,41 @@ async function writeWindowsLauncherUpdateHelper({ filePath, artifact, latestVers
   await ensureDir(helperDir);
   const payloadPath = path.join(helperDir, 'payload.json');
   const scriptPath = path.join(helperDir, 'apply-launcher-update.ps1');
+  const cmdPath = path.join(helperDir, 'apply-launcher-update.cmd');
   const logPath = path.join(helperDir, 'handoff.log');
-  const installerArgs = defaultLauncherInstallerArgs(artifact);
+  const bootstrapLogPath = path.join(helperDir, 'bootstrap.log');
+  const installerArgs = windowsLauncherInstallerArgs(artifact, targetExe);
   await writeJsonFile(payloadPath, {
     installerPath: filePath,
     installerArgs,
     targetExe,
+    installDir: path.dirname(targetExe),
     expectedVersion: latestVersion || '',
     oldPid: process.pid,
     logPath,
+    bootstrapLogPath,
     createdAt: new Date().toISOString()
   });
   await fs.writeFile(scriptPath, launcherUpdateHelperScript(payloadPath), 'utf8');
-  return { scriptPath, payloadPath, logPath, targetExe, installerArgs };
+  await fs.writeFile(cmdPath, launcherUpdateHelperBatch(scriptPath, bootstrapLogPath), 'utf8');
+  return { scriptPath, cmdPath, payloadPath, logPath, bootstrapLogPath, targetExe, installerArgs };
 }
 
 async function launchWindowsLauncherUpdateHelper(filePath, artifact = {}, options = {}) {
+  const prepared = await prepareWindowsLauncherUpdateHelper(filePath, artifact, options);
+  return launchPreparedLauncherUpdate(prepared);
+}
+
+async function prepareWindowsLauncherUpdateHelper(filePath, artifact = {}, options = {}) {
   const helper = await writeWindowsLauncherUpdateHelper({
     filePath,
     artifact,
     latestVersion: options.latestVersion || '',
     downloadDir: options.downloadDir || path.dirname(filePath)
   });
-  const command = windowsPowerShellPath();
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper.scriptPath];
-  if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
-    return { ok: true, skipped: true, strategy: 'windows-helper', command, args, ...helper };
-  }
-  const launched = await spawnDetached(command, args, path.dirname(helper.scriptPath), process.env);
-  return { ...launched, strategy: 'windows-helper', ...helper };
+  const command = windowsCommandPromptPath();
+  const args = ['/d', '/s', '/c', 'start', '""', '/min', windowsCommandPromptPath(), '/d', '/s', '/c', helper.cmdPath];
+  return { ok: true, prepared: true, strategy: 'windows-helper', command, args, cwd: path.dirname(helper.scriptPath), ...helper };
 }
 
 function shellSingleQuote(value) {
@@ -2073,6 +2109,10 @@ fail_update() {
   exit 1
 }
 write_log "Waiting for old launcher PID $old_pid"
+if [ "\${AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY:-}" = "1" ]; then
+  write_log "Test mode helper startup confirmed."
+  exit 0
+fi
 if [ "$old_pid" -gt 0 ]; then
   waits=0
   while kill -0 "$old_pid" 2>/dev/null; do
@@ -2144,6 +2184,11 @@ async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadD
 }
 
 async function launchMacLauncherUpdateHelper(filePath, artifact = {}, options = {}) {
+  const prepared = await prepareMacLauncherUpdateHelper(filePath, artifact, options);
+  return launchPreparedLauncherUpdate(prepared);
+}
+
+async function prepareMacLauncherUpdateHelper(filePath, artifact = {}, options = {}) {
   const helper = await writeMacLauncherUpdateHelper({
     filePath,
     artifact,
@@ -2152,32 +2197,69 @@ async function launchMacLauncherUpdateHelper(filePath, artifact = {}, options = 
   });
   const command = '/bin/sh';
   const args = [helper.scriptPath];
-  if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
-    return { ok: true, skipped: true, strategy: 'macos-helper', command, args, ...helper };
-  }
-  const launched = await spawnDetached(command, args, path.dirname(helper.scriptPath), process.env);
-  return { ...launched, strategy: 'macos-helper', ...helper };
+  return { ok: true, prepared: true, strategy: 'macos-helper', command, args, cwd: path.dirname(helper.scriptPath), ...helper };
 }
 
 async function launchDownloadedLauncherUpdate(filePath, artifact = {}, options = {}) {
+  const prepared = await prepareDownloadedLauncherUpdate(filePath, artifact, options);
+  return launchPreparedLauncherUpdate(prepared);
+}
+
+async function prepareDownloadedLauncherUpdate(filePath, artifact = {}, options = {}) {
   const fileName = String(artifact.fileName || artifact.path || artifact.url || filePath).toLowerCase();
   if (process.platform === 'win32' && fileName.endsWith('.exe')) {
-    return launchWindowsLauncherUpdateHelper(filePath, artifact, options);
+    return prepareWindowsLauncherUpdateHelper(filePath, artifact, options);
   }
   if (process.platform === 'darwin' && fileName.endsWith('.zip')) {
-    return launchMacLauncherUpdateHelper(filePath, artifact, options);
+    return prepareMacLauncherUpdateHelper(filePath, artifact, options);
   }
 
   const cwd = path.dirname(filePath);
   const args = defaultLauncherInstallerArgs(artifact);
-  if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
-    return { ok: true, skipped: true, strategy: 'direct', command: filePath, args };
-  }
   if (process.platform === 'darwin') {
-    return spawnDetached('open', [filePath], cwd, process.env);
+    return { ok: true, prepared: true, strategy: 'direct-open', command: 'open', args: [filePath], cwd };
   }
 
-  return spawnDetached(filePath, args, cwd, process.env);
+  return { ok: true, prepared: true, strategy: 'direct', command: filePath, args, cwd };
+}
+
+async function waitForLauncherUpdateHelperStart(prepared = {}, timeoutMs = 5000) {
+  if (!prepared.logPath || !['windows-helper', 'macos-helper'].includes(prepared.strategy)) return;
+  const start = Date.now();
+  let bootstrapText = '';
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const text = await fs.readFile(prepared.logPath, 'utf8');
+      if (text.includes('Waiting for old launcher PID') || text.includes('Test mode helper startup confirmed.')) {
+        return;
+      }
+    } catch {
+      // Helper has not written its first line yet.
+    }
+    if (prepared.bootstrapLogPath) {
+      bootstrapText = await fs.readFile(prepared.bootstrapLogPath, 'utf8').catch(() => bootstrapText);
+    }
+    await sleep(100);
+  }
+  const bootstrapDetail = prepared.bootstrapLogPath
+    ? ` Bootstrap log: ${prepared.bootstrapLogPath}${bootstrapText ? ` (${bootstrapText.slice(-500)})` : ''}.`
+    : '';
+  throw new Error(`Launcher update helper did not start. No handoff log was written at ${prepared.logPath}.${bootstrapDetail}`);
+}
+
+async function launchPreparedLauncherUpdate(prepared = {}) {
+  if (!prepared?.command) {
+    throw new Error('Launcher update restart helper is not prepared.');
+  }
+  const shouldSkipLaunch = process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
+    && process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY !== '1';
+  if (shouldSkipLaunch) {
+    return { ...prepared, ok: true, skipped: true };
+  }
+  const launched = await spawnDetached(prepared.command, prepared.args || [], prepared.cwd || path.dirname(prepared.command), process.env);
+  const result = { ...prepared, ...launched, strategy: prepared.strategy };
+  await waitForLauncherUpdateHelperStart(prepared);
+  return result;
 }
 
 async function runLauncherUpdate() {
@@ -2215,30 +2297,65 @@ async function runLauncherUpdate() {
     }
     launcherUpdateState.lines.push('Launcher update downloaded and verified.');
     launcherUpdateState.progress = { phase: 'Preparing restart handoff', completed: 2, total: 3, percent: 92 };
-    const launched = await launchDownloadedLauncherUpdate(target, update.artifact, { latestVersion: update.latestVersion, downloadDir });
+    const preparedRestart = await prepareDownloadedLauncherUpdate(target, update.artifact, { latestVersion: update.latestVersion, downloadDir });
     const result = {
       ok: true,
       version: update.latestVersion,
       downloadedPath: target,
       artifact: update.artifact,
-      launched
+      restartRequired: true,
+      preparedRestart
     };
     launcherUpdateState.lastResult = result;
-    launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Ready' : 'Restarting launcher', completed: 3, total: 3, percent: 100 };
-    launcherUpdateState.lines.push(process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
-      ? 'Test mode skipped installer launch and app quit.'
-      : ['windows-helper', 'macos-helper'].includes(launched.strategy)
-        ? 'Update handoff is ready. The launcher will close and reopen automatically after installation finishes.'
-        : 'Installer started. The launcher will close so the update can finish.');
-    if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
-      setTimeout(() => app.quit(), ['windows-helper', 'macos-helper'].includes(launched.strategy) ? 350 : 900);
-    }
+    launcherUpdateState.progress = { phase: 'Update Is Done, Restart Required', completed: 3, total: 3, percent: 100 };
+    launcherUpdateState.lines.push('Update Is Done, Restart Required.');
+    launcherUpdateState.lines.push('Click Restart Launcher to install the update and reopen AHT Launcher.');
     return result;
   } catch (error) {
     launcherUpdateState.error = error.message || String(error);
     throw error;
   } finally {
     launcherUpdateState.running = false;
+  }
+}
+
+async function restartLauncherUpdate() {
+  if (launcherUpdateState.running) {
+    launcherUpdateState.lines.push('Restart request ignored because a launcher update is already running.');
+    return launcherUpdateState;
+  }
+  const staged = launcherUpdateState.lastResult;
+  if (!staged?.restartRequired || !staged?.preparedRestart) {
+    throw new Error('Launcher update is not ready to restart yet.');
+  }
+  launcherUpdateState.running = true;
+  launcherUpdateState.error = null;
+  launcherUpdateState.progress = { phase: 'Starting restart helper', completed: 3, total: 3, percent: 100 };
+  launcherUpdateState.lines.push('Restart requested. Starting launcher update helper.');
+  try {
+    const launched = await launchPreparedLauncherUpdate(staged.preparedRestart);
+    const result = {
+      ...staged,
+      restartRequired: false,
+      restartStartedAt: new Date().toISOString(),
+      launched
+    };
+    launcherUpdateState.lastResult = result;
+    launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Restart verified' : 'Restarting launcher', completed: 3, total: 3, percent: 100 };
+    launcherUpdateState.lines.push(process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
+      ? 'Test mode verified the restart helper without closing the launcher.'
+      : 'Restart helper is running. Closing AHT Launcher so the update can install and reopen.');
+    if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
+      setTimeout(() => app.quit(), 250);
+    } else {
+      launcherUpdateState.running = false;
+    }
+    return result;
+  } catch (error) {
+    launcherUpdateState.error = error.message || String(error);
+    launcherUpdateState.progress = { ...(launcherUpdateState.progress || {}), phase: 'Restart failed', percent: 100 };
+    launcherUpdateState.running = false;
+    throw error;
   }
 }
 
@@ -4432,6 +4549,7 @@ ipcMain.handle('update:start', async (_event, payload = {}) => runUpdate(Boolean
 }));
 ipcMain.handle('update:state', async () => updateState);
 ipcMain.handle('launcher:updateStart', async () => runLauncherUpdate());
+ipcMain.handle('launcher:updateRestart', async () => restartLauncherUpdate());
 ipcMain.handle('launcher:updateState', async () => launcherUpdateState);
 ipcMain.handle('account:register', async (_event, username) => registerMinecraftUsername(username));
 ipcMain.handle('changes:scan', async () => {

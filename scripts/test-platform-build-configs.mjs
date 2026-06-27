@@ -149,6 +149,10 @@ assert(!rendererApp.includes('server owner') && !desktopMain.includes('server ow
 assert(rendererApp.includes('"Verified AHT package ready."') && rendererApp.includes('status.developerMode') && rendererApp.includes('currentStatus?.developerMode'), 'Renderer must show simple verified-package feed wording to players while keeping release-source diagnostics in developer mode.');
 assert(rendererApp.includes('els.sideInstalledVersion.textContent = installedLabel'), 'Sidebar pack tile must show the same v.x installed-version label as the main hero.');
 assert(rendererHtml.includes('id="launcherVersionLabel"') && rendererApp.includes('els.launcherVersionLabel.textContent = launcherVersion'), 'Regular launcher sidebar must show the running launcher app version.');
+assert(preloadScript.includes("restartLauncherUpdate: () => ipcRenderer.invoke('launcher:updateRestart')") && desktopMain.includes("ipcMain.handle('launcher:updateRestart', async () => restartLauncherUpdate())"), 'Launcher self-update must expose a separate explicit restart IPC.');
+assert(rendererApp.includes('Update Is Done, Restart Required') && rendererApp.includes('Restart Launcher') && rendererApp.includes('restartLauncherSelfUpdate'), 'Launcher self-update UI must stage the update and require an explicit restart button.');
+assert(desktopMain.includes('waitForLauncherUpdateHelperStart') && desktopMain.includes('Launcher update helper did not start') && desktopMain.includes('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'), 'Launcher restart must verify the handoff helper starts before quitting.');
+assert(desktopMain.includes('function windowsLauncherInstallerArgs') && desktopMain.includes('`/D=${targetDir}`'), 'Windows launcher self-update must install into the current launcher directory.');
 const gameTileButtonStart = rendererHtml.indexOf('id="gameTileButton"');
 const gameTileButtonEnd = rendererHtml.indexOf('coming-soon', gameTileButtonStart);
 const gameTileButtonHtml = gameTileButtonStart >= 0 && gameTileButtonEnd > gameTileButtonStart
