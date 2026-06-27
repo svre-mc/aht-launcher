@@ -4531,6 +4531,13 @@ function focusMainWindow() {
   if (!mainWindow) {
     if (app.isReady()) {
       createWindow();
+    } else {
+      app.whenReady().then(() => {
+        if (!mainWindow) {
+          createWindow();
+        }
+        focusMainWindow();
+      }).catch(() => {});
     }
     return;
   }
@@ -4674,7 +4681,8 @@ ipcMain.handle('dev:buildClientZip', async (_event, payload = {}) => {
     version: payload.version || '',
     name: payload.name || 'A Hard Time',
     packId: payload.packId || config.packId || 'a-hard-time-dregora',
-    minecraft: payload.minecraft || config.minecraftLauncher?.minecraft || {}
+    minecraft: payload.minecraft || config.minecraftLauncher?.minecraft || {},
+    includeFiles: false
   });
   return result;
 });

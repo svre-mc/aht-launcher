@@ -18,11 +18,13 @@ const outDir = path.join(root, 'release');
 const installDir = path.join(root, 'install');
 
 await fs.mkdir(path.join(source, 'mods'), { recursive: true });
+await fs.mkdir(path.join(source, 'mods', 'OpenTerrainGenerator', 'cache'), { recursive: true });
 await fs.mkdir(path.join(source, 'config'), { recursive: true });
 await fs.mkdir(path.join(source, 'resourcepacks'), { recursive: true });
 await fs.mkdir(path.join(source, 'scripts'), { recursive: true });
 await fs.writeFile(path.join(source, 'mods', 'aht-custom-patched.jar'), 'patched jar bytes from local client', 'utf8');
 await fs.writeFile(path.join(source, 'mods', 'aht-version-lock-1.0.0.jar'), 'version lock bytes', 'utf8');
+await fs.writeFile(path.join(source, 'mods', 'OpenTerrainGenerator', 'cache', 'huge-runtime-cache.dat'), 'runtime cache should never be zipped', 'utf8');
 await fs.writeFile(path.join(source, 'config', 'aht.cfg'), 'config=true\n', 'utf8');
 await fs.writeFile(path.join(source, 'resourcepacks', 'aht-resources.zip'), 'resource bytes', 'utf8');
 await fs.writeFile(path.join(source, 'scripts', 'startup.zs'), 'print("aht");\n', 'utf8');
@@ -43,6 +45,10 @@ const zip = await createClientModpackZip({
 assert(await pathExists(zip.zipPath), 'client ZIP was not created');
 assert(zip.metadata.format === 'aht-full-client-zip', 'client ZIP metadata format mismatch');
 assert(zip.metadata.minecraft?.modLoaders?.[0]?.id === 'forge-14.23.5.2860', `Forge loader was not detected: ${JSON.stringify(zip.metadata.minecraft)}`);
+assert(!Array.isArray(zip.files), 'client ZIP builder should not return the full file list to the UI by default');
+assert(Array.isArray(zip.fileSamples) && zip.fileSamples.length > 0, 'client ZIP builder should return a small file sample for diagnostics');
+const clientZipEntries = new Set(new AdmZip(zip.zipPath).getEntries().map((entry) => entry.entryName.replace(/\\/g, '/')));
+assert(![...clientZipEntries].some((entry) => entry.toLowerCase().includes('/openterraingenerator/') || entry.toLowerCase().startsWith('mods/openterraingenerator/')), 'OpenTerrainGenerator runtime folder must not be included in client ZIPs');
 
 const release = await buildRelease({
   packZip: zip.zipPath,

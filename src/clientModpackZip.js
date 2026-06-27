@@ -18,6 +18,8 @@ export const CLIENT_PACK_DIRS = [
 export const CLIENT_PACK_FILES = ['options.txt', 'optionsof.txt'];
 
 const JUNK_FILE_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
+const SKIPPED_DIRECTORY_NAMES = new Set(['.aht-launcher', '.git', 'openterraingenerator']);
+const DEFAULT_FILE_SAMPLE_LIMIT = 200;
 
 function normalizeZipPath(value = '') {
   return String(value).replaceAll('\\', '/').replace(/^\/+/, '');
@@ -76,25 +78,39 @@ async function detectMinecraft(sourceDir, fallback = {}) {
 function shouldSkipFile(relPath = '') {
   const normalized = normalizeZipPath(relPath).toLowerCase();
   const parts = normalized.split('/');
-  if (parts.includes('.aht-launcher')) return true;
-  if (parts.includes('.git')) return true;
+  if (parts.some((part) => SKIPPED_DIRECTORY_NAMES.has(part))) return true;
   return JUNK_FILE_NAMES.has(parts.at(-1));
 }
 
-async function walkFiles(root, rel = '') {
-  const target = path.join(root, rel);
-  const entries = await fs.readdir(target, { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    const childRel = rel ? path.join(rel, entry.name) : entry.name;
-    if (shouldSkipFile(childRel)) continue;
-    if (entry.isDirectory()) {
-      files.push(...await walkFiles(root, childRel));
-    } else if (entry.isFile()) {
-      files.push(childRel);
+async function* walkFiles(root) {
+  const pending = [''];
+  for (let index = 0; index < pending.length; index += 1) {
+    const rel = pending[index];
+    const target = rel ? path.join(root, rel) : root;
+    const entries = (await fs.readdir(target, { withFileTypes: true }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const childRel = rel ? path.join(rel, entry.name) : entry.name;
+      if (shouldSkipFile(childRel)) continue;
+      if (entry.isDirectory()) {
+        pending.push(childRel);
+      } else if (entry.isFile()) {
+        yield childRel;
+      }
     }
   }
-  return files.sort((left, right) => normalizeZipPath(left).localeCompare(normalizeZipPath(right)));
+}
+
+function rememberReportFile(report, fileRecord) {
+  if (Array.isArray(report.files)) {
+    report.files.push(fileRecord);
+    return;
+  }
+  if (report.fileSamples.length < report.fileSampleLimit) {
+    report.fileSamples.push(fileRecord);
+  } else {
+    report.fileListTruncated = true;
+  }
 }
 
 async function addFile(zip, absPath, relPath, report) {
@@ -103,7 +119,7 @@ async function addFile(zip, absPath, relPath, report) {
   zip.addFile(absPath, zipPath, { mtime: stat.mtime });
   report.fileCount += 1;
   report.totalBytes += stat.size;
-  report.files.push({ path: zipPath, size: stat.size });
+  rememberReportFile(report, { path: zipPath, size: stat.size });
 }
 
 export async function createClientModpackZip(options = {}) {
@@ -122,6 +138,10 @@ export async function createClientModpackZip(options = {}) {
   const name = String(options.name || 'A Hard Time').trim() || 'A Hard Time';
   const packId = slugify(options.packId || name);
   const outDir = path.resolve(String(options.outDir || path.join(sourceDir, '.aht-launcher', 'client-zips')));
+  const includeFiles = options.includeFiles === true;
+  const fileSampleLimit = Number.isInteger(Number(options.fileSampleLimit))
+    ? Math.max(0, Number(options.fileSampleLimit))
+    : DEFAULT_FILE_SAMPLE_LIMIT;
   await ensureDir(outDir);
   const zipPath = path.join(outDir, `${packId}-${slugify(version)}-client.zip`);
   const tmpPath = `${zipPath}.tmp`;
@@ -141,8 +161,13 @@ export async function createClientModpackZip(options = {}) {
     missingRoots: [],
     fileCount: 0,
     totalBytes: 0,
-    files: []
+    fileSamples: [],
+    fileSampleLimit,
+    fileListTruncated: false
   };
+  if (includeFiles) {
+    report.files = [];
+  }
 
   const zip = new yazl.ZipFile();
   const output = createWriteStream(tmpPath);
@@ -160,7 +185,7 @@ export async function createClientModpackZip(options = {}) {
       continue;
     }
     report.includedRoots.push(dirName);
-    for (const relFile of await walkFiles(absDir)) {
+    for await (const relFile of walkFiles(absDir)) {
       await addFile(zip, path.join(absDir, relFile), path.posix.join(dirName, normalizeZipPath(relFile)), report);
     }
   }
@@ -196,5 +221,7 @@ export async function createClientModpackZip(options = {}) {
   await done;
   await fs.rename(tmpPath, zipPath);
 
-  return { ...report, minecraft, metadata };
+  const result = { ...report, minecraft, metadata };
+  delete result.fileSampleLimit;
+  return result;
 }
