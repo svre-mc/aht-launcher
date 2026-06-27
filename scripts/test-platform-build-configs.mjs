@@ -148,6 +148,7 @@ assert(!rendererApp.includes('packageTarget') && !rendererApp.includes('build - 
 assert(!rendererApp.includes('server owner') && !desktopMain.includes('server owner'), 'Player-facing update/feed messages must not use internal server-owner wording.');
 assert(rendererApp.includes('"Verified AHT package ready."') && rendererApp.includes('status.developerMode') && rendererApp.includes('currentStatus?.developerMode'), 'Renderer must show simple verified-package feed wording to players while keeping release-source diagnostics in developer mode.');
 assert(rendererApp.includes('els.sideInstalledVersion.textContent = installedLabel'), 'Sidebar pack tile must show the same v.x installed-version label as the main hero.');
+assert(rendererHtml.includes('id="launcherVersionLabel"') && rendererApp.includes('els.launcherVersionLabel.textContent = launcherVersion'), 'Regular launcher sidebar must show the running launcher app version.');
 const gameTileButtonStart = rendererHtml.indexOf('id="gameTileButton"');
 const gameTileButtonEnd = rendererHtml.indexOf('coming-soon', gameTileButtonStart);
 const gameTileButtonHtml = gameTileButtonStart >= 0 && gameTileButtonEnd > gameTileButtonStart

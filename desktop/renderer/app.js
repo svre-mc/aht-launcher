@@ -394,6 +394,7 @@ const els = {
   developerTab: $("#developerTab"),
   developerTileButton: $("#developerTileButton"),
   downloadsButton: $("#downloadsButton"),
+  launcherVersionLabel: $("#launcherVersionLabel"),
   sidebarProgress: $("#sidebarProgress"),
   sidebarProgressLabel: $("#sidebarProgressLabel"),
   sidebarProgressCount: $("#sidebarProgressCount"),
@@ -2252,6 +2253,7 @@ function renderStatus(status) {
   developerAuthenticated = Boolean(status.developerAuthenticated);
   applyDeveloperGate(status);
   const latestVersion = status.latest?.version || "-";
+  const launcherVersion = status.appVersion ? `Launcher v${status.appVersion}` : "Launcher v-";
   const developerBypass = Boolean(status.developerClientBypass || status.developerMode);
   const installedVersion = status.installed?.version || null;
   const configured = Boolean(status.config.latestUrl);
@@ -2262,6 +2264,7 @@ function renderStatus(status) {
     els.platformTargetView.textContent = `${platformName} install and Minecraft Launcher profile settings.`;
   }
   els.versionLine.textContent = installedLabel;
+  if (els.launcherVersionLabel) els.launcherVersionLabel.textContent = launcherVersion;
   els.installedVersion.textContent = installedVersion || "Not Installed";
   els.latestVersion.textContent = latestVersion;
   els.sideInstalledVersion.textContent = installedLabel;

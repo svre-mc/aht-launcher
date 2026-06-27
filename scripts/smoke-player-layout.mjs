@@ -302,6 +302,15 @@ try {
   ) {
     throw new Error(`Sidebar must show installed version truth, not latest feed version: ${JSON.stringify(sidebarVersionProof)}`);
   }
+  const launcherVersionProof = await waitFor(client, `
+    (() => {
+      const label = document.querySelector('#launcherVersionLabel')?.textContent?.trim();
+      return label && /Launcher v\\d+\\.\\d+\\.\\d+/.test(label) ? { label } : false;
+    })()
+  `, 'visible launcher version label');
+  if (!launcherVersionProof.label.includes(status.appVersion)) {
+    throw new Error(`Launcher version label must show the running app version: ${JSON.stringify({ launcherVersionProof, appVersion: status.appVersion })}`);
+  }
   const sidebarIconProof = await waitFor(client, `
     (() => {
       const tile = document.querySelector('#gameTileButton');
