@@ -1955,7 +1955,7 @@ async function getStatus(configOverride = null) {
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
-  const updateRequired = !developerClientBypass && !updateBlockedReason && latest && latest.required !== false
+  const updateRequired = !updateBlockedReason && latest && latest.required !== false
     ? installed?.version !== latest.version
     : false;
   const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {

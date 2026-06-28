@@ -11,10 +11,14 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-developer-client-bypass-
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
-const electronBin = process.platform === 'win32'
+const smokeExe = process.env.AHT_SMOKE_EXE || '';
+const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
-  : path.resolve('node_modules', '.bin', 'electron');
-const electronArgs = ['.', '--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+  : path.resolve('node_modules', '.bin', 'electron'));
+const electronArgs = smokeExe
+  ? ['--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
+  : ['.', '--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,7 +120,10 @@ const latest = {
   minecraft: {
     version: '1.12.2',
     modLoaders: [{ id: 'forge-14.23.5.2860', primary: true }]
-  }
+  },
+  installMode: 'full-client-zip',
+  zipFormat: 'aht-full-client-zip',
+  zip: { path: 'packs/developer-smoke.zip' }
 };
 const expectedContent = 'managed=true\n';
 const changedContent = 'managed=false\n';
@@ -162,8 +169,13 @@ await writeJson(
 );
 
 const child = spawn(electronBin, electronArgs, {
-  cwd: process.cwd(),
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', AHT_ALLOW_DEVELOPER: '1' },
+  cwd: electronCwd,
+  env: {
+    ...process.env,
+    ELECTRON_ENABLE_LOGGING: '0',
+    AHT_ALLOW_DEVELOPER: '1',
+    AHT_LAUNCHER_SOURCE_ROOT: process.cwd()
+  },
   stdio: 'ignore',
   windowsHide: true
 });
@@ -209,6 +221,35 @@ try {
     throw new Error(`Developer local changes summary should be Bypassed, got ${diffSummary}`);
   }
 
+  const localLatestPath = path.join(root, 'developer-latest.json');
+  await writeJson(localLatestPath, latest);
+  const configPath = path.join(userData, 'launcher.config.json');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  config.latestUrl = localLatestPath;
+  await writeJson(configPath, config);
+  await fsp.rm(path.join(instanceDir, '.aht-launcher', 'installed.json'), { force: true });
+  const notInstalledProof = await waitFor(client, `
+    window.aht.getStatus().then((status) => {
+      renderStatus(status);
+      return status.developerMode && status.developerClientBypass && !status.installed ? {
+        updateRequired: status.updateRequired,
+        launchReady: status.launchReady,
+        launchBlockedReason: status.launchBlockedReason,
+        updateDisabled: document.querySelector('#updateButton')?.getAttribute('aria-disabled') === 'true',
+        playDisabled: document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'true',
+        badge: document.querySelector('#statusBadge')?.textContent || '',
+        installed: status.installed || null,
+        latest: status.latest?.version || ''
+      } : false;
+    })
+  `, 'developer not-installed update gate');
+  if (!notInstalledProof.updateRequired || notInstalledProof.launchReady || !/Install the pack before playing/i.test(notInstalledProof.launchBlockedReason || '')) {
+    throw new Error(`Developer not-installed modpack status should require Update before Play: ${JSON.stringify(notInstalledProof)}`);
+  }
+  if (notInstalledProof.updateDisabled || !notInstalledProof.playDisabled) {
+    throw new Error(`Developer not-installed modpack should enable Update and keep Play disabled: ${JSON.stringify(notInstalledProof)}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -216,7 +257,8 @@ try {
     latestError: status.latestError,
     integrity: status.integrity.counts,
     scanSource: scan.source,
-    changesSource: changes.source
+    changesSource: changes.source,
+    notInstalledProof
   }, null, 2));
 } finally {
   if (client) {

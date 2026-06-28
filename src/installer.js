@@ -422,11 +422,26 @@ async function recoverInterruptedCleanInstall(instanceDir, logger) {
   return { removedStaging, removedBackups, restoredBackup };
 }
 
-async function replaceInstallWithStaging(instanceDir, stagingDir) {
+async function removeBackupAfterSuccessfulSwap(backupDir, { logger = console, simulateFailure = false } = {}) {
+  try {
+    if (simulateFailure && process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_BACKUP_CLEANUP_FAILURE === '1') {
+      throw new Error('Simulated backup cleanup failure');
+    }
+    await fs.rm(backupDir, { recursive: true, force: true });
+    return { backupRemoved: true, backupDir, backupCleanupWarning: '' };
+  } catch (cleanupError) {
+    const message = cleanupError?.message || String(cleanupError);
+    logger?.log?.(`Install completed, but old install backup cleanup is pending: ${backupDir}. ${message}`);
+    return { backupRemoved: false, backupDir, backupCleanupWarning: message };
+  }
+}
+
+async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) {
   const resolvedInstanceDir = assertSafeInstanceRoot(instanceDir);
   const resolvedStagingDir = path.resolve(stagingDir);
   const backupDir = uniqueInstallSiblingDir(resolvedInstanceDir, 'backup');
   let oldInstallMoved = false;
+  let stagedInstallActive = false;
 
   await ensureDir(path.dirname(resolvedInstanceDir));
   await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
@@ -436,15 +451,18 @@ async function replaceInstallWithStaging(instanceDir, stagingDir) {
       oldInstallMoved = true;
     }
     await fs.rename(resolvedStagingDir, resolvedInstanceDir);
-    if (oldInstallMoved) {
-      await fs.rm(backupDir, { recursive: true, force: true });
-    }
+    stagedInstallActive = true;
   } catch (error) {
-    if (oldInstallMoved && !(await pathExists(resolvedInstanceDir)) && await pathExists(backupDir)) {
+    if (oldInstallMoved && !stagedInstallActive && !(await pathExists(resolvedInstanceDir)) && await pathExists(backupDir)) {
       await fs.rename(backupDir, resolvedInstanceDir).catch(() => {});
     }
     throw error;
   }
+
+  if (!oldInstallMoved) {
+    return { backupRemoved: true, backupDir: '', backupCleanupWarning: '' };
+  }
+  return removeBackupAfterSuccessfulSwap(backupDir, options);
 }
 
 async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, previousManaged, forceRepair, replaceGameSettings, logger, onProgress, progressBase = 0, progressSpan = 100 }) {
@@ -525,7 +543,10 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       .map((item) => item.relativePath);
 
     emitProgress('Replacing install');
-    await replaceInstallWithStaging(instanceDir, stagingDir);
+    const replacement = await replaceInstallWithStaging(instanceDir, stagingDir, {
+      logger,
+      simulateFailure: true
+    });
     if (onProgress) {
       onProgress({
         phase: 'Finalizing',
@@ -542,7 +563,10 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       overrideFileCount: filesTotal,
       removedStaleCount: removed.length,
       removedStale: removed,
-      cleanInstall: true
+      cleanInstall: true,
+      backupRemoved: replacement.backupRemoved,
+      backupDir: replacement.backupDir,
+      backupCleanupWarning: replacement.backupCleanupWarning
     };
   } finally {
     await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});

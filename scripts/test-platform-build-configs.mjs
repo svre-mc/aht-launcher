@@ -297,6 +297,7 @@ const packagedDeveloperSmokeScripts = [
   'scripts/smoke-developer-modpack-zip-ui.mjs',
   'scripts/smoke-developer-secret-persistence.mjs',
   'scripts/smoke-developer-update-log-auth-refresh.mjs',
+  'scripts/test-developer-client-bypass.mjs',
   'scripts/smoke-launcher-update-publish.mjs',
   'scripts/smoke-r2-release-flow.mjs',
   'scripts/smoke-r2-release-ui-flow.mjs',

@@ -181,6 +181,38 @@ assert(!rootEntriesAfterRepair.some((entry) => entry.startsWith('.install.aht-st
 const repairedScan = await scanManagedIntegrity(installDir);
 assert(repairedScan.counts.corrupted === 0, `repair did not return to clean integrity: ${JSON.stringify(repairedScan)}`);
 
+process.env.AHT_TEST_HOOKS = '1';
+process.env.AHT_TEST_BACKUP_CLEANUP_FAILURE = '1';
+const backupCleanupLogs = [];
+const backupCleanupInstall = await installPack({
+  latestSource: path.join(outDir, 'latest.json'),
+  instanceDir: installDir,
+  replaceGameSettings: true,
+  forceRepair: true,
+  logger: { log(line) { backupCleanupLogs.push(String(line)); } }
+});
+delete process.env.AHT_TEST_BACKUP_CLEANUP_FAILURE;
+delete process.env.AHT_TEST_HOOKS;
+assert(backupCleanupInstall.cleanInstall === true, 'backup cleanup failure should not fail a completed clean install swap');
+assert(backupCleanupInstall.backupRemoved === false, `backup cleanup failure should be reported as a warning: ${JSON.stringify(backupCleanupInstall)}`);
+assert(/Simulated backup cleanup failure/.test(backupCleanupInstall.backupCleanupWarning || ''), `backup cleanup warning missing simulated failure: ${JSON.stringify(backupCleanupInstall)}`);
+assert(backupCleanupLogs.some((line) => /old install backup cleanup is pending/i.test(line)), `backup cleanup warning was not logged: ${JSON.stringify(backupCleanupLogs)}`);
+assert(await pathExists(path.join(installDir, '.aht-launcher', 'installed.json')), 'completed install was not active after backup cleanup failure');
+const backupCleanupScan = await scanManagedIntegrity(installDir);
+assert(backupCleanupScan.counts.corrupted === 0, `backup cleanup warning left install corrupt: ${JSON.stringify(backupCleanupScan)}`);
+const backupCleanupEntries = await fs.readdir(root);
+assert(backupCleanupEntries.some((entry) => entry.startsWith('.install.aht-backup-')), `simulated cleanup failure should leave only a recoverable backup sibling: ${backupCleanupEntries.join(', ')}`);
+const cleanupRecoveryInstall = await installPack({
+  latestSource: path.join(outDir, 'latest.json'),
+  instanceDir: installDir,
+  replaceGameSettings: true,
+  forceRepair: true,
+  logger: { log() {} }
+});
+assert(cleanupRecoveryInstall.cleanInstall === true, 'cleanup recovery repair should still use clean staged replacement');
+const cleanupRecoveryEntries = await fs.readdir(root);
+assert(!cleanupRecoveryEntries.some((entry) => entry.startsWith('.install.aht-staging-') || entry.startsWith('.install.aht-backup-')), `cleanup recovery left staging or backup folders behind: ${cleanupRecoveryEntries.join(', ')}`);
+
 const recoveryInstallDir = path.join(root, 'recover-install');
 const recoveryBackupDir = path.join(root, '.recover-install.aht-backup-2000-crashed');
 const recoveryOldBackupDir = path.join(root, '.recover-install.aht-backup-1000-old');
