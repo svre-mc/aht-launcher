@@ -205,6 +205,8 @@ if (!window.aht) {
     selectJson: async () => "D:\\AHT\\dist-r2\\latest.json",
     selectZip: async () => "D:\\Downloads\\A Hard Time-2.8.2.zip",
     selectFolder: async (defaultPath = "") => defaultPath || "D:\\AHT\\dist-r2",
+    selectUpdateLogImage: async () => "D:\\AHT\\media\\update-banner.webp",
+    selectUpdateLogVideo: async () => "D:\\AHT\\media\\update-video.mp4",
     openPath: async () => ({}),
     devBuildRelease: async () => ({
       report: {
@@ -576,9 +578,25 @@ const els = {
   publishUpdateLogButton: $("#publishUpdateLogButton"),
   updateLogVersionInput: $("#updateLogVersionInput"),
   updateLogTitleInput: $("#updateLogTitleInput"),
+  updateLogSubtitleInput: $("#updateLogSubtitleInput"),
+  updateLogImageInput: $("#updateLogImageInput"),
+  pickUpdateLogImageButton: $("#pickUpdateLogImageButton"),
+  updateLogVideoInput: $("#updateLogVideoInput"),
+  pickUpdateLogVideoButton: $("#pickUpdateLogVideoButton"),
+  updateLogYoutubeInput: $("#updateLogYoutubeInput"),
   updateLogBodyInput: $("#updateLogBodyInput"),
   updateLogStatus: $("#updateLogStatus"),
   developerUpdateLogsList: $("#developerUpdateLogsList"),
+  updateLogOverlay: $("#updateLogOverlay"),
+  updateLogHero: $("#updateLogHero"),
+  updateLogModalMeta: $("#updateLogModalMeta"),
+  updateLogModalTitle: $("#updateLogModalTitle"),
+  updateLogModalSubtitle: $("#updateLogModalSubtitle"),
+  updateLogArticleBody: $("#updateLogArticleBody"),
+  updateLogCloseButton: $("#updateLogCloseButton"),
+  updateLogVideoOverlay: $("#updateLogVideoOverlay"),
+  updateLogVideoStage: $("#updateLogVideoStage"),
+  updateLogVideoCloseButton: $("#updateLogVideoCloseButton"),
   releaseCheckCard: $("#releaseCheckCard"),
   releaseCheckState: $("#releaseCheckState"),
   releaseCheckTitle: $("#releaseCheckTitle"),
@@ -696,15 +714,175 @@ function displayPackName(name) {
   return value || String(name || "A Hard Time");
 }
 
-function updateLogSummary(text) {
-  const value = String(text || "").replace(/\s+/g, " ").trim();
-  return value.length > 180 ? `${value.slice(0, 177)}...` : value;
+function updateLogSummary() {
+  return "Read more...";
+}
+
+function updateLogText(log) {
+  return String(log?.text || log?.body || "").trim();
+}
+
+function updateLogImageUrl(log) {
+  return String(log?.image?.url || log?.imageUrl || log?.bannerUrl || "").trim();
+}
+
+function isRemoteUrl(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function youtubeEmbedUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+    let id = "";
+    if (host === "youtu.be") {
+      id = url.pathname.replace(/^\/+/, "").split("/")[0] || "";
+    } else if (host.endsWith("youtube.com")) {
+      if (url.pathname.startsWith("/embed/")) id = url.pathname.split("/")[2] || "";
+      else if (url.pathname.startsWith("/shorts/")) id = url.pathname.split("/")[2] || "";
+      else id = url.searchParams.get("v") || "";
+    }
+    if (!/^[A-Za-z0-9_-]{6,}$/.test(id)) return "";
+    return `https://www.youtube.com/embed/${id}?rel=0`;
+  } catch {
+    return "";
+  }
+}
+
+function updateLogPlayable(log) {
+  const media = log?.media && typeof log.media === "object" ? log.media : null;
+  const youtube = String(log?.youtubeUrl || (media?.type === "youtube" ? media.url : "") || "").trim();
+  const embed = youtubeEmbedUrl(youtube);
+  if (embed) return { type: "youtube", url: embed, originalUrl: youtube, title: media?.title || log?.title || "Update video" };
+  const videoUrl = String(log?.videoUrl || log?.video?.url || (media?.type === "video" ? media.url : "") || "").trim();
+  if (videoUrl) return { type: "video", url: videoUrl, title: media?.title || log?.title || "Update video" };
+  return null;
+}
+
+function updateLogMediaLabel(log) {
+  const playable = updateLogPlayable(log);
+  if (!playable) return "";
+  return playable.type === "youtube" ? "YouTube" : "Video";
 }
 
 function updateLogMeta(log) {
   const version = String(log?.version || "").trim();
   if (version) return `Update ${version}`;
   return log?.publishedAt ? shortDateTime(log.publishedAt) : "Update Log";
+}
+
+function closeUpdateLog() {
+  if (!els.updateLogOverlay) return;
+  els.updateLogOverlay.hidden = true;
+  els.updateLogHero.style.backgroundImage = "";
+  els.updateLogArticleBody.innerHTML = "";
+}
+
+function closeUpdateLogVideo() {
+  if (!els.updateLogVideoOverlay) return;
+  els.updateLogVideoOverlay.hidden = true;
+  els.updateLogVideoStage.innerHTML = "";
+}
+
+function appendUpdateLogParagraph(parent, text) {
+  const paragraph = document.createElement("p");
+  paragraph.textContent = text;
+  parent.appendChild(paragraph);
+}
+
+function renderUpdateLogArticleText(parent, text) {
+  parent.innerHTML = "";
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  let list = null;
+  const closeList = () => { list = null; };
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      closeList();
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const tag = heading[1].length === 1 ? "h2" : "h3";
+      const el = document.createElement(tag);
+      el.textContent = heading[2].trim();
+      parent.appendChild(el);
+      continue;
+    }
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      if (!list) {
+        list = document.createElement("ul");
+        parent.appendChild(list);
+      }
+      const item = document.createElement("li");
+      item.textContent = bullet[1].trim();
+      list.appendChild(item);
+      continue;
+    }
+    const image = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)$/i);
+    if (image) {
+      closeList();
+      const figure = document.createElement("figure");
+      const img = document.createElement("img");
+      img.src = image[2];
+      img.alt = image[1] || "Update image";
+      img.loading = "lazy";
+      figure.appendChild(img);
+      if (image[1]) {
+        const caption = document.createElement("figcaption");
+        caption.textContent = image[1];
+        figure.appendChild(caption);
+      }
+      parent.appendChild(figure);
+      continue;
+    }
+    closeList();
+    appendUpdateLogParagraph(parent, line);
+  }
+  if (!parent.childElementCount) {
+    appendUpdateLogParagraph(parent, "No update-log details were provided.");
+  }
+}
+
+function openUpdateLog(log) {
+  if (!els.updateLogOverlay) return;
+  closeUpdateLogVideo();
+  const imageUrl = updateLogImageUrl(log);
+  els.updateLogModalMeta.textContent = updateLogMeta(log);
+  els.updateLogModalTitle.textContent = log?.title || "AHT Update Feed";
+  els.updateLogModalSubtitle.textContent = String(log?.subtitle || "").trim();
+  els.updateLogModalSubtitle.hidden = !els.updateLogModalSubtitle.textContent;
+  els.updateLogHero.classList.toggle("has-image", Boolean(imageUrl));
+  els.updateLogHero.style.backgroundImage = imageUrl ? `linear-gradient(180deg, rgba(20, 25, 27, 0.1), rgba(20, 25, 27, 0.88)), url("${imageUrl.replace(/"/g, "%22")}")` : "";
+  renderUpdateLogArticleText(els.updateLogArticleBody, updateLogText(log));
+  els.updateLogOverlay.hidden = false;
+}
+
+function openUpdateLogVideo(log) {
+  const playable = updateLogPlayable(log);
+  if (!playable || !els.updateLogVideoOverlay) return;
+  closeUpdateLog();
+  els.updateLogVideoStage.innerHTML = "";
+  if (playable.type === "youtube") {
+    const iframe = document.createElement("iframe");
+    iframe.src = playable.url;
+    iframe.title = playable.title;
+    iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+    iframe.allowFullscreen = true;
+    els.updateLogVideoStage.appendChild(iframe);
+  } else {
+    const video = document.createElement("video");
+    video.src = playable.url;
+    video.controls = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    els.updateLogVideoStage.appendChild(video);
+  }
+  els.updateLogVideoOverlay.hidden = false;
 }
 
 function renderUpdateLogs(logs = []) {
@@ -715,11 +893,18 @@ function renderUpdateLogs(logs = []) {
 
   const artClasses = ["aht-art", "patch-art", "sync-art"];
   for (const [index, log] of items.entries()) {
+    const playable = updateLogPlayable(log);
+    const imageUrl = updateLogImageUrl(log);
     const card = document.createElement("article");
-    card.className = `feature-card ${index === 0 ? "large" : ""}`.trim();
-    const art = document.createElement("div");
-    art.className = `feature-art ${artClasses[index] || "patch-art"}`;
-    if (index === 0) {
+    card.className = `feature-card ${index === 0 ? "large" : ""} ${playable ? "is-playable" : ""}`.trim();
+
+    const art = document.createElement("button");
+    art.type = "button";
+    art.className = `feature-art feature-art-button ${imageUrl ? "has-image" : (artClasses[index] || "patch-art")}`;
+    art.setAttribute("aria-label", playable ? `Play ${log?.title || "update video"}` : `Read ${log?.title || "update log"}`);
+    if (imageUrl) art.style.backgroundImage = `linear-gradient(180deg, rgba(10, 12, 12, 0.08), rgba(10, 12, 12, 0.42)), url("${imageUrl.replace(/"/g, "%22")}")`;
+    art.addEventListener("click", () => playable ? openUpdateLogVideo(log) : openUpdateLog(log));
+    if (playable) {
       const glyph = document.createElement("div");
       glyph.className = "play-glyph";
       const icon = document.createElement("span");
@@ -728,14 +913,18 @@ function renderUpdateLogs(logs = []) {
       glyph.appendChild(icon);
       art.appendChild(glyph);
     }
-    const copy = document.createElement("div");
-    copy.className = "feature-copy";
+
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "feature-copy feature-copy-button";
+    copy.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
+    copy.addEventListener("click", () => openUpdateLog(log));
     const meta = document.createElement("span");
     const title = document.createElement("strong");
     const body = document.createElement("p");
     meta.textContent = updateLogMeta(log);
-    title.textContent = log.title || "AHT Update Feed";
-    body.textContent = updateLogSummary(log.text || log.body || "");
+    title.textContent = log?.title || "AHT Update Feed";
+    body.textContent = updateLogSummary(log?.text || log?.body || "");
     copy.append(meta, title, body);
     card.append(art, copy);
     els.updateLogGrid.appendChild(card);
@@ -1976,13 +2165,50 @@ function renderDeveloperUpdateLogs(logs = []) {
   for (const log of items) {
     const item = document.createElement("div");
     item.className = "developer-update-log-item";
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "developer-update-log-main";
+    main.addEventListener("click", () => openUpdateLog(log));
     const meta = document.createElement("span");
     const title = document.createElement("strong");
     const body = document.createElement("p");
     meta.textContent = `${updateLogMeta(log)} | ${shortDateTime(log.publishedAt)}`;
     title.textContent = log.title || "Untitled update";
     body.textContent = updateLogSummary(log.text || log.body || "");
-    item.append(meta, title, body);
+    main.append(meta, title, body);
+
+    const footer = document.createElement("div");
+    footer.className = "developer-update-log-footer";
+    const badges = document.createElement("div");
+    badges.className = "update-log-badges";
+    const addBadge = (label) => {
+      const badge = document.createElement("span");
+      badge.textContent = label;
+      badges.appendChild(badge);
+    };
+    if (updateLogImageUrl(log)) addBadge("Banner");
+    const mediaLabel = updateLogMediaLabel(log);
+    if (mediaLabel) addBadge(mediaLabel);
+    if (!badges.childElementCount) addBadge("Text only");
+
+    const actions = document.createElement("div");
+    actions.className = "developer-update-log-actions";
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "button compact";
+    preview.textContent = "Preview";
+    preview.addEventListener("click", () => openUpdateLog(log));
+    actions.appendChild(preview);
+    if (updateLogPlayable(log)) {
+      const play = document.createElement("button");
+      play.type = "button";
+      play.className = "button compact";
+      play.textContent = "Play";
+      play.addEventListener("click", () => openUpdateLogVideo(log));
+      actions.appendChild(play);
+    }
+    footer.append(badges, actions);
+    item.append(main, footer);
     els.developerUpdateLogsList.appendChild(item);
   }
 }
@@ -2005,21 +2231,45 @@ async function loadDeveloperUpdateLogs() {
   }
 }
 
+function updateLogInputReference(value, localKey, urlKey) {
+  const raw = String(value || "").trim();
+  if (!raw) return {};
+  return isRemoteUrl(raw) ? { [urlKey]: raw } : { [localKey]: raw };
+}
+
 async function publishDeveloperUpdateLog() {
+  const videoInput = els.updateLogVideoInput.value.trim();
+  const youtubeInput = els.updateLogYoutubeInput.value.trim();
+  if (videoInput && youtubeInput) {
+    setUpdateLogStatus("bad", "Choose one video", "Video file or YouTube link", "Use either a video file/public video URL or a YouTube link, not both.");
+    return;
+  }
+  if (youtubeInput && !youtubeEmbedUrl(youtubeInput)) {
+    setUpdateLogStatus("bad", "Invalid YouTube link", "Use a normal YouTube video, Shorts, or youtu.be link", "The launcher only shows a play button for valid YouTube video links.");
+    return;
+  }
   const payload = {
     version: els.updateLogVersionInput.value.trim(),
     title: els.updateLogTitleInput.value.trim(),
-    text: els.updateLogBodyInput.value.trim()
+    subtitle: els.updateLogSubtitleInput.value.trim(),
+    text: els.updateLogBodyInput.value.trim(),
+    ...updateLogInputReference(els.updateLogImageInput.value, "imageLocalPath", "imageUrl"),
+    ...updateLogInputReference(videoInput, "videoLocalPath", "videoUrl"),
+    youtubeUrl: youtubeInput
   };
   if (!payload.title || !payload.text) {
     setUpdateLogStatus("bad", "Log incomplete", "Title and text required", "Add a title and update-log text before pushing.");
     return;
   }
   setUnavailable(els.publishUpdateLogButton, true);
-  setUpdateLogStatus("warn", "Publishing log", payload.title, "Pushing update log to the Worker.");
+  setUpdateLogStatus("warn", "Publishing log", payload.title, (payload.videoLocalPath || payload.imageLocalPath) ? "Uploading media to R2, then pushing the update log to the Worker." : "Pushing update log metadata to the Worker.");
   try {
     const result = await window.aht.devPublishUpdateLog(payload);
     els.updateLogTitleInput.value = "";
+    els.updateLogSubtitleInput.value = "";
+    els.updateLogImageInput.value = "";
+    els.updateLogVideoInput.value = "";
+    els.updateLogYoutubeInput.value = "";
     els.updateLogBodyInput.value = "";
     setUpdateLogStatus("ok", "Log pushed", result.log?.title || payload.title, "Players will see it on the launcher home screen.");
     await loadDeveloperUpdateLogs();
@@ -3007,6 +3257,28 @@ els.devTabs.forEach((tab) => {
 });
 els.loadUpdateLogsButton.addEventListener("click", () => loadDeveloperUpdateLogs());
 els.publishUpdateLogButton.addEventListener("click", () => publishDeveloperUpdateLog());
+els.pickUpdateLogImageButton.addEventListener("click", async () => {
+  const file = await window.aht.selectUpdateLogImage();
+  if (file) els.updateLogImageInput.value = file;
+});
+els.pickUpdateLogVideoButton.addEventListener("click", async () => {
+  const file = await window.aht.selectUpdateLogVideo();
+  if (file) els.updateLogVideoInput.value = file;
+});
+els.updateLogCloseButton.addEventListener("click", () => closeUpdateLog());
+els.updateLogVideoCloseButton.addEventListener("click", () => closeUpdateLogVideo());
+els.updateLogOverlay.addEventListener("click", (event) => {
+  if (event.target === els.updateLogOverlay) closeUpdateLog();
+});
+els.updateLogVideoOverlay.addEventListener("click", (event) => {
+  if (event.target === els.updateLogVideoOverlay) closeUpdateLogVideo();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeUpdateLog();
+    closeUpdateLogVideo();
+  }
+});
 els.scanLauncherBuildsButton.addEventListener("click", () => scanLauncherBuilds());
 els.publishLauncherUpdateButton.addEventListener("click", () => publishLauncherUpdate());
 els.planServerTransferButton.addEventListener("click", () => planServerTransfer().catch(() => {}));

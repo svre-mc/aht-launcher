@@ -26,27 +26,34 @@ const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 const logs = [
   {
     id: 'log-4',
-    title: 'Fourth newest',
-    text: 'Newest update log from developer launcher.',
+    title: 'Launcher Stability Patch',
+    subtitle: 'Cleaner installs, faster update checks, and a readable full log.',
+    text: '# Launcher Stability\nNewest update log from developer launcher.\n- Full update-log articles open inside the launcher.\n- Optional media opens in a dedicated player.\n- Cards stay concise on the home screen.',
     version: '2.8.4',
     publishedAt: '2026-06-24T12:04:00.000Z',
-    author: 'admin'
+    author: 'admin',
+    image: { type: 'image', url: `${workerEndpoint}/update-media/log-4.webp`, path: 'update-media/log-4.webp' },
+    media: { type: 'youtube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', title: 'Launcher patch video' }
   },
   {
     id: 'log-3',
     title: 'Third newest',
-    text: 'Second visible update log.',
+    subtitle: 'A written-only update log.',
+    text: '# Written Notes\nSecond visible update log.\n- Non-playable logs should open the full article from the card art or title.\n![Patch comparison](https://packs.example.com/update-media/body-shot.webp)',
     version: '2.8.3',
     publishedAt: '2026-06-24T12:03:00.000Z',
-    author: 'admin'
+    author: 'admin',
+    image: { type: 'image', url: `${workerEndpoint}/update-media/log-3.webp`, path: 'update-media/log-3.webp' }
   },
   {
     id: 'log-2',
     title: 'Second newest',
-    text: 'Third visible update log.',
+    subtitle: 'A log with an uploaded MP4.',
+    text: '# Video Notes\nThird visible update log with a direct video URL.',
     version: '2.8.2',
     publishedAt: '2026-06-24T12:02:00.000Z',
-    author: 'admin'
+    author: 'admin',
+    media: { type: 'video', url: `${workerEndpoint}/update-media/patch.mp4`, title: 'Direct MP4' }
   },
   {
     id: 'log-1',
@@ -202,9 +209,12 @@ try {
     (() => {
       const cards = [...document.querySelectorAll('#updateLogGrid .feature-card')].map((card) => ({
         title: card.querySelector('strong')?.textContent || '',
-        meta: card.querySelector('span')?.textContent || '',
+        meta: card.querySelector('.feature-copy span')?.textContent || '',
         body: card.querySelector('p')?.textContent || '',
-        large: card.classList.contains('large')
+        large: card.classList.contains('large'),
+        playable: Boolean(card.querySelector('.play-glyph')),
+        hasCopyButton: Boolean(card.querySelector('.feature-copy-button')),
+        hasArtButton: Boolean(card.querySelector('.feature-art-button'))
       }));
       return {
         hidden: document.querySelector('#updateLogGrid').hidden,
@@ -218,7 +228,7 @@ try {
   if (proof.hidden || proof.count !== 3) {
     throw new Error(`Expected exactly three visible update-log cards: ${JSON.stringify(proof)}`);
   }
-  if (titles.join('|') !== 'Fourth newest|Third newest|Second newest') {
+  if (titles.join('|') !== 'Launcher Stability Patch|Third newest|Second newest') {
     throw new Error(`Player update logs are not the latest three in order: ${JSON.stringify(proof)}`);
   }
   if (proof.fullText.includes('Old hidden') || proof.fullText.includes('This older log must not render')) {
@@ -226,6 +236,38 @@ try {
   }
   if (!proof.cards[0].large || proof.cards.slice(1).some((card) => card.large)) {
     throw new Error(`Only the newest update log should be the large card: ${JSON.stringify(proof)}`);
+  }
+  if (proof.cards.some((card) => card.body !== 'Read more...')) {
+    throw new Error(`Cards should only show the compact Read more text: ${JSON.stringify(proof)}`);
+  }
+  if (proof.cards.some((card) => !card.hasCopyButton || !card.hasArtButton)) {
+    throw new Error(`Update-log cards should be clickable through art and title areas: ${JSON.stringify(proof)}`);
+  }
+  if (JSON.stringify(proof.cards.map((card) => card.playable)) !== JSON.stringify([true, false, true])) {
+    throw new Error(`Play buttons should only render for logs with media: ${JSON.stringify(proof)}`);
+  }
+  await evaluate(client, `document.querySelector('#updateLogGrid .feature-card:first-child .feature-art-button').click(); true`);
+  await waitFor(client, "!document.querySelector('#updateLogVideoOverlay').hidden && document.querySelector('#updateLogVideoStage iframe')", 'YouTube video overlay');
+  const videoProof = await evaluate(client, `({
+    hidden: document.querySelector('#updateLogVideoOverlay').hidden,
+    iframeSrc: document.querySelector('#updateLogVideoStage iframe')?.src || ''
+  })`);
+  if (!videoProof.iframeSrc.includes('youtube.com/embed/')) {
+    throw new Error(`YouTube playable did not open inside launcher: ${JSON.stringify(videoProof)}`);
+  }
+  await evaluate(client, `document.querySelector('#updateLogVideoCloseButton').click(); true`);
+  await waitFor(client, "document.querySelector('#updateLogVideoOverlay').hidden", 'closed video overlay');
+  await evaluate(client, `document.querySelector('#updateLogGrid .feature-card:nth-child(2) .feature-copy-button').click(); true`);
+  await waitFor(client, "!document.querySelector('#updateLogOverlay').hidden && document.querySelector('#updateLogArticleBody')?.textContent.includes('Non-playable logs should open')", 'full update-log article overlay');
+  const articleProof = await evaluate(client, `({
+    title: document.querySelector('#updateLogModalTitle')?.textContent || '',
+    subtitleHidden: document.querySelector('#updateLogModalSubtitle')?.hidden,
+    body: document.querySelector('#updateLogArticleBody')?.textContent || '',
+    articleImage: document.querySelector('#updateLogArticleBody figure img')?.src || '',
+    articleCaption: document.querySelector('#updateLogArticleBody figcaption')?.textContent || ''
+  })`);
+  if (articleProof.title !== 'Third newest' || articleProof.subtitleHidden || !articleProof.body.includes('Second visible update log') || !articleProof.articleImage.includes('/update-media/body-shot.webp') || articleProof.articleCaption !== 'Patch comparison') {
+    throw new Error(`Full update-log article did not render expected content: ${JSON.stringify(articleProof)}`);
   }
   if (!updateLogRequests.some((query) => query.includes('limit=3'))) {
     throw new Error(`Player did not request update logs with limit=3: ${JSON.stringify(updateLogRequests)}`);
@@ -237,6 +279,7 @@ try {
     requestQueries: updateLogRequests,
     titles,
     cardCount: proof.count,
+    playable: proof.cards.map((card) => card.playable),
     hidden: proof.hidden
   }, null, 2));
 } finally {

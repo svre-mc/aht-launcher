@@ -82,7 +82,17 @@ function configureTestRemoteDebugPort() {
   writeTestStartupProbe('after-remote-debug-hook', { port });
 }
 
+function configureTestUserDataPath() {
+  if (process.env.AHT_TEST_HOOKS !== '1') return;
+  const rawPath = String(process.env.AHT_TEST_USER_DATA || '').trim();
+  if (!rawPath) return;
+  const resolvedPath = path.resolve(rawPath);
+  app.setPath('userData', resolvedPath);
+  writeTestStartupProbe('after-user-data-hook', { userData: resolvedPath });
+}
+
 configureTestRemoteDebugPort();
+configureTestUserDataPath();
 
 let releaseBuilderModulePromise = null;
 let clientModpackZipModulePromise = null;
@@ -1299,8 +1309,8 @@ function minecraftUsernameMatchesAuth(auth = {}, username = '') {
 }
 
 async function inspectConfiguredMinecraftLauncherAuth(config = {}) {
-  const rootDir = config.minecraftLauncher?.rootDir || '';
-  if (!rootDir || config.minecraftLauncher?.enabled === false) {
+  const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
+  if (!rootDir) {
     return { signedIn: false, accountCount: 0, files: [], usernames: [], preferredUsername: '' };
   }
   return inspectMinecraftLauncherAuth(rootDir, {
@@ -1461,12 +1471,15 @@ async function expectedCacheExtraManagedFiles(config, latest = null) {
     }));
 }
 
-async function scanCurrentManagedIntegrity(config, latest = null) {
+async function scanCurrentManagedIntegrity(config, latest = null, options = {}) {
   const requiredManaged = await expectedCacheExtraManagedFiles(config, latest).catch((error) => {
     console.warn(`Unable to load expected cache extras for integrity scan: ${error.message || error}`);
     return [];
   });
-  return scanManagedIntegrity(config.instanceDir, { requiredManaged });
+  return scanManagedIntegrity(config.instanceDir, {
+    requiredManaged,
+    onProgress: typeof options.onProgress === 'function' ? options.onProgress : null
+  });
 }
 
 async function readUpdateLogs(config, limit = 3) {
@@ -2085,7 +2098,14 @@ async function runUpdate(forceRepair = false, options = {}) {
       }
     }
     updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };
-    const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall);
+    const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall, {
+      onProgress: (progress) => {
+        updateState.progress = {
+          ...progress,
+          percent: Math.min(99, weightedOperationPercent(progress.percent, 98, 1))
+        };
+      }
+    });
     await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');
     await sendLauncherEvent(config, identity, {
       type: forceRepair ? 'repair_completed' : 'install_completed',
@@ -3698,6 +3718,122 @@ function formatBytes(bytes = 0) {
   return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
+function normalizePublicBaseUrl(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw || !isHttpUrl(raw)) return '';
+  return raw.endsWith('/') ? raw : `${raw}/`;
+}
+
+function publicWorkerBaseUrl(config = {}) {
+  return normalizePublicBaseUrl(workerBaseUrlFromLatest(config.latestUrl))
+    || normalizePublicBaseUrl(accountBaseUrl(config));
+}
+
+function updateMediaAllowedExtensions(kind = '') {
+  return kind === 'image'
+    ? new Set(['.png', '.jpg', '.jpeg', '.webp'])
+    : new Set(['.mp4', '.webm', '.mov']);
+}
+
+function safeUpdateMediaKey(filePath, kind = 'media') {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!updateMediaAllowedExtensions(kind).has(ext)) {
+    throw new Error(kind === 'image'
+      ? 'Update-log banner must be a PNG, JPG, JPEG, or WEBP file.'
+      : 'Update-log video must be an MP4, WEBM, or MOV file.');
+  }
+  const stamp = new Date().toISOString().slice(0, 7);
+  const baseName = path.basename(filePath, ext)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || kind;
+  return `update-media/${stamp}/${crypto.randomUUID()}-${baseName}${ext}`;
+}
+
+function cleanRemoteMediaUrl(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!isHttpUrl(raw)) {
+    throw new Error('Update-log media links must start with http:// or https://.');
+  }
+  return raw;
+}
+
+async function uploadDeveloperUpdateLogMedia({ config, payload, filePath, kind }) {
+  const file = path.resolve(String(filePath || '').trim());
+  if (!file || !(await pathExists(file))) {
+    throw new Error(`Update-log ${kind} file was not found: ${filePath || '(empty)'}`);
+  }
+  const stat = await fs.stat(file);
+  if (!stat.isFile()) {
+    throw new Error(`Update-log ${kind} path is not a file: ${file}`);
+  }
+  const rel = safeUpdateMediaKey(file, kind);
+  const bucket = String(payload.r2Bucket || config.developer?.r2Bucket || 'ahtlauncher').trim();
+  const publicBase = publicWorkerBaseUrl(config);
+  if (!publicBase) {
+    throw new Error('Player Feed URL or Worker base URL is required before uploading update-log media.');
+  }
+  const secrets = await loadDeveloperSecrets().catch(() => ({}));
+  const credentials = await resolveR2DirectCredentials({ payload, config, secrets });
+  if (!directR2CredentialsReady(credentials)) {
+    throw new Error(`Fast R2 upload credentials are required for update-log media. Missing ${missingDirectR2CredentialLabels(credentials).join(', ')}.`);
+  }
+  const r2Direct = await loadR2DirectUploadModule();
+  const sha256 = await hashFile(file, 'sha256');
+  await r2Direct.uploadR2ObjectDirect({
+    ...credentials,
+    bucket,
+    key: rel,
+    file,
+    contentType: contentType(file),
+    sha256,
+    metadata: {
+      'aht-uploaded-by': 'aht-launcher',
+      'aht-update-log-media': kind
+    }
+  });
+  return {
+    type: kind === 'image' ? 'image' : 'video',
+    url: new URL(rel, publicBase).toString(),
+    path: rel,
+    title: path.basename(file),
+    size: stat.size,
+    sha256
+  };
+}
+
+async function prepareDeveloperUpdateLogPayload(config, payload = {}) {
+  const next = { ...payload };
+  const imageLocalPath = String(next.imageLocalPath || '').trim();
+  const videoLocalPath = String(next.videoLocalPath || '').trim();
+  const imageUrl = String(next.imageUrl || '').trim();
+  const videoUrl = String(next.videoUrl || '').trim();
+  const youtubeUrl = String(next.youtubeUrl || '').trim();
+
+  if (imageLocalPath) {
+    next.image = await uploadDeveloperUpdateLogMedia({ config, payload: next, filePath: imageLocalPath, kind: 'image' });
+  } else if (imageUrl) {
+    next.image = { type: 'image', url: cleanRemoteMediaUrl(imageUrl) };
+  }
+
+  if (videoLocalPath) {
+    next.media = await uploadDeveloperUpdateLogMedia({ config, payload: next, filePath: videoLocalPath, kind: 'video' });
+  } else if (youtubeUrl) {
+    next.media = { type: 'youtube', url: cleanRemoteMediaUrl(youtubeUrl) };
+  } else if (videoUrl) {
+    next.media = { type: 'video', url: cleanRemoteMediaUrl(videoUrl) };
+  }
+
+  delete next.imageLocalPath;
+  delete next.videoLocalPath;
+  delete next.imageUrl;
+  delete next.videoUrl;
+  delete next.youtubeUrl;
+  return next;
+}
+
 function trimUploadLines(max = 100) {
   if (uploadState.lines.length > max) {
     trimOperationLines(uploadState, max);
@@ -4998,9 +5134,15 @@ async function existingLaunchCwd(preferred = '') {
   }
   return app.getPath('home');
 }
+async function macOpenCommand() {
+  const absoluteOpen = '/usr/bin/open';
+  return await pathExists(absoluteOpen) ? absoluteOpen : 'open';
+}
+
 async function openMacApplication(args, cwd, env) {
-  await spawnLogged('open', args, { cwd, env, timeoutMs: 10_000 });
-  return { ok: true, command: 'open', args };
+  const command = await macOpenCommand();
+  await spawnLogged(command, args, { cwd, env, timeoutMs: 10_000 });
+  return { ok: true, command, args };
 }
 
 async function openMacMinecraftLauncher(cwd, env) {
@@ -5025,8 +5167,9 @@ async function openMacMinecraftLauncher(cwd, env) {
   }
   for (const args of [
     ['-b', 'com.mojang.minecraftlauncher'],
-    ['-a', 'Minecraft'],
-    ['-a', 'Minecraft Launcher']
+    ['-b', 'com.microsoft.minecraftlauncher'],
+    ['-a', 'Minecraft Launcher'],
+    ['-a', 'Minecraft']
   ]) {
     try {
       return await openMacApplication(args, cwd, env);
@@ -5238,6 +5381,20 @@ ipcMain.handle('dialog:json', async () => {
   });
   return result.canceled ? '' : result.filePaths[0];
 });
+ipcMain.handle('dialog:updateLogImage', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [{ name: 'Update-log banner images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+  });
+  return result.canceled ? '' : result.filePaths[0];
+});
+ipcMain.handle('dialog:updateLogVideo', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [{ name: 'Update-log videos', extensions: ['mp4', 'webm', 'mov'] }]
+  });
+  return result.canceled ? '' : result.filePaths[0];
+});
 ipcMain.handle('dialog:folder', async (_event, defaultPath = '') => {
   const options = { properties: ['openDirectory', 'createDirectory'] };
   const startingPath = typeof defaultPath === 'string' ? defaultPath.trim() : '';
@@ -5354,11 +5511,16 @@ ipcMain.handle('dev:login', async (_event, { username, password }) => {
 ipcMain.handle('dev:summary', async () => adminFetch(await loadConfig(), 'admin/summary'));
 ipcMain.handle('dev:events', async (_event, limit = 50) => adminFetch(await loadConfig(), `admin/events?limit=${limit}`));
 ipcMain.handle('dev:updateLogs', async (_event, limit = 20) => adminFetch(await loadConfig(), `admin/update-logs?limit=${limit}`));
-ipcMain.handle('dev:publishUpdateLog', async (_event, payload) => adminFetch(await loadConfig(), 'admin/update-logs', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(payload || {})
-}));
+ipcMain.handle('dev:publishUpdateLog', async (_event, payload) => {
+  assertDeveloperAuthenticated();
+  const config = await loadConfig();
+  const prepared = await prepareDeveloperUpdateLogPayload(config, payload || {});
+  return adminFetch(config, 'admin/update-logs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(prepared)
+  });
+});
 
 if (!singleInstanceLock) {
   app.exit(0);

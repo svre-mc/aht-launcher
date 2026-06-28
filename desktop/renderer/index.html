@@ -20,14 +20,14 @@
 
       <div class="game-list">
         <button id="gameTileButton" class="game-tile active" type="button" data-tab="player">
-          <span class="game-thumb aht-art"><span>AHT</span></span>
+          <span class="game-thumb bill-art"><span>AHT</span></span>
           <span class="game-copy">
             <strong id="sidePackTitle">AHT</strong>
             <small><span class="sidebar-version-dot" aria-hidden="true"></span><span id="sideInstalledVersion">Not Installed</span></small>
           </span>
         </button>
         <button class="game-tile coming-soon" type="button" disabled aria-disabled="true" tabindex="-1">
-          <span class="game-thumb alt aht-art"><span>AHT</span></span>
+          <span class="game-thumb alt bill-art"><span>AHT</span></span>
           <span class="game-copy">
             <strong>AHT 3.0</strong>
             <small>Coming soon</small>
@@ -339,7 +339,11 @@
             <div class="dev-fields update-log-fields">
               <label>Version <input id="updateLogVersionInput" type="text" placeholder="2.8.2"></label>
               <label>Title <input id="updateLogTitleInput" type="text" maxlength="120"></label>
-              <label class="span-2">Log Text <textarea id="updateLogBodyInput" rows="6" maxlength="2000"></textarea></label>
+              <label class="span-2">Subtitle <input id="updateLogSubtitleInput" type="text" maxlength="180" placeholder="Short one-line summary for the full log"></label>
+              <label class="span-2">Banner Image <span class="browse"><input id="updateLogImageInput" type="text" placeholder="PNG, JPG, JPEG, WEBP, or public image URL"><button id="pickUpdateLogImageButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label class="span-2">Video File <span class="browse"><input id="updateLogVideoInput" type="text" placeholder="Optional MP4, WEBM, MOV, or public video URL"><button id="pickUpdateLogVideoButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label class="span-2">YouTube Link <input id="updateLogYoutubeInput" type="url" placeholder="Optional YouTube link"></label>
+              <label class="span-2">Log Text <textarea id="updateLogBodyInput" rows="10" maxlength="8000" placeholder="Use headings, bullets, and concise patch notes. Players open the full article from the launcher card."></textarea></label>
             </div>
             <div id="updateLogStatus" class="release-check-card warn">
               <div>
@@ -475,6 +479,25 @@
       </div>
       <pre id="launcherUpdateLog" class="log launcher-update-log"></pre>
       <button id="launcherUpdateNowButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update Launcher</button>
+    </section>
+  </div>
+  <div id="updateLogOverlay" class="overlay update-log-overlay" hidden>
+    <article class="update-log-dialog" role="dialog" aria-modal="true" aria-labelledby="updateLogModalTitle">
+      <button id="updateLogCloseButton" class="modal-icon-button update-log-close" type="button" aria-label="Close update log"><span class="button-icon icon-close" aria-hidden="true"></span></button>
+      <header id="updateLogHero" class="update-log-hero">
+        <div class="update-log-hero-copy">
+          <span id="updateLogModalMeta" class="update-log-modal-meta">Update Log</span>
+          <h2 id="updateLogModalTitle">Update Log</h2>
+          <p id="updateLogModalSubtitle"></p>
+        </div>
+      </header>
+      <section id="updateLogArticleBody" class="update-log-article-body"></section>
+    </article>
+  </div>
+  <div id="updateLogVideoOverlay" class="overlay update-log-video-overlay" hidden>
+    <section class="update-log-video-dialog" role="dialog" aria-modal="true" aria-label="Update log video">
+      <button id="updateLogVideoCloseButton" class="modal-icon-button update-log-video-close" type="button" aria-label="Close video"><span class="button-icon icon-close" aria-hidden="true"></span></button>
+      <div id="updateLogVideoStage" class="update-log-video-stage"></div>
     </section>
   </div>
   <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>

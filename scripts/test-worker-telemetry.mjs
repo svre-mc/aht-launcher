@@ -295,12 +295,24 @@ const publishedLog = await jsonRequest('/admin/update-logs', {
   body: JSON.stringify({
     version: '2.8.2',
     title: 'AHT Update Feed',
-    text: 'Exact AHT client ZIP installs and launcher proof telemetry are now visible in the launcher.'
+    subtitle: 'Exact client ZIP installs and launcher proof telemetry.',
+    text: '# Launcher Patch\nExact AHT client ZIP installs and launcher proof telemetry are now visible in the launcher.\n- Full log modal ready\n- Optional videos ready',
+    image: { type: 'image', url: 'https://packs.example.com/update-media/banner.webp', path: 'update-media/banner.webp' },
+    media: { type: 'youtube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', title: 'Patch video' }
   })
 });
 const publicLogs = await jsonRequest('/api/update-logs?limit=3');
 const adminLogs = await jsonRequest('/admin/update-logs?limit=10', { headers: auth });
-if (publishedLog.log.title !== 'AHT Update Feed' || publicLogs.logs.length !== 1 || adminLogs.logs.length !== 1) {
+if (
+  publishedLog.log.title !== 'AHT Update Feed'
+  || publishedLog.log.subtitle !== 'Exact client ZIP installs and launcher proof telemetry.'
+  || publishedLog.log.image?.url !== 'https://packs.example.com/update-media/banner.webp'
+  || publishedLog.log.media?.type !== 'youtube'
+  || !publishedLog.log.text.includes('Full log modal ready')
+  || publicLogs.logs.length !== 1
+  || publicLogs.logs[0].media?.type !== 'youtube'
+  || adminLogs.logs.length !== 1
+) {
   throw new Error(`Update log publish/list failed: ${JSON.stringify({ publishedLog, publicLogs, adminLogs })}`);
 }
 const summary = await jsonRequest('/admin/summary', { headers: auth });

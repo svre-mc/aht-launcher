@@ -137,7 +137,8 @@ const server = http.createServer(async (request, response) => {
     const body = await readBody(request);
     requests.push(body);
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    if (String(body.username || '').toLowerCase() === 'takenuser_1' && !(body.recoverExistingUsername && body.minecraftAccountMatched)) {
+    const duplicateUsernames = new Set(['takenuser_1', 'disabledprof']);
+    if (duplicateUsernames.has(String(body.username || '').toLowerCase()) && !(body.recoverExistingUsername && body.minecraftAccountMatched)) {
       response.statusCode = 409;
       response.end(JSON.stringify({ error: 'That username is not available.' }));
       return;
@@ -252,13 +253,43 @@ try {
     throw new Error(`Recovery did not retry with a Minecraft Launcher account match: ${JSON.stringify(requests)}`);
   }
 
+  await writeJson(path.join(mcRoot, 'launcher_accounts.json'), {
+    activeAccountLocalId: 'disabled-profile-account',
+    accounts: {
+      'disabled-profile-account': {
+        type: 'Xbox',
+        minecraftProfile: { name: 'DisabledProf' }
+      }
+    }
+  });
+  config.minecraftLauncher = {
+    ...config.minecraftLauncher,
+    enabled: false,
+    rootDir: mcRoot,
+    autoImportAccount: true
+  };
+  await writeJson(configPath, config);
+  const disabledProfileRecovery = await evaluate(client, `window.aht.accountRegister('DisabledProf')`);
+  const disabledProfileIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
+  const disabledProfileRequests = requests.filter((item) => item.username === 'DisabledProf');
+  if (
+    !disabledProfileRecovery?.ok
+    || disabledProfileIdentity.minecraftUsername !== 'DisabledProf'
+    || disabledProfileIdentity.usernameRegistrationMode !== 'minecraft-launcher-recovery'
+    || disabledProfileRequests.length !== 2
+    || disabledProfileRequests[1].minecraftAccountMatched !== true
+    || disabledProfileRequests[1].recoverExistingUsername !== true
+  ) {
+    throw new Error(`Disabled Minecraft profile toggle blocked account recovery: ${JSON.stringify({ disabledProfileRecovery, disabledProfileIdentity, disabledProfileRequests })}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
     duplicateProof,
     duplicateAfterRefresh,
-    registeredUsername: recoveredIdentity.minecraftUsername,
-    recoveryMode: recoveredIdentity.usernameRegistrationMode,
+    registeredUsername: disabledProfileIdentity.minecraftUsername,
+    recoveryMode: disabledProfileIdentity.usernameRegistrationMode,
     requests: requests.map((item) => ({ username: item.username, installId: item.installId, packId: item.packId, recovered: Boolean(item.recoverExistingUsername && item.minecraftAccountMatched) }))
   }, null, 2));} finally {
   if (client) {

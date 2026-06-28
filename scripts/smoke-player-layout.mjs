@@ -17,11 +17,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-layout-'));
 const userData = path.join(root, 'userData');
 const minecraftRoot = path.join(root, '.minecraft');
 const tempDefaults = path.join(root, 'app.defaults.json');
-const packagedDefaults = smokeExe ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
-const defaultsPath = packagedDefaults || tempDefaults;
-const originalDefaults = packagedDefaults && fs.existsSync(packagedDefaults)
-  ? await fsp.readFile(packagedDefaults)
-  : null;
+const defaultsPath = tempDefaults;
 const screenshotDir = path.join(root, 'screenshots');
 const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
@@ -258,7 +254,13 @@ await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
-  env: { ...process.env, AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults, ELECTRON_ENABLE_LOGGING: '0' },
+  env: {
+    ...process.env,
+    AHT_APP_DEFAULTS: tempDefaults,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
+    ELECTRON_ENABLE_LOGGING: '0'
+  },
   stdio: 'ignore',
   windowsHide: true
 });
@@ -325,7 +327,7 @@ try {
   }
   const sidebarArtProof = await waitFor(client, `
     (() => {
-      const thumbs = [...document.querySelectorAll('.game-list .game-thumb.aht-art')];
+      const thumbs = [...document.querySelectorAll('.game-list .game-thumb.bill-art')];
       return thumbs.length >= 2 ? thumbs.map((thumb) => ({
         className: thumb.className,
         before: getComputedStyle(thumb, '::before').content,
@@ -338,8 +340,8 @@ try {
   if (dirtySidebarArt.length) {
     throw new Error(`Sidebar AHT thumbnails must not inherit large cover-art overlays: ${JSON.stringify(dirtySidebarArt)}`);
   }
-  if (!sidebarArtProof.every((thumb) => thumb.backgroundImage.includes('aht-cover.png'))) {
-    throw new Error(`Sidebar AHT thumbnails must keep the official cover asset: ${JSON.stringify(sidebarArtProof)}`);
+  if (!sidebarArtProof.every((thumb) => thumb.backgroundImage.includes('aht-bill-transparent.png'))) {
+    throw new Error(`Sidebar AHT thumbnails must use the transparent bill asset: ${JSON.stringify(sidebarArtProof)}`);
   }
   const identityProof = await waitFor(client, `
     window.aht.getStatus().then((status) => status.identity?.minecraftUsername ? {
@@ -415,11 +417,4 @@ try {
   }
   child.kill();
   await new Promise((resolve) => server.close(resolve));
-  if (packagedDefaults) {
-    if (originalDefaults) {
-      await fsp.writeFile(packagedDefaults, originalDefaults);
-    } else {
-      await fsp.rm(packagedDefaults, { force: true });
-    }
-  }
 }

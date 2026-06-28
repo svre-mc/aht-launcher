@@ -6,26 +6,38 @@ const store = new Map([
   ['launcher/latest.json', { value: JSON.stringify({ product: 'aht-launcher', version: '0.1.1' }), contentType: 'application/json; charset=utf-8' }],
   ['launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe', { value: new Uint8Array([7, 8, 9]), contentType: '' }],
   ['cache/files/test.jar', { value: new Uint8Array([1, 2, 3]), contentType: '' }],
+  ['packs/range-test.zip', { value: new Uint8Array([10, 11, 12, 13, 14]), contentType: '' }],
+  ['packs/empty.zip', { value: new Uint8Array([]), contentType: '' }],
   ['server/aht_version_lock.cfg', { value: 'requiredVersion=2.8.1', contentType: '' }]
 ]);
 
-function objectFor(key, record) {
+function objectFor(key, record, options = {}) {
   const bytes = typeof record.value === 'string' ? encoder.encode(record.value) : record.value;
+  const requestedRange = options.range || null;
+  const rangeOffset = Math.max(0, Number(requestedRange?.offset || 0));
+  const rangeLength = Math.max(0, Number(requestedRange?.length || bytes.byteLength));
+  const responseBytes = requestedRange
+    ? bytes.subarray(rangeOffset, Math.min(bytes.byteLength, rangeOffset + rangeLength))
+    : bytes;
   return {
     key,
     size: bytes.byteLength,
     uploaded: new Date('2026-06-24T00:00:00Z'),
     httpEtag: '"test-etag"',
     httpMetadata: record.contentType ? { contentType: record.contentType } : {},
-    body: new Response(bytes).body
+    body: new Response(responseBytes).body
   };
 }
 
 const env = {
   AHT_RELEASES: {
-    async get(key) {
+    async head(key) {
       const record = store.get(key);
       return record ? objectFor(key, record) : null;
+    },
+    async get(key, options = {}) {
+      const record = store.get(key);
+      return record ? objectFor(key, record, options) : null;
     }
   },
   AHT_DATA: {
@@ -44,6 +56,8 @@ async function check(name, request, expected) {
     contentType: response.headers.get('content-type'),
     cacheControl: response.headers.get('cache-control'),
     length: response.headers.get('content-length'),
+    contentRange: response.headers.get('content-range'),
+    acceptRanges: response.headers.get('accept-ranges'),
     body
   };
   for (const [key, value] of Object.entries(expected)) {
@@ -86,6 +100,27 @@ results.push(await check('launcher installer', new Request('https://worker.test/
   contentType: 'application/vnd.microsoft.portable-executable',
   cacheControl: 'public, max-age=31536000, immutable',
   length: '3'
+}));
+results.push(await check('range pack', new Request('https://worker.test/packs/range-test.zip', { headers: { Range: 'bytes=1-3' } }), {
+  status: 206,
+  contentType: 'application/zip',
+  cacheControl: 'public, max-age=31536000, immutable',
+  length: '3',
+  contentRange: 'bytes 1-3/5',
+  acceptRanges: 'bytes',
+  body: String.fromCharCode(11, 12, 13)
+}));
+results.push(await check('invalid range', new Request('https://worker.test/packs/range-test.zip', { headers: { Range: 'bytes=99-100' } }), {
+  status: 416,
+  contentRange: 'bytes */5',
+  acceptRanges: 'bytes',
+  body: ''
+}));
+results.push(await check('empty suffix range', new Request('https://worker.test/packs/empty.zip', { headers: { Range: 'bytes=-1' } }), {
+  status: 416,
+  contentRange: 'bytes */0',
+  acceptRanges: 'bytes',
+  body: ''
 }));
 results.push(await check('head jar', new Request('https://worker.test/cache/files/test.jar', { method: 'HEAD' }), {
   status: 200,

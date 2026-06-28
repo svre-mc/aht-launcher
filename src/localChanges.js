@@ -4,6 +4,28 @@ import { hashFile, normalizeRelPath, pathExists, readJsonFile, safeJoin } from '
 
 const MONITORED_ROOTS = ['mods'];
 
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function progressEmitter(options = {}, defaultPhase = 'Scanning files') {
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  if (!onProgress) {
+    return () => {};
+  }
+  return (phase = defaultPhase, completed = 0, total = 0, currentPath = '') => {
+    const safeTotal = Math.max(0, Number(total) || 0);
+    const safeCompleted = Math.max(0, Number(completed) || 0);
+    onProgress({
+      phase,
+      currentPath,
+      completed: safeCompleted,
+      total: safeTotal,
+      percent: safeTotal ? Math.max(0, Math.min(100, Math.round((safeCompleted / safeTotal) * 100))) : 0
+    });
+  };
+}
+
 function normalizeManagedModFiles(managed = []) {
   return managed
     .map((item) => ({
@@ -24,7 +46,8 @@ function managedModFiles(managed = [], requiredManaged = []) {
   return [...byPath.values()];
 }
 
-async function walkFiles(root, rel = '') {
+async function walkFiles(root, rel = '', options = {}) {
+  const state = options.state || { visited: 0, yieldEvery: Math.max(1, Number(options.yieldEvery) || 100) };
   const target = path.join(root, rel);
   if (!(await pathExists(target))) {
     return [];
@@ -39,12 +62,16 @@ async function walkFiles(root, rel = '') {
   const entries = await fs.readdir(target, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
+    state.visited += 1;
+    if (state.visited % state.yieldEvery === 0) {
+      await yieldToEventLoop();
+    }
     if (entry.name === '.aht-launcher') {
       continue;
     }
     const childRel = rel ? path.join(rel, entry.name) : entry.name;
     if (entry.isDirectory()) {
-      files.push(...await walkFiles(root, childRel));
+      files.push(...await walkFiles(root, childRel, { state }));
     } else if (entry.isFile()) {
       const childAbs = path.join(root, childRel);
       const childStat = await fs.stat(childAbs);
@@ -54,18 +81,81 @@ async function walkFiles(root, rel = '') {
   return files;
 }
 
-async function scanAddedModFiles(instanceDir, managedSet, limit) {
+function managedDirectoryPrefixes(managedSet) {
+  const prefixes = new Set();
+  for (const relPath of managedSet) {
+    const parts = normalizeRelPath(relPath).split('/').filter(Boolean);
+    let prefix = '';
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      prefix = prefix ? `${prefix}/${parts[index]}` : parts[index];
+      prefixes.add(`${prefix}/`.toLowerCase());
+    }
+  }
+  return prefixes;
+}
+
+async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
   const added = [];
+  const yieldEvery = Math.max(1, Number(options.yieldEvery) || 25);
+  const managedDirs = managedDirectoryPrefixes(managedSet);
+  let visited = 0;
+
+  const addFileIssue = async (abs, rel, size) => {
+    if (managedSet.has(rel)) {
+      return;
+    }
+    added.push({
+      path: rel,
+      size,
+      sha256: await hashFile(abs, 'sha256')
+    });
+  };
+
+  const addDirectoryIssue = (rel) => {
+    const folderPath = rel.endsWith('/') ? rel : `${rel}/`;
+    if (managedSet.has(rel) || managedSet.has(folderPath)) {
+      return;
+    }
+    added.push({
+      path: folderPath,
+      size: 0,
+      source: 'unmanaged-directory',
+      entryType: 'directory'
+    });
+  };
+
   for (const root of MONITORED_ROOTS) {
     const rootPath = safeJoin(instanceDir, root);
-    for (const file of await walkFiles(rootPath)) {
-      const rel = root.includes('.') ? root : `${root}/${file.rel}`;
-      if (!managedSet.has(rel)) {
-        added.push({
-          path: rel,
-          size: file.size,
-          sha256: await hashFile(file.abs, 'sha256')
-        });
+    const entries = await fs.readdir(rootPath, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.name === '.aht-launcher') {
+        continue;
+      }
+      visited += 1;
+      if (visited % yieldEvery === 0) {
+        await yieldToEventLoop();
+      }
+      const rel = normalizeRelPath(`${root}/${entry.name}`);
+      if (entry.isDirectory()) {
+        const folderPath = `${rel}/`;
+        if (!managedDirs.has(folderPath.toLowerCase())) {
+          addDirectoryIssue(rel);
+        } else {
+          for (const file of await walkFiles(rootPath, entry.name, { yieldEvery })) {
+            const fileRel = normalizeRelPath(`${root}/${file.rel}`);
+            visited += 1;
+            await addFileIssue(file.abs, fileRel, file.size);
+            if (visited % yieldEvery === 0) {
+              await yieldToEventLoop();
+            }
+            if (added.length >= limit) {
+              break;
+            }
+          }
+        }
+      } else if (entry.isFile()) {
+        const stat = await fs.stat(path.join(rootPath, entry.name));
+        await addFileIssue(path.join(rootPath, entry.name), rel, stat.size);
       }
       if (added.length >= limit) {
         break;
@@ -89,18 +179,28 @@ async function loadManaged(instanceDir) {
 export async function scanLocalChanges(instanceDir, options = {}) {
   const limit = options.limit || 500;
   const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
+  const managedToCheck = managed.filter((item) => item.relativePath);
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
   const missing = [];
   const added = [];
+  const progressPhase = 'Scanning managed mods';
+  const reportProgress = progressEmitter(options, progressPhase);
+  let scanned = 0;
+  reportProgress('Scanning managed mods', 0, managedToCheck.length);
 
-  for (const item of managed) {
+  for (const item of managedToCheck) {
     if (!item.relativePath) {
       continue;
     }
     const target = safeJoin(instanceDir, item.relativePath);
     if (!(await pathExists(target))) {
       missing.push({ path: item.relativePath, source: item.source || 'managed' });
+      scanned += 1;
+      reportProgress(progressPhase, scanned, managedToCheck.length, item.relativePath);
+      if (scanned % 10 === 0) {
+        await yieldToEventLoop();
+      }
       continue;
     }
     if (item.sha256) {
@@ -116,9 +216,16 @@ export async function scanLocalChanges(instanceDir, options = {}) {
         });
       }
     }
+    scanned += 1;
+    reportProgress('Scanning managed mods', scanned, managedToCheck.length, item.relativePath);
+    if (scanned % 10 === 0) {
+      await yieldToEventLoop();
+    }
   }
 
-  added.push(...await scanAddedModFiles(instanceDir, managedSet, limit));
+  reportProgress('Scanning extra mods', managedToCheck.length, managedToCheck.length);
+  added.push(...await scanAddedModFiles(instanceDir, managedSet, limit, { yieldEvery: 25 }));
+  reportProgress('Scan complete', managedToCheck.length, managedToCheck.length);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -139,18 +246,28 @@ export async function scanLocalChanges(instanceDir, options = {}) {
 export async function scanManagedIntegrity(instanceDir, options = {}) {
   const limit = options.limit || 500;
   const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
+  const managedToCheck = managed.filter((item) => item.relativePath);
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
   const missing = [];
+  const progressPhase = 'Verifying installed files';
+  const reportProgress = progressEmitter(options, progressPhase);
   let checked = 0;
+  let scanned = 0;
+  reportProgress('Verifying installed files', 0, managedToCheck.length);
 
-  for (const item of managed) {
+  for (const item of managedToCheck) {
     if (!item.relativePath) {
       continue;
     }
     const target = safeJoin(instanceDir, item.relativePath);
     if (!(await pathExists(target))) {
       missing.push({ path: item.relativePath, source: item.source || 'managed' });
+      scanned += 1;
+      reportProgress(progressPhase, scanned, managedToCheck.length, item.relativePath);
+      if (scanned % 10 === 0) {
+        await yieldToEventLoop();
+      }
       continue;
     }
     checked += 1;
@@ -167,9 +284,16 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
         });
       }
     }
+    scanned += 1;
+    reportProgress('Verifying installed files', scanned, managedToCheck.length, item.relativePath);
+    if (scanned % 10 === 0) {
+      await yieldToEventLoop();
+    }
   }
 
-  const added = await scanAddedModFiles(instanceDir, managedSet, limit);
+  reportProgress('Scanning extra mods', managedToCheck.length, managedToCheck.length);
+  const added = await scanAddedModFiles(instanceDir, managedSet, limit, { yieldEvery: 25 });
+  reportProgress('Integrity scan complete', managedToCheck.length, managedToCheck.length);
   const corruptCount = changed.length + missing.length + added.length;
   return {
     generatedAt: new Date().toISOString(),

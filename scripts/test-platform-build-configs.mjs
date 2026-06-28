@@ -186,8 +186,8 @@ assert(rendererHtml.includes('class="brand-mark bill-art"'), 'Brand mark must us
 assert(rendererHtml.includes('class="profile-avatar bill-art"'), 'Player avatar must use the transparent bill asset.');
 assert(!rendererHtml.includes('class="brand-mark aht-art"'), 'Brand mark must not use the full cover art.');
 assert(!rendererHtml.includes('class="profile-avatar aht-art"'), 'Player avatar must not use the full cover art.');
-assert(rendererHtml.includes('class="game-thumb aht-art"'), 'AHT modpack tile must keep the full cover art.');
-assert(rendererHtml.includes('class="game-thumb alt aht-art"'), 'AHT 3.0 tile must keep the full cover art.');
+assert(rendererHtml.includes('class="game-thumb bill-art"'), 'AHT modpack tile must use the clean transparent bill asset.');
+assert(rendererHtml.includes('class="game-thumb alt bill-art"'), 'AHT 3.0 tile must use the clean transparent bill asset.');
 assert(rendererHtml.includes('class="game-thumb download-thumb aht-art"'), 'Downloads tile must keep the full cover art.');
 assert(rendererCss.includes('assets/aht-cover.png'), 'Full cover art CSS must stay available for modpack tiles.');
 assert(rendererCss.includes('assets/aht-bill-transparent.png'), 'Transparent bill art CSS must stay available for app/profile marks.');
@@ -258,10 +258,12 @@ assert(rendererApp.includes('Legacy CurseForge export ZIPs are blocked for norma
 assert(desktopMain.includes('allowLegacyCurseForge') && desktopMain.includes('assertFullClientReleaseAllowed'), 'Main process must block legacy CurseForge releases by default with an explicit test/tooling allow flag.');
 assert(desktopMain.includes("add('error', 'legacy CurseForge release blocked'"), 'Release validation must block legacy CurseForge artifacts before R2 upload.');
 assert(checkProductionReadiness.includes('live pack release is exact AHT client ZIP') && checkProductionReadiness.includes("from '../src/clientPackFormat.js'") && !checkProductionReadiness.includes("const CLIENT_PACK_FORMAT = 'aht-full-client-zip';"), 'Production readiness must import the shared client pack format instead of duplicating the full-client ZIP string.');
+assert(checkProductionReadiness.includes('function httpRangeStatus') && checkProductionReadiness.includes('Range: "bytes=0-0"') && checkProductionReadiness.includes('live pack ZIP supports parallel range downloads'), 'Production readiness must verify live Worker/R2 pack ZIP Range support for fast multipart downloads.');
 assert(desktopMain.includes("from '../src/clientPackFormat.js'") && !desktopMain.includes("const CLIENT_PACK_FORMAT = 'aht-full-client-zip';") && !desktopMain.includes("const CLIENT_PACK_METADATA_ENTRY = 'aht-client-pack.json';"), 'Main process must import shared client pack constants instead of duplicating them.');
 assert(checkProductionReadiness.includes('function nextRequiredStep') && checkProductionReadiness.includes('publish an exact AHT client ZIP release') && checkProductionReadiness.includes('report.nextRequiredStep'), 'Production readiness must print blocker-specific next steps instead of generic cloud setup guidance.');
 assert(!checkProductionReadiness.includes("console.log('Next required step: run Developer > Setup Cloud after Cloudflare login, then re-run this check.');"), 'Production readiness must not always print the cloud setup next step for unrelated blockers.');
 assert(checkProductionReadiness.includes('live launcher update feed matches local version') && checkProductionReadiness.includes('liveLauncherVersion === localLauncherVersion'), 'Production readiness must block when the hosted launcher update feed is older than the local package version.');
+assert(checkProductionReadiness.includes('live launcher Windows download matches local artifact') && checkProductionReadiness.includes('localWindowsLauncherArtifact') && checkProductionReadiness.includes('liveWindowsSha === localWindowsSha') && checkProductionReadiness.includes('liveWindowsSize === localWindowsSize'), 'Production readiness must block when the hosted Windows launcher download hash/size differs from the local artifact.');
 assert(checkProductionReadiness.includes('stalePackFeed && staleLauncherFeed') && checkProductionReadiness.includes('publish an exact AHT client ZIP release and a launcher update'), 'Production readiness must report both stale pack and launcher feed blockers when both are present.');
 assert(checkProductionReadiness.includes("from './validate-launcher-update-manifest.mjs'") && checkProductionReadiness.includes('function validateLauncherDownloads') && checkProductionReadiness.includes('validateLauncherUpdateManifest(manifest') && checkProductionReadiness.includes('live launcher update feed has Windows and macOS downloads'), 'Production readiness must use the reusable strict launcher manifest validator for live launcher update feeds.');
 assert(checkProductionReadiness.includes("names.includes('live launcher update feed has Windows and macOS downloads')"), 'Production readiness next-step guidance must route missing launcher downloads to a launcher update publish.');
@@ -344,8 +346,11 @@ for (const [label, source] of Object.entries({ desktopMain, rendererApp, rendere
   }
 }
 assert(desktopMain.includes("openMacMinecraftLauncher(cwd, env)"), 'macOS play must use the macOS Minecraft Launcher opener.');
+assert(desktopMain.includes("async function macOpenCommand()") && desktopMain.includes("const absoluteOpen = '/usr/bin/open'") && desktopMain.includes("return await pathExists(absoluteOpen) ? absoluteOpen : 'open';"), 'macOS opener must prefer absolute /usr/bin/open so Finder-launched apps do not depend on PATH.');
 assert(desktopMain.includes("'/Applications/Minecraft.app'"), 'macOS opener must try the normal Minecraft.app path.');
-assert(desktopMain.includes("['-a', 'Minecraft']"), 'macOS opener must fall back to the Minecraft app name.');
+assert(desktopMain.includes("'/Applications/Minecraft Launcher.app'"), 'macOS opener must try the legacy Minecraft Launcher.app path.');
+assert(desktopMain.includes("['-b', 'com.mojang.minecraftlauncher']") && desktopMain.includes("['-b', 'com.microsoft.minecraftlauncher']"), 'macOS opener must try Mojang and Microsoft Minecraft Launcher bundle IDs.');
+assert(desktopMain.includes("['-a', 'Minecraft']") && desktopMain.includes("['-a', 'Minecraft Launcher']"), 'macOS opener must fall back to both Minecraft app names.');
 assert(desktopMain.includes('async function existingLaunchCwd'), 'Minecraft Launcher opener must sanitize missing configured cwd before spawning.');
 assert(desktopMain.includes('const cwd = await existingLaunchCwd(requestedCwd);'), 'Minecraft Launcher opener must use a verified existing cwd.');
 assert(desktopMain.includes('async function openWindowsStoreMinecraftLauncher(cwd, env)'), 'Windows Store Minecraft Launcher opener must be isolated.');
@@ -355,6 +360,7 @@ assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = n
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');
 assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update and Play must install Forge into synced launcher roots.');
 assert(desktopMain.includes('function isCurseForgeMinecraftRoot') && desktopMain.includes('Number(a.fallback) - Number(b.fallback)') && desktopMain.includes("isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir)"), 'Regular player setup must prefer normal Minecraft Launcher roots and migrate old CurseForge launcher roots.');
+assert(desktopMain.includes('const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();') && !desktopMain.includes("if (!rootDir || config.minecraftLauncher?.enabled === false)"), 'Minecraft account recovery must still inspect signed-in launcher accounts when the profile toggle is disabled or stale.');
 const forgeInstaller = fs.readFileSync(new URL('../src/forgeInstaller.js', import.meta.url), 'utf8');
 assert(desktopMain.includes('javaCacheDir') || forgeInstaller.includes('ensureManagedJava8Runtime'), 'Forge installer must have managed Java 8 fallback for stale jre-legacy certificates.');
 assert(forgeInstaller.includes('windowsJavaInstallRoots') && forgeInstaller.includes('Eclipse Adoptium'), 'Forge installer must prefer installed Temurin/Adoptium Java 8 before stale bundled Minecraft Java.');

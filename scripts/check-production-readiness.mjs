@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -122,6 +123,12 @@ function nextRequiredStep(blockers = []) {
   }
   if (staleLauncherFeed) {
     return 'publish a launcher update for the current package version when ready, then re-run this check.';
+  }
+  if (names.includes('live launcher Windows download matches local artifact')) {
+    return 'publish the current Windows launcher artifact to the launcher update feed, then re-run this check.';
+  }
+  if (names.includes('live pack ZIP supports parallel range downloads')) {
+    return 'deploy the Cloudflare Worker Range support, then re-run this check before sending players large pack updates.';
   }
   if (names.includes('Cloudflare account authenticated') || names.some((name) => name.startsWith('live R2 ') || name === 'live Worker deployed')) {
     return 'run Developer > Setup Cloud after Cloudflare login, then re-run this check.';
@@ -323,6 +330,84 @@ function httpJsonStatus(url) {
   };
 }
 
+function resolveHttpReference(baseUrl, reference = '') {
+  const value = String(reference || '').trim();
+  if (!value) return '';
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return value;
+  }
+}
+
+function httpRangeStatus(url) {
+  if (!/^https?:\/\//i.test(String(url || ''))) {
+    return { ok: false, status: 0, detail: 'missing URL' };
+  }
+  const script = [
+    'const url = process.argv[1];',
+    'fetch(url, { method: "GET", headers: { Range: "bytes=0-0", "Accept-Encoding": "identity" } })',
+    '  .then(async (response) => {',
+    '    const body = await response.arrayBuffer().catch(() => new ArrayBuffer(0));',
+    '    console.log(JSON.stringify({',
+    '      status: response.status,',
+    '      contentRange: response.headers.get("content-range") || "",',
+    '      acceptRanges: response.headers.get("accept-ranges") || "",',
+    '      length: response.headers.get("content-length") || "",',
+    '      bodyBytes: body.byteLength',
+    '    }));',
+    '  })',
+    '  .catch((error) => {',
+    '    console.log(JSON.stringify({ status: 0, error: error.message || String(error) }));',
+    '    process.exitCode = 1;',
+    '  });'
+  ].join('\n');
+  const result = spawnSync(process.execPath, ['-e', script, url], {
+    cwd: rootDir,
+    encoding: 'utf8',
+    timeout: 30000
+  });
+  let parsed = null;
+  try {
+    parsed = JSON.parse(result.stdout || '{}');
+  } catch {}
+  const status = Number(parsed?.status || 0);
+  const contentRange = String(parsed?.contentRange || '');
+  const ok = result.status === 0
+    && status === 206
+    && /^bytes\s+0-0\/\d+$/i.test(contentRange)
+    && Number(parsed?.bodyBytes || 0) === 1;
+  return {
+    ok,
+    status,
+    detail: ok
+      ? `${status} ${contentRange}`
+      : `${status || 'ERR'} ${parsed?.error || contentRange || result.stderr || result.error || url}`
+  };
+}
+
+function sha256FileSync(filePath) {
+  const hash = createHash('sha256');
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest('hex');
+}
+
+function localWindowsLauncherArtifact(version = '') {
+  if (!version) return null;
+  const filePath = path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.exe`);
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    return {
+      filePath,
+      size: stat.size,
+      sha256: sha256FileSync(filePath)
+    };
+  } catch {
+    return null;
+  }
+}
+
 function validateLauncherDownloads(manifest = {}, latestUrl = '') {
   const result = validateLauncherUpdateManifest(manifest, { latestUrl });
   return result.ok ? [] : result.errors;
@@ -499,6 +584,16 @@ function checkLiveCloudflareState(authOk) {
         : `published ${latest?.version || 'unknown version'} is legacy CurseForge/cache format; publish an exact AHT client ZIP before sending players`)
       : 'release feed unavailable'
   );
+  const packRangeUrl = releaseFeed.ok
+    ? resolveHttpReference(defaults?.latestUrl || '', latest?.zip?.url || latest?.zip?.path || '')
+    : '';
+  const packRange = httpRangeStatus(packRangeUrl);
+  addCheck(
+    'live pack ZIP supports parallel range downloads',
+    'blocker',
+    Boolean(releaseFeed.ok && fullClientRelease && packRange.ok),
+    packRange.ok ? packRange.detail : `${packRange.detail}; deploy the Worker Range support before sending players large ZIPs`
+  );
   const launcherFeed = httpJsonStatus(defaults?.launcherUpdate?.latestUrl || '');
   addCheck(
     'live launcher update feed published',
@@ -523,6 +618,28 @@ function checkLiveCloudflareState(authOk) {
     'blocker',
     Boolean(launcherFeed.ok && launcherDownloadProblems.length === 0),
     launcherDownloadProblems.join(', ') || 'windows-x64, macos-arm64, macos-x64'
+  );
+  const localWindowsArtifact = localWindowsLauncherArtifact(localLauncherVersion);
+  const liveWindowsArtifact = launcherFeed.json?.downloads?.['windows-x64'] || null;
+  const liveWindowsSha = String(liveWindowsArtifact?.sha256 || '').toLowerCase();
+  const liveWindowsSize = Number(liveWindowsArtifact?.size || 0);
+  const localWindowsSha = String(localWindowsArtifact?.sha256 || '').toLowerCase();
+  const localWindowsSize = Number(localWindowsArtifact?.size || 0);
+  const windowsArtifactMatches = Boolean(
+    launcherFeed.ok
+    && localWindowsArtifact
+    && liveWindowsArtifact
+    && liveWindowsSha
+    && liveWindowsSha === localWindowsSha
+    && liveWindowsSize === localWindowsSize
+  );
+  addCheck(
+    'live launcher Windows download matches local artifact',
+    'blocker',
+    windowsArtifactMatches,
+    windowsArtifactMatches
+      ? `${path.basename(localWindowsArtifact.filePath)} ${localWindowsSha}`
+      : `live sha=${liveWindowsSha || 'missing'} size=${liveWindowsSize || 'missing'}, local sha=${localWindowsSha || 'missing'} size=${localWindowsSize || 'missing'}`
   );
   const proofBaseUrl = defaults?.launcherProof?.baseUrl || defaults?.sync?.baseUrl || '';
   const proofStatus = liveLauncherProofStatus(proofBaseUrl);

@@ -86,6 +86,9 @@ assert(firstInstall.cleanInstall === true, 'full-client install should use clean
 assert(firstProgress.some((progress) => progress.phase === 'Downloading pack' && progress.unit === 'bytes'), 'full-client install did not report byte download progress');
 assert(firstProgress.some((progress) => progress.phase === 'Verifying pack' && progress.unit === 'bytes'), 'full-client install did not report byte verification progress');
 assert(firstProgress.some((progress) => progress.phase === 'Full client ZIP'), 'full-client install did not report extraction progress');
+assert(firstProgress.some((progress) => progress.phase === 'Preserving player data'), 'full-client install did not report player-data preservation progress');
+assert(firstProgress.some((progress) => progress.phase === 'Caching pack' && progress.unit === 'bytes'), 'full-client install did not report ZIP cache copy progress');
+assert(firstProgress.some((progress) => progress.phase === 'Finalizing' && progress.percent >= 97), 'full-client install did not advance finalizing progress after post-extraction work');
 assertMonotonicProgress(firstProgress, 'full-client install');
 
 const installedMod = path.join(installDir, 'mods', 'aht-custom-patched.jar');
@@ -105,6 +108,8 @@ assert(sourceHash === installedHash, 'managed mod hash mismatch after full-clien
 await fs.writeFile(path.join(installDir, 'mods', 'extra-untracked.jar'), 'extra mod should be blocked', 'utf8');
 await fs.mkdir(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache'), { recursive: true });
 await fs.writeFile(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'stale-runtime-cache.dat'), 'stale otg cache', 'utf8');
+await fs.mkdir(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'nested'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'nested', 'another-runtime-cache.dat'), 'another stale otg cache', 'utf8');
 await fs.writeFile(path.join(installDir, 'config', 'stale-local.cfg'), 'stale local config\n', 'utf8');
 await fs.writeFile(path.join(installDir, 'resourcepacks', 'stale-resourcepack.zip'), 'stale resourcepack\n', 'utf8');
 await fs.mkdir(path.join(installDir, 'saves', 'Player World'), { recursive: true });
@@ -130,6 +135,14 @@ await fs.writeFile(path.join(staleSiblingBackup, 'old.tmp'), 'old backup data', 
 const dirtyScan = await scanManagedIntegrity(installDir);
 assert(dirtyScan.counts.added >= 2, `extra mod files were not detected: ${JSON.stringify(dirtyScan)}`);
 assert(dirtyScan.counts.corrupted >= 2, `extra mod files should lock launch as corrupted: ${JSON.stringify(dirtyScan)}`);
+assert(dirtyScan.added.some((item) => item.path === 'mods/OpenTerrainGenerator/' && item.entryType === 'directory'), `unmanaged OTG folder should be one directory issue: ${JSON.stringify(dirtyScan.added)}`);
+assert(!dirtyScan.added.some((item) => /OpenTerrainGenerator\/cache\//i.test(item.path)), `scanner should not descend into huge unmanaged OTG folders: ${JSON.stringify(dirtyScan.added)}`);
+const integrityProgress = [];
+const progressScan = await scanManagedIntegrity(installDir, { onProgress: (progress) => integrityProgress.push(progress) });
+assert(progressScan.counts.corrupted === dirtyScan.counts.corrupted, 'progress-enabled integrity scan changed scan results');
+assert(integrityProgress[0]?.phase === 'Verifying installed files', `integrity progress did not start with verification: ${JSON.stringify(integrityProgress)}`);
+assert(integrityProgress.some((progress) => progress.currentPath === 'mods/aht-custom-patched.jar' && progress.percent > 0), `integrity progress did not report managed mod progress: ${JSON.stringify(integrityProgress)}`);
+assert(integrityProgress.at(-1)?.phase === 'Integrity scan complete', `integrity progress did not report completion: ${JSON.stringify(integrityProgress)}`);
 const repairProgress = [];
 const repairInstall = await installPack({
   latestSource: path.join(outDir, 'latest.json'),
@@ -141,6 +154,8 @@ const repairInstall = await installPack({
 });
 assert(repairInstall.cleanInstall === true, 'full-client repair should use clean staged replacement');
 assert(repairProgress.some((progress) => progress.phase === 'Verifying cached pack' && progress.unit === 'bytes'), 'full-client repair did not verify the cached pack before reinstalling');
+assert(repairProgress.some((progress) => progress.phase === 'Preserving player data'), 'full-client repair did not report player-data preservation progress');
+assert(repairProgress.some((progress) => progress.phase === 'Caching pack' && progress.unit === 'bytes'), 'full-client repair did not report ZIP cache copy progress');
 assert(!repairProgress.some((progress) => progress.phase === 'Downloading pack'), 'full-client repair redownloaded the pack instead of reusing the verified cache');
 assertMonotonicProgress(repairProgress, 'full-client repair');
 assert(await fs.readFile(path.join(installDir, 'options.txt'), 'utf8') === 'pack-options\n', 'replaceGameSettings=true did not replace options.txt');

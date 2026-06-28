@@ -10,7 +10,7 @@ const renderer = fs.readFileSync('desktop/renderer/app.js', 'utf8').replace(/\r\
 assert(main.includes('function createOperationState'), 'main process is missing operation state helper.');
 assert(main.includes("updateState = createOperationState(forceRepair ? 'repair' : 'install'"), 'runUpdate must mark updateState running before slow setup work.');
 assert(main.includes("updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };"), 'runUpdate must verify installed files before writing terminal success.');
-assert(main.includes('const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall);'), 'runUpdate must scan the repaired install before saving integrity state.');
+assert(main.includes('const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall, {') && main.includes('weightedOperationPercent(progress.percent, 98, 1)'), 'runUpdate must scan the repaired install with visible verification progress before saving integrity state.');
 assert(main.includes("await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');"), 'runUpdate must save the real post-install integrity result.');
 assert(main.includes('if (isFullClientRelease(release)) {\n    return [];\n  }'), 'full-client ZIP integrity must not pull legacy cache extras into required managed files.');
 assert(main.includes('relativePath: normalizeRelPath(entry.installPath || `mods/${entry.fileName}`),'), 'cache-extra integrity must honor release cache installPath for resourcepacks.');

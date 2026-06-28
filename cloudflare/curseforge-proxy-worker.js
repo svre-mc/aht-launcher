@@ -1,12 +1,13 @@
 const CURSEFORGE_BASE = 'https://api.curseforge.com/v1';
 const RELEASE_PATHS = new Set(['latest.json', 'release-report.json', 'launcher/latest.json']);
-const RELEASE_PREFIXES = ['packs/', 'cache/', 'server/', 'launcher/files/'];
+const RELEASE_PREFIXES = ['packs/', 'cache/', 'server/', 'launcher/files/', 'update-media/'];
 
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
+    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified',
     'Cache-Control': 'private, max-age=60'
   };
 }
@@ -70,7 +71,67 @@ function objectHttpDate(value) {
   return Number.isNaN(date.valueOf()) ? '' : date.toUTCString();
 }
 
-async function serveReleaseObject(pathname, env, origin, method = 'GET') {
+function parseHttpRangeHeader(header = '', size = 0) {
+  const value = String(header || '').trim();
+  if (!value) return { range: null, error: '' };
+  const match = value.match(/^bytes=(\d*)-(\d*)$/i);
+  if (!match) return { range: null, error: 'invalid' };
+  const total = Number(size);
+  if (!Number.isFinite(total) || total < 0) return { range: null, error: 'invalid' };
+  const startRaw = match[1];
+  const endRaw = match[2];
+  if (!startRaw && !endRaw) return { range: null, error: 'invalid' };
+
+  if (!startRaw) {
+    const suffix = Number(endRaw);
+    if (!Number.isInteger(suffix) || suffix <= 0) return { range: null, error: 'invalid' };
+    if (total === 0) return { range: null, error: 'unsatisfiable' };
+    const length = Math.min(suffix, total);
+    const start = Math.max(0, total - length);
+    const end = total - 1;
+    return { range: { start, end, offset: start, length, total }, error: '' };
+  }
+
+  const start = Number(startRaw);
+  const requestedEnd = endRaw ? Number(endRaw) : total - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(requestedEnd) || start < 0 || requestedEnd < start || start >= total) {
+    return { range: null, error: 'unsatisfiable' };
+  }
+  const end = Math.min(requestedEnd, Math.max(0, total - 1));
+  return { range: { start, end, offset: start, length: end - start + 1, total }, error: '' };
+}
+
+function releaseHeaders(key, origin, object, range = null) {
+  const headers = corsHeaders(origin);
+  headers['Cache-Control'] = cacheControlForKey(key);
+  headers['Content-Type'] = object.httpMetadata?.contentType || contentTypeForKey(key);
+  headers['Accept-Ranges'] = 'bytes';
+  if (object.httpEtag) headers.ETag = object.httpEtag;
+  if (range) {
+    headers['Content-Length'] = String(range.length);
+    headers['Content-Range'] = `bytes ${range.start}-${range.end}/${range.total}`;
+  } else if (object.size !== undefined) {
+    headers['Content-Length'] = String(object.size);
+  }
+  const lastModified = objectHttpDate(object.uploaded);
+  if (lastModified) headers['Last-Modified'] = lastModified;
+  return headers;
+}
+
+function rangeNotSatisfiable(origin, objectSize) {
+  const headers = corsHeaders(origin);
+  headers['Content-Range'] = `bytes */${objectSize}`;
+  headers['Accept-Ranges'] = 'bytes';
+  return new Response(null, { status: 416, headers });
+}
+
+function releaseNotFound(key, origin) {
+  return json({ error: 'Release object not found', key }, 404, origin);
+}
+
+async function serveReleaseObject(request, env, origin) {
+  const pathname = new URL(request.url).pathname;
+  const method = request.method;
   if (!isReleaseCandidatePath(pathname)) {
     return null;
   }
@@ -82,18 +143,34 @@ async function serveReleaseObject(pathname, env, origin, method = 'GET') {
   if (!key) {
     return json({ error: 'Invalid release path' }, 400, origin);
   }
-  const object = await bucket.get(key);
-  if (!object) {
-    return json({ error: 'Release object not found', key }, 404, origin);
+
+  const rangeHeader = request.headers.get('Range') || '';
+  let range = null;
+  let object = null;
+  let objectSize = 0;
+  if (rangeHeader) {
+    const metadata = typeof bucket.head === 'function' ? await bucket.head(key) : await bucket.get(key);
+    if (!metadata) {
+      return releaseNotFound(key, origin);
+    }
+    objectSize = Number(metadata.size || 0);
+    const parsed = parseHttpRangeHeader(rangeHeader, objectSize);
+    if (parsed.error || !parsed.range) {
+      return rangeNotSatisfiable(origin, objectSize);
+    }
+    range = parsed.range;
+    object = method === 'HEAD'
+      ? metadata
+      : await bucket.get(key, { range: { offset: range.offset, length: range.length } });
+  } else {
+    object = await bucket.get(key);
   }
-  const headers = corsHeaders(origin);
-  headers['Cache-Control'] = cacheControlForKey(key);
-  headers['Content-Type'] = object.httpMetadata?.contentType || contentTypeForKey(key);
-  if (object.httpEtag) headers.ETag = object.httpEtag;
-  if (object.size !== undefined) headers['Content-Length'] = String(object.size);
-  const lastModified = objectHttpDate(object.uploaded);
-  if (lastModified) headers['Last-Modified'] = lastModified;
-  return new Response(method === 'HEAD' ? null : object.body, { status: 200, headers });
+
+  if (!object) {
+    return releaseNotFound(key, origin);
+  }
+  const headers = releaseHeaders(key, origin, object, range);
+  return new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
 }
 
 async function sha256Hex(value) {
@@ -256,6 +333,32 @@ function cleanText(value, maxLength) {
   return String(value || '').trim().replace(/\r\n/g, '\n').slice(0, maxLength);
 }
 
+function cleanUrl(value, maxLength = 800) {
+  const raw = cleanText(value, maxLength);
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+  } catch {}
+  return '';
+}
+
+function cleanAssetObject(value, allowedTypes = []) {
+  const source = value && typeof value === 'object' ? value : {};
+  const url = cleanUrl(source.url || source.href || '');
+  if (!url) return null;
+  const type = cleanText(source.type || '', 24).toLowerCase();
+  const safeType = allowedTypes.includes(type) ? type : '';
+  return {
+    ...(safeType ? { type: safeType } : {}),
+    url,
+    path: cleanText(source.path || '', 300),
+    title: cleanText(source.title || '', 120)
+  };
+}
+
 async function createLauncherProof(request, env, origin) {
   const body = await readBody(request);
   const installId = cleanString(body.installId, 120);
@@ -341,8 +444,15 @@ async function publishUpdateLog(request, env, origin) {
   }
   const body = await readBody(request);
   const title = cleanText(body.title, 120);
-  const text = cleanText(body.text || body.body, 2000);
+  const subtitle = cleanText(body.subtitle, 180);
+  const text = cleanText(body.text || body.body, 8000);
   const version = cleanText(body.version, 40);
+  const image = cleanAssetObject(body.image || { url: body.imageUrl, path: body.imagePath }, ['image']);
+  const media = cleanAssetObject(body.media || {
+    type: body.youtubeUrl ? 'youtube' : (body.videoUrl ? 'video' : ''),
+    url: body.youtubeUrl || body.videoUrl,
+    path: body.videoPath
+  }, ['youtube', 'video']);
   if (!title) {
     return json({ error: 'Update log title is required' }, 400, origin);
   }
@@ -354,10 +464,13 @@ async function publishUpdateLog(request, env, origin) {
   const log = {
     id,
     title,
+    subtitle,
     text,
     version,
+    image,
+    media,
     publishedAt,
-    author: body.author || 'admin'
+    author: cleanText(body.author || 'admin', 80)
   };
   const safeTimestamp = publishedAt.replaceAll(':', '-');
   const key = `update-logs/${safeTimestamp}-${id}.json`;
@@ -465,7 +578,7 @@ export default {
     const url = new URL(request.url);
     try {
       if (request.method === 'GET' || request.method === 'HEAD') {
-        const releaseResponse = await serveReleaseObject(url.pathname, env, origin, request.method);
+        const releaseResponse = await serveReleaseObject(request, env, origin);
         if (releaseResponse) {
           return releaseResponse;
         }

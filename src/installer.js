@@ -1,4 +1,4 @@
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
@@ -322,29 +322,98 @@ function preservedFilesForInstall(replaceGameSettings) {
     : [...PLAYER_PRESERVED_FILES, 'options.txt', 'optionsof.txt'];
 }
 
-async function copyPathIfPresent(source, dest) {
+async function copyFileWithProgress(source, dest, options = {}) {
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const phase = options.phase || 'Copying file';
+  const currentPath = options.currentPath || path.basename(source);
+  const base = Number(options.progressBase ?? options.percent ?? 0);
+  const span = Number(options.progressSpan ?? 0);
+  const stat = await fs.stat(source).catch(() => null);
+  const total = stat?.size || 0;
+  let loaded = 0;
+  await ensureDir(path.dirname(dest));
+  await removeFileIfExists(dest);
+  if (onProgress) {
+    onProgress({ phase, currentPath, unit: 'bytes', completed: 0, total, completedBytes: 0, totalBytes: total, percent: weightedProgress(0, base, span), currentPercent: 0 });
+  }
+  const progressStream = new Transform({
+    transform(chunk, encoding, callback) {
+      loaded += chunk.length;
+      if (onProgress && total) {
+        const currentPercent = Math.max(0, Math.min(100, Math.round((loaded / total) * 100)));
+        onProgress({
+          phase,
+          currentPath,
+          unit: 'bytes',
+          completed: loaded,
+          total,
+          completedBytes: loaded,
+          totalBytes: total,
+          percent: weightedProgress(currentPercent, base, span),
+          currentPercent
+        });
+      }
+      callback(null, chunk);
+    }
+  });
+  try {
+    await pipeline(createReadStream(source), progressStream, createWriteStream(dest));
+  } catch (error) {
+    await removeFileIfExists(dest);
+    throw error;
+  }
+  if (onProgress) {
+    onProgress({ phase, currentPath, unit: 'bytes', completed: total || loaded, total: total || loaded, completedBytes: total || loaded, totalBytes: total || loaded, percent: weightedProgress(100, base, span), currentPercent: 100 });
+  }
+}
+
+async function copyPathIfPresent(source, dest, options = {}) {
   if (!(await pathExists(source))) {
     return false;
   }
-  await ensureDir(path.dirname(dest));
+  const relPath = options.relPath || path.basename(source);
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
   await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
-  await fs.cp(source, dest, { recursive: true, force: true });
+  const stat = await fs.stat(source);
+  if (stat.isFile()) {
+    await copyFileWithProgress(source, dest, { ...options, currentPath: relPath });
+    return true;
+  }
+  if (!stat.isDirectory()) {
+    return false;
+  }
+  const files = await walkInstanceFiles(source);
+  let copied = 0;
+  if (onProgress) {
+    onProgress({ phase: options.phase || 'Preserving player data', currentPath: relPath, completed: 0, total: files.length, percent: weightedProgress(0, options.progressBase ?? 95, options.progressSpan ?? 1) });
+  }
+  for (const file of files) {
+    const target = safeJoin(dest, file.rel);
+    await copyFileWithProgress(file.abs, target, { ...options, currentPath: normalizeRelPath(path.posix.join(relPath, file.rel)), progressBase: options.progressBase ?? 95, progressSpan: options.progressSpan ?? 1 });
+    copied += 1;
+    if (onProgress) {
+      onProgress({ phase: options.phase || 'Preserving player data', currentPath: normalizeRelPath(path.posix.join(relPath, file.rel)), completed: copied, total: files.length, percent: weightedProgress(files.length ? Math.round((copied / files.length) * 100) : 100, options.progressBase ?? 95, options.progressSpan ?? 1) });
+    }
+    if (copied % 25 === 0) {
+      await yieldToEventLoop();
+    }
+  }
   return true;
 }
 
-async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger) {
+async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger, options = {}) {
   const preserved = [];
   for (const relPath of PLAYER_PRESERVED_DIRS) {
     const source = safeJoin(instanceDir, relPath);
     const dest = safeJoin(stagingDir, relPath);
-    if (await copyPathIfPresent(source, dest)) {
+    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving player data' })) {
       preserved.push(relPath);
     }
   }
   for (const relPath of preservedFilesForInstall(replaceGameSettings)) {
     const source = safeJoin(instanceDir, relPath);
     const dest = safeJoin(stagingDir, relPath);
-    if (await copyPathIfPresent(source, dest)) {
+    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving player data' })) {
       preserved.push(relPath);
     }
   }
@@ -354,14 +423,19 @@ async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSetti
   return preserved;
 }
 
-async function copyCurrentPackToStagingCache(packZipPath, stagingDir, logger) {
+async function copyCurrentPackToStagingCache(packZipPath, stagingDir, logger, options = {}) {
   const dest = path.join(stagingDir, '.aht-launcher', 'downloads', path.basename(packZipPath));
   if (path.resolve(packZipPath) === path.resolve(dest)) {
     return;
   }
   try {
-    await ensureDir(path.dirname(dest));
-    await fs.copyFile(packZipPath, dest);
+    await copyFileWithProgress(packZipPath, dest, {
+      ...options,
+      phase: 'Caching pack',
+      currentPath: path.basename(packZipPath),
+      progressBase: options.progressBase ?? 96,
+      progressSpan: options.progressSpan ?? 1
+    });
   } catch (error) {
     logger.log(`Could not preserve downloaded ZIP cache: ${error?.message || error}`);
   }
@@ -533,8 +607,8 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       overrideFileCount: filesTotal
     };
 
-    await copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger);
-    await copyCurrentPackToStagingCache(packZipPath, stagingDir, logger);
+    await copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger, { onProgress, progressBase: 95, progressSpan: 0 });
+    await copyCurrentPackToStagingCache(packZipPath, stagingDir, logger, { onProgress, progressBase: 96, progressSpan: 1 });
     await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'installed.json'), installed);
     await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
 
@@ -542,7 +616,14 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       .filter((item) => item?.relativePath && !isGameSettingsRelPath(item.relativePath) && !nextManagedSet.has(item.relativePath))
       .map((item) => item.relativePath);
 
-    emitProgress('Replacing install');
+    if (onProgress) {
+      onProgress({
+        phase: 'Replacing install',
+        completed: filesTotal,
+        total: filesTotal,
+        percent: 97
+      });
+    }
     const replacement = await replaceInstallWithStaging(instanceDir, stagingDir, {
       logger,
       simulateFailure: true
@@ -552,7 +633,7 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
         phase: 'Finalizing',
         completed: filesTotal,
         total: filesTotal,
-        percent: Math.min(97, weightedProgress(100, progressBase, progressSpan))
+        percent: Math.max(97, weightedProgress(100, progressBase, progressSpan))
       });
     }
 

@@ -133,7 +133,7 @@ await writeJson(path.join(userData, 'identity.json'), {
 });
 
 const logs = [
-  { id: 'log-1', title: 'Auth Refresh Works', text: 'Unauthorized retry recovered.', version: '2.8.5', publishedAt: '2026-06-25T12:00:00.000Z' }
+  { id: 'log-1', title: 'Auth Refresh Works', subtitle: 'Developer list keeps media metadata.', text: 'Unauthorized retry recovered.', version: '2.8.5', publishedAt: '2026-06-25T12:00:00.000Z', image: { type: 'image', url: 'https://packs.example.com/update-media/auth.webp' }, media: { type: 'youtube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' } }
 ];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, workerEndpoint);
@@ -200,7 +200,7 @@ try {
       return await window.aht.devUpdateLogs(20);
     })()
   `);
-  if (proof.logs?.[0]?.title !== 'Auth Refresh Works') {
+  if (proof.logs?.[0]?.title !== 'Auth Refresh Works' || proof.logs?.[0]?.image?.url !== 'https://packs.example.com/update-media/auth.webp' || proof.logs?.[0]?.media?.type !== 'youtube') {
     throw new Error(`Developer update logs were not returned after auth refresh: ${JSON.stringify(proof)}`);
   }
   if (loginCalls.length !== 2) {
@@ -215,7 +215,9 @@ try {
     root,
     loginCalls: loginCalls.length,
     updateLogAuthHeaders,
-    title: proof.logs[0].title
+    title: proof.logs[0].title,
+    media: proof.logs[0].media?.type || '',
+    image: proof.logs[0].image?.url || ''
   }, null, 2));
 } finally {
   if (client) {
