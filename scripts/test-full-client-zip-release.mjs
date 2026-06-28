@@ -286,6 +286,47 @@ assert(!(await pathExists(path.join(wrappedInstallDir, 'A Hard Time Client', 'mo
 assert(await pathExists(path.join(wrappedInstallDir, 'resourcepacks', 'aht-wrapper-resources.zip')), 'wrapped client ZIP did not normalize resourcepacks/');
 const wrappedScan = await scanManagedIntegrity(wrappedInstallDir);
 assert(wrappedScan.counts.corrupted === 0, `wrapped client ZIP did not scan clean: ${JSON.stringify(wrappedScan)}`);
+
+const largeStackZipPath = path.join(root, 'large-stack-client.zip');
+const largeStackZip = new AdmZip();
+const largeStackMetadata = {
+  format: 'aht-full-client-zip',
+  packId: 'a-hard-time-dregora',
+  name: 'A Hard Time',
+  version: '9.9.1',
+  minecraft: { version: '1.12.2', modLoaders: [{ id: 'forge-14.23.5.2860', primary: true }] },
+  generatedAt: new Date().toISOString()
+};
+largeStackZip.addFile('aht-client-pack.json', Buffer.from(`${JSON.stringify(largeStackMetadata, null, 2)}\n`, 'utf8'));
+for (let index = 0; index < 6500; index += 1) {
+  largeStackZip.addFile(`config/stack-proof/${String(index).padStart(5, '0')}.cfg`, Buffer.from(`stack-proof=${index}\n`, 'utf8'));
+}
+largeStackZip.writeZip(largeStackZipPath);
+const largeStackLatest = {
+  schemaVersion: 1,
+  packId: 'a-hard-time-dregora',
+  name: 'A Hard Time',
+  version: '9.9.1',
+  installMode: 'full-client-zip',
+  zipFormat: 'aht-full-client-zip',
+  minecraft: largeStackMetadata.minecraft,
+  zip: {
+    fileName: path.basename(largeStackZipPath),
+    path: path.basename(largeStackZipPath),
+    sha256: await hashFile(largeStackZipPath, 'sha256'),
+    size: (await fs.stat(largeStackZipPath)).size
+  }
+};
+const largeStackLatestPath = path.join(root, 'large-stack-latest.json');
+await fs.writeFile(largeStackLatestPath, JSON.stringify(largeStackLatest, null, 2), 'utf8');
+const largeStackResult = await installPack({
+  latestSource: largeStackLatestPath,
+  instanceDir: path.join(root, 'large-stack-install'),
+  dryRun: true,
+  logger: { log() {} }
+});
+assert(largeStackResult.installMode === 'full-client-zip', `large ZIP dry run used wrong mode: ${JSON.stringify(largeStackResult)}`);
+assert(largeStackResult.overrideFileCount === 6500, `large ZIP dry run did not inspect every entry without stack overflow: ${JSON.stringify(largeStackResult)}`);
 console.log(JSON.stringify({
   ok: true,
   root,
