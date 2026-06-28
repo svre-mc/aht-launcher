@@ -353,6 +353,44 @@ try {
   }
   await waitFor(client, "document.querySelector('#updateLogGrid')?.hidden === false", 'layout update logs');
 
+  const sidebarProgressProof = await evaluate(client, `
+    (() => {
+      if (typeof setSidebarProgress === 'function') {
+        setSidebarProgress(true, 33, 'Downloading pack 580 MB/718 MB at 13 MB/s');
+      } else {
+        const progress = document.querySelector('#sidebarProgress');
+        progress.hidden = false;
+        document.querySelector('#sidebarProgressLabel').textContent = 'Downloading pack';
+        document.querySelector('#sidebarProgressCount').textContent = '33%';
+      }
+      const sidebar = document.querySelector('.sidebar').getBoundingClientRect();
+      const progress = document.querySelector('#sidebarProgress').getBoundingClientRect();
+      const downloads = document.querySelector('#downloadsButton').getBoundingClientRect();
+      const label = document.querySelector('#sidebarProgressLabel');
+      const proof = {
+        label: label.textContent.trim(),
+        fullTitle: document.querySelector('#sidebarProgress').title,
+        progress: { left: progress.left, right: progress.right, top: progress.top, bottom: progress.bottom, width: progress.width, height: progress.height },
+        downloads: { left: downloads.left, right: downloads.right, top: downloads.top, bottom: downloads.bottom, width: downloads.width, height: downloads.height },
+        sidebar: { left: sidebar.left, right: sidebar.right, top: sidebar.top, bottom: sidebar.bottom, width: sidebar.width, height: sidebar.height },
+        overlap: progress.bottom > downloads.top - 1,
+        progressOutsideSidebar: progress.left < sidebar.left - 1 || progress.right > sidebar.right + 1,
+        labelOverflow: label.scrollWidth > label.clientWidth + 2
+      };
+      document.querySelector('#sidebarProgress').hidden = true;
+      return proof;
+    })()
+  `);
+  if (
+    /MB|GB|\/s/i.test(sidebarProgressProof.label)
+    || !/580 MB\/718 MB/i.test(sidebarProgressProof.fullTitle || '')
+    || sidebarProgressProof.overlap
+    || sidebarProgressProof.progressOutsideSidebar
+    || sidebarProgressProof.labelOverflow
+  ) {
+    throw new Error(`Sidebar progress overlaps or shows unbounded transfer text: ${JSON.stringify(sidebarProgressProof)}`);
+  }
+
   const reports = [];
   const screenshots = [];
   for (const size of [{ name: 'desktop', width: 1260, height: 760 }, { name: 'compact', width: 980, height: 700 }]) {

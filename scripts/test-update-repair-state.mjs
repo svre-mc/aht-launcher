@@ -16,6 +16,8 @@ assert(main.includes('if (isFullClientRelease(release)) {\n    return [];\n  }')
 assert(main.includes('relativePath: normalizeRelPath(entry.installPath || `mods/${entry.fileName}`),'), 'cache-extra integrity must honor release cache installPath for resourcepacks.');
 assert(main.includes('function refreshStaleIntegrityState(config, latest, integrity)'), 'status refresh must be able to self-heal stale cache-extra integrity state.');
 assert(main.includes('integrity = await refreshStaleIntegrityState(config, latest, integrity);'), 'getStatus must refresh stale cache-extra integrity before blocking Play.');
+assert(main.includes('const OPERATION_LINES_MAX = 120') && main.includes('function appendOperationLine'), 'main process must cap operation log lines so large installs/uploads do not flood IPC.');
+assert(!/(?:operationState|updateState|launcherUpdateState|serverTransferState|uploadState)\.lines\.push/.test(main), 'operation state logs must go through appendOperationLine/appendOperationLines instead of unbounded array pushes.');
 assert(!main.includes("phase: 'Saving install state'"), 'runUpdate must not skip real integrity verification with a synthetic clean state.');
 assert(main.includes("completeOperationState(updateState, result, 'Complete');"), 'runUpdate must normalize success to Complete.');
 assert(main.includes("failOperationState(updateState, error, forceRepair ? 'Repair failed' : 'Update failed');"), 'runUpdate must normalize failure and clear running.');
@@ -23,6 +25,8 @@ assert(!main.includes('finally {\n    updateState.running = false;\n  }'), 'runU
 
 assert(renderer.includes('const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;'), 'renderer must define the completed download visible window.');
 assert(renderer.includes('const DOWNLOAD_ERROR_VISIBLE_MS = 6200;'), 'renderer must define a bounded failed download visible window.');
+assert(renderer.includes('function truncateLogText') && renderer.includes('function setTextContentBounded'), 'renderer must cap large visible logs to keep installs/uploads responsive.');
+assert(!/els\.(?:devLog|serverTransferLog|downloadsLog|launcherUpdateLog)\.textContent\s*=\s*(?:JSON\.stringify|.*\.join\("\\n"\))/.test(renderer), 'large renderer log areas must use setTextContentBounded instead of direct JSON/join text writes.');
 assert(renderer.includes('if (state.error) return terminalUpdateAgeMs(ensureTerminalUpdateTimestamp(state)) < DOWNLOAD_ERROR_VISIBLE_MS;'), 'failed installs must not pin sidebar progress forever.');
 assert(renderer.includes('const visibleMs = lastUpdateState.error ? DOWNLOAD_ERROR_VISIBLE_MS : DOWNLOAD_COMPLETE_VISIBLE_MS;'), 'terminal update cleanup must use the correct success/error visibility window.');
 assert(renderer.includes('scheduleCompletedUpdateClear(DOWNLOAD_ERROR_VISIBLE_MS);'), 'direct update failures must schedule failed progress cleanup.');

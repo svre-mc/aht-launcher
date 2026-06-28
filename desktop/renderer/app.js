@@ -1,6 +1,24 @@
 const $ = (id) => document.querySelector(id);
 const launchParams = new URLSearchParams(window.location.search);
 const bootDeveloperMode = launchParams.get("mode") === "developer";
+const LOG_TEXT_LIMIT = 24_000;
+const DEV_LOG_TEXT_LIMIT = 60_000;
+
+function truncateLogText(text = "", limit = LOG_TEXT_LIMIT) {
+  const value = String(text ?? "");
+  const cap = Math.max(1000, Number(limit) || LOG_TEXT_LIMIT);
+  if (value.length <= cap) return value;
+  return `${value.slice(0, cap)}\n\n[Log truncated: ${value.length - cap} more characters hidden to keep the launcher responsive.]`;
+}
+
+function stringifyLogValue(value, limit = DEV_LOG_TEXT_LIMIT) {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return truncateLogText(text, limit);
+}
+
+function setTextContentBounded(element, text = "", limit = LOG_TEXT_LIMIT) {
+  if (element) element.textContent = truncateLogText(text, limit);
+}
 
 if (bootDeveloperMode) {
   document.body.classList.add("dev-mode", "dev-locked");
@@ -631,17 +649,17 @@ function logIsEmpty() {
 }
 
 function setLog(text) {
-  if (els.log) els.log.textContent = text || "";
+  setTextContentBounded(els.log, text || "", LOG_TEXT_LIMIT);
 }
 
 function appendLog(text) {
   if (!els.log) return;
-  els.log.textContent = `${els.log.textContent}${els.log.textContent ? "\n" : ""}${text}`;
+  setTextContentBounded(els.log, `${els.log.textContent}${els.log.textContent ? "\n" : ""}${text}`, LOG_TEXT_LIMIT);
 }
 
 function setDevLog(value) {
   els.eventDetails.hidden = true;
-  els.devLog.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  setTextContentBounded(els.devLog, stringifyLogValue(value, DEV_LOG_TEXT_LIMIT), DEV_LOG_TEXT_LIMIT);
 }
 
 function applyDeveloperGate(status) {
@@ -1229,7 +1247,7 @@ function renderUploadState(state) {
     setReleaseUploadProgress(null, true);
   }
   if (Array.isArray(state.lines) && state.lines.length) {
-    els.devLog.textContent = state.lines.join("\n");
+    setTextContentBounded(els.devLog, state.lines.join("\n"), DEV_LOG_TEXT_LIMIT);
   }
 }
 
@@ -1310,13 +1328,24 @@ function setProgress(visible, percent = 0, label = "Preparing") {
   setSidebarProgress(visible, clamped, label);
 }
 
+function compactSidebarProgressLabel(label = "Preparing") {
+  const text = String(label || "Preparing").trim() || "Preparing";
+  return text
+    .replace(/\s+\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB)\/.*$/i, "")
+    .replace(/\s+at\s+\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB)?\/s.*$/i, "")
+    .trim() || text;
+}
+
 function setSidebarProgress(visible, percent = 0, label = "Preparing") {
   if (!els.sidebarProgress) return;
   const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+  const fullLabel = String(label || "Preparing").trim() || "Preparing";
   els.sidebarProgress.hidden = !visible;
+  els.sidebarProgress.title = fullLabel;
+  els.sidebarProgress.setAttribute("aria-label", `${fullLabel} ${clamped}%`.trim());
   if (els.sidebarProgressBar) els.sidebarProgressBar.style.width = `${clamped}%`;
   if (els.sidebarProgressCount) els.sidebarProgressCount.textContent = `${clamped}%`;
-  if (els.sidebarProgressLabel) els.sidebarProgressLabel.textContent = label;
+  if (els.sidebarProgressLabel) els.sidebarProgressLabel.textContent = compactSidebarProgressLabel(fullLabel);
 }
 
 function setMiniProgress(bar, percent = 0) {
@@ -1500,7 +1529,7 @@ function renderDownloads(state = lastUpdateState) {
   }
   setMiniProgress(els.downloadsProgressBar, percent);
   const logText = downloadLogText(state);
-  els.downloadsLog.textContent = logText;
+  setTextContentBounded(els.downloadsLog, logText, LOG_TEXT_LIMIT);
   els.downloadsLog.hidden = logText === "No downloads yet.";
   setUnavailable(els.downloadsUpdateIconButton, !status?.latest || !status?.updateRequired || Boolean(state?.running));
 }
@@ -1552,7 +1581,7 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   const lines = [...(state?.lines || [])];
   if (state?.error) lines.push(`ERROR: ${state.error}`);
   if (!lines.length) lines.push("Waiting to start launcher update.");
-  els.launcherUpdateLog.textContent = lines.join("\n");
+  setTextContentBounded(els.launcherUpdateLog, lines.join("\n"), LOG_TEXT_LIMIT);
   setLauncherUpdateButton(restartReady);
   setUnavailable(els.launcherUpdateNowButton, Boolean(state?.running));
   if (!launcherUpdateAutoStarted && !state?.running && !state?.lastResult) {
@@ -1823,7 +1852,7 @@ function renderDashboardEvents(filter = activeEventFilter) {
   const items = dashboardItemsForFilter(filter);
   els.eventsList.innerHTML = "";
   els.eventDetails.hidden = true;
-  els.devLog.textContent = "";
+  setTextContentBounded(els.devLog, "", DEV_LOG_TEXT_LIMIT);
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -1931,7 +1960,7 @@ function renderEventDetails(item) {
     if (missing.length) lines.push(`Missing:\n${missing.map((entry) => `  - ${entry.path}`).join("\n")}`);
   }
   lines.push("", JSON.stringify(item, null, 2));
-  els.devLog.textContent = lines.join("\n");
+  setTextContentBounded(els.devLog, lines.join("\n"), DEV_LOG_TEXT_LIMIT);
 }
 
 function renderDeveloperUpdateLogs(logs = []) {
@@ -2088,12 +2117,12 @@ async function planServerTransfer() {
     const result = await window.aht.devPlanServerTransfer(serverTransferPayload());
     const excluded = result.excludedDirs?.length ? ` Excluded: ${result.excludedDirs.join(", ")}.` : "";
     setServerTransferStatus("ok", "Plan ready", `${result.fileCount || 0} files`, `${Math.round((result.totalBytes || 0) / 1024 / 1024)} MB will upload. Scope: root files, mods, scripts, config, ForgeEssentials.${excluded}`);
-    els.serverTransferLog.textContent = JSON.stringify(result, null, 2);
+    setTextContentBounded(els.serverTransferLog, stringifyLogValue(result, DEV_LOG_TEXT_LIMIT), DEV_LOG_TEXT_LIMIT);
     return result;
   } catch (error) {
     const message = cleanErrorMessage(error);
     setServerTransferStatus("bad", "Plan failed", "Could not scan server folder", message);
-    els.serverTransferLog.textContent = message;
+    setTextContentBounded(els.serverTransferLog, message, LOG_TEXT_LIMIT);
     throw error;
   } finally {
     setUnavailable(els.planServerTransferButton, false);
@@ -2127,7 +2156,7 @@ function renderServerTransferState(state = lastServerTransferState) {
   setServerTransferStatus(state.error ? "bad" : state.running ? "warn" : state.lastResult ? "ok" : "warn", label, title, detail);
   const lines = [...(state.lines || [])];
   if (state.error) lines.push(`ERROR: ${state.error}`);
-  els.serverTransferLog.textContent = lines.join("\n") || "No server upload has run yet.";
+  setTextContentBounded(els.serverTransferLog, lines.join("\n") || "No server upload has run yet.", DEV_LOG_TEXT_LIMIT);
 }
 
 async function pollServerTransfer() {
@@ -2151,7 +2180,7 @@ async function uploadServerFiles() {
     await window.aht.saveSettings(serializeSettings());
     setServerTransferStatus("warn", "Starting upload", "Connecting to server", "This is local SFTP only. No Cloudflare is used.");
     setServerTransferProgress({ phase: "Connecting", percent: 0 });
-    els.serverTransferLog.textContent = "Starting server file upload...\nScope: root files, mods, scripts, config, ForgeEssentials.\nDregoraRL is excluded.";
+    setTextContentBounded(els.serverTransferLog, "Starting server file upload...\nScope: root files, mods, scripts, config, ForgeEssentials.\nDregoraRL is excluded.", LOG_TEXT_LIMIT);
     window.aht.devSyncServerFiles(serverTransferPayload()).catch((error) => {
       lastServerTransferState = {
         running: false,

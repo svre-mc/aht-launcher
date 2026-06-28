@@ -137,13 +137,13 @@ const server = http.createServer(async (request, response) => {
     const body = await readBody(request);
     requests.push(body);
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    if (String(body.username || '').toLowerCase() === 'takenuser_1') {
+    if (String(body.username || '').toLowerCase() === 'takenuser_1' && !(body.recoverExistingUsername && body.minecraftAccountMatched)) {
       response.statusCode = 409;
       response.end(JSON.stringify({ error: 'That username is not available.' }));
       return;
     }
     response.statusCode = 200;
-    response.end(JSON.stringify({ ok: true, username: body.username, key: `accounts/usernames/${String(body.username).toLowerCase()}.json` }));
+    response.end(JSON.stringify({ ok: true, username: body.username, key: `accounts/usernames/${String(body.username).toLowerCase()}.json`, recovered: Boolean(body.recoverExistingUsername && body.minecraftAccountMatched) }));
     return;
   }
   if (url.pathname === '/latest.json') {
@@ -221,7 +221,35 @@ try {
     throw new Error(`Successful retry did not persist username: ${JSON.stringify({ status: status.identity, identity })}`);
   }
   if (requests.length !== 2 || requests[0].username !== 'TakenUser_1' || requests[1].username !== 'FreshUser_1') {
-    throw new Error(`Unexpected username registration requests: ${JSON.stringify(requests)}`);
+    throw new Error(`Unexpected username registration requests before recovery: ${JSON.stringify(requests)}`);
+  }
+
+  await writeJson(path.join(mcRoot, 'launcher_accounts.json'), {
+    activeAccountLocalId: 'taken-account',
+    accounts: {
+      'taken-account': {
+        type: 'Xbox',
+        minecraftProfile: { name: 'TakenUser_1' }
+      }
+    }
+  });
+  const configPath = path.join(userData, 'launcher.config.json');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  config.minecraftLauncher = {
+    ...config.minecraftLauncher,
+    enabled: true,
+    rootDir: mcRoot,
+    autoImportAccount: true
+  };
+  await writeJson(configPath, config);
+  const recovery = await evaluate(client, `window.aht.accountRegister('TakenUser_1')`);
+  const recoveredIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
+  const takenRequests = requests.filter((item) => item.username === 'TakenUser_1');
+  if (!recovery?.ok || recoveredIdentity.minecraftUsername !== 'TakenUser_1' || recoveredIdentity.usernameRegistrationMode !== 'minecraft-launcher-recovery') {
+    throw new Error(`Minecraft Launcher username recovery did not persist: ${JSON.stringify({ recovery, recoveredIdentity })}`);
+  }
+  if (requests.length !== 4 || takenRequests.length !== 3 || takenRequests[2].minecraftAccountMatched !== true || takenRequests[2].recoverExistingUsername !== true) {
+    throw new Error(`Recovery did not retry with a Minecraft Launcher account match: ${JSON.stringify(requests)}`);
   }
 
   console.log(JSON.stringify({
@@ -229,10 +257,10 @@ try {
     root,
     duplicateProof,
     duplicateAfterRefresh,
-    registeredUsername: identity.minecraftUsername,
-    requests: requests.map((item) => ({ username: item.username, installId: item.installId, packId: item.packId }))
-  }, null, 2));
-} finally {
+    registeredUsername: recoveredIdentity.minecraftUsername,
+    recoveryMode: recoveredIdentity.usernameRegistrationMode,
+    requests: requests.map((item) => ({ username: item.username, installId: item.installId, packId: item.packId, recovered: Boolean(item.recoverExistingUsername && item.minecraftAccountMatched) }))
+  }, null, 2));} finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});
     client.close();

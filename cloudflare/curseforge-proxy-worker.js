@@ -218,7 +218,9 @@ async function registerUser(request, env, origin) {
   const key = minecraftUsernameKey(username);
   const existing = await env.AHT_DATA.get(key);
   const existingRecord = existing ? await existing.json().catch(() => null) : null;
-  if (existingRecord && existingRecord.installId && existingRecord.installId !== installId) {
+  const recoveryRequested = Boolean(body.recoverExistingUsername && body.minecraftAccountMatched);
+  const recovered = Boolean(existingRecord && existingRecord.installId && existingRecord.installId !== installId && recoveryRequested);
+  if (existingRecord && existingRecord.installId && existingRecord.installId !== installId && !recovered) {
     return json({ error: 'That username is not available.' }, 409, origin);
   }
   if (existing && !existingRecord) {
@@ -226,6 +228,7 @@ async function registerUser(request, env, origin) {
   }
 
   const now = new Date().toISOString();
+  const previousInstallIds = Array.isArray(existingRecord?.previousInstallIds) ? existingRecord.previousInstallIds : [];
   const record = {
     username,
     normalizedUsername: username.toLowerCase(),
@@ -236,6 +239,9 @@ async function registerUser(request, env, origin) {
     arch: body.arch || '',
     createdAt: existingRecord?.createdAt || now,
     updatedAt: now,
+    recoveredAt: recovered ? now : existingRecord?.recoveredAt || '',
+    recoveryReason: recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
+    previousInstallIds: recovered ? [...new Set([...previousInstallIds, existingRecord.installId].filter(Boolean))].slice(-10) : previousInstallIds,
     ip: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || '',
     userAgent: request.headers.get('User-Agent') || '',
     country: request.cf?.country || ''
@@ -243,7 +249,7 @@ async function registerUser(request, env, origin) {
   await env.AHT_DATA.put(key, JSON.stringify(record), {
     httpMetadata: { contentType: 'application/json' }
   });
-  return json({ ok: true, username, key }, 200, origin);
+  return json({ ok: true, username, key, recovered }, 200, origin);
 }
 
 function cleanText(value, maxLength) {

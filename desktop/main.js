@@ -166,7 +166,39 @@ const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
 const DEVELOPER_SECRET_KEYS = ['curseforgeApiKey', 'serverSshPassword', 'launcherProofSecret', 'githubToken', 'r2AccountId', 'r2AccessKeyId', 'r2SecretAccessKey'];
+const OPERATION_LINES_MAX = 120;
+const OPERATION_LINE_MAX_CHARS = 900;
 let launcherModeCache = null;
+
+function operationLineText(line) {
+  const text = String(line ?? '');
+  return text.length > OPERATION_LINE_MAX_CHARS ? text.slice(0, OPERATION_LINE_MAX_CHARS) + '...' : text;
+}
+
+function trimOperationLines(state, max = OPERATION_LINES_MAX) {
+  if (!state || !Array.isArray(state.lines)) return;
+  const limit = Math.max(1, Number(max) || OPERATION_LINES_MAX);
+  if (state.lines.length > limit) {
+    state.lines = state.lines.slice(-limit);
+  }
+}
+
+function appendOperationLine(state, line, max = OPERATION_LINES_MAX) {
+  if (!state) return;
+  if (!Array.isArray(state.lines)) state.lines = [];
+  state.lines.push(operationLineText(line));
+  trimOperationLines(state, max);
+}
+
+function appendOperationLines(state, lines = [], max = OPERATION_LINES_MAX) {
+  if (!state) return;
+  if (!Array.isArray(state.lines)) state.lines = [];
+  for (const line of lines) {
+    state.lines.push(operationLineText(line));
+  }
+  trimOperationLines(state, max);
+}
+
 function createOperationState(kind, phase = 'Preparing') {
   return {
     running: true,
@@ -1259,6 +1291,34 @@ function accountBaseUrl(config) {
   return config.sync?.baseUrl || config.developer?.adminBaseUrl || '';
 }
 
+function minecraftUsernameMatchesAuth(auth = {}, username = '') {
+  const target = normalizeMinecraftUsername(username).toLowerCase();
+  if (!target) return false;
+  return (auth.usernames || []).some((item) => normalizeMinecraftUsername(item).toLowerCase() === target)
+    || normalizeMinecraftUsername(auth.preferredUsername).toLowerCase() === target;
+}
+
+async function inspectConfiguredMinecraftLauncherAuth(config = {}) {
+  const rootDir = config.minecraftLauncher?.rootDir || '';
+  if (!rootDir || config.minecraftLauncher?.enabled === false) {
+    return { signedIn: false, accountCount: 0, files: [], usernames: [], preferredUsername: '' };
+  }
+  return inspectMinecraftLauncherAuth(rootDir, {
+    extraRoots: minecraftRootCandidates(process.platform, {
+      ...process.env,
+      HOME: process.env.HOME || app.getPath('home'),
+      USERPROFILE: process.env.USERPROFILE || app.getPath('home')
+    }).filter((root) => !samePath(root, rootDir))
+  });
+}
+
+async function canRecoverMinecraftUsernameFromLauncher(username, config = {}, options = {}) {
+  if (options.allowMinecraftLauncherRecovery === false) return false;
+  if (config.minecraftLauncher?.autoImportAccount === false && options.mode !== 'minecraft-launcher') return false;
+  const auth = await inspectConfiguredMinecraftLauncherAuth(config);
+  return minecraftUsernameMatchesAuth(auth, username);
+}
+
 async function registerMinecraftUsername(username, options = {}) {
   const normalizedUsername = normalizeMinecraftUsername(username);
   assertMinecraftUsername(normalizedUsername);
@@ -1269,31 +1329,52 @@ async function registerMinecraftUsername(username, options = {}) {
 
   if (base) {
     const url = new URL('api/users/register', base.endsWith('/') ? base : `${base}/`);
+    const registrationPayload = {
+      username: normalizedUsername,
+      installId: identity.installId,
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      packId: config.packId
+    };
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: normalizedUsername,
-        installId: identity.installId,
-        appVersion: app.getVersion(),
-        platform: process.platform,
-        arch: process.arch,
-        packId: config.packId
-      })
+      body: JSON.stringify(registrationPayload)
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(body.error || `${response.status} ${response.statusText}`);
+      const message = body.error || `${response.status} ${response.statusText}`;
+      if (!isUsernameUnavailableError(message) || !(await canRecoverMinecraftUsernameFromLauncher(normalizedUsername, config, options))) {
+        throw new Error(message);
+      }
+      const recoveryResponse = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...registrationPayload,
+          recoverExistingUsername: true,
+          minecraftAccountMatched: true,
+          recoveryReason: 'minecraft-launcher-account-match'
+        })
+      });
+      const recoveryBody = await recoveryResponse.json().catch(() => ({}));
+      if (!recoveryResponse.ok) {
+        throw new Error(recoveryBody.error || message);
+      }
+      remote = { ...recoveryBody, recovered: true };
+    } else {
+      remote = body;
     }
-    remote = body;
   }
 
   const nextIdentity = {
     ...identity,
     minecraftUsername: remote.username || normalizedUsername,
     usernameRegisteredAt: identity.usernameRegisteredAt || new Date().toISOString(),
-    usernameRegistrationMode: options.mode || (remote.skipped ? 'local' : 'worker'),
-    minecraftLauncherDetectedUsername: options.mode === 'minecraft-launcher' ? normalizedUsername : identity.minecraftLauncherDetectedUsername || '',
+    usernameRegistrationMode: options.mode || (remote.recovered ? 'minecraft-launcher-recovery' : (remote.skipped ? 'local' : 'worker')),
+    minecraftLauncherDetectedUsername: (options.mode === 'minecraft-launcher' || remote.recovered) ? normalizedUsername : identity.minecraftLauncherDetectedUsername || '',
+    minecraftUsernameUnavailable: '',
     minecraftUsernameSyncWarning: ''
   };
   await writeJsonFile(identityPath(), nextIdentity);
@@ -1545,7 +1626,7 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
         total,
         percent: 97
       };
-      operationState.lines.push(`Installing Forge ${target.versionId} for Minecraft Launcher root ${target.rootDir}...`);
+      appendOperationLine(operationState, `Installing Forge ${target.versionId} for Minecraft Launcher root ${target.rootDir}...`);
     }
     const forgeLines = [];
     await installForgeLoader(target, {
@@ -1554,8 +1635,8 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
       logger: { log: (line) => forgeLines.push(String(line)) }
     });
     if (operationState) {
-      operationState.lines.push(...forgeLines);
-      operationState.lines.push(`Forge ${target.versionId} is ready in ${target.rootDir}.`);
+      appendOperationLines(operationState, forgeLines);
+      appendOperationLine(operationState, `Forge ${target.versionId} is ready in ${target.rootDir}.`);
     }
   }
   const refreshed = await ensureMinecraftLauncherProfile({ config, latest, installed });
@@ -1940,7 +2021,7 @@ async function getStatus(configOverride = null) {
 
 async function runUpdate(forceRepair = false, options = {}) {
   if (updateState.running) {
-    updateState.lines.push(`${forceRepair ? 'Repair' : 'Update'} request ignored because an install is already running.`);
+    appendOperationLine(updateState, `${forceRepair ? 'Repair' : 'Update'} request ignored because an install is already running.`);
     return updateState;
   }
   updateState = createOperationState(forceRepair ? 'repair' : 'install', forceRepair ? 'Preparing repair' : 'Preparing update');
@@ -1959,7 +2040,7 @@ async function runUpdate(forceRepair = false, options = {}) {
     await sendLauncherEvent(config, identity, {
       type: forceRepair ? 'repair_started' : 'install_started',
       version: null
-    }).catch((error) => updateState.lines.push(`Sync warning: ${error.message}`));
+    }).catch((error) => appendOperationLine(updateState, `Sync warning: ${error.message}`));
     const result = await installPack({
       latestSource: config.latestUrl,
       instanceDir: config.instanceDir,
@@ -1970,7 +2051,7 @@ async function runUpdate(forceRepair = false, options = {}) {
       onProgress: (progress) => {
         updateState.progress = progress;
       },
-      logger: { log: (line) => updateState.lines.push(String(line)) }
+      logger: { log: (line) => appendOperationLine(updateState, line) }
     });
     let latestAfterInstall = null;
     if (config.minecraftLauncher?.enabled !== false) {
@@ -2011,7 +2092,7 @@ async function runUpdate(forceRepair = false, options = {}) {
       version: result.installed?.version || null,
       manifestFileCount: result.installed?.manifestFileCount || 0,
       overrideFileCount: result.installed?.overrideFileCount || 0
-    }).catch((error) => updateState.lines.push(`Sync warning: ${error.message}`));
+    }).catch((error) => appendOperationLine(updateState, `Sync warning: ${error.message}`));
     completeOperationState(updateState, result, 'Complete');
     return result;
   } catch (error) {
@@ -2589,12 +2670,12 @@ async function launchPreparedLauncherUpdate(prepared = {}) {
 
 async function runLauncherUpdate() {
   if (launcherUpdateState.running) {
-    launcherUpdateState.lines.push('Launcher update request ignored because an app update is already running.');
+    appendOperationLine(launcherUpdateState, 'Launcher update request ignored because an app update is already running.');
     return launcherUpdateState;
   }
   const pending = await hydratePendingLauncherUpdateState();
   if (pending && launcherUpdateState.lastResult?.restartRequired) {
-    launcherUpdateState.lines.push('Launcher update is already downloaded and ready to install.');
+    appendOperationLine(launcherUpdateState, 'Launcher update is already downloaded and ready to install.');
     return launcherUpdateState.lastResult;
   }
   const config = await loadConfig();
@@ -2633,7 +2714,7 @@ async function runLauncherUpdate() {
         throw new Error(`Launcher update hash mismatch: expected ${update.artifact.sha256}, got ${actual}`);
       }
     }
-    launcherUpdateState.lines.push('Launcher update downloaded and verified.');
+    appendOperationLine(launcherUpdateState, 'Launcher update downloaded and verified.');
     launcherUpdateState.progress = { phase: 'Preparing restart handoff', completed: 2, total: 3, percent: 92 };
     const preparedRestart = await prepareDownloadedLauncherUpdate(target, update.artifact, { latestVersion: update.latestVersion, downloadDir });
     const result = {
@@ -2659,8 +2740,8 @@ async function runLauncherUpdate() {
     });
     launcherUpdateState.lastResult = result;
     launcherUpdateState.progress = { phase: 'Ready to install', completed: 3, total: 3, percent: 100 };
-    launcherUpdateState.lines.push('Ready to install.');
-    launcherUpdateState.lines.push('Click Install and Restart to close AHT Launcher, install the update, and reopen it.');
+    appendOperationLine(launcherUpdateState, 'Ready to install.');
+    appendOperationLine(launcherUpdateState, 'Click Install and Restart to close AHT Launcher, install the update, and reopen it.');
     return result;
   } catch (error) {
     launcherUpdateState.error = error.message || String(error);
@@ -2672,7 +2753,7 @@ async function runLauncherUpdate() {
 
 async function restartLauncherUpdate() {
   if (launcherUpdateState.running) {
-    launcherUpdateState.lines.push('Restart request ignored because a launcher update is already running.');
+    appendOperationLine(launcherUpdateState, 'Restart request ignored because a launcher update is already running.');
     return launcherUpdateState;
   }
   const staged = launcherUpdateState.lastResult;
@@ -2682,7 +2763,7 @@ async function restartLauncherUpdate() {
   launcherUpdateState.running = true;
   launcherUpdateState.error = null;
   launcherUpdateState.progress = { phase: 'Starting install helper', completed: 3, total: 3, percent: 100 };
-  launcherUpdateState.lines.push('Install and restart requested. Starting launcher update helper.');
+  appendOperationLine(launcherUpdateState, 'Install and restart requested. Starting launcher update helper.');
   try {
     await writePendingLauncherUpdate({
       status: 'installing',
@@ -2707,7 +2788,7 @@ async function restartLauncherUpdate() {
     };
     launcherUpdateState.lastResult = result;
     launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Restart verified' : 'Installing launcher update', completed: 3, total: 3, percent: 100 };
-    launcherUpdateState.lines.push(process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
+    appendOperationLine(launcherUpdateState, process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
       ? 'Test mode verified the restart helper without closing the launcher.'
       : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
     if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
@@ -2792,13 +2873,13 @@ async function syncServerFiles(payload = {}) {
   };
   try {
     const result = await uploadServerFiles(options, {
-      logger: { log: (line) => serverTransferState.lines.push(String(line)) },
+      logger: { log: (line) => appendOperationLine(serverTransferState, line) },
       onProgress: (progress) => {
         serverTransferState.progress = progress;
       }
     });
     serverTransferState.lastResult = result;
-    serverTransferState.lines.push(`Done. Uploaded ${result.uploaded} changed files, skipped ${result.skipped || 0} unchanged files. Excluded: ${result.excludedDirs.join(', ') || 'none'}`);
+    appendOperationLine(serverTransferState, `Done. Uploaded ${result.uploaded} changed files, skipped ${result.skipped || 0} unchanged files. Excluded: ${result.excludedDirs.join(', ') || 'none'}`);
     serverTransferState.progress = {
       phase: 'Complete',
       completed: result.fileCount,
@@ -3619,7 +3700,7 @@ function formatBytes(bytes = 0) {
 
 function trimUploadLines(max = 100) {
   if (uploadState.lines.length > max) {
-    uploadState.lines = uploadState.lines.slice(-max);
+    trimOperationLines(uploadState, max);
   }
 }
 
@@ -3956,7 +4037,7 @@ async function syncLauncherUpdate(payload = {}) {
   try {
     for (const item of files) {
       uploadState.current = item.rel;
-      uploadState.lines.push(`Uploading ${item.rel} (${item.size || (await fs.stat(item.file)).size} bytes)`);
+      appendOperationLine(uploadState, `Uploading ${item.rel} (${item.size || (await fs.stat(item.file)).size} bytes)`);
       const output = await uploadR2Object({
         bucket,
         rel: item.rel,
@@ -3964,12 +4045,12 @@ async function syncLauncherUpdate(payload = {}) {
         wranglerCwd,
         onOutput: (text) => {
           const compact = String(text || '').trim();
-          if (compact) uploadState.lines.push(compact);
+          if (compact) appendOperationLine(uploadState, compact);
         }
       });
       uploaded.push({ path: item.rel, output: output.trim() });
       uploadState.completed = uploaded.length;
-      uploadState.lines.push(`Uploaded ${item.rel}`);
+      appendOperationLine(uploadState, `Uploaded ${item.rel}`);
     }
     const verification = await verifyRemoteLauncherUpdate({ publicLatestUrl: launcherLatestUrl, localManifest: manifest });
     uploadState.verification = verification;
@@ -4081,9 +4162,9 @@ async function syncR2(payload = {}) {
         currentPercent: 0,
         method: fastUpload ? 'direct-multipart' : 'wrangler'
       };
-      uploadState.lines.push(`Uploading ${rel} (${formatBytes(stat.size)})`);
+      appendOperationLine(uploadState, `Uploading ${rel} (${formatBytes(stat.size)})`);
       if (fastUpload) {
-        uploadState.lines.push(`Checking remote ${rel}`);
+        appendOperationLine(uploadState, `Checking remote ${rel}`);
         trimUploadLines();
         const sha256 = await releaseObjectSha256({ rel, file, localLatest });
         const remote = await r2Direct.headR2ObjectDirect({
@@ -4093,7 +4174,7 @@ async function syncR2(payload = {}) {
         });
         if (remoteReleaseObjectMatches({ rel, remote, stat, sha256 })) {
           uploaded.push({ path: rel, output: `skipped ${rel}; remote object already matches`, method: 'direct-skip', skipped: true, size: stat.size });
-          uploadState.lines.push(`Skipped ${rel}; remote already matches.`);
+          appendOperationLine(uploadState, `Skipped ${rel}; remote already matches.`);
         } else {
           const result = await r2Direct.uploadR2ObjectDirect({
             ...directCredentials,
@@ -4123,7 +4204,7 @@ async function syncR2(payload = {}) {
               const pct = Number(progress.percent || 0);
               if (pct >= lastLoggedPercent + 10 || pct === 100) {
                 lastLoggedPercent = pct;
-                uploadState.lines.push(`${rel}: ${pct}% (${formatBytes(currentLoaded)}/${formatBytes(stat.size)} at ${formatBytes(progress.speedBytesPerSecond || 0)}/s)`);
+                appendOperationLine(uploadState, `${rel}: ${pct}% (${formatBytes(currentLoaded)}/${formatBytes(stat.size)} at ${formatBytes(progress.speedBytesPerSecond || 0)}/s)`);
                 trimUploadLines();
               }
             }
@@ -4132,7 +4213,7 @@ async function syncR2(payload = {}) {
         }
       } else {
         if (rel.endsWith('.zip')) {
-          uploadState.lines.push('Large ZIP upload is running through Wrangler; add R2 access keys for byte progress and faster multipart upload.');
+          appendOperationLine(uploadState, 'Large ZIP upload is running through Wrangler; add R2 access keys for byte progress and faster multipart upload.');
         }
         const output = await spawnLogged(npx, wranglerArgs([
           'r2',
@@ -4148,8 +4229,7 @@ async function syncR2(payload = {}) {
           onOutput: (text) => {
             const compact = String(text || '').trim();
             if (compact) {
-              uploadState.lines.push(compact);
-              trimUploadLines();
+              appendOperationLine(uploadState, compact);
             }
           }
         });
@@ -4171,12 +4251,12 @@ async function syncR2(payload = {}) {
         method: fastUpload ? 'direct-multipart' : 'wrangler'
       };
       const latestUpload = uploaded.at(-1);
-      uploadState.lines.push(latestUpload?.skipped ? `Remote current ${rel}` : `Uploaded ${rel}`);
+      appendOperationLine(uploadState, latestUpload?.skipped ? `Remote current ${rel}` : `Uploaded ${rel}`);
       trimUploadLines();
     }
     const verification = await verifyRemoteRelease({ publicLatestUrl, localLatest });
     uploadState.verification = verification;
-    uploadState.lines.push(`Verified player feed ${verification.publicLatestUrl}`);
+    appendOperationLine(uploadState, `Verified player feed ${verification.publicLatestUrl}`);
     uploadState.lastResult = { uploaded, validation, verification, preflight };
     return { uploaded, validation, verification, preflight };
   } catch (error) {

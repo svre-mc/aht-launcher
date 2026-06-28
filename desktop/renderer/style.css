@@ -68,9 +68,12 @@ body::before {
 
 .sidebar {
   display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 18px;
   min-width: 0;
+  min-height: 100vh;
+  overflow: hidden;
+  box-sizing: border-box;
   padding: 26px 28px 22px 28px;
   border-right: 1px solid var(--line-strong);
   background:
@@ -194,8 +197,12 @@ label {
   display: grid;
   align-content: start;
   gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   margin-left: -28px;
   margin-right: -28px;
+  padding-bottom: 8px;
 }
 
 .game-tile {
@@ -302,17 +309,22 @@ body.dev-mode .game-tile.coming-soon {
 
 .sidebar-progress {
   display: grid;
-  gap: 10px;
-  padding: 13px;
+  gap: 9px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 12px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.035);
   box-shadow: var(--bevel);
 }
 
 .sidebar-progress-meta {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
 }
 
@@ -337,6 +349,8 @@ body.dev-mode .game-tile.coming-soon {
   appearance: none;
   -webkit-appearance: none;
   display: inline-flex;
+  width: 100%;
+  box-sizing: border-box;
   align-items: center;
   justify-content: center;
   gap: 10px;

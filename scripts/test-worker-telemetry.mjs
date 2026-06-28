@@ -120,6 +120,54 @@ if (duplicateResponse.status !== 409 || !/not available/i.test(duplicateBody.err
   throw new Error(`Expected duplicate username rejection, got ${duplicateResponse.status} ${JSON.stringify(duplicateBody)}`);
 }
 
+await jsonRequest('/api/users/register', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    username: 'RecoveredRig',
+    installId: 'install-old',
+    platform: 'win32',
+    arch: 'x64',
+    packId: 'a-hard-time-dregora'
+  })
+});
+const recoveryResponse = await worker.fetch(new Request('https://worker.test/api/users/register', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    username: 'RecoveredRig',
+    installId: 'install-new',
+    recoverExistingUsername: true,
+    minecraftAccountMatched: true,
+    recoveryReason: 'minecraft-launcher-account-match'
+  })
+}), env, {});
+const recoveryBody = await recoveryResponse.json();
+if (!recoveryResponse.ok || !recoveryBody.recovered) {
+  throw new Error(`Expected Minecraft Launcher account recovery, got ${recoveryResponse.status} ${JSON.stringify(recoveryBody)}`);
+}
+const recoveredProof = await jsonRequest('/api/launcher-proof', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    minecraftUsername: 'RecoveredRig',
+    installId: 'install-new',
+    packId: 'a-hard-time-dregora',
+    installedVersion: '2.8.2'
+  })
+});
+if (!recoveredProof.trusted || recoveredProof.payload.installId !== 'install-new') {
+  throw new Error(`Recovered username did not produce a proof for the new install: ${JSON.stringify(recoveredProof)}`);
+}
+const oldRecoveredProofResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ minecraftUsername: 'RecoveredRig', installId: 'install-old' })
+}), env, {});
+if (oldRecoveredProofResponse.status !== 403) {
+  throw new Error(`Recovered username should reject the old install proof, got ${oldRecoveredProofResponse.status}`);
+}
+
 const launcherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
