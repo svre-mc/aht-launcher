@@ -355,6 +355,10 @@ assert(desktopMain.includes('async function existingLaunchCwd'), 'Minecraft Laun
 assert(desktopMain.includes('const cwd = await existingLaunchCwd(requestedCwd);'), 'Minecraft Launcher opener must use a verified existing cwd.');
 assert(desktopMain.includes('async function openWindowsStoreMinecraftLauncher(cwd, env)'), 'Windows Store Minecraft Launcher opener must be isolated.');
 assert(desktopMain.includes("process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe')"), 'Windows Store opener must use absolute explorer.exe when available.');
+assert(desktopMain.includes('function windowsMinecraftLauncherExeCandidates') && desktopMain.includes('AHT_MINECRAFT_WINDOWS_EXE') && desktopMain.includes('XboxGames'), 'Windows Minecraft Launcher opener must try real EXE paths for AtlasOS/debloated installs.');
+assert(desktopMain.includes('function windowsMinecraftLauncherShortcutCandidates') && desktopMain.includes('Minecraft Launcher.lnk') && desktopMain.includes('Minecraft.lnk'), 'Windows Minecraft Launcher opener must try Start Menu shortcuts when Store/AppX paths are unavailable.');
+assert(desktopMain.includes('async function spawnWindowsStartTarget') && desktopMain.includes("const protocolTarget = 'minecraft:'"), 'Windows Minecraft Launcher opener must try the minecraft: protocol before Store AppID fallback.');
+assert(desktopMain.includes('const isRootLauncher = cwd &&') && desktopMain.includes("samePath(candidate, path.join(cwd, 'minecraft.exe'))"), 'Windows opener must only pass --workDir to the legacy root minecraft.exe launcher, not every Minecraft.exe alias.');
 assert(desktopMain.includes('return openWindowsStoreMinecraftLauncher(cwd, env);'), 'Windows play fallback must use the robust Store opener.');
 assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = null)'), 'Launcher must gather all synced Minecraft profile roots before installing loaders.');
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');

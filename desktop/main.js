@@ -5180,19 +5180,97 @@ async function openMacMinecraftLauncher(cwd, env) {
   throw new Error(`Minecraft Launcher could not be opened on macOS.${lastError ? ` ${lastError.message}` : ''}`);
 }
 
-async function openWindowsStoreMinecraftLauncher(cwd, env) {
-  const appTarget = 'shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft';
-  const explorer = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe') : 'explorer.exe';
-  try {
-    return await spawnDetached(explorer, [appTarget], cwd, env);
-  } catch (explorerError) {
-    const commandPrompt = process.env.ComSpec || (process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
+function windowsCommandPrompt() {
+  return process.env.ComSpec || (process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
+}
+
+function windowsDriveRoot(value = '') {
+  const normalized = String(value || 'C:').replace(/[\\/]+$/, '');
+  return /^[A-Za-z]:$/.test(normalized) ? `${normalized}\\` : normalized;
+}
+
+function uniquePaths(pathsToCheck = []) {
+  const seen = new Set();
+  const result = [];
+  for (const candidate of pathsToCheck) {
+    if (!candidate) continue;
+    const normalized = path.normalize(candidate);
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function windowsMinecraftLauncherExeCandidates(cwd = '') {
+  const systemDrive = windowsDriveRoot(process.env.SystemDrive || 'C:');
+  return uniquePaths([
+    process.env.AHT_MINECRAFT_WINDOWS_EXE || '',
+    cwd ? path.join(cwd, 'minecraft.exe') : '',
+    cwd ? path.join(cwd, 'Minecraft.exe') : '',
+    process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
+    process.env.ProgramW6432 ? path.join(process.env.ProgramW6432, 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'Minecraft.exe') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'MinecraftLauncher.exe') : '',
+    path.join(systemDrive, 'XboxGames', 'Minecraft Launcher', 'Content', 'Minecraft.exe'),
+    path.join(systemDrive, 'XboxGames', 'Minecraft Launcher', 'Content', 'MinecraftLauncher.exe')
+  ]);
+}
+
+function windowsMinecraftLauncherShortcutCandidates() {
+  const shortcutNames = ['Minecraft Launcher.lnk', 'Minecraft.lnk'];
+  const shortcutDirs = uniquePaths([
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs') : '',
+    process.env.ProgramData ? path.join(process.env.ProgramData, 'Microsoft', 'Windows', 'Start Menu', 'Programs') : '',
+    process.env.ProgramData ? path.join(process.env.ProgramData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Games') : ''
+  ]);
+  return uniquePaths(shortcutDirs.flatMap((dir) => shortcutNames.map((name) => path.join(dir, name))));
+}
+
+async function spawnWindowsStartTarget(target, cwd, env) {
+  const commandPrompt = windowsCommandPrompt();
+  const args = ['/d', '/s', '/c', 'start', '""', target];
+  await spawnLogged(commandPrompt, args, { cwd, env, timeoutMs: 10_000 });
+  return { ok: true, command: commandPrompt, args, target };
+}
+
+async function openWindowsShortcutMinecraftLauncher(cwd, env) {
+  let lastError = null;
+  for (const shortcutPath of windowsMinecraftLauncherShortcutCandidates()) {
+    if (!(await pathExists(shortcutPath))) continue;
     try {
-      return await spawnDetached(commandPrompt, ['/d', '/s', '/c', 'start', '""', appTarget], cwd, env);
-    } catch (startError) {
-      throw new Error(`Minecraft Launcher could not be opened. Explorer failed: ${explorerError.message}. Start failed: ${startError.message}`);
+      return await spawnWindowsStartTarget(shortcutPath, cwd, env);
+    } catch (error) {
+      lastError = error;
     }
   }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('No Minecraft Launcher Start Menu shortcut was found.');
+}
+
+async function openWindowsStoreMinecraftLauncher(cwd, env) {
+  const appTarget = 'shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft';
+  const protocolTarget = 'minecraft:';
+  const explorer = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe') : 'explorer.exe';
+  const errors = [];
+  for (const target of [protocolTarget, appTarget]) {
+    try {
+      return await spawnWindowsStartTarget(target, cwd, env);
+    } catch (error) {
+      errors.push(`${target}: ${error.message}`);
+    }
+  }
+  try {
+    return await spawnDetached(explorer, [appTarget], cwd, env);
+  } catch (error) {
+    errors.push(`explorer ${appTarget}: ${error.message}`);
+  }
+  throw new Error(`Minecraft Launcher could not be opened on Windows. Tried installed EXEs, Start Menu shortcuts, minecraft: protocol, and Store AppID. ${errors.join(' ')}`);
 }
 async function openMinecraftLauncher(config) {
   const requestedCwd = config.minecraftLauncher?.rootDir || app.getPath('home');
@@ -5203,21 +5281,21 @@ async function openMinecraftLauncher(config) {
   }
 
   if (process.platform === 'win32') {
-    const rootLauncher = cwd ? path.join(cwd, 'minecraft.exe') : '';
-    if (rootLauncher && await pathExists(rootLauncher)) {
-      return spawnDetached(rootLauncher, ['--workDir', cwd], cwd, env);
-    }
-    const candidates = [
-      process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
-      process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
-      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe') : ''
-    ].filter(Boolean);
-    for (const candidate of candidates) {
+    for (const candidate of windowsMinecraftLauncherExeCandidates(cwd)) {
       if (await pathExists(candidate)) {
-        return spawnDetached(candidate, [], cwd, env);
+        const isRootLauncher = cwd && (
+          samePath(candidate, path.join(cwd, 'minecraft.exe')) ||
+          samePath(candidate, path.join(cwd, 'Minecraft.exe'))
+        );
+        const args = isRootLauncher ? ['--workDir', cwd] : [];
+        return spawnDetached(candidate, args, cwd, env);
       }
     }
-    return openWindowsStoreMinecraftLauncher(cwd, env);
+    try {
+      return await openWindowsShortcutMinecraftLauncher(cwd, env);
+    } catch {
+      return openWindowsStoreMinecraftLauncher(cwd, env);
+    }
   }
 
   if (process.platform === 'darwin') {
