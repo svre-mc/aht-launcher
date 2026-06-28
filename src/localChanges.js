@@ -3,6 +3,7 @@ import path from 'node:path';
 import { hashFile, normalizeRelPath, pathExists, readJsonFile, safeJoin } from './utils.js';
 
 const MONITORED_ROOTS = ['mods'];
+const ALLOWED_UNMANAGED_MOD_DIRECTORIES = new Set(['openterraingenerator']);
 
 function yieldToEventLoop() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -44,6 +45,14 @@ function managedModFiles(managed = [], requiredManaged = []) {
     byPath.set(item.relativePath, item);
   }
   return [...byPath.values()];
+}
+
+function isAllowedUnmanagedModPath(relPath = '') {
+  const normalized = normalizeRelPath(relPath).toLowerCase();
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.length >= 2
+    && parts[0] === 'mods'
+    && ALLOWED_UNMANAGED_MOD_DIRECTORIES.has(parts[1]);
 }
 
 async function walkFiles(root, rel = '', options = {}) {
@@ -101,7 +110,7 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
   let visited = 0;
 
   const addFileIssue = async (abs, rel, size) => {
-    if (managedSet.has(rel)) {
+    if (managedSet.has(rel) || isAllowedUnmanagedModPath(rel)) {
       return;
     }
     added.push({
@@ -113,7 +122,7 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
 
   const addDirectoryIssue = (rel) => {
     const folderPath = rel.endsWith('/') ? rel : `${rel}/`;
-    if (managedSet.has(rel) || managedSet.has(folderPath)) {
+    if (managedSet.has(rel) || managedSet.has(folderPath) || isAllowedUnmanagedModPath(folderPath)) {
       return;
     }
     added.push({
@@ -136,6 +145,9 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
         await yieldToEventLoop();
       }
       const rel = normalizeRelPath(`${root}/${entry.name}`);
+      if (isAllowedUnmanagedModPath(rel)) {
+        continue;
+      }
       if (entry.isDirectory()) {
         const folderPath = `${rel}/`;
         if (!managedDirs.has(folderPath.toLowerCase())) {

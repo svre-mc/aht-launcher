@@ -28,6 +28,7 @@ await write(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), JSON.
 
 await write(path.join(instanceDir, 'mods', 'changed.jar'), edited);
 await write(path.join(instanceDir, 'mods', 'local-added.jar'), Buffer.from('local mod\n'));
+await write(path.join(instanceDir, 'mods', 'OpenTerrainGenerator', 'cache', 'runtime-cache.dat'), Buffer.from('runtime cache\n'));
 await write(path.join(instanceDir, 'config', 'changed.cfg'), edited);
 await write(path.join(instanceDir, 'config', 'local-added.cfg'), Buffer.from('local config\n'));
 await write(path.join(instanceDir, 'shaderpacks', 'local.zip'), Buffer.from('local shaderpack\n'));
@@ -47,6 +48,9 @@ if (JSON.stringify(missingPaths) !== JSON.stringify(['mods/missing.jar'])) {
 }
 if (JSON.stringify(addedPaths) !== JSON.stringify(['mods/local-added.jar'])) {
   throw new Error(`Added paths should be mod-only: ${JSON.stringify(addedPaths)}`);
+}
+if (changes.added.some((item) => /openterraingenerator/i.test(item.path)) || integrity.added.some((item) => /openterraingenerator/i.test(item.path))) {
+  throw new Error(`OpenTerrainGenerator runtime folder should be ignored by change scans: ${JSON.stringify({ changes: changes.added, integrity: integrity.added })}`);
 }
 if (changes.counts.managed !== 2 || changes.counts.changed !== 1 || changes.counts.missing !== 1 || changes.counts.added !== 1) {
   throw new Error(`Unexpected local-change counts: ${JSON.stringify(changes.counts)}`);

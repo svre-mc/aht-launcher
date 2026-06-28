@@ -34,6 +34,16 @@ function isGameSettingsRelPath(relPath = '') {
   return normalized === 'options.txt' || normalized === 'optionsof.txt';
 }
 
+const PRESERVED_UNMANAGED_MOD_DIRS = ['OpenTerrainGenerator'];
+
+function isPreservedUnmanagedModPath(relPath = '') {
+  const normalized = normalizeRelPath(relPath).toLowerCase();
+  return PRESERVED_UNMANAGED_MOD_DIRS.some((dirName) => {
+    const dirPath = `mods/${dirName}`.toLowerCase();
+    return normalized === dirPath || normalized.startsWith(`${dirPath}/`);
+  });
+}
+
 function stripClientPackRoot(relPath = '', rootPrefix = '') {
   const normalized = normalizeRelPath(relPath);
   if (!rootPrefix) return normalized;
@@ -208,7 +218,7 @@ async function extractZipEntryToFile(zipFile, entry, target, shouldHash) {
   }
 }
 
-async function walkInstanceFiles(root, rel = '') {
+async function walkInstanceFiles(root, rel = '', options = {}) {
   if (!(await pathExists(root))) {
     return [];
   }
@@ -225,7 +235,11 @@ async function walkInstanceFiles(root, rel = '') {
     const childRel = rel ? path.join(rel, entry.name) : entry.name;
     const childAbs = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      files.push(...await walkInstanceFiles(childAbs, childRel));
+      const normalizedChildRel = normalizeRelPath(childRel);
+      if (typeof options.skipDirectory === 'function' && options.skipDirectory(normalizedChildRel, childAbs)) {
+        continue;
+      }
+      files.push(...await walkInstanceFiles(childAbs, childRel, options));
     } else if (entry.isFile()) {
       const childStat = await fs.stat(childAbs);
       files.push({ abs: childAbs, rel: normalizeRelPath(childRel), size: childStat.size });
@@ -234,14 +248,18 @@ async function walkInstanceFiles(root, rel = '') {
   return files;
 }
 
-async function removeEmptyDirs(root) {
+async function removeEmptyDirs(root, options = {}) {
   if (!(await pathExists(root))) {
     return;
   }
   const entries = await fs.readdir(root, { withFileTypes: true });
   for (const entry of entries) {
+    const childAbs = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      await removeEmptyDirs(path.join(root, entry.name));
+      if (typeof options.skipDirectory === 'function' && options.skipDirectory(childAbs)) {
+        continue;
+      }
+      await removeEmptyDirs(childAbs, options);
     }
   }
   const remaining = await fs.readdir(root);
@@ -253,14 +271,17 @@ async function removeEmptyDirs(root) {
 async function removeUnexpectedModFiles(instanceDir, nextManagedSet) {
   const modsDir = safeJoin(instanceDir, 'mods');
   const removed = [];
-  for (const file of await walkInstanceFiles(modsDir)) {
+  const skipPreservedModDirectory = (relPath) => isPreservedUnmanagedModPath(`mods/${relPath}`);
+  const skipPreservedModDirectoryAbs = (absPath) => PRESERVED_UNMANAGED_MOD_DIRS
+    .some((dirName) => path.resolve(absPath).toLowerCase() === path.resolve(modsDir, dirName).toLowerCase());
+  for (const file of await walkInstanceFiles(modsDir, '', { skipDirectory: skipPreservedModDirectory })) {
     const relPath = normalizeRelPath(`mods/${file.rel}`);
-    if (!nextManagedSet.has(relPath)) {
+    if (!nextManagedSet.has(relPath) && !isPreservedUnmanagedModPath(relPath)) {
       await removeFileIfExists(file.abs);
       removed.push(relPath);
     }
   }
-  await removeEmptyDirs(modsDir);
+  await removeEmptyDirs(modsDir, { skipDirectory: skipPreservedModDirectoryAbs });
   return removed;
 }
 
@@ -276,6 +297,7 @@ const PLAYER_PRESERVED_FILES = [
   'servers.dat',
   'servers.dat_old'
 ];
+const PLAYER_PRESERVED_MOD_DIRS = PRESERVED_UNMANAGED_MOD_DIRS.map((dirName) => `mods/${dirName}`);
 
 function installSiblingPrefix(instanceDir, label) {
   const resolved = path.resolve(instanceDir);
@@ -382,6 +404,7 @@ async function copyPathIfPresent(source, dest, options = {}) {
   if (!stat.isDirectory()) {
     return false;
   }
+  await ensureDir(dest);
   const files = await walkInstanceFiles(source);
   let copied = 0;
   if (onProgress) {
@@ -403,6 +426,13 @@ async function copyPathIfPresent(source, dest, options = {}) {
 
 async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger, options = {}) {
   const preserved = [];
+  for (const relPath of PLAYER_PRESERVED_MOD_DIRS) {
+    const source = safeJoin(instanceDir, relPath);
+    const dest = safeJoin(stagingDir, relPath);
+    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving runtime mod data' })) {
+      preserved.push(relPath);
+    }
+  }
   for (const relPath of PLAYER_PRESERVED_DIRS) {
     const source = safeJoin(instanceDir, relPath);
     const dest = safeJoin(stagingDir, relPath);
