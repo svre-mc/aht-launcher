@@ -57,39 +57,49 @@ function isAllowedUnmanagedModPath(relPath = '') {
 
 async function walkFiles(root, rel = '', options = {}) {
   const state = options.state || { visited: 0, yieldEvery: Math.max(1, Number(options.yieldEvery) || 100) };
-  const target = path.join(root, rel);
-  if (!(await pathExists(target))) {
-    return [];
-  }
-  const stat = await fs.stat(target);
-  if (stat.isFile()) {
-    return [{ abs: target, rel: rel.replaceAll(path.sep, '/'), size: stat.size }];
-  }
-  if (!stat.isDirectory()) {
-    return [];
-  }
-  const entries = await fs.readdir(target, { withFileTypes: true });
   const files = [];
-  for (const entry of entries) {
-    state.visited += 1;
-    if (state.visited % state.yieldEvery === 0) {
-      await yieldToEventLoop();
-    }
-    if (entry.name === '.aht-launcher') {
+  const maxFiles = Number.isFinite(Number(options.maxFiles)) ? Math.max(0, Number(options.maxFiles)) : Infinity;
+  const pending = [rel];
+
+  while (pending.length && files.length < maxFiles) {
+    const currentRel = pending.pop();
+    const target = path.join(root, currentRel);
+    if (!(await pathExists(target))) {
       continue;
     }
-    const childRel = rel ? path.join(rel, entry.name) : entry.name;
-    if (entry.isDirectory()) {
-      files.push(...await walkFiles(root, childRel, { state }));
-    } else if (entry.isFile()) {
-      const childAbs = path.join(root, childRel);
-      const childStat = await fs.stat(childAbs);
-      files.push({ abs: childAbs, rel: childRel.replaceAll(path.sep, '/'), size: childStat.size });
+    const stat = await fs.stat(target);
+    if (stat.isFile()) {
+      files.push({ abs: target, rel: currentRel.replaceAll(path.sep, '/'), size: stat.size });
+      continue;
+    }
+    if (!stat.isDirectory()) {
+      continue;
+    }
+
+    const entries = await fs.readdir(target, { withFileTypes: true });
+    for (const entry of entries) {
+      state.visited += 1;
+      if (state.visited % state.yieldEvery === 0) {
+        await yieldToEventLoop();
+      }
+      if (entry.name === '.aht-launcher') {
+        continue;
+      }
+      const childRel = currentRel ? path.join(currentRel, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        pending.push(childRel);
+      } else if (entry.isFile()) {
+        const childAbs = path.join(root, childRel);
+        const childStat = await fs.stat(childAbs);
+        files.push({ abs: childAbs, rel: childRel.replaceAll(path.sep, '/'), size: childStat.size });
+        if (files.length >= maxFiles) {
+          break;
+        }
+      }
     }
   }
   return files;
 }
-
 function managedDirectoryPrefixes(managedSet) {
   const prefixes = new Set();
   for (const relPath of managedSet) {
@@ -153,7 +163,7 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
         if (!managedDirs.has(folderPath.toLowerCase())) {
           addDirectoryIssue(rel);
         } else {
-          for (const file of await walkFiles(rootPath, entry.name, { yieldEvery })) {
+          for (const file of await walkFiles(rootPath, entry.name, { yieldEvery, maxFiles: Math.max(0, limit - added.length + managedSet.size) })) {
             const fileRel = normalizeRelPath(`${root}/${file.rel}`);
             visited += 1;
             await addFileIssue(file.abs, fileRel, file.size);
@@ -251,7 +261,7 @@ export async function scanLocalChanges(instanceDir, options = {}) {
     changed: changed.slice(0, limit),
     missing: missing.slice(0, limit),
     added: added.slice(0, limit),
-    truncated: changed.length > limit || missing.length > limit || added.length > limit
+    truncated: changed.length > limit || missing.length > limit || (limit > 0 && added.length >= limit)
   };
 }
 
@@ -323,6 +333,6 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
     changed: changed.slice(0, limit),
     missing: missing.slice(0, limit),
     added: added.slice(0, limit),
-    truncated: changed.length > limit || missing.length > limit || added.length > limit
+    truncated: changed.length > limit || missing.length > limit || (limit > 0 && added.length >= limit)
   };
 }

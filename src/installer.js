@@ -233,20 +233,29 @@ async function walkInstanceFiles(root, rel = '', options = {}) {
   if (!stat.isDirectory()) {
     return [];
   }
-  const entries = await fs.readdir(root, { withFileTypes: true });
   const files = [];
-  for (const entry of entries) {
-    const childRel = rel ? path.join(rel, entry.name) : entry.name;
-    const childAbs = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      const normalizedChildRel = normalizeRelPath(childRel);
-      if (typeof options.skipDirectory === 'function' && options.skipDirectory(normalizedChildRel, childAbs)) {
-        continue;
+  const pending = [{ abs: root, rel: normalizeRelPath(rel) }];
+  let checked = 0;
+  while (pending.length) {
+    const current = pending.pop();
+    const entries = await fs.readdir(current.abs, { withFileTypes: true });
+    for (const entry of entries) {
+      const childRel = current.rel ? path.join(current.rel, entry.name) : entry.name;
+      const childAbs = path.join(current.abs, entry.name);
+      if (entry.isDirectory()) {
+        const normalizedChildRel = normalizeRelPath(childRel);
+        if (typeof options.skipDirectory === 'function' && options.skipDirectory(normalizedChildRel, childAbs)) {
+          continue;
+        }
+        pending.push({ abs: childAbs, rel: normalizedChildRel });
+      } else if (entry.isFile()) {
+        const childStat = await fs.stat(childAbs);
+        files.push({ abs: childAbs, rel: normalizeRelPath(childRel), size: childStat.size });
       }
-      files.push(...await walkInstanceFiles(childAbs, childRel, options));
-    } else if (entry.isFile()) {
-      const childStat = await fs.stat(childAbs);
-      files.push({ abs: childAbs, rel: normalizeRelPath(childRel), size: childStat.size });
+      checked += 1;
+      if (checked % 500 === 0) {
+        await yieldToEventLoop();
+      }
     }
   }
   return files;
@@ -409,6 +418,16 @@ async function copyPathIfPresent(source, dest, options = {}) {
     return false;
   }
   await ensureDir(dest);
+  if (options.fastDirectoryCopy) {
+    if (onProgress) {
+      onProgress({ phase: options.phase || 'Preserving player data', currentPath: relPath, completed: 0, total: 1, percent: weightedProgress(0, options.progressBase ?? 95, options.progressSpan ?? 1) });
+    }
+    await fs.cp(source, dest, { recursive: true, force: true });
+    if (onProgress) {
+      onProgress({ phase: options.phase || 'Preserving player data', currentPath: relPath, completed: 1, total: 1, percent: weightedProgress(100, options.progressBase ?? 95, options.progressSpan ?? 1) });
+    }
+    return true;
+  }
   const files = await walkInstanceFiles(source);
   let copied = 0;
   if (onProgress) {
@@ -433,7 +452,7 @@ async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSetti
   for (const relPath of PLAYER_PRESERVED_MOD_DIRS) {
     const source = safeJoin(instanceDir, relPath);
     const dest = safeJoin(stagingDir, relPath);
-    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving runtime mod data' })) {
+    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving runtime mod data', fastDirectoryCopy: true })) {
       preserved.push(relPath);
     }
   }

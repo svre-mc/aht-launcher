@@ -110,6 +110,12 @@ await fs.mkdir(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache'), {
 await fs.writeFile(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'stale-runtime-cache.dat'), 'stale otg cache', 'utf8');
 await fs.mkdir(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'nested'), { recursive: true });
 await fs.writeFile(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'nested', 'another-runtime-cache.dat'), 'another stale otg cache', 'utf8');
+const largePreservedOtgDir = path.join(installDir, 'mods', 'OpenTerrainGenerator', 'large-preserved-runtime-tree');
+await fs.mkdir(largePreservedOtgDir, { recursive: true });
+const largePreservedOtgFileCount = 120000;
+for (let index = 0; index < largePreservedOtgFileCount; index += 1) {
+  await fs.writeFile(path.join(largePreservedOtgDir, `${String(index).padStart(6, '0')}.dat`), '', 'utf8');
+}
 await fs.writeFile(path.join(installDir, 'config', 'stale-local.cfg'), 'stale local config\n', 'utf8');
 await fs.writeFile(path.join(installDir, 'resourcepacks', 'stale-resourcepack.zip'), 'stale resourcepack\n', 'utf8');
 await fs.mkdir(path.join(installDir, 'saves', 'Player World'), { recursive: true });
@@ -163,6 +169,7 @@ assert(await fs.readFile(path.join(installDir, 'optionsof.txt'), 'utf8') === 'pa
 assert(!(await pathExists(path.join(installDir, 'mods', 'extra-untracked.jar'))), 'repair did not remove an untracked extra mod');
 assert(await pathExists(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'stale-runtime-cache.dat')), 'repair should preserve the OpenTerrainGenerator runtime folder');
 assert(await pathExists(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'cache', 'nested', 'another-runtime-cache.dat')), 'repair should preserve nested OpenTerrainGenerator runtime files');
+assert(await pathExists(path.join(installDir, 'mods', 'OpenTerrainGenerator', 'large-preserved-runtime-tree', '119999.dat')), 'repair should preserve large OpenTerrainGenerator runtime trees without stack overflow');
 assert(!(await pathExists(path.join(installDir, 'config', 'stale-local.cfg'))), 'clean full-client repair did not remove stale config files');
 assert(!(await pathExists(path.join(installDir, 'resourcepacks', 'stale-resourcepack.zip'))), 'clean full-client repair did not remove stale resourcepacks');
 assert(await fs.readFile(path.join(installDir, 'saves', 'Player World', 'level.dat'), 'utf8') === 'player world data', 'player saves were not preserved during clean repair');
