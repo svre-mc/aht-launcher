@@ -161,6 +161,7 @@ const repairInstall = await installPack({
 assert(repairInstall.cleanInstall === true, 'full-client repair should use clean staged replacement');
 assert(repairProgress.some((progress) => progress.phase === 'Verifying cached pack' && progress.unit === 'bytes'), 'full-client repair did not verify the cached pack before reinstalling');
 assert(repairProgress.some((progress) => progress.phase === 'Preserving player data'), 'full-client repair did not report player-data preservation progress');
+assert(!repairProgress.some((progress) => progress.phase === 'Preserving runtime mod data'), 'OpenTerrainGenerator runtime data must be moved after the install swap, not copied during the 95% preservation phase');
 assert(repairProgress.some((progress) => progress.phase === 'Caching pack' && progress.unit === 'bytes'), 'full-client repair did not report ZIP cache copy progress');
 assert(!repairProgress.some((progress) => progress.phase === 'Downloading pack'), 'full-client repair redownloaded the pack instead of reusing the verified cache');
 assertMonotonicProgress(repairProgress, 'full-client repair');

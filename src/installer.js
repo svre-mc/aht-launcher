@@ -440,13 +440,6 @@ async function copyPathIfPresent(source, dest, options = {}) {
 
 async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger, options = {}) {
   const preserved = [];
-  for (const relPath of PLAYER_PRESERVED_MOD_DIRS) {
-    const source = safeJoin(instanceDir, relPath);
-    const dest = safeJoin(stagingDir, relPath);
-    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving runtime mod data' })) {
-      preserved.push(relPath);
-    }
-  }
   for (const relPath of PLAYER_PRESERVED_DIRS) {
     const source = safeJoin(instanceDir, relPath);
     const dest = safeJoin(stagingDir, relPath);
@@ -463,6 +456,31 @@ async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSetti
   }
   if (preserved.length) {
     logger.log(`Preserved player data: ${preserved.join(', ')}`);
+  }
+  return preserved;
+}
+
+async function movePathIfPresent(source, dest) {
+  if (!(await pathExists(source))) {
+    return false;
+  }
+  await ensureDir(path.dirname(dest));
+  await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
+  await fs.rename(source, dest);
+  return true;
+}
+
+async function movePreservedRuntimeDataFromBackup(backupDir, instanceDir, logger) {
+  const preserved = [];
+  for (const relPath of PLAYER_PRESERVED_MOD_DIRS) {
+    const source = safeJoin(backupDir, relPath);
+    const dest = safeJoin(instanceDir, relPath);
+    if (await movePathIfPresent(source, dest)) {
+      preserved.push(relPath);
+    }
+  }
+  if (preserved.length) {
+    logger?.log?.(`Preserved runtime mod data without copying: ${preserved.join(', ')}`);
   }
   return preserved;
 }
@@ -580,6 +598,7 @@ async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) 
   if (!oldInstallMoved) {
     return { backupRemoved: true, backupDir: '', backupCleanupWarning: '' };
   }
+  await movePreservedRuntimeDataFromBackup(backupDir, resolvedInstanceDir, options.logger);
   return removeBackupAfterSuccessfulSwap(backupDir, options);
 }
 

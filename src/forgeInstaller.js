@@ -223,8 +223,23 @@ export function javaSetupHelpMessage(platform = process.platform) {
   return `Install ${runtime}, restart AHT Launcher, then click Update again.`;
 }
 
+function minecraftServiceFailureMessage(error = null) {
+  const text = `${error?.message || error || ''}`;
+  const compact = text.replace(/\s+/g, ' ');
+  const officialServicePattern = /REQUEST_FAILED|Unable to prepare assets for download|launcher\.mojang\.com|piston-meta\.mojang\.com|resources\.download\.minecraft\.net|libraries\.minecraft\.net|api\.minecraftservices\.com|sessionserver\.mojang\.com|authserver\.mojang\.com|maven\.minecraftforge\.net|maven\.forgecdn\.net|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network timeout/i;
+  const launcherRuntimePattern = /could not open .*java-runtime-(?:gamma|beta|delta|epsilon|alpha).*javaw?\.cfg/i;
+  if (!officialServicePattern.test(compact) && !launcherRuntimePattern.test(compact)) {
+    return '';
+  }
+  return 'Minecraft services or the Minecraft Launcher runtime are currently unavailable. Wait for Mojang/Microsoft services to recover, reopen Minecraft Launcher, then try AHT Launcher again.';
+}
+
 export function friendlyForgeJavaErrorMessage(error = null, javaPath = 'java', platform = process.platform) {
   const text = `${error?.message || error || ''}`;
+  const serviceMessage = minecraftServiceFailureMessage(error);
+  if (serviceMessage) {
+    return serviceMessage;
+  }
   const help = javaSetupHelpMessage(platform);
   if (error?.code === 'ENOENT' || /ENOENT|not found|spawn .* ENOENT/i.test(text)) {
     return `Java 8 runtime was not found (${javaPath}). ${help}`;

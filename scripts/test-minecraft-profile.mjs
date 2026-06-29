@@ -271,6 +271,10 @@ const certificateMessage = friendlyForgeJavaErrorMessage(new Error('sun.security
 if (!certificateMessage.includes('could not validate Mojang/Forge HTTPS certificates') || !certificateMessage.includes('Eclipse Temurin JDK 8') || certificateMessage.includes('SunCertPathBuilderException')) {
   throw new Error(`Certificate message is not clean: ${certificateMessage}`);
 }
+const minecraftServiceMessage = friendlyForgeJavaErrorMessage(new Error('Forge installer exited with code 1: Error: could not open C:\\Users\\Player\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Local\\runtime\\java-runtime-gamma\\windows-x64\\java-runtime-gamma\\bin\\javaw.cfg'), fakeModernJava, 'win32');
+if (!minecraftServiceMessage.includes('Minecraft services') || !minecraftServiceMessage.includes('Mojang/Microsoft') || minecraftServiceMessage.includes('javaw.cfg')) {
+  throw new Error(`Minecraft outage message is not clean: ${minecraftServiceMessage}`);
+}
 
 const macAuthRoot = path.join(root, 'mac-launcher-auth');
 await fs.mkdir(macAuthRoot, { recursive: true });
