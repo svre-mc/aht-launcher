@@ -154,6 +154,7 @@ if (!window.aht) {
   const mockUpdateLogs = [];
   window.aht = {
     getStatus: async () => mockStatus,
+    copyErrorReport: async () => ({ ok: true, copied: true, chars: 0 }),
     saveSettings: async () => ({}),
     setupRecommend: async () => mockStatus.setup,
     setupApply: async () => mockStatus,
@@ -705,8 +706,19 @@ function applyDeveloperGate(status) {
 
 function cleanErrorMessage(error) {
   return String(error?.message || error || "Unknown error")
-    .replace(/^Error invoking remote method '[^']+': Error: /, "")
+    .replace(/^Error invoking remote method '[^']+': (?:Error|RangeError|SyntaxError): /, "")
+    .replace(/^Error invoking remote method '[^']+': /, "")
     .replace(/^Error: /, "");
+}
+
+async function copyErrorReportFromToast(payload = {}) {
+  if (!window.aht?.copyErrorReport) return;
+  try {
+    const result = await window.aht.copyErrorReport(payload);
+    showToast("Error details copied", `${result.chars || 0} characters copied. Send that text with the screenshot.`, "success", { durationMs: 4200, disableDiagnostics: true });
+  } catch {
+    showToast("Copy failed", "Open Downloads and copy the visible log text instead.", "warn", { durationMs: 4200, disableDiagnostics: true });
+  }
 }
 
 function displayPackName(name) {
@@ -1487,7 +1499,7 @@ async function buildReleaseFromSelectedZip(reason = "Building release") {
   return result;
 }
 
-function showToast(title, detail = "", type = "info") {
+function showToast(title, detail = "", type = "info", options = {}) {
   const toast = document.createElement("div");
   toast.className = `toast ${type}`.trim();
   const body = document.createElement("div");
@@ -1499,13 +1511,40 @@ function showToast(title, detail = "", type = "info") {
     span.textContent = detail;
     body.appendChild(span);
   }
+  const diagnosticEnabled = type === "error" && !options.disableDiagnostics;
+  if (diagnosticEnabled) {
+    toast.classList.add("is-clickable");
+    toast.setAttribute("role", "button");
+    toast.setAttribute("tabindex", "0");
+    toast.title = "Click to copy the full AHT Launcher error report";
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "toast-copy-action";
+    action.textContent = "Copy full error details";
+    body.appendChild(action);
+    const copy = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyErrorReportFromToast({
+        title,
+        detail,
+        message: detail,
+        context: options.context || "renderer-toast"
+      });
+    };
+    toast.addEventListener("click", copy);
+    toast.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") copy(event);
+    });
+    action.addEventListener("click", copy);
+  }
   toast.appendChild(body);
   els.toastStack.appendChild(toast);
   const remove = () => {
     toast.classList.add("is-hiding");
     window.setTimeout(() => toast.remove(), 180);
   };
-  window.setTimeout(remove, type === "error" ? 6200 : 3800);
+  window.setTimeout(remove, Number(options.durationMs) || (type === "error" ? 30000 : 3800));
 }
 
 function setProgress(visible, percent = 0, label = "Preparing") {

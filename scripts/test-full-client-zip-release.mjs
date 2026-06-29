@@ -327,6 +327,15 @@ const largeStackResult = await installPack({
 });
 assert(largeStackResult.installMode === 'full-client-zip', `large ZIP dry run used wrong mode: ${JSON.stringify(largeStackResult)}`);
 assert(largeStackResult.overrideFileCount === 6500, `large ZIP dry run did not inspect every entry without stack overflow: ${JSON.stringify(largeStackResult)}`);
+const largeStackRelease = await buildRelease({
+  packZip: largeStackZipPath,
+  outDir: path.join(root, 'large-stack-release'),
+  baseUrl: '',
+  channel: 'stable'
+});
+assert(largeStackRelease.latest.installMode === 'full-client-zip', 'large ZIP release build did not stay in full-client mode');
+assert(largeStackRelease.latest.clientZip?.fileCount >= 6500, `large ZIP release build did not inspect every entry without stack overflow: ${JSON.stringify(largeStackRelease.latest.clientZip)}`);
+assert(largeStackRelease.latest.clientZip?.modFileCount >= 1, `large ZIP release build did not include the injected version-lock mod: ${JSON.stringify(largeStackRelease.latest.clientZip)}`);
 console.log(JSON.stringify({
   ok: true,
   root,

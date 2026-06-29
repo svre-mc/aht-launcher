@@ -2878,6 +2878,31 @@ body.dev-mode .toast {
   line-height: 1.35;
 }
 
+.toast.is-clickable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.toast-copy-action {
+  appearance: none;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--amber);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+}
+
+.toast-copy-action:hover,
+.toast-copy-action:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
 .toast.is-hiding {
   animation: toast-out 160ms ease-in forwards;
 }

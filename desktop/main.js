@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
@@ -12,6 +12,7 @@ import { installPack } from '../src/installer.js';
 import { scanLocalChanges, scanManagedIntegrity } from '../src/localChanges.js';
 import {
   defaultMinecraftRoot,
+  ensureMinecraftLauncherAssets,
   ensureMinecraftLauncherProfile,
   inspectMinecraftLauncherAuth,
   inspectMinecraftLauncherProfile,
@@ -246,6 +247,117 @@ function failOperationState(state, error, phase = 'Failed') {
   state.progress = { ...previous, phase, percent: 100 };
 }
 
+let lastErrorDiagnostic = null;
+
+function errorForDiagnostic(error = null) {
+  if (!error) return { name: 'Error', message: 'Unknown error', stack: '' };
+  return {
+    name: String(error.name || 'Error'),
+    message: String(error.message || error),
+    code: error.code || '',
+    stack: String(error.stack || '')
+  };
+}
+
+function operationForDiagnostic(state = {}) {
+  return {
+    running: Boolean(state.running),
+    kind: state.kind || '',
+    startedAt: state.startedAt || '',
+    completedAt: state.completedAt || '',
+    error: state.error || '',
+    progress: state.progress || null,
+    lines: Array.isArray(state.lines) ? state.lines.slice(-60) : []
+  };
+}
+
+function safeConfigForDiagnostic(config = null) {
+  if (!config) return null;
+  let latestHost = '';
+  try {
+    latestHost = config.latestUrl ? new URL(config.latestUrl).host : '';
+  } catch {}
+  return {
+    packId: config.packId || '',
+    instanceDir: config.instanceDir || '',
+    latestHost,
+    latestConfigured: Boolean(config.latestUrl),
+    minecraftLauncher: {
+      enabled: config.minecraftLauncher?.enabled !== false,
+      rootDir: config.minecraftLauncher?.rootDir || '',
+      profileId: config.minecraftLauncher?.profileId || '',
+      profileName: config.minecraftLauncher?.profileName || '',
+      memoryMb: config.minecraftLauncher?.memoryMb || 0,
+      syncDefaultRoots: config.minecraftLauncher?.syncDefaultRoots !== false,
+      syncRootCount: Array.isArray(config.minecraftLauncher?.syncRoots) ? config.minecraftLauncher.syncRoots.length : 0
+    },
+    launcherProof: {
+      enabled: config.launcherProof?.enabled !== false,
+      required: Boolean(config.launcherProof?.required),
+      proofUrlConfigured: Boolean(config.launcherProof?.workerUrl || config.launcherProof?.baseUrl)
+    }
+  };
+}
+
+function recordErrorDiagnostic(channel, error, context = {}) {
+  lastErrorDiagnostic = {
+    at: new Date().toISOString(),
+    channel,
+    error: errorForDiagnostic(error),
+    context
+  };
+  return lastErrorDiagnostic;
+}
+
+async function buildErrorDiagnosticReport(payload = {}) {
+  const config = await loadConfig().catch(() => null);
+  const report = {
+    title: String(payload.title || 'AHT Launcher error'),
+    clickedAt: new Date().toISOString(),
+    app: {
+      name: app.getName(),
+      version: app.getVersion(),
+      mode: developerModeEnabled() ? 'developer' : 'player',
+      packaged: app.isPackaged
+    },
+    platform: {
+      platform: process.platform,
+      arch: process.arch,
+      versions: process.versions
+    },
+    rendererError: {
+      message: String(payload.message || payload.detail || ''),
+      detail: String(payload.detail || ''),
+      context: payload.context || null
+    },
+    lastMainError: lastErrorDiagnostic,
+    config: safeConfigForDiagnostic(config),
+    operations: {
+      update: operationForDiagnostic(updateState),
+      launcherUpdate: operationForDiagnostic(launcherUpdateState),
+      upload: operationForDiagnostic(uploadState),
+      serverTransfer: operationForDiagnostic(serverTransferState)
+    }
+  };
+  return `${JSON.stringify(report, null, 2)}\n`;
+}
+
+async function copyErrorDiagnosticReport(payload = {}) {
+  const text = await buildErrorDiagnosticReport(payload);
+  clipboard.writeText(text);
+  return { ok: true, copied: true, chars: text.length };
+}
+
+function diagnosticIpc(channel, handler) {
+  return async (event, ...args) => {
+    try {
+      return await handler(event, ...args);
+    } catch (error) {
+      recordErrorDiagnostic(channel, error);
+      throw error;
+    }
+  };
+}
 function weightedOperationPercent(percent, base = 0, span = 100) {
   const normalizedPercent = Math.max(0, Math.min(100, Number(percent) || 0));
   return Math.max(0, Math.min(100, Math.round(base + ((normalizedPercent / 100) * span))));
@@ -1957,7 +2069,14 @@ async function getStatus(configOverride = null) {
     updateLogsError = error.message;
   }
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
-  const installed = await pathExists(installedPath) ? await readJsonFile(installedPath) : null;
+  let installed = null;
+  if (await pathExists(installedPath)) {
+    try {
+      installed = await readJsonFile(installedPath);
+    } catch (error) {
+      latestError ||= `Installed manifest is damaged. Click Update to reinstall A Hard Time. ${error.message || error}`;
+    }
+  }
   const developerClientBypass = developerClientBypassAllowed();
   let integrity = developerClientBypass ? developerBypassIntegrityState(config) : await readIntegrityState(config);
   if (!developerClientBypass) {
@@ -2092,6 +2211,15 @@ async function runUpdate(forceRepair = false, options = {}) {
           installed: result.installed,
           operationState: updateState
         });
+        const assetLines = [];
+        result.minecraftAssets = await ensureMinecraftLauncherAssets({
+          config,
+          latest: latestAfterInstall,
+          installed: result.installed,
+          profile,
+          logger: { log: (line) => assetLines.push(String(line)) }
+        });
+        appendOperationLines(updateState, assetLines);
         result.minecraftProfile = profile;
       } catch (error) {
         throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
@@ -4528,7 +4656,11 @@ async function inspectZipMetadataEntries(packZip) {
         })
           .then(() => {
             if (!stopped) {
-              zipFile.readEntry();
+              setImmediate(() => {
+                if (!stopped) {
+                  zipFile.readEntry();
+                }
+              });
             }
           })
           .catch(fail);
@@ -4581,7 +4713,11 @@ async function inspectFullClientZipEntries(packZip) {
         })
           .then(() => {
             if (!stopped) {
-              zipFile.readEntry();
+              setImmediate(() => {
+                if (!stopped) {
+                  zipFile.readEntry();
+                }
+              });
             }
           })
           .catch(fail);
@@ -5270,15 +5406,16 @@ function focusMainWindow() {
   mainWindow.focus();
 }
 
+ipcMain.handle('diagnostics:copyErrorReport', async (_event, payload = {}) => copyErrorDiagnosticReport(payload));
 ipcMain.handle('status:get', async () => getStatus());
 ipcMain.handle('settings:save', async (_event, config) => saveSettings(config));
 ipcMain.handle('settings:testFeed', async (_event, config) => testReleaseFeed(config));
-ipcMain.handle('update:start', async (_event, payload = {}) => runUpdate(Boolean(payload.forceRepair), {
+ipcMain.handle('update:start', diagnosticIpc('update:start', async (_event, payload = {}) => runUpdate(Boolean(payload.forceRepair), {
   replaceGameSettings: Boolean(payload.replaceGameSettings)
-}));
+})));
 ipcMain.handle('update:state', async () => updateState);
-ipcMain.handle('launcher:updateStart', async () => runLauncherUpdate());
-ipcMain.handle('launcher:updateRestart', async () => restartLauncherUpdate());
+ipcMain.handle('launcher:updateStart', diagnosticIpc('launcher:updateStart', async () => runLauncherUpdate()));
+ipcMain.handle('launcher:updateRestart', diagnosticIpc('launcher:updateRestart', async () => restartLauncherUpdate()));
 ipcMain.handle('launcher:updateState', async () => {
   await hydratePendingLauncherUpdateState();
   return launcherUpdateState;
@@ -5311,12 +5448,19 @@ ipcMain.handle('changes:sync', async () => {
     changes
   });
 });
-ipcMain.handle('play:start', async () => {
+ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
   const config = await loadConfig();
   const developerClientBypass = developerClientBypassAllowed();
 
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
-  const installed = await pathExists(installedPath) ? await readJsonFile(installedPath) : null;
+  let installed = null;
+  if (await pathExists(installedPath)) {
+    try {
+      installed = await readJsonFile(installedPath);
+    } catch (error) {
+      throw new Error(`Installed manifest is damaged. Click Update to reinstall A Hard Time. ${error.message || error}`);
+    }
+  }
   let latest = null;
   let latestError = null;
   try {
@@ -5350,6 +5494,7 @@ ipcMain.handle('play:start', async () => {
   });
   let profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   profile = await installMinecraftProfileLoaders(profile, { config, latest: launchLatest, installed });
+  const minecraftAssets = await ensureMinecraftLauncherAssets({ config, latest: launchLatest, installed, profile });
   const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity, {
     allowLegacyRelease: developerClientBypass
   });
@@ -5364,9 +5509,10 @@ ipcMain.handle('play:start', async () => {
       proofFile: launcherProof.proofFile || '',
       trusted: Boolean(launcherProof.trusted),
       source: launcherProof.source || ''
-    })
+    }),
+    minecraftAssets
   };
-});
+}));
 ipcMain.handle('dialog:zip', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
@@ -5408,7 +5554,7 @@ ipcMain.handle('dialog:folder', async (_event, defaultPath = '') => {
 ipcMain.handle('shell:openPath', async (_event, target) => shell.openPath(target));
 ipcMain.handle('setup:recommend', async () => setupForRenderer(await setupRecommendations()));
 ipcMain.handle('setup:apply', async () => applyRecommendedSetup());
-ipcMain.handle('dev:buildClientZip', async (_event, payload = {}) => {
+ipcMain.handle('dev:buildClientZip', diagnosticIpc('dev:buildClientZip', async (_event, payload = {}) => {
   assertDeveloperAuthenticated();
   const { createClientModpackZip } = await loadClientModpackZipModule();
   const config = await loadConfig();
@@ -5423,8 +5569,8 @@ ipcMain.handle('dev:buildClientZip', async (_event, payload = {}) => {
     includeFiles: false
   });
   return result;
-});
-ipcMain.handle('dev:buildRelease', async (_event, payload) => {
+}));
+ipcMain.handle('dev:buildRelease', diagnosticIpc('dev:buildRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
   const inspected = await inspectPackZipFile(payload?.packZip || '');
   assertFullClientReleaseAllowed(inspected, payload?.allowLegacyCurseForge === true);
@@ -5439,30 +5585,30 @@ ipcMain.handle('dev:buildRelease', async (_event, payload) => {
     channel: payload.channel || 'stable',
     cacheModsDir: payload.cacheModsDir || ''
   });
-});
-ipcMain.handle('dev:inspectPackZip', async (_event, packZip) => {
+}));
+ipcMain.handle('dev:inspectPackZip', diagnosticIpc('dev:inspectPackZip', async (_event, packZip) => {
   assertDeveloperAuthenticated();
   return inspectPackZipFile(packZip);
-});
-ipcMain.handle('dev:validateRelease', async (_event, payload) => {
+}));
+ipcMain.handle('dev:validateRelease', diagnosticIpc('dev:validateRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
   const config = await loadConfig();
   return validateRelease({
     ...payload,
     outDir: resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir)
   });
-});
+}));
 ipcMain.handle('dev:cloudLogin', async (_event, payload) => cloudLogin(payload));
 ipcMain.handle('dev:cloudSetupBuckets', async (_event, payload) => cloudSetupBuckets(payload));
 ipcMain.handle('dev:cloudSetupSecrets', async (_event, payload) => cloudSetupSecrets(payload));
 ipcMain.handle('dev:cloudDeployWorker', async (_event, payload) => cloudDeployWorker(payload));
 ipcMain.handle('dev:cloudPreflight', async (_event, payload) => cloudPreflight(payload));
 ipcMain.handle('dev:writePlayerDefaults', async (_event, payload) => writePlayerDefaults(payload));
-ipcMain.handle('dev:syncR2', async (_event, payload) => syncR2(payload));
+ipcMain.handle('dev:syncR2', diagnosticIpc('dev:syncR2', async (_event, payload) => syncR2(payload)));
 ipcMain.handle('dev:findLauncherBuilds', async () => findLauncherBuilds());
-ipcMain.handle('dev:syncLauncherUpdate', async (_event, payload) => syncLauncherUpdate(payload));
+ipcMain.handle('dev:syncLauncherUpdate', diagnosticIpc('dev:syncLauncherUpdate', async (_event, payload) => syncLauncherUpdate(payload)));
 ipcMain.handle('dev:checkLauncherWorkflow', async (_event, payload) => checkLauncherWorkflow(payload));
-ipcMain.handle('dev:dispatchLauncherWorkflow', async (_event, payload) => dispatchLauncherWorkflow(payload));
+ipcMain.handle('dev:dispatchLauncherWorkflow', diagnosticIpc('dev:dispatchLauncherWorkflow', async (_event, payload) => dispatchLauncherWorkflow(payload)));
 ipcMain.handle('dev:uploadState', async () => uploadState);
 ipcMain.handle('dev:planServerTransfer', async (_event, payload) => planServerTransfer(payload));
 ipcMain.handle('dev:syncServerFiles', async (_event, payload) => syncServerFiles(payload));
@@ -5511,7 +5657,7 @@ ipcMain.handle('dev:login', async (_event, { username, password }) => {
 ipcMain.handle('dev:summary', async () => adminFetch(await loadConfig(), 'admin/summary'));
 ipcMain.handle('dev:events', async (_event, limit = 50) => adminFetch(await loadConfig(), `admin/events?limit=${limit}`));
 ipcMain.handle('dev:updateLogs', async (_event, limit = 20) => adminFetch(await loadConfig(), `admin/update-logs?limit=${limit}`));
-ipcMain.handle('dev:publishUpdateLog', async (_event, payload) => {
+ipcMain.handle('dev:publishUpdateLog', diagnosticIpc('dev:publishUpdateLog', async (_event, payload) => {
   assertDeveloperAuthenticated();
   const config = await loadConfig();
   const prepared = await prepareDeveloperUpdateLogPayload(config, payload || {});
@@ -5520,7 +5666,7 @@ ipcMain.handle('dev:publishUpdateLog', async (_event, payload) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(prepared)
   });
-});
+}));
 
 if (!singleInstanceLock) {
   app.exit(0);

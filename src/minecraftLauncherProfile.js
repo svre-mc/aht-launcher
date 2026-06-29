@@ -1,7 +1,9 @@
+import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
   ensureDir,
+  fetchJson,
   pathExists,
   readJsonFile,
   writeJsonFile
@@ -114,6 +116,43 @@ function uniqueVersionIds(values = []) {
     result.push(text);
   }
   return result;
+}
+
+const MOJANG_VERSION_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
+
+function repairableJsonError(error = null) {
+  return error instanceof SyntaxError || error?.code === 'ENOENT' || /Unexpected end of JSON input|Unexpected token/i.test(String(error?.message || error || ''));
+}
+
+function corruptJsonBackupPath(file = '') {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${file}.aht-corrupt-${stamp}.bak`;
+}
+
+async function backupCorruptJson(file = '') {
+  try {
+    if (await pathExists(file)) {
+      await fs.copyFile(file, corruptJsonBackupPath(file));
+    }
+  } catch {
+    // Backups are best-effort; launcher setup should continue with a clean replacement.
+  }
+}
+
+async function readRepairableJsonFile(file, fallback = null) {
+  if (!(await pathExists(file))) {
+    return fallback;
+  }
+  try {
+    const value = await readJsonFile(file);
+    return value && typeof value === 'object' ? value : fallback;
+  } catch (error) {
+    if (!repairableJsonError(error)) {
+      throw error;
+    }
+    await backupCorruptJson(file);
+    return fallback;
+  }
 }
 
 function loaderVersionIdCandidates(minecraft = {}) {
@@ -300,11 +339,102 @@ function minecraftMetadata(latest = null, installed = null) {
   return latest?.minecraft || installed?.minecraft || null;
 }
 
-async function readProfiles(file) {
-  if (!(await pathExists(file))) {
-    return {};
+function validBaseVersionJson(value = null, minecraftVersion = '') {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && (!minecraftVersion || value.id === minecraftVersion)
+    && value.assetIndex
+    && typeof value.assetIndex === 'object'
+    && value.assetIndex.id
+    && value.assetIndex.url
+  );
+}
+
+function validAssetIndexJson(value = null) {
+  return Boolean(value && typeof value === 'object' && value.objects && typeof value.objects === 'object');
+}
+
+async function fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson } = {}) {
+  const manifest = await fetchJsonImpl(manifestUrl);
+  const match = Array.isArray(manifest?.versions)
+    ? manifest.versions.find((item) => item?.id === minecraftVersion && item?.url)
+    : null;
+  if (!match) {
+    throw new Error(`Minecraft ${minecraftVersion} was not found in Mojang's version manifest.`);
   }
-  return readJsonFile(file);
+  const versionJson = await fetchJsonImpl(match.url);
+  if (!validBaseVersionJson(versionJson, minecraftVersion)) {
+    throw new Error(`Mojang returned incomplete Minecraft ${minecraftVersion} metadata.`);
+  }
+  return versionJson;
+}
+
+async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+  if (!rootDir || !minecraftVersion) {
+    return { ok: false, skipped: true, reason: 'missing root or Minecraft version', rootDir, minecraftVersion };
+  }
+  const actions = [];
+  const versionDir = path.join(rootDir, 'versions', minecraftVersion);
+  const versionJsonPath = path.join(versionDir, `${minecraftVersion}.json`);
+  let versionJson = await readRepairableJsonFile(versionJsonPath, null);
+  if (!validBaseVersionJson(versionJson, minecraftVersion)) {
+    logger?.log?.(`Repairing Minecraft ${minecraftVersion} version metadata in ${rootDir}`);
+    versionJson = await fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl, fetchJsonImpl });
+    await writeJsonFile(versionJsonPath, versionJson);
+    actions.push(`wrote ${versionJsonPath}`);
+  }
+
+  const assetId = String(versionJson.assetIndex.id || '').trim();
+  const assetUrl = String(versionJson.assetIndex.url || '').trim();
+  const assetIndexPath = path.join(rootDir, 'assets', 'indexes', `${assetId}.json`);
+  let assetIndex = await readRepairableJsonFile(assetIndexPath, null);
+  if (!validAssetIndexJson(assetIndex)) {
+    logger?.log?.(`Repairing Minecraft asset index ${assetId} in ${rootDir}`);
+    assetIndex = await fetchJsonImpl(assetUrl);
+    if (!validAssetIndexJson(assetIndex)) {
+      throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
+    }
+    await writeJsonFile(assetIndexPath, assetIndex);
+    actions.push(`wrote ${assetIndexPath}`);
+  }
+
+  return {
+    ok: true,
+    rootDir,
+    minecraftVersion,
+    versionJsonPath,
+    assetIndexPath,
+    assetId,
+    repaired: actions.length > 0,
+    actions
+  };
+}
+
+export async function ensureMinecraftLauncherAssets({ config = {}, latest = null, installed = null, profile = null, manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+  const minecraft = minecraftMetadata(latest, installed);
+  const minecraftVersion = minecraft?.version || profile?.minecraftVersion || '';
+  if (!minecraftVersion) {
+    return { ok: false, skipped: true, reason: 'release metadata does not include a Minecraft version', roots: [] };
+  }
+  const profileRoots = Array.isArray(profile?.syncedProfiles) && profile.syncedProfiles.length
+    ? profile.syncedProfiles.map((item) => item.rootDir)
+    : [profile?.rootDir || minecraftRoot(config)];
+  const roots = uniqueLauncherRoots(profileRoots);
+  const results = [];
+  for (const rootDir of roots) {
+    results.push(await ensureMinecraftRootAssets({ rootDir, minecraftVersion, manifestUrl, fetchJsonImpl, logger }));
+  }
+  return {
+    ok: true,
+    minecraftVersion,
+    roots: results,
+    repaired: results.some((item) => item.repaired)
+  };
+}
+
+async function readProfiles(file) {
+  return readRepairableJsonFile(file, {});
 }
 
 async function profileStateForRoot({ config, latest = null, installed = null, rootDir = minecraftRoot(config), authRoots = null }) {

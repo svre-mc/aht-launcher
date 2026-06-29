@@ -10,6 +10,7 @@ function developerApiAllowed() {
 
 const playerApi = {
   getStatus: () => ipcRenderer.invoke('status:get'),
+  copyErrorReport: (payload) => ipcRenderer.invoke('diagnostics:copyErrorReport', payload || {}),
   saveSettings: (config) => ipcRenderer.invoke('settings:save', config),
   testFeed: (config) => ipcRenderer.invoke('settings:testFeed', config),
   startUpdate: (payload) => ipcRenderer.invoke('update:start', typeof payload === 'object' && payload ? payload : { forceRepair: Boolean(payload) }),

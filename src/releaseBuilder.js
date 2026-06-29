@@ -458,7 +458,11 @@ async function forEachZipEntry(filePath, handler) {
         Promise.resolve(handler(entry, zipFile))
           .then(() => {
             if (!stopped) {
-              zipFile.readEntry();
+              setImmediate(() => {
+                if (!stopped) {
+                  zipFile.readEntry();
+                }
+              });
             }
           })
           .catch(fail);

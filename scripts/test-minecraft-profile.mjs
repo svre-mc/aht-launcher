@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   defaultMinecraftRoot,
+  ensureMinecraftLauncherAssets,
   ensureMinecraftLauncherProfile,
   inspectMinecraftLauncherAuth,
   inspectMinecraftLauncherProfile,
@@ -389,6 +390,79 @@ if (!inspectedMissingProfile || inspectedMissingProfile.loaderInstalled || inspe
   throw new Error(`Expected inspect to include missing synced loader state: ${JSON.stringify(inspectedMissingLoader)}`);
 }
 
+const corruptProfileRoot = path.join(root, 'corrupt-profile-root');
+await fs.mkdir(path.join(corruptProfileRoot, 'versions', versionId), { recursive: true });
+await fs.writeFile(path.join(corruptProfileRoot, 'versions', versionId, `${versionId}.json`), '{}', 'utf8');
+await fs.writeFile(path.join(corruptProfileRoot, 'launcher_profiles.json'), '', 'utf8');
+const corruptProfileConfig = {
+  ...config,
+  minecraftLauncher: {
+    ...config.minecraftLauncher,
+    rootDir: corruptProfileRoot,
+    syncDefaultRoots: false
+  }
+};
+await ensureMinecraftLauncherProfile({ config: corruptProfileConfig, latest, installed: null });
+const repairedProfiles = JSON.parse(await fs.readFile(path.join(corruptProfileRoot, 'launcher_profiles.json'), 'utf8'));
+if (!repairedProfiles.profiles?.['a-hard-time-dregora']) {
+  throw new Error(`Corrupt launcher_profiles.json was not repaired: ${JSON.stringify(repairedProfiles)}`);
+}
+const profileBackups = (await fs.readdir(corruptProfileRoot)).filter((name) => name.includes('launcher_profiles.json.aht-corrupt-'));
+if (!profileBackups.length) {
+  throw new Error('Corrupt launcher_profiles.json was not backed up before repair.');
+}
+
+const assetRoot = path.join(root, 'asset-root');
+const fakeManifestUrl = 'https://example.invalid/version_manifest_v2.json';
+const fakeVersionUrl = 'https://example.invalid/1.12.2.json';
+const fakeAssetUrl = 'https://example.invalid/1.12.json';
+const fakeFetches = [];
+const fakeFetchJson = async (url) => {
+  fakeFetches.push(String(url));
+  if (url === fakeManifestUrl) {
+    return { versions: [{ id: '1.12.2', url: fakeVersionUrl }] };
+  }
+  if (url === fakeVersionUrl) {
+    return { id: '1.12.2', assetIndex: { id: '1.12', url: fakeAssetUrl } };
+  }
+  if (url === fakeAssetUrl) {
+    return { objects: { 'minecraft/lang/en_us.lang': { hash: 'a'.repeat(40), size: 1 } } };
+  }
+  throw new Error(`Unexpected fake fetch ${url}`);
+};
+const assetProfile = { rootDir: assetRoot, syncedProfiles: [{ rootDir: assetRoot }], minecraftVersion: '1.12.2' };
+const firstAssetRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: assetProfile,
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson
+});
+if (!firstAssetRepair.ok || !firstAssetRepair.repaired) {
+  throw new Error(`Expected missing Minecraft metadata to be repaired: ${JSON.stringify(firstAssetRepair)}`);
+}
+const assetIndexPath = path.join(assetRoot, 'assets', 'indexes', '1.12.json');
+if (!JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
+  throw new Error('Asset index was not written correctly.');
+}
+await fs.writeFile(assetIndexPath, '', 'utf8');
+const secondAssetRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: assetProfile,
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson
+});
+if (!secondAssetRepair.repaired) {
+  throw new Error('Corrupt asset index was not repaired.');
+}
+const assetBackupDir = path.join(assetRoot, 'assets', 'indexes');
+const assetBackups = (await fs.readdir(assetBackupDir)).filter((name) => name.includes('1.12.json.aht-corrupt-'));
+if (!assetBackups.length) {
+  throw new Error('Corrupt asset index was not backed up before repair.');
+}
 console.log(JSON.stringify({
   profilesPath: created.profilesPath,
   platformRoots,
