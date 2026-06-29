@@ -6,6 +6,7 @@ function assert(condition, message) {
 
 const main = fs.readFileSync('desktop/main.js', 'utf8').replace(/\r\n/g, '\n');
 const renderer = fs.readFileSync('desktop/renderer/app.js', 'utf8').replace(/\r\n/g, '\n');
+const installer = fs.readFileSync('src/installer.js', 'utf8').replace(/\r\n/g, '\n');
 
 assert(main.includes('function createOperationState'), 'main process is missing operation state helper.');
 assert(main.includes("updateState = createOperationState(forceRepair ? 'repair' : 'install'"), 'runUpdate must mark updateState running before slow setup work.');
@@ -22,6 +23,8 @@ assert(!main.includes("phase: 'Saving install state'"), 'runUpdate must not skip
 assert(main.includes("completeOperationState(updateState, result, 'Complete');"), 'runUpdate must normalize success to Complete.');
 assert(main.includes("failOperationState(updateState, error, forceRepair ? 'Repair failed' : 'Update failed');"), 'runUpdate must normalize failure and clear running.');
 assert(!main.includes('finally {\n    updateState.running = false;\n  }'), 'runUpdate must not rely on a bare finally running=false terminal state.');
+assert(!installer.includes('fs.cp(source, dest, { recursive: true'), 'preserved runtime mod folders must not use recursive fs.cp because large OpenTerrainGenerator trees can overflow the call stack during update/repair.');
+assert(!installer.includes('fastDirectoryCopy'), 'installer must not keep the obsolete recursive fastDirectoryCopy path.');
 
 assert(renderer.includes('const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;'), 'renderer must define the completed download visible window.');
 assert(renderer.includes('const DOWNLOAD_ERROR_VISIBLE_MS = 6200;'), 'renderer must define a bounded failed download visible window.');

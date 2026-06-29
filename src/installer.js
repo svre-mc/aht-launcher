@@ -418,16 +418,7 @@ async function copyPathIfPresent(source, dest, options = {}) {
     return false;
   }
   await ensureDir(dest);
-  if (options.fastDirectoryCopy) {
-    if (onProgress) {
-      onProgress({ phase: options.phase || 'Preserving player data', currentPath: relPath, completed: 0, total: 1, percent: weightedProgress(0, options.progressBase ?? 95, options.progressSpan ?? 1) });
-    }
-    await fs.cp(source, dest, { recursive: true, force: true });
-    if (onProgress) {
-      onProgress({ phase: options.phase || 'Preserving player data', currentPath: relPath, completed: 1, total: 1, percent: weightedProgress(100, options.progressBase ?? 95, options.progressSpan ?? 1) });
-    }
-    return true;
-  }
+
   const files = await walkInstanceFiles(source);
   let copied = 0;
   if (onProgress) {
@@ -452,7 +443,7 @@ async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSetti
   for (const relPath of PLAYER_PRESERVED_MOD_DIRS) {
     const source = safeJoin(instanceDir, relPath);
     const dest = safeJoin(stagingDir, relPath);
-    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving runtime mod data', fastDirectoryCopy: true })) {
+    if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving runtime mod data' })) {
       preserved.push(relPath);
     }
   }
