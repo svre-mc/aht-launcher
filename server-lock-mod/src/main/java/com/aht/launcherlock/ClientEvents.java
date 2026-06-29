@@ -12,6 +12,11 @@ public class ClientEvents {
 
     @SubscribeEvent
     public void onConnected(FMLNetworkEvent.ClientConnectedToServerEvent event) {
+        if (event.isLocal()) {
+            this.sendDelayTicks = -1;
+            return;
+        }
+
         this.sendDelayTicks = 20;
     }
 

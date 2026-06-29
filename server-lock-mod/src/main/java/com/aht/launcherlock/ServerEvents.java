@@ -1,6 +1,7 @@
 package com.aht.launcherlock;
 
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.server.MinecraftServer;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.PlayerEvent;
@@ -13,6 +14,11 @@ import java.util.UUID;
 public class ServerEvents {
     @SubscribeEvent
     public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (!isDedicatedServer()) {
+            PackVersionLock.clearPlayer(event.player.getUniqueID());
+            return;
+        }
+
         if (event.player instanceof EntityPlayerMP) {
             EntityPlayerMP player = (EntityPlayerMP) event.player;
             PackVersionLock.watchPlayer(player.getUniqueID());
@@ -26,7 +32,12 @@ public class ServerEvents {
 
     @SubscribeEvent
     public void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
+        if (event.phase != TickEvent.Phase.END || !isDedicatedServer()) {
+            return;
+        }
+
+        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
+        if (server == null || server.getPlayerList() == null) {
             return;
         }
 
@@ -40,12 +51,15 @@ public class ServerEvents {
             }
 
             iterator.remove();
-            EntityPlayerMP player = FMLCommonHandler.instance().getMinecraftServerInstance()
-                    .getPlayerList()
-                    .getPlayerByUUID(entry.getKey());
+            EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(entry.getKey());
             if (player != null && !PackVersionLock.acceptedPlayers.contains(entry.getKey())) {
                 PackVersionLock.disconnect(player, "missing launcher version report");
             }
         }
+    }
+
+    private static boolean isDedicatedServer() {
+        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
+        return server != null && server.isDedicatedServer();
     }
 }
