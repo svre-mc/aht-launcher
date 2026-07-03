@@ -11,6 +11,8 @@ assert(source.includes(liveMutateFlag), 'production readiness must require an ex
 assert(source.includes('liveMutatingChecks,'), 'production readiness JSON report must expose whether live mutating checks ran');
 assert(source.includes('skipped read-only run; pass --live-mutate'), 'read-only readiness runs must describe skipped mutating proof checks');
 assert(source.includes('production-readiness-latest.json') && source.includes('function writeLatestReport') && source.includes('writeLatestReport(report);'), 'production readiness must write a durable latest JSON report for every run');
+assert(source.includes('function githubPushAuthStatus') && source.includes('scripts/check-github-push-auth.mjs') && source.includes("GIT_TERMINAL_PROMPT: '0'") && source.includes("GCM_INTERACTIVE: 'never'") && source.includes('GitHub push auth preflight'), 'production readiness must use the fail-fast GitHub push-auth preflight instead of allowing GCM to hang');
+assert(source.includes("names.includes('GitHub push auth preflight')") && source.includes('npm run check:github-push-auth'), 'production readiness next-step guidance must route missing GitHub auth to the auth preflight command');
 
 const functionDeclaration = 'function liveLauncherProofStatus(baseUrl)';
 const proofCall = 'const proofStatus = liveLauncherProofStatus(proofBaseUrl);';

@@ -137,6 +137,9 @@ function nextRequiredStep(blockers = []) {
   if (names.includes('publish-relevant source changes committed to git')) {
     return 'commit the publish-relevant launcher source changes before using GitHub Actions, then re-run this check.';
   }
+  if (names.includes('GitHub push auth preflight')) {
+    return 'log in to GitHub for this repo with Git Credential Manager or a PAT, then re-run npm run check:github-push-auth.';
+  }
   if (names.includes('local HEAD is pushed to origin branch')) {
     return 'push the committed launcher changes to origin/main before using GitHub Actions, then re-run this check.';
   }
@@ -241,7 +244,9 @@ function gitPublishRelevantChanges() {
     'scripts/smoke-repair-missing-managed-manifest.mjs',
     'scripts/smoke-setup-recovery-actions.mjs',
     'scripts/test-minecraft-service-status.mjs',
-    'scripts/test-social-client.mjs'
+    'scripts/test-social-client.mjs',
+    'scripts/check-github-push-auth.mjs',
+    'scripts/test-github-push-auth-check.mjs'
   ];
   const publishRelevantPaths = [...new Set([...githubLauncherWorkflowPaths, ...localReadinessPaths])];
   const result = spawnSync('git', ['status', '--porcelain=v1', '--', ...publishRelevantPaths], {
@@ -271,14 +276,62 @@ function checkGitPublishState() {
   const localHead = gitSingleLine(['rev-parse', 'HEAD']);
   const remoteLine = branch ? gitSingleLine(['ls-remote', 'origin', `refs/heads/${branch}`], 30_000) : '';
   const remoteHead = remoteLine.split(/\s+/)[0] || '';
+  const pushed = Boolean(branch && localHead && remoteHead && localHead === remoteHead);
   addCheck(
     'local HEAD is pushed to origin branch',
     'blocker',
-    Boolean(branch && localHead && remoteHead && localHead === remoteHead),
+    pushed,
     branch
       ? `branch ${branch}, local ${localHead.slice(0, 12) || 'missing'}, origin/${branch} ${remoteHead.slice(0, 12) || 'missing'}`
       : 'not on a named branch'
   );
+  if (!pushed && branch && localHead && remoteHead) {
+    const authStatus = githubPushAuthStatus(branch);
+    addCheck(
+      'GitHub push auth preflight',
+      'blocker',
+      authStatus.ok,
+      authStatus.detail
+    );
+  }
+}
+
+function githubPushAuthStatus(branch) {
+  const scriptPath = path.join(rootDir, 'scripts', 'check-github-push-auth.mjs');
+  if (!existsNonEmpty(scriptPath)) {
+    return { ok: false, detail: 'missing scripts/check-github-push-auth.mjs' };
+  }
+  const result = spawnSync(process.execPath, [
+    scriptPath,
+    '--branch',
+    branch,
+    '--timeout-ms',
+    '30000'
+  ], {
+    cwd: rootDir,
+    encoding: 'utf8',
+    timeout: 45_000,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GCM_INTERACTIVE: 'never'
+    }
+  });
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(result.stdout || '{}');
+  } catch {}
+  if (result.status === 0 && parsed?.ok) {
+    return { ok: true, detail: parsed.output || 'push dry-run ok' };
+  }
+  const reason = parsed?.failure?.reason || (result.error ? result.error.message : '') || (result.signal ? `signal ${result.signal}` : '') || 'push auth failed';
+  const message = parsed?.failure?.message || commandDetail(output, reason);
+  const loginCommand = parsed?.failure?.loginCommands?.[0] || '';
+  return {
+    ok: false,
+    detail: [reason, message, loginCommand].filter(Boolean).join(' | ')
+  };
 }
 
 function collectFiles(relativePaths) {
