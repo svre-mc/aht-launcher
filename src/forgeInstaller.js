@@ -9,6 +9,7 @@ import {
   readJsonFile,
   writeJsonFile
 } from './utils.js';
+import { minecraftServiceFailureMessage } from './minecraftServiceStatus.js';
 
 export function forgeLoaderVersion(loaderId = '') {
   return String(loaderId).startsWith('forge-') ? String(loaderId).slice('forge-'.length) : '';
@@ -220,18 +221,7 @@ export function javaSetupHelpMessage(platform = process.platform) {
   const runtime = platform === 'win32'
     ? 'Eclipse Temurin JDK 8 (HotSpot) x64'
     : 'Java 8 / JDK 8';
-  return `Install ${runtime}, restart AHT Launcher, then click Update again.`;
-}
-
-function minecraftServiceFailureMessage(error = null) {
-  const text = `${error?.message || error || ''}`;
-  const compact = text.replace(/\s+/g, ' ');
-  const officialServicePattern = /REQUEST_FAILED|Unable to prepare assets for download|launcher\.mojang\.com|piston-meta\.mojang\.com|resources\.download\.minecraft\.net|libraries\.minecraft\.net|api\.minecraftservices\.com|sessionserver\.mojang\.com|authserver\.mojang\.com|maven\.minecraftforge\.net|maven\.forgecdn\.net|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network timeout/i;
-  const launcherRuntimePattern = /could not open .*java-runtime-(?:gamma|beta|delta|epsilon|alpha).*javaw?\.cfg/i;
-  if (!officialServicePattern.test(compact) && !launcherRuntimePattern.test(compact)) {
-    return '';
-  }
-  return 'Minecraft services or the Minecraft Launcher runtime are currently unavailable. Wait for Mojang/Microsoft services to recover, reopen Minecraft Launcher, then try AHT Launcher again.';
+  return `Install ${runtime}, restart AHT Launcher, then try again.`;
 }
 
 export function friendlyForgeJavaErrorMessage(error = null, javaPath = 'java', platform = process.platform) {

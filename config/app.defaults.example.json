@@ -11,6 +11,11 @@
     "baseUrl": "https://aht-curseforge-proxy.example.workers.dev/",
     "playerLabel": ""
   },
+  "social": {
+    "enabled": true,
+    "feedUrl": "",
+    "actionUrl": ""
+  },
   "launcherUpdate": {
     "enabled": true,
     "latestUrl": "https://aht-curseforge-proxy.example.workers.dev/launcher/latest.json"

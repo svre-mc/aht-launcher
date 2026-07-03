@@ -54,6 +54,34 @@ function yieldToEventLoop() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryableMoveError(error = {}) {
+  return ['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(error?.code);
+}
+
+async function renameWithRetry(source, dest, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts) || 10);
+  const baseDelayMs = Math.max(25, Number(options.baseDelayMs) || 80);
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fs.rename(source, dest);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!retryableMoveError(error) || attempt >= attempts) {
+        throw error;
+      }
+      options.logger?.log?.(`Retrying install file move after ${error.code || 'filesystem'} lock (${attempt}/${attempts}): ${source} -> ${dest}`);
+      await sleep(baseDelayMs * attempt);
+    }
+  }
+  throw lastError;
+}
+
 function zipEntryIsFile(entry) {
   return entry && !String(entry.fileName || '').endsWith('/');
 }
@@ -466,7 +494,7 @@ async function movePathIfPresent(source, dest) {
   }
   await ensureDir(path.dirname(dest));
   await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
-  await fs.rename(source, dest);
+  await renameWithRetry(source, dest);
   return true;
 }
 
@@ -547,7 +575,7 @@ async function recoverInterruptedCleanInstall(instanceDir, logger) {
     removedBackups = await removeInstallSiblings(backupDirs, logger, 'backup');
   } else if (backupDirs.length) {
     const [newestBackup, ...olderBackups] = backupDirs;
-    await fs.rename(newestBackup.abs, resolvedInstanceDir);
+    await renameWithRetry(newestBackup.abs, resolvedInstanceDir, { logger });
     restoredBackup = newestBackup.abs;
     removedBackups = await removeInstallSiblings(olderBackups, logger, 'backup');
   }
@@ -583,14 +611,14 @@ async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) 
   await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
   try {
     if (await pathExists(resolvedInstanceDir)) {
-      await fs.rename(resolvedInstanceDir, backupDir);
+      await renameWithRetry(resolvedInstanceDir, backupDir, { logger: options.logger });
       oldInstallMoved = true;
     }
-    await fs.rename(resolvedStagingDir, resolvedInstanceDir);
+    await renameWithRetry(resolvedStagingDir, resolvedInstanceDir, { logger: options.logger });
     stagedInstallActive = true;
   } catch (error) {
     if (oldInstallMoved && !stagedInstallActive && !(await pathExists(resolvedInstanceDir)) && await pathExists(backupDir)) {
-      await fs.rename(backupDir, resolvedInstanceDir).catch(() => {});
+      await renameWithRetry(backupDir, resolvedInstanceDir, { logger: options.logger }).catch(() => {});
     }
     throw error;
   }

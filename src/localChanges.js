@@ -190,17 +190,34 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
   return added;
 }
 
-async function loadManaged(instanceDir) {
+async function loadManagedState(instanceDir) {
   const managedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
   if (!(await pathExists(managedPath))) {
-    return [];
+    return { entries: [], manifestExists: false, loadError: '' };
   }
-  return readJsonFile(managedPath);
+  try {
+    const entries = await readJsonFile(managedPath);
+    if (!Array.isArray(entries)) {
+      return {
+        entries: [],
+        manifestExists: true,
+        loadError: 'Installed file manifest is damaged: managed-files.json is not an array.'
+      };
+    }
+    return { entries, manifestExists: true, loadError: '' };
+  } catch (error) {
+    return {
+      entries: [],
+      manifestExists: true,
+      loadError: `Installed file manifest is damaged: ${error.message || error}`
+    };
+  }
 }
 
 export async function scanLocalChanges(instanceDir, options = {}) {
   const limit = options.limit || 500;
-  const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
+  const managedState = await loadManagedState(instanceDir);
+  const managed = managedModFiles(managedState.entries, options.requiredManaged || []);
   const managedToCheck = managed.filter((item) => item.relativePath);
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
@@ -252,6 +269,8 @@ export async function scanLocalChanges(instanceDir, options = {}) {
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,
+    managedManifestExists: managedState.manifestExists,
+    managedManifestError: managedState.loadError,
     counts: {
       managed: managed.length,
       changed: changed.length,
@@ -267,7 +286,8 @@ export async function scanLocalChanges(instanceDir, options = {}) {
 
 export async function scanManagedIntegrity(instanceDir, options = {}) {
   const limit = options.limit || 500;
-  const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
+  const managedState = await loadManagedState(instanceDir);
+  const managed = managedModFiles(managedState.entries, options.requiredManaged || []);
   const managedToCheck = managed.filter((item) => item.relativePath);
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
@@ -320,6 +340,8 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,
+    managedManifestExists: managedState.manifestExists,
+    managedManifestError: managedState.loadError,
     valid: managed.length > 0 && corruptCount === 0,
     counts: {
       managed: managed.length,

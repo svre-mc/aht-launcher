@@ -2,13 +2,16 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  downloadToFile,
   ensureDir,
   fetchJson,
+  hashFile,
   pathExists,
   readJsonFile,
   writeJsonFile
 } from './utils.js';
 import { launcherProofJavaArgs, launcherProofPath } from './launcherProof.js';
+import { minecraftServiceFailureMessage } from './minecraftServiceStatus.js';
 
 export function defaultMinecraftRoot(platform = process.platform, env = process.env) {
   if (platform === 'win32') {
@@ -119,6 +122,7 @@ function uniqueVersionIds(values = []) {
 }
 
 const MOJANG_VERSION_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
+const MINECRAFT_ASSET_OBJECT_BASE_URL = 'https://resources.download.minecraft.net/';
 
 function repairableJsonError(error = null) {
   return error instanceof SyntaxError || error?.code === 'ENOENT' || /Unexpected end of JSON input|Unexpected token/i.test(String(error?.message || error || ''));
@@ -152,6 +156,18 @@ async function readRepairableJsonFile(file, fallback = null) {
     }
     await backupCorruptJson(file);
     return fallback;
+  }
+}
+
+async function fetchMinecraftJson(source, fetchJsonImpl = fetchJson) {
+  try {
+    return await fetchJsonImpl(source);
+  } catch (error) {
+    const serviceMessage = minecraftServiceFailureMessage(`${source} ${error?.message || error}`);
+    if (serviceMessage) {
+      throw new Error(serviceMessage);
+    }
+    throw error;
   }
 }
 
@@ -327,7 +343,9 @@ export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
     accountCount,
     files,
     usernames,
-    preferredUsername: usernames[0] || ''
+    preferredUsername: usernames[0] || '',
+    profileKnown: usernames.length > 0,
+    credentialOnly: accountCount === 0 && usernames.length === 0 && files.some((name) => String(name).includes('launcher_msa_credentials'))
   };
 }
 
@@ -355,22 +373,125 @@ function validAssetIndexJson(value = null) {
   return Boolean(value && typeof value === 'object' && value.objects && typeof value.objects === 'object');
 }
 
+function validAssetObjectHash(value = '') {
+  return /^[a-f0-9]{40}$/i.test(String(value || '').trim());
+}
+
+function assetObjectEntries(assetIndex = null) {
+  const objects = assetIndex?.objects && typeof assetIndex.objects === 'object' ? assetIndex.objects : {};
+  return Object.entries(objects)
+    .map(([name, item]) => ({
+      name,
+      hash: String(item?.hash || '').trim().toLowerCase(),
+      size: Number.isFinite(Number(item?.size)) ? Number(item.size) : null
+    }))
+    .filter((item) => validAssetObjectHash(item.hash));
+}
+
+function assetObjectPath(rootDir = '', hash = '') {
+  const normalized = String(hash || '').trim().toLowerCase();
+  return path.join(rootDir, 'assets', 'objects', normalized.slice(0, 2), normalized);
+}
+
+function assetObjectUrl(hash = '', baseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL) {
+  const normalized = String(hash || '').trim().toLowerCase();
+  const base = String(baseUrl || MINECRAFT_ASSET_OBJECT_BASE_URL);
+  return new URL(`${normalized.slice(0, 2)}/${normalized}`, base.endsWith('/') ? base : `${base}/`).toString();
+}
+
+async function assetObjectNeedsRepair(file = '', entry = {}, verifyHashes = false) {
+  const stat = await fs.stat(file).catch(() => null);
+  if (!stat || !stat.isFile()) {
+    return true;
+  }
+  if (Number.isFinite(entry.size) && entry.size >= 0 && stat.size !== entry.size) {
+    return true;
+  }
+  if (verifyHashes) {
+    return await hashFile(file, 'sha1') !== entry.hash;
+  }
+  return false;
+}
+
+async function assetObjectValidationError(entry = {}, source = '', dest = '') {
+  const actualHash = await hashFile(dest, 'sha1').catch(() => 'missing');
+  return new Error(`Minecraft asset ${entry.name || entry.hash} from ${source} did not match Mojang metadata after download. Expected ${entry.hash}, got ${actualHash}.`);
+}
+
+async function repairMinecraftAssetObject({ entry, dest, source, downloadFileImpl, logger }) {
+  const attempts = 3;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fs.rm(dest, { force: true }).catch(() => {});
+      await downloadFileImpl(source, dest, { logger, retries: 3 });
+      if (await assetObjectNeedsRepair(dest, entry, true)) {
+        throw await assetObjectValidationError(entry, source, dest);
+      }
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        logger?.log?.(`Minecraft asset ${entry.name || entry.hash} failed validation; retrying (${attempt + 1}/${attempts})...`);
+      }
+    }
+  }
+  const serviceMessage = minecraftServiceFailureMessage(`${source} ${lastError?.message || lastError}`);
+  throw new Error(serviceMessage || lastError?.message || String(lastError));
+}
+
+async function ensureMinecraftAssetObjects({
+  rootDir = '',
+  assetIndex = null,
+  assetBaseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL,
+  downloadFileImpl = downloadToFile,
+  verifyAssetHashes = false,
+  logger = null
+} = {}) {
+  const entries = assetObjectEntries(assetIndex);
+  let downloaded = 0;
+  for (const entry of entries) {
+    const dest = assetObjectPath(rootDir, entry.hash);
+    if (!(await assetObjectNeedsRepair(dest, entry, verifyAssetHashes))) {
+      continue;
+    }
+    const source = assetObjectUrl(entry.hash, assetBaseUrl);
+    logger?.log?.(`Repairing Minecraft asset ${entry.name || entry.hash}`);
+    await repairMinecraftAssetObject({ entry, dest, source, downloadFileImpl, logger });
+    downloaded += 1;
+  }
+  return {
+    checked: entries.length,
+    downloaded
+  };
+}
+
 async function fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson } = {}) {
-  const manifest = await fetchJsonImpl(manifestUrl);
+  const manifest = await fetchMinecraftJson(manifestUrl, fetchJsonImpl);
   const match = Array.isArray(manifest?.versions)
     ? manifest.versions.find((item) => item?.id === minecraftVersion && item?.url)
     : null;
   if (!match) {
     throw new Error(`Minecraft ${minecraftVersion} was not found in Mojang's version manifest.`);
   }
-  const versionJson = await fetchJsonImpl(match.url);
+  const versionJson = await fetchMinecraftJson(match.url, fetchJsonImpl);
   if (!validBaseVersionJson(versionJson, minecraftVersion)) {
     throw new Error(`Mojang returned incomplete Minecraft ${minecraftVersion} metadata.`);
   }
   return versionJson;
 }
 
-async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+async function ensureMinecraftRootAssets({
+  rootDir = '',
+  minecraftVersion = '',
+  manifestUrl = MOJANG_VERSION_MANIFEST_URL,
+  fetchJsonImpl = fetchJson,
+  downloadFileImpl = downloadToFile,
+  assetBaseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL,
+  ensureAssetObjects = true,
+  verifyAssetHashes = false,
+  logger = null
+} = {}) {
   if (!rootDir || !minecraftVersion) {
     return { ok: false, skipped: true, reason: 'missing root or Minecraft version', rootDir, minecraftVersion };
   }
@@ -391,12 +512,25 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
   let assetIndex = await readRepairableJsonFile(assetIndexPath, null);
   if (!validAssetIndexJson(assetIndex)) {
     logger?.log?.(`Repairing Minecraft asset index ${assetId} in ${rootDir}`);
-    assetIndex = await fetchJsonImpl(assetUrl);
+    assetIndex = await fetchMinecraftJson(assetUrl, fetchJsonImpl);
     if (!validAssetIndexJson(assetIndex)) {
       throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
     }
     await writeJsonFile(assetIndexPath, assetIndex);
     actions.push(`wrote ${assetIndexPath}`);
+  }
+  const assetObjects = ensureAssetObjects
+    ? await ensureMinecraftAssetObjects({
+      rootDir,
+      assetIndex,
+      downloadFileImpl,
+      assetBaseUrl,
+      verifyAssetHashes,
+      logger
+    })
+    : { checked: 0, downloaded: 0 };
+  if (assetObjects.downloaded > 0) {
+    actions.push(`downloaded ${assetObjects.downloaded} Minecraft asset object${assetObjects.downloaded === 1 ? '' : 's'}`);
   }
 
   return {
@@ -406,12 +540,25 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
     versionJsonPath,
     assetIndexPath,
     assetId,
+    assetObjects,
     repaired: actions.length > 0,
     actions
   };
 }
 
-export async function ensureMinecraftLauncherAssets({ config = {}, latest = null, installed = null, profile = null, manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+export async function ensureMinecraftLauncherAssets({
+  config = {},
+  latest = null,
+  installed = null,
+  profile = null,
+  manifestUrl = MOJANG_VERSION_MANIFEST_URL,
+  fetchJsonImpl = fetchJson,
+  downloadFileImpl = downloadToFile,
+  assetBaseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL,
+  ensureAssetObjects = true,
+  verifyAssetHashes = false,
+  logger = null
+} = {}) {
   const minecraft = minecraftMetadata(latest, installed);
   const minecraftVersion = minecraft?.version || profile?.minecraftVersion || '';
   if (!minecraftVersion) {
@@ -423,12 +570,26 @@ export async function ensureMinecraftLauncherAssets({ config = {}, latest = null
   const roots = uniqueLauncherRoots(profileRoots);
   const results = [];
   for (const rootDir of roots) {
-    results.push(await ensureMinecraftRootAssets({ rootDir, minecraftVersion, manifestUrl, fetchJsonImpl, logger }));
+    results.push(await ensureMinecraftRootAssets({
+      rootDir,
+      minecraftVersion,
+      manifestUrl,
+      fetchJsonImpl,
+      downloadFileImpl,
+      assetBaseUrl,
+      ensureAssetObjects,
+      verifyAssetHashes,
+      logger
+    }));
   }
   return {
     ok: true,
     minecraftVersion,
     roots: results,
+    assetObjects: {
+      checked: results.reduce((total, item) => total + (Number(item.assetObjects?.checked) || 0), 0),
+      downloaded: results.reduce((total, item) => total + (Number(item.assetObjects?.downloaded) || 0), 0)
+    },
     repaired: results.some((item) => item.repaired)
   };
 }
@@ -473,6 +634,8 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
     loaderId: primaryModLoader(minecraft || {})?.id || '',
     loaderInstallerUrl: loaderInstallerUrl(minecraft || {}),
     accountReuseAvailable: auth.signedIn,
+    accountProfileKnown: Boolean(auth.profileKnown),
+    accountCredentialOnly: Boolean(auth.credentialOnly),
     accountCount: auth.accountCount,
     accountFiles: auth.files,
     accountUsernames: auth.usernames,

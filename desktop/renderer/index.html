@@ -64,13 +64,13 @@
           <button id="developerTab" class="tab nav-item" data-tab="developer" hidden>Developer</button>
         </nav>
 
-        <div class="profile-card">
+        <button id="profileFriendsButton" class="profile-card" type="button" aria-haspopup="dialog" aria-controls="friendsOverlay" hidden>
           <div class="profile-avatar bill-art"><span>AHT</span></div>
           <div class="profile-copy">
             <strong id="playerLabelView">Player</strong>
             <span id="syncStatus"><span class="online-dot"></span>Sync -</span>
           </div>
-        </div>
+        </button>
       </header>
 
       <section id="setupNotice" class="setup-notice" hidden>
@@ -98,7 +98,7 @@
         </section>
 
         <section class="quick-actions">
-          <button id="scanButton" class="ghost-button"><span class="button-icon icon-scan" aria-hidden="true"></span>Scan files</button>
+          <button id="scanButton" class="ghost-button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
           <button class="ghost-button tab" data-tab="settings"><span class="button-icon icon-settings" aria-hidden="true"></span>Game settings</button>
         </section>
 
@@ -148,7 +148,12 @@
                 <strong id="setupAssistantTitle">Checking local paths</strong>
                 <p id="setupAssistantDetail">Feed: checking | Install folder: checking</p>
               </div>
-              <button id="settingsAutoSetupButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
+              <div class="setup-actions">
+                <button id="settingsAutoSetupButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
+                <button id="setupOpenMinecraftButton" class="button compact" type="button" hidden><span class="button-icon icon-play" aria-hidden="true"></span>Open Minecraft</button>
+                <button id="setupDownloadMinecraftButton" class="button compact" type="button" hidden><span class="button-icon icon-download" aria-hidden="true"></span>Get Launcher</button>
+                <button id="setupJavaHelpButton" class="button compact" type="button" hidden><span class="button-icon icon-download" aria-hidden="true"></span>Get Java 8</button>
+              </div>
             </div>
             <div class="form-grid">
               <label class="span-2 player-technical" hidden>Latest Feed <span class="browse"><input id="latestUrlInput" type="text"><button id="pickLatestButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
@@ -437,6 +442,42 @@
       <div class="repair-prompt-actions">
         <button id="repairPromptCancelButton" class="button compact" type="button">Cancel</button>
         <button id="repairPromptRepairButton" class="button primary compact" type="button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
+      </div>
+    </section>
+  </div>
+  <div id="friendsOverlay" class="overlay friends-overlay" hidden>
+    <section class="friends-dialog" role="dialog" aria-modal="true" aria-labelledby="friendsTitle">
+      <header class="friends-header">
+        <div>
+          <p class="eyebrow">Player Network</p>
+          <h2 id="friendsTitle">Friends</h2>
+          <span id="friendsSummary" class="account-copy">Loading friends.</span>
+        </div>
+        <div class="friends-header-actions">
+          <button id="friendsRefreshButton" class="button compact" type="button">Refresh</button>
+          <button id="friendsCloseButton" class="modal-icon-button" type="button" aria-label="Close friends"><span class="button-icon icon-close" aria-hidden="true"></span></button>
+        </div>
+      </header>
+      <div class="friends-counts">
+        <div><span id="friendsCount">0</span><small>Friends</small></div>
+        <div><span id="friendsOnlineCount">0</span><small>Online</small></div>
+        <div><span id="blockedCount">0</span><small>Blocked</small></div>
+      </div>
+      <div id="friendsStatus" class="friends-status" aria-live="polite"></div>
+      <div class="friends-grid">
+        <section class="friends-panel">
+          <h3>Friends</h3>
+          <div id="friendsList" class="friends-list"></div>
+        </section>
+        <section class="friends-panel">
+          <h3>Blocked Players</h3>
+          <div id="blockedList" class="friends-list"></div>
+        </section>
+      </div>
+      <div class="friends-actions">
+        <label>Add Friend <span class="inline-action"><input id="addFriendInput" type="text" maxlength="16" autocomplete="off" spellcheck="false"><button id="addFriendButton" class="button compact" type="button">Add</button></span></label>
+        <label>Unadd Friend <span class="inline-action"><input id="removeFriendInput" type="text" maxlength="16" autocomplete="off" spellcheck="false"><button id="removeFriendButton" class="button compact" type="button">Unadd</button></span></label>
+        <label>Unblock Player <span class="inline-action"><input id="unblockPlayerInput" type="text" maxlength="16" autocomplete="off" spellcheck="false"><button id="unblockPlayerButton" class="button compact" type="button">Unblock</button></span></label>
       </div>
     </section>
   </div>

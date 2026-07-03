@@ -23,6 +23,8 @@ import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
 import { writeLauncherProof } from '../src/launcherProof.js';
 import { selectLauncherArtifact, validateLauncherUpdateManifest } from '../src/launcherUpdateManifest.js';
+import { minecraftServiceFailureMessage } from '../src/minecraftServiceStatus.js';
+import { fetchSocialState, sendSocialAction } from '../src/socialClient.js';
 
 import {
   ensureDir,
@@ -45,6 +47,9 @@ const LAUNCHER_WORKFLOW_DEFAULTS = {
   branch: 'main',
   workflow: 'build-macos.yml'
 };
+const MINECRAFT_LAUNCHER_DOWNLOAD_URL = 'https://www.minecraft.net/download';
+const JAVA8_DOWNLOAD_URL = 'https://adoptium.net/temurin/releases/?version=8';
+const WINDOWS_MINECRAFT_PACKAGE_FAMILY = 'Microsoft.4297127D64EC6_8wekyb3d8bbwe';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -90,6 +95,11 @@ function configureTestUserDataPath() {
   const resolvedPath = path.resolve(rawPath);
   app.setPath('userData', resolvedPath);
   writeTestStartupProbe('after-user-data-hook', { userData: resolvedPath });
+}
+
+function testMinecraftAssetBaseUrl() {
+  if (process.env.AHT_TEST_HOOKS !== '1') return '';
+  return String(process.env.AHT_TEST_MINECRAFT_ASSET_BASE_URL || '').trim();
 }
 
 configureTestRemoteDebugPort();
@@ -317,7 +327,7 @@ async function buildErrorDiagnosticReport(payload = {}) {
     app: {
       name: app.getName(),
       version: app.getVersion(),
-      mode: developerModeEnabled() ? 'developer' : 'player',
+      mode: isDeveloperMode() ? 'developer' : 'player',
       packaged: app.isPackaged
     },
     platform: {
@@ -342,8 +352,17 @@ async function buildErrorDiagnosticReport(payload = {}) {
   return `${JSON.stringify(report, null, 2)}\n`;
 }
 
+async function captureTestErrorDiagnosticReport(text = '') {
+  if (process.env.AHT_TEST_HOOKS !== '1') return;
+  const capturePath = String(process.env.AHT_TEST_ERROR_REPORT_CAPTURE_PATH || '').trim();
+  if (!capturePath) return;
+  await ensureDir(path.dirname(capturePath));
+  await fs.writeFile(capturePath, String(text || ''), 'utf8');
+}
+
 async function copyErrorDiagnosticReport(payload = {}) {
   const text = await buildErrorDiagnosticReport(payload);
+  await captureTestErrorDiagnosticReport(text);
   clipboard.writeText(text);
   return { ok: true, copied: true, chars: text.length };
 }
@@ -353,8 +372,9 @@ function diagnosticIpc(channel, handler) {
     try {
       return await handler(event, ...args);
     } catch (error) {
-      recordErrorDiagnostic(channel, error);
-      throw error;
+      const serviceMessage = channel === 'play:start' ? minecraftServiceFailureMessage(error) : '';
+      recordErrorDiagnostic(channel, serviceMessage ? new Error(`${serviceMessage}\n\nOriginal error: ${error?.message || error}`) : error);
+      throw serviceMessage ? new Error(serviceMessage) : error;
     }
   };
 }
@@ -516,6 +536,20 @@ function migrateDeveloperEncryptionProfile() {
 
 function configPath() {
   return path.join(app.getPath('userData'), 'launcher.config.json');
+}
+
+function damagedConfigBackupPath(file) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${file}.corrupt-${stamp}.bak`;
+}
+
+async function recoverDamagedConfig(file, defaults, error) {
+  const backupPath = damagedConfigBackupPath(file);
+  await fs.rename(file, backupPath);
+  await ensureDir(defaults.instanceDir);
+  await writeJsonFile(file, configForStorage(defaults));
+  console.warn(`Recovered damaged launcher config. Backed up ${backupPath}: ${error.message || error}`);
+  return defaults;
 }
 
 function identityPath() {
@@ -761,12 +795,12 @@ function ahtInstallRoot() {
   return path.dirname(defaultInstanceDir());
 }
 
-function oldUserDataInstanceDir() {
-  return path.join(app.getPath('userData'), 'instances', 'RLCraft Dregora');
+function oldUserDataInstancesRoot() {
+  return path.join(app.getPath('userData'), 'instances');
 }
 
 function defaultCacheModsDir() {
-  return path.join(app.getPath('home'), 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora', 'mods');
+  return '';
 }
 
 function defaultReleaseOutDir() {
@@ -788,11 +822,16 @@ function isCurseForgeMinecraftRoot(value = '') {
   return normalized.includes('/curseforge/minecraft/install');
 }
 
+function isTemporaryTestMinecraftRoot(value = '') {
+  const normalized = String(value || '').replace(/\\/g, '/').toLowerCase();
+  return normalized.endsWith('/.minecraft') && /\/(?:temp|tmp)\/aht-[^/]+\/\.minecraft$/.test(normalized);
+}
+
 function isOldLauncherInstanceDir(value = '') {
   if (!value) return false;
   const resolved = path.resolve(value);
-  const oldRoot = path.resolve(path.join(app.getPath('userData'), 'instances'));
-  return samePath(resolved, oldUserDataInstanceDir()) || resolved.toLowerCase().startsWith(`${oldRoot.toLowerCase()}${path.sep}`);
+  const oldRoot = path.resolve(oldUserDataInstancesRoot());
+  return samePath(resolved, oldRoot) || resolved.toLowerCase().startsWith(`${oldRoot.toLowerCase()}${path.sep}`);
 }
 
 function defaultConfig() {
@@ -810,6 +849,11 @@ function defaultConfig() {
       sendLocalChanges: true,
       baseUrl: '',
       playerLabel: ''
+    },
+    social: {
+      enabled: true,
+      feedUrl: '',
+      actionUrl: ''
     },
     developer: {
       adminBaseUrl: '',
@@ -886,12 +930,23 @@ function isPlayerDefaultInstanceDir(value = '') {
 function localInstanceCandidates() {
   const home = app.getPath('home');
   const documents = app.getPath('documents');
+  const ahtRoot = ahtInstallRoot();
+  const testInstanceDir = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_LOCAL_INSTANCE_DIR || '').trim()
+    : '';
   return [...new Set([
+    testInstanceDir,
+    defaultPlayerInstanceDir(),
+    defaultDeveloperInstanceDir(),
+    path.join(ahtRoot, 'A Hard Time'),
+    path.join(ahtRoot, 'A Hard Time Developer'),
+    path.join(ahtRoot, 'A Hard Time Dregora'),
+    path.join(ahtRoot, 'RLCraft Dregora'),
     path.join(home, 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora'),
     path.join(home, 'curseforge', 'minecraft', 'Instances', 'A Hard Time Dregora'),
     path.join(documents, 'CurseForge', 'minecraft', 'Instances', 'RLCraft Dregora'),
     path.join(documents, 'CurseForge', 'minecraft', 'Instances', 'A Hard Time Dregora')
-  ])];
+  ].filter(Boolean))];
 }
 
 function localMinecraftLauncherCandidates() {
@@ -962,6 +1017,20 @@ async function firstExistingDirectory(paths) {
   return '';
 }
 
+async function firstPackShapedInstanceDir(paths) {
+  for (const item of paths) {
+    try {
+      const stat = await fs.stat(item);
+      if (!stat.isDirectory()) continue;
+      const presence = await installedPackPresence({ instanceDir: item });
+      if (presence.filesPresent) {
+        return item;
+      }
+    } catch {}
+  }
+  return '';
+}
+
 async function firstExistingFile(paths) {
   for (const item of paths) {
     try {
@@ -980,6 +1049,7 @@ function mergeConfig(defaults, stored) {
     ...stored,
     curseforge: { ...defaults.curseforge, ...stored.curseforge },
     sync: { ...defaults.sync, ...stored.sync },
+    social: { ...defaults.social, ...stored.social },
     developer: { ...defaults.developer, ...stored.developer },
     launcherUpdate: { ...defaults.launcherUpdate, ...stored.launcherUpdate },
     launcherProof: { ...defaults.launcherProof, ...stored.launcherProof },
@@ -1021,7 +1091,7 @@ async function packagedDefaults() {
   if (!configured.instanceDir || isCurseForgeInstanceDir(configured.instanceDir) || isOldLauncherInstanceDir(configured.instanceDir)) {
     configured.instanceDir = defaultInstanceDir();
   }
-  const detectedInstanceDir = await firstExistingDirectory(localInstanceCandidates());
+  const detectedInstanceDir = await firstPackShapedInstanceDir(localInstanceCandidates());
   if (detectedInstanceDir && !configured.developer.defaultCacheModsDir) {
     const modsDir = path.join(detectedInstanceDir, 'mods');
     if (await pathExists(modsDir)) {
@@ -1050,7 +1120,12 @@ async function loadConfig() {
     await writeJsonFile(file, configForStorage(defaults));
     return defaults;
   }
-  const stored = await readJsonFile(file);
+  let stored;
+  try {
+    stored = await readJsonFile(file);
+  } catch (error) {
+    return recoverDamagedConfig(file, defaults, error);
+  }
   const config = mergeConfig(defaults, stored);
   let changed = false;
   if (!isDeveloperMode() && ('developer' in (stored || {}) || 'serverTransfer' in (stored || {}))) {
@@ -1076,6 +1151,10 @@ async function loadConfig() {
     samePath(stored.minecraftLauncher?.rootDir, defaultMinecraftRoot())
   ) {
     config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir;
+    changed = true;
+  }
+  if (!isDeveloperMode() && !explicitUserDataDir && isTemporaryTestMinecraftRoot(config.minecraftLauncher?.rootDir)) {
+    config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir || defaultMinecraftRoot();
     changed = true;
   }
   if (!isDeveloperMode() && isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir) && !isCurseForgeMinecraftRoot(defaults.minecraftLauncher?.rootDir)) {
@@ -1141,9 +1220,24 @@ async function saveConfig(nextConfig) {
   return merged;
 }
 
-async function readInstalledPack(config) {
+async function readInstalledPackState(config) {
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
-  return (await pathExists(installedPath)) ? await readJsonFile(installedPath) : null;
+  if (!(await pathExists(installedPath))) {
+    return { installed: null, manifestExists: false, manifestError: '' };
+  }
+  try {
+    return { installed: await readJsonFile(installedPath), manifestExists: true, manifestError: '' };
+  } catch (error) {
+    return {
+      installed: null,
+      manifestExists: true,
+      manifestError: `Installed manifest is damaged: ${error.message || error}`
+    };
+  }
+}
+
+async function readInstalledPack(config) {
+  return (await readInstalledPackState(config)).installed;
 }
 
 async function refreshMinecraftLauncherProfile(config) {
@@ -1193,16 +1287,30 @@ async function saveSettings(configPatch) {
 
 async function setupRecommendations(config = null) {
   const current = config || await loadConfig();
-  const detectedInstanceDir = await firstExistingDirectory(localInstanceCandidates());
+  const detectedInstanceDir = await firstPackShapedInstanceDir(localInstanceCandidates());
   const detectedMinecraftRoot = await firstExistingMinecraftLauncherRoot(localMinecraftLauncherCandidates());
-  const detectedMinecraftAuth = detectedMinecraftRoot
-    ? await inspectMinecraftLauncherAuth(detectedMinecraftRoot)
-    : { signedIn: false, accountCount: 0, files: [], usernames: [], preferredUsername: '' };
+  const minecraftLauncherOpen = await minecraftLauncherOpenStatus(current);
+  const configuredMinecraftRoot = current.minecraftLauncher?.rootDir || defaultMinecraftRoot();
+  const minecraftAuthRoot = configuredMinecraftRoot || detectedMinecraftRoot || defaultMinecraftRoot();
+  const detectedMinecraftAuth = await inspectMinecraftLauncherAuth(minecraftAuthRoot, {
+    extraRoots: [
+      detectedMinecraftRoot,
+      ...minecraftRootCandidates(process.platform, {
+        ...process.env,
+        HOME: process.env.HOME || app.getPath('home'),
+        USERPROFILE: process.env.USERPROFILE || app.getPath('home')
+      })
+    ].filter((root) => root && !samePath(root, minecraftAuthRoot))
+  });
   const localReleaseLatest = await firstExistingFile(localReleaseCandidates());
-  const recommendedInstanceDir = defaultInstanceDir();
+  const recommendedInstanceDir = current.instanceDir || defaultInstanceDir();
   const cacheModsDir = detectedInstanceDir && await pathExists(path.join(detectedInstanceDir, 'mods'))
     ? path.join(detectedInstanceDir, 'mods')
     : '';
+  const instanceExists = Boolean(await firstExistingDirectory([current.instanceDir]));
+  const installPresence = instanceExists
+    ? await installedPackPresence(current)
+    : { filesPresent: false };
   return {
     configPath: configPath(),
     detectedInstanceDir,
@@ -1211,10 +1319,17 @@ async function setupRecommendations(config = null) {
     detectedMinecraftRoot,
     recommendedMinecraftRoot: detectedMinecraftRoot || current.minecraftLauncher?.rootDir || defaultMinecraftRoot(),
     minecraftLauncherExe: detectedMinecraftRoot ? path.join(detectedMinecraftRoot, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher') : '',
+    minecraftLauncherOpenAvailable: minecraftLauncherOpen.available,
+    minecraftLauncherOpenState: minecraftLauncherOpen.state,
+    minecraftLauncherOpenLabel: minecraftLauncherOpen.label,
     minecraftAccountReuseAvailable: detectedMinecraftAuth.signedIn,
+    minecraftAccountProfileKnown: Boolean(detectedMinecraftAuth.profileKnown),
+    minecraftAccountCredentialOnly: Boolean(detectedMinecraftAuth.credentialOnly),
     minecraftAccountFileCount: detectedMinecraftAuth.files.length,
     detectedMinecraftUsername: detectedMinecraftAuth.preferredUsername || '',
-    instanceExists: Boolean(await firstExistingDirectory([current.instanceDir])),
+    javaRuntimeMode: javaRuntimeModeForSetup(),
+    instanceExists,
+    instanceHasPack: Boolean(installPresence.filesPresent),
     cacheModsDir,
     cacheModsExists: Boolean(cacheModsDir),
     localReleaseLatest,
@@ -1226,8 +1341,13 @@ async function setupRecommendations(config = null) {
 async function applyRecommendedSetup() {
   const current = await loadConfig();
   const setup = await setupRecommendations(current);
-  const instanceDir = defaultInstanceDir();
+  const instanceDir = setup.recommendedInstanceDir || defaultInstanceDir();
   const playCwd = current.playCommand?.cwd;
+  const shouldUpdatePlayCwd = !playCwd
+    || samePath(playCwd, current.instanceDir)
+    || isCurseForgeInstanceDir(playCwd)
+    || isOldLauncherInstanceDir(playCwd)
+    || (isDeveloperMode() && isPlayerDefaultInstanceDir(playCwd));
   const nextConfig = await saveConfig({
     ...current,
     instanceDir,
@@ -1242,7 +1362,7 @@ async function applyRecommendedSetup() {
     },
     playCommand: {
       ...current.playCommand,
-      cwd: !playCwd || isCurseForgeInstanceDir(playCwd) || isOldLauncherInstanceDir(playCwd) || (isDeveloperMode() && isPlayerDefaultInstanceDir(playCwd)) ? instanceDir : playCwd
+      cwd: shouldUpdatePlayCwd ? instanceDir : playCwd
     }
   });
   return getStatus(nextConfig);
@@ -1583,15 +1703,111 @@ async function expectedCacheExtraManagedFiles(config, latest = null) {
     }));
 }
 
+const PACK_PRESENCE_DIRS = [
+  'mods',
+  'config',
+  'resourcepacks',
+  'resources',
+  'scripts',
+  'structures',
+  'fancymenu_data',
+  'fancymenu_setups',
+  'customnpcs',
+  'llibrary'
+];
+const PACK_PRESENCE_FILES = [
+  'options.txt',
+  'optionsof.txt',
+  'servers.dat',
+  'minecraftinstance.json',
+  'manifest.json',
+  'crafttweaker.log'
+];
+
+async function directoryHasEntries(dir) {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries.some((entry) => entry.name !== '.aht-launcher');
+  } catch {
+    return false;
+  }
+}
+
+async function installedPackPresence(config) {
+  const installedManifestPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
+  const managedManifestPath = path.join(config.instanceDir, '.aht-launcher', 'managed-files.json');
+  const modsDir = path.join(config.instanceDir, 'mods');
+  const installedManifest = await pathExists(installedManifestPath);
+  const managedManifest = await pathExists(managedManifestPath);
+  const packDirs = [];
+  const packFiles = [];
+  let modJarCount = 0;
+  try {
+    const entries = await fs.readdir(modsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.toLowerCase().endsWith('.jar')) {
+        modJarCount += 1;
+      }
+    }
+  } catch {
+    modJarCount = 0;
+  }
+  for (const dirName of PACK_PRESENCE_DIRS) {
+    if (await directoryHasEntries(path.join(config.instanceDir, dirName))) {
+      packDirs.push(dirName);
+    }
+  }
+  for (const fileName of PACK_PRESENCE_FILES) {
+    if (await pathExists(path.join(config.instanceDir, fileName))) {
+      packFiles.push(fileName);
+    }
+  }
+  const packEvidenceCount = packDirs.length + packFiles.length;
+  return {
+    installedManifest,
+    managedManifest,
+    modJarCount,
+    packDirs,
+    packFiles,
+    filesPresent: installedManifest || managedManifest || modJarCount > 0 || packDirs.includes('mods') || packEvidenceCount >= 2
+  };
+}
+
 async function scanCurrentManagedIntegrity(config, latest = null, options = {}) {
   const requiredManaged = await expectedCacheExtraManagedFiles(config, latest).catch((error) => {
     console.warn(`Unable to load expected cache extras for integrity scan: ${error.message || error}`);
     return [];
   });
-  return scanManagedIntegrity(config.instanceDir, {
+  const installedState = options.installedPackState || await readInstalledPackState(config);
+  const integrity = await scanManagedIntegrity(config.instanceDir, {
     requiredManaged,
     onProgress: typeof options.onProgress === 'function' ? options.onProgress : null
   });
+  const installPresence = integrity.counts?.managed
+    ? { installedManifest: true, modJarCount: 0, filesPresent: true }
+    : await installedPackPresence(config);
+  const detectedInstanceDir = installPresence.filesPresent
+    ? ''
+    : await firstPackShapedInstanceDir(localInstanceCandidates());
+  const detectedDifferentInstanceDir = detectedInstanceDir && !samePath(detectedInstanceDir, config.instanceDir)
+    ? detectedInstanceDir
+    : '';
+  const latestAvailable = Boolean(latest?.version && (latest?.zip?.url || latest?.zip?.path));
+  const repairInstallFromLatest = Boolean(latestAvailable && !installPresence.filesPresent);
+  return {
+    ...integrity,
+    installDetected: installPresence.filesPresent,
+    repairable: Boolean(integrity.counts?.managed || installPresence.filesPresent || repairInstallFromLatest),
+    repairInstallFromLatest,
+    installDetection: {
+      ...installPresence,
+      latestAvailable
+    },
+    installedManifestExists: installedState.manifestExists,
+    installedManifestError: installedState.manifestError,
+    detectedInstanceDir: detectedDifferentInstanceDir,
+    installFolderMismatch: Boolean(detectedDifferentInstanceDir)
+  };
 }
 
 async function readUpdateLogs(config, limit = 3) {
@@ -1699,6 +1915,9 @@ async function refreshStaleIntegrityState(config, latest, integrity) {
 }
 function integrityBlockReason(integrity) {
   if (!integrity) return '';
+  if (integrity.installedManifestError) {
+    return 'Repair required. The installed manifest is damaged.';
+  }
   const counts = integrity.counts || {};
   if (!counts.managed) {
     return 'Repair required. The installed file manifest is missing.';
@@ -1824,6 +2043,15 @@ function evaluateLaunchState(config, latest, latestError, installed, minecraftPr
       launchReady: false,
       launchMode: 'minecraftLauncher',
       launchBlockedReason: updateBlockedReason
+    };
+  }
+
+  if (options.installedManifestError || integrity?.installedManifestError) {
+    return {
+      playConfigured,
+      launchReady: false,
+      launchMode: 'minecraftLauncher',
+      launchBlockedReason: 'Repair required. The installed manifest is damaged.'
     };
   }
 
@@ -1991,9 +2219,16 @@ function setupForRenderer(setup = {}) {
   }
   return {
     instanceExists: Boolean(setup.instanceExists),
+    instanceHasPack: Boolean(setup.instanceHasPack),
     latestConfigured: Boolean(setup.latestConfigured),
     canAutoConfigure: Boolean(setup.canAutoConfigure),
-    minecraftAccountReuseAvailable: Boolean(setup.minecraftAccountReuseAvailable)
+    minecraftAccountReuseAvailable: Boolean(setup.minecraftAccountReuseAvailable),
+    minecraftAccountProfileKnown: Boolean(setup.minecraftAccountProfileKnown),
+    minecraftAccountCredentialOnly: Boolean(setup.minecraftAccountCredentialOnly),
+    minecraftLauncherOpenAvailable: Boolean(setup.minecraftLauncherOpenAvailable),
+    minecraftLauncherOpenState: setup.minecraftLauncherOpenState || '',
+    minecraftLauncherOpenLabel: setup.minecraftLauncherOpenLabel || '',
+    javaRuntimeMode: setup.javaRuntimeMode || ''
   };
 }
 
@@ -2022,7 +2257,9 @@ function minecraftProfileForRenderer(profile = null) {
     loaderInstalled: Boolean(profile.loaderInstalled),
     minecraftVersion: profile.minecraftVersion || '',
     loaderId: profile.loaderId || '',
-    accountReuseAvailable: Boolean(profile.accountReuseAvailable)
+    accountReuseAvailable: Boolean(profile.accountReuseAvailable),
+    accountProfileKnown: Boolean(profile.accountProfileKnown),
+    accountCredentialOnly: Boolean(profile.accountCredentialOnly)
   };
 }
 
@@ -2068,19 +2305,29 @@ async function getStatus(configOverride = null) {
   } catch (error) {
     updateLogsError = error.message;
   }
-  const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
-  let installed = null;
-  if (await pathExists(installedPath)) {
-    try {
-      installed = await readJsonFile(installedPath);
-    } catch (error) {
-      latestError ||= `Installed manifest is damaged. Click Update to reinstall A Hard Time. ${error.message || error}`;
-    }
-  }
+  const installedState = await readInstalledPackState(config);
+  const installed = installedState.installed;
   const developerClientBypass = developerClientBypassAllowed();
   let integrity = developerClientBypass ? developerBypassIntegrityState(config) : await readIntegrityState(config);
   if (!developerClientBypass) {
     integrity = await refreshStaleIntegrityState(config, latest, integrity);
+    if (installedState.manifestError) {
+      integrity = {
+        ...(integrity || {
+          generatedAt: new Date().toISOString(),
+          instanceDir: config.instanceDir,
+          valid: false,
+          counts: { managed: 0, checked: 0, ok: 0, changed: 0, missing: 0, added: 0, corrupted: 0 },
+          changed: [],
+          missing: [],
+          added: [],
+          truncated: false
+        }),
+        valid: false,
+        installedManifestExists: installedState.manifestExists,
+        installedManifestError: installedState.manifestError
+      };
+    }
   }
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
   const launchLatestError = developerClientBypass && installed ? null : latestError;
@@ -2092,6 +2339,7 @@ async function getStatus(configOverride = null) {
     : false;
   const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
     skipLoaderCheck: true,
+    installedManifestError: installedState.manifestError,
     allowLegacyRelease: developerClientBypass
   });
   const pendingLauncherUpdate = await hydratePendingLauncherUpdateState();
@@ -2144,6 +2392,7 @@ async function getStatus(configOverride = null) {
     updateLogsError,
     launcherUpdate,
     installed,
+    installedManifestError: installedState.manifestError,
     integrity,
     updateBlockedReason,
     updateRequired,
@@ -2165,6 +2414,11 @@ async function runUpdate(forceRepair = false, options = {}) {
     if (!config.latestUrl) {
       throw new Error('latestUrl is not configured');
     }
+    let latestSourceLabel = 'configured source';
+    try {
+      latestSourceLabel = new URL(config.latestUrl).host || latestSourceLabel;
+    } catch {}
+    appendOperationLine(updateState, `Reading release feed from ${latestSourceLabel}.`);
     const latestBeforeInstall = await readLatest(config);
     if (!developerClientBypassAllowed()) {
       requirePlayerFullClientRelease(latestBeforeInstall);
@@ -2217,6 +2471,7 @@ async function runUpdate(forceRepair = false, options = {}) {
           latest: latestAfterInstall,
           installed: result.installed,
           profile,
+          ensureAssetObjects: false,
           logger: { log: (line) => assetLines.push(String(line)) }
         });
         appendOperationLines(updateState, assetLines);
@@ -2439,7 +2694,7 @@ function Write-PendingFailure([string]$message) {
 }
 try {
   Write-UpdateLog ('Waiting for old launcher PID ' + $payload.oldPid)
-  if ($env:AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY -eq '1') {
+  if ($payload.testHelperStartOnly -eq $true -or $env:AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY -eq '1') {
     Write-UpdateLog 'Test mode helper startup confirmed.'
     exit 0
   }
@@ -2550,6 +2805,7 @@ async function writeWindowsLauncherUpdateHelper({ filePath, artifact, latestVers
     logPath,
     bootstrapLogPath,
     pendingFailurePath: launcherUpdatePendingFailurePath(),
+    testHelperStartOnly: process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY === '1',
     createdAt: new Date().toISOString()
   });
   await fs.writeFile(scriptPath, launcherUpdateHelperScript(payloadPath), 'utf8');
@@ -2619,6 +2875,7 @@ zip_path=${shellSingleQuote(payload.installerPath)}
 target_app=${shellSingleQuote(payload.targetApp)}
 fallback_app=${shellSingleQuote(payload.fallbackApp)}
 old_pid=${Number(payload.oldPid) || 0}
+test_helper_start_only=${payload.testHelperStartOnly ? '1' : '0'}
 log_path=${shellSingleQuote(payload.logPath)}
 pending_failure_path=${shellSingleQuote(payload.pendingFailurePath)}
 work_dir=${shellSingleQuote(payload.workDir)}
@@ -2636,7 +2893,7 @@ fail_update() {
   exit 1
 }
 write_log "Waiting for old launcher PID $old_pid"
-if [ "\${AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY:-}" = "1" ]; then
+if [ "$test_helper_start_only" = "1" ] || [ "\${AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY:-}" = "1" ]; then
   write_log "Test mode helper startup confirmed."
   exit 0
 fi
@@ -2728,6 +2985,7 @@ async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadD
     oldPid: process.pid,
     logPath,
     pendingFailurePath: launcherUpdatePendingFailurePath(),
+    testHelperStartOnly: process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY === '1',
     workDir: path.join(helperDir, 'macos-extract'),
     createdAt: new Date().toISOString()
   };
@@ -2781,10 +3039,11 @@ async function waitForLauncherUpdateHelperStart(prepared = {}, timeoutMs = 5000)
   if (!prepared.logPath || !['windows-helper', 'macos-helper'].includes(prepared.strategy)) return;
   const start = Date.now();
   let bootstrapText = '';
+  const requiresTestConfirmation = process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY === '1';
   while (Date.now() - start < timeoutMs) {
     try {
       const text = await fs.readFile(prepared.logPath, 'utf8');
-      if (text.includes('Waiting for old launcher PID') || text.includes('Test mode helper startup confirmed.')) {
+      if (text.includes('Test mode helper startup confirmed.') || (!requiresTestConfirmation && text.includes('Waiting for old launcher PID'))) {
         return;
       }
     } catch {
@@ -5270,6 +5529,79 @@ async function existingLaunchCwd(preferred = '') {
   }
   return app.getPath('home');
 }
+
+function commandLooksLikePath(value = '') {
+  const text = String(value || '').trim();
+  return path.isAbsolute(text) || text.includes('/') || text.includes('\\');
+}
+
+function windowsMinecraftLauncherExecutableCandidates(rootDir = '', env = process.env) {
+  return [
+    rootDir ? { path: path.join(rootDir, 'minecraft.exe'), args: ['--workDir', rootDir], kind: 'root' } : null,
+    env['ProgramFiles(x86)'] ? { path: path.join(env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: [], kind: 'desktop' } : null,
+    env.ProgramFiles ? { path: path.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: [], kind: 'desktop' } : null,
+    env.LOCALAPPDATA ? { path: path.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: [], kind: 'desktop' } : null
+  ].filter((item) => item?.path);
+}
+
+async function firstWindowsMinecraftLauncherExecutable(rootDir = '', env = process.env) {
+  for (const candidate of windowsMinecraftLauncherExecutableCandidates(rootDir, env)) {
+    if (await pathExists(candidate.path)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function macMinecraftLauncherAppPaths(env = process.env) {
+  const home = app.getPath('home');
+  return [
+    env.AHT_MINECRAFT_MAC_APP || '',
+    '/Applications/Minecraft.app',
+    '/Applications/Minecraft Launcher.app',
+    path.join(home, 'Applications', 'Minecraft.app'),
+    path.join(home, 'Applications', 'Minecraft Launcher.app')
+  ].filter(Boolean);
+}
+
+function javaRuntimeModeForSetup() {
+  if (process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_SETUP_JAVA_MODE) {
+    return String(process.env.AHT_TEST_SETUP_JAVA_MODE);
+  }
+  return process.platform === 'win32' && process.arch === 'x64' ? 'automatic' : 'checked-on-play';
+}
+
+async function minecraftLauncherOpenStatus(config = {}) {
+  const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
+  const openCommand = String(config.minecraftLauncher?.openCommand || '').trim();
+  if (openCommand) {
+    const available = !commandLooksLikePath(openCommand) || await pathExists(openCommand);
+    return {
+      available,
+      state: available ? 'custom' : 'missing-custom',
+      label: available ? 'Custom launcher' : 'Custom launcher missing'
+    };
+  }
+  if (process.platform === 'win32') {
+    const executable = await firstWindowsMinecraftLauncherExecutable(rootDir, process.env);
+    if (executable) {
+      return { available: true, state: executable.kind, label: 'Ready' };
+    }
+    if (await windowsStoreMinecraftLauncherInstalled(process.env)) {
+      return { available: true, state: 'store', label: 'Ready' };
+    }
+    return { available: false, state: 'missing', label: 'Install needed' };
+  }
+  if (process.platform === 'darwin') {
+    const appPath = await firstExistingDirectory(macMinecraftLauncherAppPaths(process.env));
+    if (appPath) {
+      return { available: true, state: 'app', label: 'Ready' };
+    }
+    return { available: true, state: 'check-on-play', label: 'Checked on Play' };
+  }
+  return { available: false, state: 'unsupported', label: 'Unsupported platform' };
+}
+
 async function macOpenCommand() {
   const absoluteOpen = '/usr/bin/open';
   return await pathExists(absoluteOpen) ? absoluteOpen : 'open';
@@ -5282,14 +5614,7 @@ async function openMacApplication(args, cwd, env) {
 }
 
 async function openMacMinecraftLauncher(cwd, env) {
-  const home = app.getPath('home');
-  const appPaths = [
-    process.env.AHT_MINECRAFT_MAC_APP || '',
-    '/Applications/Minecraft.app',
-    '/Applications/Minecraft Launcher.app',
-    path.join(home, 'Applications', 'Minecraft.app'),
-    path.join(home, 'Applications', 'Minecraft Launcher.app')
-  ].filter(Boolean);
+  const appPaths = macMinecraftLauncherAppPaths(env);
   let lastError = null;
   for (const appPath of appPaths) {
     if (!(await pathExists(appPath))) {
@@ -5317,7 +5642,12 @@ async function openMacMinecraftLauncher(cwd, env) {
 }
 
 async function openWindowsStoreMinecraftLauncher(cwd, env) {
-  const appTarget = 'shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft';
+  const appTarget = `shell:AppsFolder\\${WINDOWS_MINECRAFT_PACKAGE_FAMILY}!Minecraft`;
+  if (!(await windowsStoreMinecraftLauncherInstalled(env))) {
+    return openMinecraftLauncherInstallHelp(
+      'Minecraft Launcher is not installed, or Windows app execution is disabled on this PC.'
+    );
+  }
   const explorer = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe') : 'explorer.exe';
   try {
     return await spawnDetached(explorer, [appTarget], cwd, env);
@@ -5330,6 +5660,88 @@ async function openWindowsStoreMinecraftLauncher(cwd, env) {
     }
   }
 }
+
+async function windowsStoreMinecraftLauncherInstalled(env = process.env) {
+  const packageDir = env.LOCALAPPDATA
+    ? path.join(env.LOCALAPPDATA, 'Packages', WINDOWS_MINECRAFT_PACKAGE_FAMILY)
+    : '';
+  if (!packageDir || !(await pathExists(packageDir))) {
+    return false;
+  }
+  const storeOwnedMarkers = ['LocalState', 'Settings', 'SystemAppData', 'AC', 'TempState', 'AppData', 'RoamingState'];
+  for (const marker of storeOwnedMarkers) {
+    if (await pathExists(path.join(packageDir, marker))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function captureTestExternalOpen(url, message = '') {
+  if (process.env.AHT_TEST_HOOKS !== '1') return false;
+  const capturePath = String(process.env.AHT_TEST_OPEN_EXTERNAL_CAPTURE_PATH || '').trim();
+  if (!capturePath) return false;
+  fsSync.mkdirSync(path.dirname(capturePath), { recursive: true });
+  fsSync.appendFileSync(capturePath, `${JSON.stringify({
+    url,
+    message,
+    timestamp: new Date().toISOString()
+  })}\n`, 'utf8');
+  return true;
+}
+
+async function openExternalSetupUrl(url, message = '') {
+  if (captureTestExternalOpen(url, message)) {
+    return { captured: true };
+  }
+  await shell.openExternal(url);
+  return { captured: false };
+}
+
+async function openMinecraftLauncherInstallHelp(message) {
+  const detail = `${message} AHT opened the official Minecraft Launcher download page. Install Minecraft Launcher, sign in with Microsoft, then click Play again. ${MINECRAFT_LAUNCHER_DOWNLOAD_URL}`;
+  try {
+    await openExternalSetupUrl(MINECRAFT_LAUNCHER_DOWNLOAD_URL, detail);
+  } catch (error) {
+    throw new Error(`${detail} If the page did not open, open that link manually. ${error.message || error}`);
+  }
+  throw new Error(detail);
+}
+
+async function openSetupExternalUrl(url, message) {
+  await openExternalSetupUrl(url, message);
+  return { ok: true, message, url };
+}
+
+async function runSetupAction(action = '') {
+  const normalized = String(action || '').trim();
+  const current = await loadConfig();
+  if (normalized === 'download-minecraft-launcher') {
+    return openSetupExternalUrl(
+      MINECRAFT_LAUNCHER_DOWNLOAD_URL,
+      'AHT opened the official Minecraft Launcher download page.'
+    );
+  }
+  if (normalized === 'open-minecraft-launcher') {
+    const openStatus = await minecraftLauncherOpenStatus(current);
+    if (!openStatus.available) {
+      return openSetupExternalUrl(
+        MINECRAFT_LAUNCHER_DOWNLOAD_URL,
+        'Minecraft Launcher is not installed. AHT opened the official download page.'
+      );
+    }
+    await openMinecraftLauncher(current);
+    return { ok: true, message: 'Minecraft Launcher opened.' };
+  }
+  if (normalized === 'open-java-help') {
+    return openSetupExternalUrl(
+      JAVA8_DOWNLOAD_URL,
+      'AHT opened the Java 8 download page. Windows x64 installs normally use AHT managed Java automatically.'
+    );
+  }
+  throw new Error(`Unknown setup action: ${normalized || 'empty'}`);
+}
+
 async function openMinecraftLauncher(config) {
   const requestedCwd = config.minecraftLauncher?.rootDir || app.getPath('home');
   const cwd = await existingLaunchCwd(requestedCwd);
@@ -5339,19 +5751,9 @@ async function openMinecraftLauncher(config) {
   }
 
   if (process.platform === 'win32') {
-    const rootLauncher = cwd ? path.join(cwd, 'minecraft.exe') : '';
-    if (rootLauncher && await pathExists(rootLauncher)) {
-      return spawnDetached(rootLauncher, ['--workDir', cwd], cwd, env);
-    }
-    const candidates = [
-      process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
-      process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
-      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe') : ''
-    ].filter(Boolean);
-    for (const candidate of candidates) {
-      if (await pathExists(candidate)) {
-        return spawnDetached(candidate, [], cwd, env);
-      }
+    const executable = await firstWindowsMinecraftLauncherExecutable(cwd, env);
+    if (executable) {
+      return spawnDetached(executable.path, executable.args || [], cwd, env);
     }
     return openWindowsStoreMinecraftLauncher(cwd, env);
   }
@@ -5421,6 +5823,34 @@ ipcMain.handle('launcher:updateState', async () => {
   return launcherUpdateState;
 });
 ipcMain.handle('account:register', async (_event, username) => registerMinecraftUsername(username));
+ipcMain.handle('social:list', diagnosticIpc('social:list', async () => {
+  const config = await loadConfig();
+  const identity = await identityPayload(config);
+  let latest = null;
+  try {
+    latest = await readLatest(config);
+  } catch {
+    latest = null;
+  }
+  return fetchSocialState({ config, latest, identity });
+}));
+ipcMain.handle('social:action', diagnosticIpc('social:action', async (_event, payload = {}) => {
+  const config = await loadConfig();
+  const identity = await identityPayload(config);
+  let latest = null;
+  try {
+    latest = await readLatest(config);
+  } catch {
+    latest = null;
+  }
+  return sendSocialAction({
+    config,
+    latest,
+    identity,
+    action: payload?.action,
+    target: payload?.target
+  });
+}));
 ipcMain.handle('changes:scan', async () => {
   const config = await loadConfig();
   if (developerClientBypassAllowed()) {
@@ -5433,7 +5863,11 @@ ipcMain.handle('files:scan', async () => {
   if (developerClientBypassAllowed()) {
     return developerBypassIntegrityState(config, 'developer-scan-bypass');
   }
-  const integrity = await scanCurrentManagedIntegrity(config);
+  const latest = await readLatest(config).catch((error) => {
+    console.warn(`Unable to load release feed before repair scan: ${error.message || error}`);
+    return null;
+  });
+  const integrity = await scanCurrentManagedIntegrity(config, latest);
   return writeIntegrityState(config, integrity, 'scan');
 });
 ipcMain.handle('changes:sync', async () => {
@@ -5452,15 +5886,8 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
   const config = await loadConfig();
   const developerClientBypass = developerClientBypassAllowed();
 
-  const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
-  let installed = null;
-  if (await pathExists(installedPath)) {
-    try {
-      installed = await readJsonFile(installedPath);
-    } catch (error) {
-      throw new Error(`Installed manifest is damaged. Click Update to reinstall A Hard Time. ${error.message || error}`);
-    }
-  }
+  const installedState = await readInstalledPackState(config);
+  const installed = installedState.installed;
   let latest = null;
   let latestError = null;
   try {
@@ -5475,10 +5902,11 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
   const integrity = developerClientBypass
     ? null
-    : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest), 'play-check');
+    : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest, { installedPackState: installedState }), 'play-check');
   const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   const initialLaunchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
     skipLoaderCheck: true,
+    installedManifestError: installedState.manifestError,
     allowLegacyRelease: developerClientBypass
   });
   if (!initialLaunchState.launchReady) {
@@ -5494,7 +5922,13 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
   });
   let profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
   profile = await installMinecraftProfileLoaders(profile, { config, latest: launchLatest, installed });
-  const minecraftAssets = await ensureMinecraftLauncherAssets({ config, latest: launchLatest, installed, profile });
+  const minecraftAssets = await ensureMinecraftLauncherAssets({
+    config,
+    latest: launchLatest,
+    installed,
+    profile,
+    assetBaseUrl: testMinecraftAssetBaseUrl() || undefined
+  });
   const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity, {
     allowLegacyRelease: developerClientBypass
   });
@@ -5554,6 +5988,7 @@ ipcMain.handle('dialog:folder', async (_event, defaultPath = '') => {
 ipcMain.handle('shell:openPath', async (_event, target) => shell.openPath(target));
 ipcMain.handle('setup:recommend', async () => setupForRenderer(await setupRecommendations()));
 ipcMain.handle('setup:apply', async () => applyRecommendedSetup());
+ipcMain.handle('setup:action', diagnosticIpc('setup:action', async (_event, action) => runSetupAction(action)));
 ipcMain.handle('dev:buildClientZip', diagnosticIpc('dev:buildClientZip', async (_event, payload = {}) => {
   assertDeveloperAuthenticated();
   const { createClientModpackZip } = await loadClientModpackZipModule();
