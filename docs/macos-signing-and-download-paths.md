@@ -49,10 +49,8 @@ Expected macOS GitHub Release asset names after the next build:
 
 - `AHT-Launcher-macOS-arm64-<version>.dmg`
 - `AHT-Launcher-macOS-x64-<version>.dmg`
-- `AHT-Launcher-macOS-arm64-<version>.zip`
-- `AHT-Launcher-macOS-x64-<version>.zip`
 
-The DMGs are for website/manual downloads. The ZIPs are required for in-app macOS launcher self-updates.
+The DMGs are for website/manual downloads. The workflow also builds macOS ZIPs for in-app launcher self-updates, but those ZIPs are uploaded through the R2 launcher update feed instead of being exposed as manual-download assets.
 
 Recommended website paths:
 

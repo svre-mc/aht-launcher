@@ -335,6 +335,21 @@ const largeStackResult = await installPack({
 });
 assert(largeStackResult.installMode === 'full-client-zip', `large ZIP dry run used wrong mode: ${JSON.stringify(largeStackResult)}`);
 assert(largeStackResult.overrideFileCount === 6500, `large ZIP dry run did not inspect every entry without stack overflow: ${JSON.stringify(largeStackResult)}`);
+const largeStackInstallProgress = [];
+const largeStackInstallDir = path.join(root, 'large-stack-real-install');
+const largeStackInstall = await installPack({
+  latestSource: largeStackLatestPath,
+  instanceDir: largeStackInstallDir,
+  onProgress: (progress) => largeStackInstallProgress.push(progress),
+  logger: { log() {} }
+});
+assert(largeStackInstall.cleanInstall === true, 'large ZIP real install should use clean staged replacement');
+assert(largeStackInstall.overrideFileCount === 6500, `large ZIP real install did not extract every entry: ${JSON.stringify(largeStackInstall)}`);
+assert(await pathExists(path.join(largeStackInstallDir, 'config', 'stack-proof', '06499.cfg')), 'large ZIP real install missed the final stack-proof file');
+assert(largeStackInstallProgress.some((progress) => progress.phase === 'Full client ZIP' && progress.currentPath === 'config/stack-proof/06499.cfg'), 'large ZIP real install did not report extraction progress for the final file');
+assertMonotonicProgress(largeStackInstallProgress, 'large full-client real install');
+const largeStackInstallScan = await scanManagedIntegrity(largeStackInstallDir);
+assert(largeStackInstallScan.counts.corrupted === 0, `large ZIP real install did not scan clean after extraction: ${JSON.stringify(largeStackInstallScan)}`);
 const largeStackRelease = await buildRelease({
   packZip: largeStackZipPath,
   outDir: path.join(root, 'large-stack-release'),

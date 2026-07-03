@@ -235,6 +235,7 @@ await writeJson(defaultsPath, {
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
+    syncDefaultRoots: false,
     syncRoots: [syncedMcRoot],
     autoImportAccount: false,
     openCommand: process.execPath,
@@ -242,6 +243,16 @@ await writeJson(defaultsPath, {
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
+for (const rootDir of [mcRoot, syncedMcRoot]) {
+  await writeJson(
+    path.join(rootDir, 'versions', '1.12.2', '1.12.2.json'),
+    { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
+  );
+  await writeJson(
+    path.join(rootDir, 'assets', 'indexes', '1.12.json'),
+    { objects: {} }
+  );
+}
 
 const registeredUsers = new Map();
 const server = http.createServer((request, response) => {

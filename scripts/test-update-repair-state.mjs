@@ -17,6 +17,8 @@ assert(main.includes('if (isFullClientRelease(release)) {\n    return [];\n  }')
 assert(main.includes('relativePath: normalizeRelPath(entry.installPath || `mods/${entry.fileName}`),'), 'cache-extra integrity must honor release cache installPath for resourcepacks.');
 assert(main.includes('function refreshStaleIntegrityState(config, latest, integrity)'), 'status refresh must be able to self-heal stale cache-extra integrity state.');
 assert(main.includes('integrity = await refreshStaleIntegrityState(config, latest, integrity);'), 'getStatus must refresh stale cache-extra integrity before blocking Play.');
+assert(main.includes('async function installedPackPresence(config)') && main.includes('PACK_PRESENCE_DIRS') && main.includes("'resourcepacks'") && main.includes("'options.txt'") && main.includes("packDirs.includes('mods')") && main.includes('repairInstallFromLatest') && main.includes('repairable: Boolean(integrity.counts?.managed || installPresence.filesPresent || repairInstallFromLatest)'), 'managed-manifest-missing scans must still tell the renderer an installed, pack-shaped, or latest-ready folder can be repaired.');
+assert(main.includes('function localInstanceCandidates()') && main.includes('defaultPlayerInstanceDir()') && main.includes('defaultDeveloperInstanceDir()') && main.includes("path.join(ahtRoot, 'A Hard Time Developer')"), 'Repair scan fallback detection must include managed AHT install folders, not only old CurseForge instances.');
 assert(main.includes('const OPERATION_LINES_MAX = 120') && main.includes('function appendOperationLine'), 'main process must cap operation log lines so large installs/uploads do not flood IPC.');
 assert(!/(?:operationState|updateState|launcherUpdateState|serverTransferState|uploadState)\.lines\.push/.test(main), 'operation state logs must go through appendOperationLine/appendOperationLines instead of unbounded array pushes.');
 assert(!main.includes("phase: 'Saving install state'"), 'runUpdate must not skip real integrity verification with a synthetic clean state.');
@@ -25,6 +27,9 @@ assert(main.includes("failOperationState(updateState, error, forceRepair ? 'Repa
 assert(!main.includes('finally {\n    updateState.running = false;\n  }'), 'runUpdate must not rely on a bare finally running=false terminal state.');
 assert(!installer.includes('fs.cp(source, dest, { recursive: true'), 'preserved runtime mod folders must not use recursive fs.cp because large OpenTerrainGenerator trees can overflow the call stack during update/repair.');
 assert(!installer.includes('fastDirectoryCopy'), 'installer must not keep the obsolete recursive fastDirectoryCopy path.');
+assert(installer.includes('async function renameWithRetry') && installer.includes("['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY']"), 'installer swaps must retry transient Windows rename/file-lock errors.');
+assert(!installer.includes('await fs.rename(resolvedStagingDir, resolvedInstanceDir);'), 'staged install activation must use renameWithRetry, not a single raw fs.rename.');
+assert(!installer.includes('await fs.rename(resolvedInstanceDir, backupDir);'), 'old install backup move must use renameWithRetry, not a single raw fs.rename.');
 
 assert(renderer.includes('const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;'), 'renderer must define the completed download visible window.');
 assert(renderer.includes('const DOWNLOAD_ERROR_VISIBLE_MS = 6200;'), 'renderer must define a bounded failed download visible window.');
@@ -42,6 +47,8 @@ assert(!renderer.includes('lastUpdateState?.running || lastUpdateState?.lastResu
 assert(renderer.includes('lastUpdateState = {\n    running: true,'), 'startUpdate must create an optimistic running state for first-click feedback.');
 assert(renderer.includes('lastIntegrityScan = null;'), 'repair must clear stale scan results before starting.');
 assert(renderer.includes('setUnavailable(els.scanButton, true);'), 'update and repair must lock Scan while installing.');
+assert(renderer.includes('currentStatus?.setup?.instanceHasPack') && renderer.includes('scan?.repairInstallFromLatest') && renderer.includes('} else if (!scan?.counts?.managed) {\n      els.diffSummary.textContent = "Repair required";'), 'Repair scan must prompt repair when an installed, pack-shaped, or latest-ready pack is present but the managed manifest is missing.');
+assert(renderer.includes('setUnavailable(els.scanButton, launcherUpdateRequired || !status.latest || updateRunning);'), 'Repair button must remain available for missing-metadata installs so the scan can detect repairable files.');
 assert(renderer.includes('if (updatePoll || lastUpdateState?.running) return;'), 'scan completion cleanup must only wait for active installs, not completed update progress.');
 assert(!renderer.includes('if (updatePoll || shouldShowUpdateProgress(lastUpdateState)) return;'), 'scan completion cleanup must not keep Scan complete visible because of stale terminal update state.');
 assert(renderer.includes('setInterval(pollUpdate, 500)'), 'update polling should be responsive while installing.');

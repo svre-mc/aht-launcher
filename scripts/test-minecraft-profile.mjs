@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -260,7 +261,7 @@ if (resolvedExplicitJava !== explicitJava) {
   throw new Error(`Expected explicit Java path, got ${resolvedExplicitJava}`);
 }
 const javaHelp = javaSetupHelpMessage('win32');
-if (!javaHelp.includes('Eclipse Temurin JDK 8') || !javaHelp.includes('restart AHT Launcher')) {
+if (!javaHelp.includes('Eclipse Temurin JDK 8') || !javaHelp.includes('restart AHT Launcher') || !javaHelp.includes('then try again') || javaHelp.includes('click Update again')) {
   throw new Error(`Java setup help is not specific enough: ${javaHelp}`);
 }
 const missingJavaMessage = friendlyForgeJavaErrorMessage(Object.assign(new Error('spawn java ENOENT'), { code: 'ENOENT' }), 'java', 'win32');
@@ -271,11 +272,25 @@ const certificateMessage = friendlyForgeJavaErrorMessage(new Error('sun.security
 if (!certificateMessage.includes('could not validate Mojang/Forge HTTPS certificates') || !certificateMessage.includes('Eclipse Temurin JDK 8') || certificateMessage.includes('SunCertPathBuilderException')) {
   throw new Error(`Certificate message is not clean: ${certificateMessage}`);
 }
-const minecraftServiceMessage = friendlyForgeJavaErrorMessage(new Error('Forge installer exited with code 1: Error: could not open C:\\Users\\Player\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Local\\runtime\\java-runtime-gamma\\windows-x64\\java-runtime-gamma\\bin\\javaw.cfg'), fakeModernJava, 'win32');
-if (!minecraftServiceMessage.includes('Minecraft services') || !minecraftServiceMessage.includes('Mojang/Microsoft') || minecraftServiceMessage.includes('javaw.cfg')) {
+const certificateWithForgeHostMessage = friendlyForgeJavaErrorMessage(new Error('PKIX path building failed while connecting to https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-14.23.5.2860/forge-1.12.2-14.23.5.2860-installer.jar'), fakeLegacyJava, 'win32');
+if (!certificateWithForgeHostMessage.includes('could not validate Mojang/Forge HTTPS certificates') || certificateWithForgeHostMessage.includes('Minecraft services')) {
+  throw new Error(`Certificate host message was mislabeled: ${certificateWithForgeHostMessage}`);
+}
+
+const minecraftServiceMessage = friendlyForgeJavaErrorMessage(new Error('Forge installer exited with code 1: Error: could not open C:\\Users\\Player\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Local\\runtime\\java-runtime-gamma\\windows-x64\\java-runtime-gamma\\lib\\amd64\\jvm.cfg'), fakeModernJava, 'win32');
+if (!minecraftServiceMessage.includes('Minecraft services') || !minecraftServiceMessage.includes('Mojang/Microsoft') || minecraftServiceMessage.includes('jvm.cfg')) {
   throw new Error(`Minecraft outage message is not clean: ${minecraftServiceMessage}`);
 }
 
+const screenshotRuntimeServiceMessage = friendlyForgeJavaErrorMessage(new Error("Forge installer exited with code 1: Error: could not open 'C:\\Users\\coars\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Local\\runtime\\java-runtime-gamma\\windows-x64\\java-runtime-gamma\\bin\\javaw.exe\\lib\\amd64\\jvm.cfg'"), fakeModernJava, 'win32');
+if (!screenshotRuntimeServiceMessage.includes('Minecraft services') || !screenshotRuntimeServiceMessage.includes('Mojang/Microsoft') || screenshotRuntimeServiceMessage.includes('javaw.exe') || screenshotRuntimeServiceMessage.includes('jvm.cfg')) {
+  throw new Error(`Screenshot runtime outage message is not clean: ${screenshotRuntimeServiceMessage}`);
+}
+
+const minecraftGammaLegacyServiceMessage = friendlyForgeJavaErrorMessage(new Error('Forge installer exited with code 1: Error: could not open C:\\Users\\coars\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Local\\runtime\\java-runtime-gamma-legacy\\windows-x64\\java-runtime-gamma-legacy\\lib\\amd64\\jvm.cfg'), fakeModernJava, 'win32');
+if (!minecraftGammaLegacyServiceMessage.includes('Minecraft services') || !minecraftGammaLegacyServiceMessage.includes('Mojang/Microsoft') || minecraftGammaLegacyServiceMessage.includes('java-runtime-gamma-legacy')) {
+  throw new Error(`Minecraft gamma legacy outage message is not clean: ${minecraftGammaLegacyServiceMessage}`);
+}
 const macAuthRoot = path.join(root, 'mac-launcher-auth');
 await fs.mkdir(macAuthRoot, { recursive: true });
 await fs.writeFile(path.join(macAuthRoot, 'launcher_accounts.json'), JSON.stringify({
@@ -311,6 +326,9 @@ const msaOnlyAuth = await inspectMinecraftLauncherAuth(macMsaOnlyRoot);
 if (!msaOnlyAuth.signedIn || msaOnlyAuth.accountCount !== 0) {
   throw new Error(`Expected MSA credential file to count as signed in, got ${JSON.stringify(msaOnlyAuth)}`);
 }
+if (msaOnlyAuth.profileKnown || !msaOnlyAuth.credentialOnly) {
+  throw new Error(`Expected MSA-only auth to be marked as credential-only without a known profile, got ${JSON.stringify(msaOnlyAuth)}`);
+}
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const curseForgeVersionId = 'forge-14.23.5.2860';
 await fs.mkdir(path.join(curseForgeRoot, 'versions', curseForgeVersionId), { recursive: true });
@@ -335,6 +353,9 @@ if (curseForgeProfile.versionId !== curseForgeVersionId || !curseForgeProfile.lo
 }
 if (!curseForgeProfile.accountReuseAvailable || curseForgeProfile.accountCount !== 2) {
   throw new Error('Expected existing Minecraft Launcher account state to be detected.');
+}
+if (!curseForgeProfile.accountProfileKnown || curseForgeProfile.accountCredentialOnly) {
+  throw new Error(`Expected full launcher account profile state, got ${JSON.stringify(curseForgeProfile)}`);
 }
 if (curseForgeProfile.preferredMinecraftUsername !== 'ActiveUser') {
   throw new Error(`Expected active launcher account username, got ${curseForgeProfile.preferredMinecraftUsername}`);
@@ -420,7 +441,11 @@ const assetRoot = path.join(root, 'asset-root');
 const fakeManifestUrl = 'https://example.invalid/version_manifest_v2.json';
 const fakeVersionUrl = 'https://example.invalid/1.12.2.json';
 const fakeAssetUrl = 'https://example.invalid/1.12.json';
+const fakeAssetBytes = Buffer.from('aht asset object\n');
+const fakeAssetHash = createHash('sha1').update(fakeAssetBytes).digest('hex');
+const fakeAssetObjectPath = path.join(assetRoot, 'assets', 'objects', fakeAssetHash.slice(0, 2), fakeAssetHash);
 const fakeFetches = [];
+const fakeAssetDownloads = [];
 const fakeFetchJson = async (url) => {
   fakeFetches.push(String(url));
   if (url === fakeManifestUrl) {
@@ -430,9 +455,14 @@ const fakeFetchJson = async (url) => {
     return { id: '1.12.2', assetIndex: { id: '1.12', url: fakeAssetUrl } };
   }
   if (url === fakeAssetUrl) {
-    return { objects: { 'minecraft/lang/en_us.lang': { hash: 'a'.repeat(40), size: 1 } } };
+    return { objects: { 'minecraft/lang/en_us.lang': { hash: fakeAssetHash, size: fakeAssetBytes.length } } };
   }
   throw new Error(`Unexpected fake fetch ${url}`);
+};
+const fakeDownloadFile = async (source, dest) => {
+  fakeAssetDownloads.push({ source, dest });
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.writeFile(dest, fakeAssetBytes);
 };
 const assetProfile = { rootDir: assetRoot, syncedProfiles: [{ rootDir: assetRoot }], minecraftVersion: '1.12.2' };
 const firstAssetRepair = await ensureMinecraftLauncherAssets({
@@ -441,10 +471,17 @@ const firstAssetRepair = await ensureMinecraftLauncherAssets({
   installed: null,
   profile: assetProfile,
   manifestUrl: fakeManifestUrl,
-  fetchJsonImpl: fakeFetchJson
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile
 });
 if (!firstAssetRepair.ok || !firstAssetRepair.repaired) {
   throw new Error(`Expected missing Minecraft metadata to be repaired: ${JSON.stringify(firstAssetRepair)}`);
+}
+if (firstAssetRepair.assetObjects.downloaded !== 1 || fakeAssetDownloads.length !== 1) {
+  throw new Error(`Missing Minecraft asset object was not downloaded: ${JSON.stringify({ firstAssetRepair, fakeAssetDownloads })}`);
+}
+if (createHash('sha1').update(await fs.readFile(fakeAssetObjectPath)).digest('hex') !== fakeAssetHash) {
+  throw new Error('Downloaded Minecraft asset object did not match the asset index hash.');
 }
 const assetIndexPath = path.join(assetRoot, 'assets', 'indexes', '1.12.json');
 if (!JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
@@ -457,15 +494,89 @@ const secondAssetRepair = await ensureMinecraftLauncherAssets({
   installed: null,
   profile: assetProfile,
   manifestUrl: fakeManifestUrl,
-  fetchJsonImpl: fakeFetchJson
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile
 });
 if (!secondAssetRepair.repaired) {
   throw new Error('Corrupt asset index was not repaired.');
+}
+await fs.writeFile(fakeAssetObjectPath, '');
+const downloadsBeforeCorruptObjectRepair = fakeAssetDownloads.length;
+const corruptObjectRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: assetProfile,
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile
+});
+if (!corruptObjectRepair.repaired || corruptObjectRepair.assetObjects.downloaded !== 1 || fakeAssetDownloads.length !== downloadsBeforeCorruptObjectRepair + 1) {
+  throw new Error(`Corrupt Minecraft asset object was not repaired: ${JSON.stringify({ corruptObjectRepair, fakeAssetDownloads })}`);
 }
 const assetBackupDir = path.join(assetRoot, 'assets', 'indexes');
 const assetBackups = (await fs.readdir(assetBackupDir)).filter((name) => name.includes('1.12.json.aht-corrupt-'));
 if (!assetBackups.length) {
   throw new Error('Corrupt asset index was not backed up before repair.');
+}
+const flakyAssetRoot = path.join(root, 'asset-flaky-root');
+let flakyDownloadAttempts = 0;
+const flakyAssetRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: flakyAssetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: { rootDir: flakyAssetRoot, syncedProfiles: [{ rootDir: flakyAssetRoot }], minecraftVersion: '1.12.2' },
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: async (source, dest) => {
+    flakyDownloadAttempts += 1;
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.writeFile(dest, flakyDownloadAttempts === 1 ? Buffer.from('bad asset bytes\n') : fakeAssetBytes);
+  }
+});
+const flakyAssetObjectPath = path.join(flakyAssetRoot, 'assets', 'objects', fakeAssetHash.slice(0, 2), fakeAssetHash);
+if (!flakyAssetRepair.repaired || flakyDownloadAttempts !== 2 || createHash('sha1').update(await fs.readFile(flakyAssetObjectPath)).digest('hex') !== fakeAssetHash) {
+  throw new Error(`Asset object hash mismatch was not retried and repaired: ${JSON.stringify({ flakyAssetRepair, flakyDownloadAttempts })}`);
+}
+const badAssetRoot = path.join(root, 'asset-bad-root');
+let badAssetMessage = '';
+try {
+  await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: badAssetRoot, syncDefaultRoots: false } },
+    latest,
+    installed: null,
+    profile: { rootDir: badAssetRoot, syncedProfiles: [{ rootDir: badAssetRoot }], minecraftVersion: '1.12.2' },
+    manifestUrl: fakeManifestUrl,
+    fetchJsonImpl: fakeFetchJson,
+    downloadFileImpl: async (_source, dest) => {
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, Buffer.from('always bad asset bytes\n'));
+    }
+  });
+} catch (error) {
+  badAssetMessage = error.message;
+}
+if (!badAssetMessage.includes('Minecraft services') || badAssetMessage.includes('Mojang metadata after download') || badAssetMessage.includes('minecraft/lang/en_us.lang')) {
+  throw new Error(`Repeated Minecraft asset hash failures should produce a clean service message: ${badAssetMessage}`);
+}
+const outageAssetRoot = path.join(root, 'asset-outage-root');
+let assetOutageMessage = '';
+try {
+  await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: outageAssetRoot, syncDefaultRoots: false } },
+    latest,
+    installed: null,
+    profile: { rootDir: outageAssetRoot, syncedProfiles: [{ rootDir: outageAssetRoot }], minecraftVersion: '1.12.2' },
+    manifestUrl: 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json',
+    fetchJsonImpl: async () => {
+      throw new SyntaxError('Unexpected end of JSON input');
+    }
+  });
+} catch (error) {
+  assetOutageMessage = error.message;
+}
+if (!assetOutageMessage.includes('Minecraft services') || !assetOutageMessage.includes('Mojang/Microsoft') || assetOutageMessage.includes('Unexpected end of JSON')) {
+  throw new Error(`Minecraft asset outage message is not clean: ${assetOutageMessage}`);
 }
 console.log(JSON.stringify({
   profilesPath: created.profilesPath,

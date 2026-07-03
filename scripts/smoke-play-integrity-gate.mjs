@@ -157,20 +157,22 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
     memoryMb: 4096,
+    syncDefaultRoots: false,
     openCommand: process.execPath,
     openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'smoke-install' });
-await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
+const installedManifest = {
   packId: latest.packId,
   name: latest.name,
   version: latest.version,
   minecraft: latest.minecraft,
   manifestFileCount: 0,
   overrideFileCount: 1
-});
+};
+await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), installedManifest);
 await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [{
   relativePath: 'config/aht-integrity-test.cfg',
   source: 'overrides',
@@ -187,6 +189,14 @@ await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), co
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2-forge-14.23.5.2860', '1.12.2-forge-14.23.5.2860.json'),
   { id: '1.12.2-forge-14.23.5.2860', type: 'release' }
+);
+await writeJson(
+  path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
+  { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
+);
+await writeJson(
+  path.join(mcRoot, 'assets', 'indexes', '1.12.json'),
+  { objects: {} }
 );
 
 const registeredUsers = new Map();
@@ -350,6 +360,85 @@ try {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
   }
 
+  const installedManifestPath = path.join(instanceDir, '.aht-launcher', 'installed.json');
+  await fsp.writeFile(installedManifestPath, '[', 'utf8');
+  const damagedInstalledStatus = await evaluate(client, 'window.aht.getStatus()');
+  if (!/Repair required.*installed manifest is damaged/i.test(damagedInstalledStatus.launchBlockedReason || '') || !damagedInstalledStatus.integrity?.installedManifestError || /Unexpected end of JSON/i.test(damagedInstalledStatus.latestError || '')) {
+    throw new Error(`Damaged installed manifest did not become a repair-required status: ${JSON.stringify({
+      latestError: damagedInstalledStatus.latestError,
+      launchBlockedReason: damagedInstalledStatus.launchBlockedReason,
+      integrity: damagedInstalledStatus.integrity
+    })}`);
+  }
+  const damagedInstalledPlay = await evaluate(client, `
+    window.aht.play()
+      .then((result) => ({ ok: true, result }))
+      .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
+  `);
+  if (damagedInstalledPlay.ok || !/Repair required.*installed manifest is damaged/i.test(damagedInstalledPlay.message || '') || /Unexpected end of JSON/i.test(damagedInstalledPlay.message || '')) {
+    throw new Error(`Damaged installed manifest Play should request Repair without raw JSON errors: ${JSON.stringify(damagedInstalledPlay)}`);
+  }
+  await evaluate(client, `
+    document.querySelector('#repairPromptOverlay').hidden = true;
+    document.querySelectorAll('.toast').forEach((toast) => toast.remove());
+    document.querySelector('#scanButton').click();
+    true
+  `);
+  const damagedInstalledRepairPrompt = await waitFor(client, `
+    (() => {
+      const prompt = document.querySelector('#repairPromptOverlay');
+      const summary = document.querySelector('#repairPromptSummary')?.textContent || '';
+      const diff = document.querySelector('#diffSummary')?.textContent || '';
+      const log = document.querySelector('#log')?.textContent || '';
+      return prompt && !prompt.hidden && /Installed manifest is damaged/i.test(summary)
+        ? { summary, diff, log }
+        : false;
+    })()
+  `, 'repair prompt for damaged installed manifest');
+  if (/Unexpected end of JSON|Repair unavailable|Install the pack before repairing/i.test(`${damagedInstalledRepairPrompt.summary}\n${damagedInstalledRepairPrompt.diff}\n${damagedInstalledRepairPrompt.log}`)) {
+    throw new Error(`Damaged installed manifest prompt leaked raw/unavailable wording: ${JSON.stringify(damagedInstalledRepairPrompt)}`);
+  }
+  await writeJson(installedManifestPath, installedManifest);
+  await evaluate(client, `document.querySelector('#repairPromptOverlay').hidden = true; true`);
+
+  await fsp.rm(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), { force: true });
+  await evaluate(client, `
+    document.querySelector('#scanButton').click();
+    true
+  `);
+  let missingManifestRepairPrompt;
+  try {
+    missingManifestRepairPrompt = await waitFor(client, `
+      (() => {
+        const prompt = document.querySelector('#repairPromptOverlay');
+        const summary = document.querySelector('#repairPromptSummary')?.textContent || '';
+        return prompt && !prompt.hidden && /manifest/i.test(summary)
+          ? { summary }
+          : false;
+      })()
+    `, 'repair prompt for missing managed manifest');
+  } catch (error) {
+    const debug = await evaluate(client, `
+      (async () => {
+        const scan = await window.aht.scanFiles().catch((scanError) => ({ error: String(scanError?.message || scanError) }));
+        return {
+          scan,
+          status: await window.aht.getStatus().catch((statusError) => ({ error: String(statusError?.message || statusError) })),
+          scanButton: {
+            className: document.querySelector('#scanButton')?.className || '',
+            ariaDisabled: document.querySelector('#scanButton')?.getAttribute('aria-disabled') || '',
+            tabIndex: document.querySelector('#scanButton')?.getAttribute('tabindex') || ''
+          },
+          promptHidden: document.querySelector('#repairPromptOverlay')?.hidden,
+          progress: document.querySelector('#sidebarProgressLabel')?.textContent || '',
+          summary: document.querySelector('#repairPromptSummary')?.textContent || '',
+          log: document.querySelector('#log')?.textContent || ''
+        };
+      })()
+    `);
+    throw new Error(`${error.message}: ${JSON.stringify(debug)}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -363,7 +452,8 @@ try {
       corrupted: persistedIntegrity.counts.corrupted,
       changedPath: persistedIntegrity.changed[0]?.path,
       cleanCorrupted: cleanStatus.integrity.counts.corrupted
-    }
+    },
+    missingManifestRepairPrompt
   }, null, 2));
 } finally {
   if (client) {

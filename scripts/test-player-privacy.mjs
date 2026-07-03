@@ -196,7 +196,7 @@ try {
   if (proof.developerMode || proof.developerClientBypass || proof.configHasDeveloper || proof.configHasServerTransfer || proof.configPath || proof.platformProfileHasInstanceDir || proof.devApiKeys.length || proof.bodyDevMode || proof.bodyDevLocked || !proof.developerTabHidden || !proof.developerTileHidden || proof.devTextVisible) {
     throw new Error(`Player launcher exposed developer/private surface: ${JSON.stringify(proof)}`);
   }
-  const allowedSetupKeys = ['canAutoConfigure', 'instanceExists', 'latestConfigured', 'minecraftAccountReuseAvailable'];
+  const allowedSetupKeys = ['canAutoConfigure', 'instanceExists', 'instanceHasPack', 'javaRuntimeMode', 'latestConfigured', 'minecraftAccountCredentialOnly', 'minecraftAccountProfileKnown', 'minecraftAccountReuseAvailable', 'minecraftLauncherOpenAvailable', 'minecraftLauncherOpenLabel', 'minecraftLauncherOpenState'];
   if (JSON.stringify(proof.setupKeys) !== JSON.stringify(allowedSetupKeys)) {
     throw new Error(`Player setup exposed diagnostic keys: ${JSON.stringify(proof)}`);
   }
@@ -205,7 +205,7 @@ try {
   if (leakedSetupText.length) {
     throw new Error(`Player setup exposed private diagnostics: ${JSON.stringify({ leakedSetupText, proof })}`);
   }
-  const allowedMinecraftProfileKeys = ['accountReuseAvailable', 'enabled', 'loaderId', 'loaderInstalled', 'minecraftVersion', 'profileExists', 'profileId', 'profileName', 'versionId'];
+  const allowedMinecraftProfileKeys = ['accountCredentialOnly', 'accountProfileKnown', 'accountReuseAvailable', 'enabled', 'loaderId', 'loaderInstalled', 'minecraftVersion', 'profileExists', 'profileId', 'profileName', 'versionId'];
   if (JSON.stringify(proof.minecraftProfileKeys) !== JSON.stringify(allowedMinecraftProfileKeys)) {
     throw new Error(`Player minecraftProfile exposed diagnostic keys: ${JSON.stringify(proof)}`);
   }
