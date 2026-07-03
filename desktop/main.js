@@ -927,9 +927,23 @@ function isPlayerDefaultInstanceDir(value = '') {
   return Boolean(value) && samePath(value, defaultPlayerInstanceDir());
 }
 
+function localUserHomePath() {
+  if (process.env.AHT_TEST_HOOKS === '1') {
+    return process.env.USERPROFILE || process.env.HOME || app.getPath('home');
+  }
+  return app.getPath('home');
+}
+
+function localDocumentsPath() {
+  if (process.env.AHT_TEST_HOOKS === '1') {
+    return path.join(localUserHomePath(), 'Documents');
+  }
+  return app.getPath('documents');
+}
+
 function localInstanceCandidates() {
-  const home = app.getPath('home');
-  const documents = app.getPath('documents');
+  const home = localUserHomePath();
+  const documents = localDocumentsPath();
   const ahtRoot = ahtInstallRoot();
   const testInstanceDir = process.env.AHT_TEST_HOOKS === '1'
     ? String(process.env.AHT_TEST_LOCAL_INSTANCE_DIR || '').trim()
@@ -950,8 +964,8 @@ function localInstanceCandidates() {
 }
 
 function localMinecraftLauncherCandidates() {
-  const home = app.getPath('home');
-  const documents = app.getPath('documents');
+  const home = localUserHomePath();
+  const documents = localDocumentsPath();
   const normalRoots = minecraftRootCandidates(process.platform, {
     ...process.env,
     HOME: process.env.HOME || app.getPath('home'),
@@ -1001,7 +1015,7 @@ async function firstExistingMinecraftLauncherRoot(paths) {
       }
     } catch {}
   }
-  candidates.sort((a, b) => Number(a.fallback) - Number(b.fallback) || b.score - a.score);
+  candidates.sort((a, b) => b.score - a.score || Number(a.fallback) - Number(b.fallback));
   return candidates[0]?.rootDir || '';
 }
 
@@ -1154,10 +1168,6 @@ async function loadConfig() {
     changed = true;
   }
   if (!isDeveloperMode() && !explicitUserDataDir && isTemporaryTestMinecraftRoot(config.minecraftLauncher?.rootDir)) {
-    config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir || defaultMinecraftRoot();
-    changed = true;
-  }
-  if (!isDeveloperMode() && isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir) && !isCurseForgeMinecraftRoot(defaults.minecraftLauncher?.rootDir)) {
     config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir || defaultMinecraftRoot();
     changed = true;
   }
@@ -5536,11 +5546,12 @@ function commandLooksLikePath(value = '') {
 }
 
 function windowsMinecraftLauncherExecutableCandidates(rootDir = '', env = process.env) {
+  const workDirArgs = rootDir ? ['--workDir', rootDir] : [];
   return [
     rootDir ? { path: path.join(rootDir, 'minecraft.exe'), args: ['--workDir', rootDir], kind: 'root' } : null,
-    env['ProgramFiles(x86)'] ? { path: path.join(env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: [], kind: 'desktop' } : null,
-    env.ProgramFiles ? { path: path.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: [], kind: 'desktop' } : null,
-    env.LOCALAPPDATA ? { path: path.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: [], kind: 'desktop' } : null
+    env['ProgramFiles(x86)'] ? { path: path.join(env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
+    env.ProgramFiles ? { path: path.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
+    env.LOCALAPPDATA ? { path: path.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null
   ].filter((item) => item?.path);
 }
 

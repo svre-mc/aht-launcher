@@ -204,6 +204,7 @@ assert(preloadScript.includes("setupAction: (action) => ipcRenderer.invoke('setu
 assert(desktopMain.includes("download-minecraft-launcher") && desktopMain.includes("open-minecraft-launcher") && desktopMain.includes("open-java-help"), 'Setup action handler must support Minecraft Launcher download/open and Java help actions.');
 assert(desktopMain.includes("process.env.AHT_TEST_HOOKS !== '1'") && desktopMain.includes('AHT_TEST_OPEN_EXTERNAL_CAPTURE_PATH') && desktopMain.includes('AHT_TEST_SETUP_JAVA_MODE'), 'Setup action test hooks must require the broad AHT_TEST_HOOKS gate.');
 assert(desktopMain.includes('AHT_TEST_LOCAL_INSTANCE_DIR') && desktopMain.includes("process.env.AHT_TEST_HOOKS === '1'"), 'Local instance test candidate must require the broad AHT_TEST_HOOKS gate.');
+assert(desktopMain.includes('function localUserHomePath()') && desktopMain.includes('function localDocumentsPath()') && desktopMain.includes('const home = localUserHomePath();') && desktopMain.includes('const documents = localDocumentsPath();'), 'Local path detection smokes must not leak the real host home/Documents paths when AHT_TEST_HOOKS is active.');
 assert(packageScripts['test:setup-recovery'] === 'node scripts/smoke-setup-recovery-actions.mjs' && verifyLocalScript.includes("['test:setup-recovery']"), 'Setup recovery smoke must be wired into local verification.');
 assert(desktopMain.includes('const installPresence = instanceExists') && desktopMain.includes('instanceHasPack: Boolean(installPresence.filesPresent)') && rendererApp.includes('const instanceEmpty = hasInstance && setup.instanceExists === true && setup.instanceHasPack === false') && rendererApp.includes('Install folder: ${instanceMissing ? "missing" : (instanceEmpty ? "empty" : "ready")}'), 'Setup assistant must distinguish an empty created install folder from a pack-shaped installed modpack.');
 assert(desktopMain.includes('async function firstPackShapedInstanceDir') && desktopMain.includes('const recommendedInstanceDir = current.instanceDir || defaultInstanceDir();') && desktopMain.includes('const instanceDir = setup.recommendedInstanceDir || defaultInstanceDir();') && setupRecoverySmoke.includes('old detected instance'), 'Auto setup must preserve the configured managed AHT install folder instead of adopting an old CurseForge-style detected instance or forcing the platform default.');
@@ -470,7 +471,14 @@ assert(desktopMain.includes('ensureAssetObjects: false'), 'Modpack Update finali
 assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = null)'), 'Launcher must gather all synced Minecraft profile roots before installing loaders.');
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');
 assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update and Play must install Forge into synced launcher roots.');
-assert(desktopMain.includes('function isCurseForgeMinecraftRoot') && desktopMain.includes('Number(a.fallback) - Number(b.fallback)') && desktopMain.includes("isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir)"), 'Regular player setup must prefer normal Minecraft Launcher roots and migrate old CurseForge launcher roots.');
+assert(
+  desktopMain.includes('function isCurseForgeMinecraftRoot')
+    && desktopMain.includes('b.score - a.score || Number(a.fallback) - Number(b.fallback)')
+    && !desktopMain.includes("isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir) && !isCurseForgeMinecraftRoot(defaults.minecraftLauncher?.rootDir)")
+    && desktopMain.includes("const workDirArgs = rootDir ? ['--workDir', rootDir] : []")
+    && desktopMain.includes("args: workDirArgs, kind: 'desktop'"),
+  'Regular player setup must keep a working CurseForge Minecraft root and pass --workDir to desktop Minecraft Launcher executables.'
+);
 assert(desktopMain.includes('function isTemporaryTestMinecraftRoot') && desktopMain.includes("normalized.endsWith('/.minecraft')") && desktopMain.includes('!explicitUserDataDir && isTemporaryTestMinecraftRoot(config.minecraftLauncher?.rootDir)'), 'Regular player config migration must reset leaked temp smoke-test Minecraft roots without breaking explicit user-data-dir smokes.');
 assert(desktopMain.includes('const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();') && !desktopMain.includes("if (!rootDir || config.minecraftLauncher?.enabled === false)"), 'Minecraft account recovery must still inspect signed-in launcher accounts when the profile toggle is disabled or stale.');
 const forgeInstaller = fs.readFileSync(new URL('../src/forgeInstaller.js', import.meta.url), 'utf8');
