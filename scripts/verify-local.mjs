@@ -12,6 +12,7 @@ const pureChecks = [
   ['test:launcher-update-manifest'],
   ['test:production-readiness'],
   ['test:github-workflow'],
+  ['test:github-push-auth'],
   ['test:r2-direct-upload'],
   ['test:server-transfer-plan'],
   ['test:mod-only-changes'],
