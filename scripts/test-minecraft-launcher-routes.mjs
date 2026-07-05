@@ -4,12 +4,12 @@ import {
   MAC_MINECRAFT_BUNDLE_IDS,
   WINDOWS_MINECRAFT_PACKAGE_FAMILY,
   isCurseForgeMinecraftRoot,
+  isWindowsMinecraftLauncherExecutablePath,
   macCurseForgeMinecraftRootCandidates,
   macMinecraftLauncherAppPaths,
   planMacMinecraftLauncherRoutes,
   planWindowsMinecraftLauncherRoutes,
   uniquePaths,
-  windowsCurseForgeAppExecutableCandidates,
   windowsStoreMinecraftPackageDir,
   windowsStoreMinecraftRoot
 } from '../src/minecraftLauncherRoutes.js';
@@ -33,6 +33,7 @@ const rootOwnedLauncher = path.win32.join(defaultRoot, 'minecraft.exe');
 const curseForgeApp = path.win32.join(env.LOCALAPPDATA, 'Programs', 'CurseForge', 'CurseForge.exe');
 const shortcutMinecraftLauncher = 'D:\\Games\\Minecraft Launcher\\MinecraftLauncher.exe';
 const shortcutMinecraftExeLauncher = 'E:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe';
+const shortcutBadMinecraftExe = 'E:\\Games\\Minecraft\\minecraft.exe';
 const shortcutCurseForgeApp = 'D:\\Games\\CurseForge\\CurseForge.exe';
 
 const macEnv = {
@@ -67,8 +68,7 @@ async function routes(existing, options = {}) {
     documentsPath,
     pathExists: existsSet(existing),
     storeInstalled: options.storeInstalled === true,
-    minecraftLauncherPaths: options.minecraftLauncherPaths || [],
-    curseForgeAppPaths: options.curseForgeAppPaths || []
+    minecraftLauncherPaths: options.minecraftLauncherPaths || []
   });
 }
 
@@ -112,9 +112,8 @@ async function macRoutes(existing, options = {}) {
 
 {
   const planned = await routes([rootOwnedLauncher], { storeInstalled: true });
-  assert.deepEqual(planned.map((route) => route.kind), ['root', 'store']);
-  assert.equal(planned[0].command, rootOwnedLauncher);
-  assert.equal(planned[0].observeExitMs, 1200);
+  assert.deepEqual(planned.map((route) => route.kind), ['store']);
+  assert.notEqual(planned[0].command, rootOwnedLauncher);
 }
 
 {
@@ -143,9 +142,9 @@ async function macRoutes(existing, options = {}) {
   ], {
     storeInstalled: true
   });
-  assert.deepEqual(planned.map((route) => route.kind), ['curseforge-app', 'store']);
-  assert.equal(planned[0].command, curseForgeApp);
-  assert.equal(planned[1].cwd, storeRoot);
+  assert.deepEqual(planned.map((route) => route.kind), ['store']);
+  assert.notEqual(planned[0].command, curseForgeApp);
+  assert.equal(planned[0].cwd, storeRoot);
 }
 
 {
@@ -155,8 +154,7 @@ async function macRoutes(existing, options = {}) {
   ], {
     storeInstalled: false
   });
-  assert.deepEqual(planned.map((route) => route.kind), ['curseforge-app']);
-  assert.equal(planned[0].command, curseForgeApp);
+  assert.deepEqual(planned, []);
 }
 
 {
@@ -178,10 +176,11 @@ async function macRoutes(existing, options = {}) {
 {
   const planned = await routes([
     curseForgeRoot,
+    shortcutBadMinecraftExe,
     shortcutMinecraftExeLauncher
   ], {
     storeInstalled: true,
-    minecraftLauncherPaths: [shortcutMinecraftExeLauncher]
+    minecraftLauncherPaths: [shortcutBadMinecraftExe, shortcutMinecraftExeLauncher]
   });
   assert.equal(planned[0].kind, 'curseforge');
   assert.equal(planned[0].command, shortcutMinecraftExeLauncher);
@@ -195,11 +194,10 @@ async function macRoutes(existing, options = {}) {
     shortcutCurseForgeApp
   ], {
     storeInstalled: true,
-    curseForgeAppPaths: [shortcutCurseForgeApp]
+    minecraftLauncherPaths: []
   });
-  assert.deepEqual(planned.map((route) => route.kind), ['curseforge-app', 'store']);
-  assert.equal(planned[0].command, shortcutCurseForgeApp);
-  assert.equal(planned[0].source, 'shortcut');
+  assert.deepEqual(planned.map((route) => route.kind), ['store']);
+  assert.notEqual(planned[0].command, shortcutCurseForgeApp);
 }
 
 {
@@ -209,9 +207,12 @@ async function macRoutes(existing, options = {}) {
 
 assert.equal(isCurseForgeMinecraftRoot('C:\\Users\\Player\\curseforge\\minecraft\\Install'), true);
 assert.equal(isCurseForgeMinecraftRoot('C:\\Users\\Player\\AppData\\Roaming\\.minecraft'), false);
+assert.equal(isWindowsMinecraftLauncherExecutablePath(desktopLauncher), true);
+assert.equal(isWindowsMinecraftLauncherExecutablePath(shortcutMinecraftExeLauncher), true);
+assert.equal(isWindowsMinecraftLauncherExecutablePath(shortcutBadMinecraftExe), false);
+assert.equal(isWindowsMinecraftLauncherExecutablePath(path.win32.join(curseForgeRoot, 'minecraft.exe')), false);
 assert.deepEqual(uniquePaths(['C:\\A\\B', 'c:/a/b/', 'C:\\A\\C']).map((item) => path.win32.normalize(item)), ['C:\\A\\B', 'C:\\A\\C']);
 assert.equal(windowsStoreMinecraftPackageDir(env), path.win32.join(env.LOCALAPPDATA, 'Packages', WINDOWS_MINECRAFT_PACKAGE_FAMILY));
-assert.deepEqual(windowsCurseForgeAppExecutableCandidates(env).map((item) => item.path)[0], curseForgeApp);
 
 {
   const planned = await macRoutes([
@@ -249,14 +250,14 @@ console.log(JSON.stringify({
   covered: [
     'curseforge-desktop-store',
     'desktop-store',
-    'root-store',
+    'root-owned-executable-ignored',
     'store-only',
     'dedupe-curseforge',
-    'curseforge-app-before-store',
-    'curseforge-app-only',
+    'curseforge-app-ignored-before-store',
+    'curseforge-app-ignored-without-store',
     'shortcut-minecraft-launcher',
     'shortcut-minecraft-exe-launcher',
-    'shortcut-curseforge-app',
+    'shortcut-curseforge-app-ignored',
     'missing-launcher',
     'macos-curseforge-app-path',
     'macos-curseforge-bundle-fallback',

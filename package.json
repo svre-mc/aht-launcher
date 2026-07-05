@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.60",
+  "version": "0.1.61",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -47,7 +47,7 @@
     "test:play-asset-repair": "node scripts/smoke-play-asset-repair.mjs",
     "test:play-curseforge-priority": "node scripts/smoke-play-curseforge-priority.mjs",
     "test:play-curseforge-fallback": "node scripts/smoke-play-curseforge-priority.mjs --fallback",
-    "test:play-curseforge-app-fallback": "node scripts/smoke-play-curseforge-priority.mjs --no-desktop --curseforge-app-fallback",
+    "test:play-store-fallback": "node scripts/smoke-play-curseforge-priority.mjs --no-desktop --store-fallback",
     "test:play-signin-guidance": "node scripts/smoke-play-signin-guidance.mjs",
     "test:player-update-play": "node scripts/smoke-player-update-play-flow.mjs",
     "test:developer-client-bypass": "node scripts/test-developer-client-bypass.mjs",

@@ -24,7 +24,7 @@ const checks = [
   ['test:play-asset-repair'],
   ['test:play-curseforge-priority'],
   ['test:play-curseforge-fallback'],
-  ['test:play-curseforge-app-fallback'],
+  ['test:play-store-fallback'],
   ['test:play-signin-guidance'],
   ['test:player-update-play'],
   ['test:launcher-self-update']

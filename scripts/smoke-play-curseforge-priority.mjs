@@ -7,10 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 const expectFallback = process.argv.includes('--fallback');
-const expectCurseForgeAppFallback = process.argv.includes('--curseforge-app-fallback');
+const expectStoreFallback = process.argv.includes('--store-fallback');
 const useDesktopMinecraftLauncher = !process.argv.includes('--no-desktop');
 const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
-const port = Number(portArg || (expectFallback ? 10976 : 10876));
+const port = Number(portArg || (expectFallback ? 10976 : expectStoreFallback ? 11076 : 10876));
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
@@ -183,7 +183,7 @@ if (useDesktopMinecraftLauncher) {
   await fsp.mkdir(path.dirname(desktopMinecraftLauncher), { recursive: true });
   await fsp.writeFile(desktopMinecraftLauncher, 'desktop launcher placeholder\n', 'utf8');
 }
-if (expectCurseForgeAppFallback) {
+if (expectStoreFallback) {
   await fsp.mkdir(path.dirname(curseForgeApp), { recursive: true });
   await fsp.writeFile(curseForgeApp, 'curseforge app placeholder\n', 'utf8');
 }
@@ -348,18 +348,20 @@ try {
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
     throw new Error(`Smoke setup should be launch-ready before CurseForge-first Play: ${JSON.stringify(before)}`);
   }
-  const expectedOpenState = 'preferred';
+  const expectedOpenState = expectStoreFallback ? 'store-fallback' : 'preferred';
   if (before.setup?.minecraftLauncherOpenState !== expectedOpenState) {
     throw new Error(`Setup did not report the expected first Minecraft route ${expectedOpenState}: ${JSON.stringify(before.setup)}`);
   }
   if (!Array.isArray(before.setup?.minecraftLauncherRouteKinds) || before.setup.minecraftLauncherRouteKinds[0] !== expectedOpenState) {
     throw new Error(`Setup did not expose the expected safe route summary: ${JSON.stringify(before.setup)}`);
   }
-  if (!before.setup.minecraftLauncherHasCurseForgeRoute || before.setup.minecraftLauncherRouteCount < 1) {
+  if (!expectStoreFallback && (!before.setup.minecraftLauncherHasCurseForgeRoute || before.setup.minecraftLauncherRouteCount < 1)) {
     throw new Error(`Setup did not report CurseForge route availability: ${JSON.stringify(before.setup)}`);
   }
-  if (expectCurseForgeAppFallback && !before.setup.minecraftLauncherRouteDegraded) {
-    throw new Error(`CurseForge app fallback should be marked as a degraded route before Store: ${JSON.stringify(before.setup)}`);
+  if (expectStoreFallback) {
+    if (!before.setup.minecraftLauncherRouteDegraded || before.setup.minecraftLauncherHasCurseForgeRoute) {
+      throw new Error(`Store fallback should be degraded and must not expose a CurseForge app route: ${JSON.stringify(before.setup)}`);
+    }
   }
 
   await evaluate(client, `document.querySelector('#playButton')?.click(); true`);
@@ -380,15 +382,12 @@ try {
   }
   const spawnCaptures = await readJsonLines(spawnCapturePath);
   const spawnCapture = spawnCaptures.at(-1);
-  if (expectCurseForgeAppFallback) {
-    if (!spawnCapture || spawnCapture.kind !== 'curseforge-app' || path.resolve(spawnCapture.command) !== path.resolve(curseForgeApp)) {
-      throw new Error(`Play did not open CurseForge before the Store fallback when no desktop Minecraft Launcher exists: ${JSON.stringify(spawnCaptures)}`);
+  if (expectStoreFallback) {
+    if (spawnCaptures.some((capture) => path.resolve(String(capture.command || '')) === path.resolve(curseForgeApp) || capture.kind === 'curseforge-app')) {
+      throw new Error(`Play opened CurseForge.exe; AHT must only open Minecraft Launcher routes: ${JSON.stringify(spawnCaptures)}`);
     }
-    if (JSON.stringify(spawnCapture.args) !== JSON.stringify([])) {
-      throw new Error(`CurseForge app fallback should not receive Minecraft Launcher args it cannot honor: ${JSON.stringify(spawnCapture)}`);
-    }
-    if (path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
-      throw new Error(`CurseForge app fallback did not launch from the CurseForge Minecraft root cwd: ${JSON.stringify(spawnCapture)}`);
+    if (!spawnCapture || spawnCapture.kind !== 'store') {
+      throw new Error(`Play did not use the Store Minecraft Launcher fallback when no desktop Minecraft Launcher exists: ${JSON.stringify(spawnCaptures)}`);
     }
   } else if (expectFallback) {
     const firstCapture = spawnCaptures[0];
@@ -440,7 +439,7 @@ try {
     curseForgeRoot,
     storeMcRoot,
     expectFallback,
-    expectCurseForgeAppFallback,
+    expectStoreFallback,
     requests: assetRequests,
     spawnCapture
   }, null, 2));

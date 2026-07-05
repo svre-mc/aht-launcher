@@ -16,6 +16,7 @@ const fakeHome = fakeUserProfile;
 const fakeAppData = path.join(fakeUserProfile, 'AppData', 'Roaming');
 const fakeLocalAppData = path.join(fakeUserProfile, 'AppData', 'Local');
 const fakeProgramFiles = path.join(root, 'Program Files');
+const desktopMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
@@ -174,7 +175,8 @@ const assetRequests = [];
 let assetObjectRequestCount = 0;
 
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
-await fsp.mkdir(fakeProgramFiles, { recursive: true });
+await fsp.mkdir(path.dirname(desktopMinecraftLauncher), { recursive: true });
+await fsp.writeFile(desktopMinecraftLauncher, 'desktop launcher placeholder\n', 'utf8');
 await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-clean.jar'), managedModContent, 'utf8');
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: latest.packId,
@@ -190,7 +192,6 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
   sha256: sha256(managedModContent)
 }]);
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), { id: versionId, type: 'release' });
-await fsp.writeFile(path.join(mcRoot, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher'), 'test launcher placeholder\n', 'utf8');
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
   { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
@@ -353,12 +354,14 @@ try {
   await waitForFile(spawnCapturePath, 'Minecraft Launcher spawn capture');
   const spawnCaptures = await readJsonLines(spawnCapturePath);
   const spawnCapture = spawnCaptures.at(-1);
-  const expectedLauncher = path.join(mcRoot, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher');
+  const expectedLauncher = process.platform === 'win32'
+    ? desktopMinecraftLauncher
+    : path.join(mcRoot, 'minecraft-launcher');
   if (!spawnCapture || path.resolve(spawnCapture.command) !== path.resolve(expectedLauncher)) {
-    throw new Error(`Play did not use the root-owned Minecraft Launcher executable: ${JSON.stringify(spawnCaptures)}`);
+    throw new Error(`Play did not use the Minecraft Launcher executable: ${JSON.stringify(spawnCaptures)}`);
   }
   if (process.platform === 'win32' && JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', mcRoot])) {
-    throw new Error(`Play did not pass --workDir to root-owned minecraft.exe: ${JSON.stringify(spawnCapture)}`);
+    throw new Error(`Play did not pass --workDir to Minecraft Launcher: ${JSON.stringify(spawnCapture)}`);
   }
   if (path.resolve(spawnCapture.cwd) !== path.resolve(mcRoot)) {
     throw new Error(`Play did not launch from the verified Minecraft root cwd: ${JSON.stringify(spawnCapture)}`);

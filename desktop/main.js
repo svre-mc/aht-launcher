@@ -24,6 +24,7 @@ import {
 import {
   WINDOWS_MINECRAFT_PACKAGE_FAMILY,
   isCurseForgeMinecraftRoot,
+  isWindowsMinecraftLauncherExecutablePath,
   macMinecraftLauncherAppPaths,
   planMacMinecraftLauncherRoutes,
   planWindowsMinecraftLauncherRoutes,
@@ -1251,28 +1252,14 @@ async function minecraftLauncherPreparationRoots(config = {}) {
   return uniquePaths(roots);
 }
 
-async function firstRootOwnedMinecraftExecutableRoot(roots = []) {
-  const executableName = process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher';
-  for (const root of uniquePaths(roots)) {
-    if (await pathExists(path.join(root, executableName))) {
-      return root;
-    }
-  }
-  return '';
-}
-
 async function minecraftLauncherRuntimeConfig(config = {}) {
   const configuredRoot = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
   const preparationRoots = await minecraftLauncherPreparationRoots(config);
   let rootDir = configuredRoot;
   if (process.platform === 'win32' && !String(config.minecraftLauncher?.openCommand || '').trim()) {
-    const curseForgeRoot = await firstRootOwnedMinecraftExecutableRoot(curseForgeMinecraftRootCandidates());
-    const nonCurseForgeRoot = await firstRootOwnedMinecraftExecutableRoot(
-      preparationRoots.filter((item) => !isCurseForgeMinecraftRoot(item))
-    );
+    const curseForgeRoot = await firstExistingDirectory(curseForgeMinecraftRootCandidates());
     rootDir = curseForgeRoot
       || configuredRoot
-      || nonCurseForgeRoot
       || await windowsStoreMinecraftRoot(process.env)
       || defaultMinecraftRoot();
   }
@@ -5973,7 +5960,7 @@ function minecraftLauncherRouteSummary(routes = []) {
     routeCount: routeKinds.length,
     routeKinds: routeKinds.slice(0, 8),
     firstRouteSource: String(items[0]?.source || '').trim(),
-    routeDegraded: Boolean(['store', 'curseforge-app'].includes(routeKinds[0] || '')),
+    routeDegraded: Boolean(['store'].includes(routeKinds[0] || '')),
     hasCurseForgeRoute: routeKinds.some((kind) => kind.startsWith('curseforge'))
   };
 }
@@ -6006,7 +5993,10 @@ function windowsShortcutSearchRoots(env = process.env) {
     env.APPDATA ? path.join(env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs') : '',
     programData ? path.join(programData, 'Microsoft', 'Windows', 'Start Menu', 'Programs') : '',
     env.USERPROFILE ? path.join(env.USERPROFILE, 'Desktop') : '',
-    env.PUBLIC ? path.join(env.PUBLIC, 'Desktop') : ''
+    env.PUBLIC ? path.join(env.PUBLIC, 'Desktop') : '',
+    env.OneDrive ? path.join(env.OneDrive, 'Desktop') : '',
+    env.OneDriveConsumer ? path.join(env.OneDriveConsumer, 'Desktop') : '',
+    env.OneDriveCommercial ? path.join(env.OneDriveCommercial, 'Desktop') : ''
   ]);
 }
 
@@ -6018,18 +6008,20 @@ function windowsLauncherDiscoveryCacheKey(env = process.env) {
     env['ProgramFiles(x86)'] || '',
     env.ProgramData || env.PROGRAMDATA || env.ALLUSERSPROFILE || '',
     env.USERPROFILE || '',
-    env.PUBLIC || ''
+    env.PUBLIC || '',
+    env.OneDrive || '',
+    env.OneDriveConsumer || '',
+    env.OneDriveCommercial || ''
   ].join('|');
 }
 
 async function readWindowsLauncherShortcutTargets(env = process.env) {
   if (process.platform !== 'win32') {
-    return { minecraftLauncherPaths: [], curseForgeAppPaths: [] };
+    return { minecraftLauncherPaths: [] };
   }
   const roots = windowsShortcutSearchRoots(env);
   const stack = roots.map((dir) => ({ dir, depth: 0 }));
   const minecraftLauncherPaths = [];
-  const curseForgeAppPaths = [];
   let scanned = 0;
   const maxDepth = 6;
   while (stack.length && scanned < WINDOWS_SHORTCUT_SCAN_LIMIT) {
@@ -6056,9 +6048,8 @@ async function readWindowsLauncherShortcutTargets(env = process.env) {
         continue;
       }
       const lowerName = entry.name.toLowerCase();
-      const maybeMinecraft = lowerName.includes('minecraft launcher');
-      const maybeCurseForge = lowerName.includes('curseforge');
-      if (!maybeMinecraft && !maybeCurseForge) {
+      const maybeMinecraft = lowerName.includes('minecraft');
+      if (!maybeMinecraft) {
         continue;
       }
       try {
@@ -6067,12 +6058,8 @@ async function readWindowsLauncherShortcutTargets(env = process.env) {
         if (!target || !(await pathExists(target))) {
           continue;
         }
-        const targetName = path.basename(target).toLowerCase();
-        if (maybeMinecraft && (targetName === 'minecraftlauncher.exe' || targetName === 'minecraft.exe')) {
+        if (isWindowsMinecraftLauncherExecutablePath(target)) {
           minecraftLauncherPaths.push(target);
-        }
-        if (maybeCurseForge && targetName === 'curseforge.exe') {
-          curseForgeAppPaths.push(target);
         }
       } catch {
         // Broken shortcuts should not block the launcher route plan.
@@ -6080,14 +6067,13 @@ async function readWindowsLauncherShortcutTargets(env = process.env) {
     }
   }
   return {
-    minecraftLauncherPaths: uniquePaths(minecraftLauncherPaths),
-    curseForgeAppPaths: uniquePaths(curseForgeAppPaths)
+    minecraftLauncherPaths: uniquePaths(minecraftLauncherPaths)
   };
 }
 
 async function windowsDiscoveredLauncherPaths(env = process.env) {
   if (process.platform !== 'win32') {
-    return { minecraftLauncherPaths: [], curseForgeAppPaths: [] };
+    return { minecraftLauncherPaths: [] };
   }
   const key = windowsLauncherDiscoveryCacheKey(env);
   if (windowsLauncherDiscoveryCache?.key === key && Date.now() - windowsLauncherDiscoveryCache.createdAt < 30_000) {
@@ -6110,8 +6096,7 @@ async function windowsMinecraftLauncherRoutes(config = {}, env = process.env) {
     documentsPath: localDocumentsPath(),
     pathExists,
     storeInstalled: await windowsStoreMinecraftLauncherInstalled(env),
-    minecraftLauncherPaths: discovered.minecraftLauncherPaths,
-    curseForgeAppPaths: discovered.curseForgeAppPaths
+    minecraftLauncherPaths: discovered.minecraftLauncherPaths
   });
 }
 

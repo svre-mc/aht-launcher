@@ -79,11 +79,12 @@ export function windowsStoreMinecraftPackageDir(env = process.env) {
 export function windowsMinecraftLauncherExecutableCandidates(rootDir = '', env = process.env, extraPaths = []) {
   const workDirArgs = rootDir ? ['--workDir', rootDir] : [];
   const candidates = [
-    rootDir ? { path: path.win32.join(rootDir, 'minecraft.exe'), args: ['--workDir', rootDir], kind: 'root' } : null,
     env['ProgramFiles(x86)'] ? { path: path.win32.join(env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
     env.ProgramFiles ? { path: path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
     env.LOCALAPPDATA ? { path: path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
-    ...uniquePaths(extraPaths).map((item) => ({ path: item, args: workDirArgs, kind: 'desktop', source: 'shortcut' }))
+    ...uniquePaths(extraPaths)
+      .filter((item) => isWindowsMinecraftLauncherExecutablePath(item))
+      .map((item) => ({ path: item, args: workDirArgs, kind: 'desktop', source: 'shortcut' }))
   ].filter((item) => item?.path);
   const seen = new Set();
   const result = [];
@@ -98,30 +99,11 @@ export function windowsMinecraftLauncherExecutableCandidates(rootDir = '', env =
   return result;
 }
 
-export function windowsCurseForgeAppExecutableCandidates(env = process.env, extraPaths = []) {
-  const fixedPaths = uniquePaths([
-    env.LOCALAPPDATA ? path.win32.join(env.LOCALAPPDATA, 'Programs', 'CurseForge', 'CurseForge.exe') : '',
-    env.ProgramFiles ? path.win32.join(env.ProgramFiles, 'CurseForge', 'CurseForge.exe') : '',
-    env['ProgramFiles(x86)'] ? path.win32.join(env['ProgramFiles(x86)'], 'CurseForge', 'CurseForge.exe') : ''
-  ]).map((item) => ({ path: item, source: 'default-path' }));
-  const shortcutPaths = uniquePaths(extraPaths).map((item) => ({ path: item, source: 'shortcut' }));
-  const seen = new Set();
-  const result = [];
-  for (const candidate of [...fixedPaths, ...shortcutPaths]) {
-    const key = pathKey(candidate.path);
-    if (!key || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    result.push({
-      path: candidate.path,
-      args: [],
-      kind: 'curseforge-app',
-      label: 'CurseForge',
-      source: candidate.source
-    });
-  }
-  return result;
+export function isWindowsMinecraftLauncherExecutablePath(value = '') {
+  const normalized = path.win32.normalize(String(value || '')).toLowerCase();
+  const fileName = path.win32.basename(normalized);
+  return fileName === 'minecraftlauncher.exe'
+    || (fileName === 'minecraft.exe' && normalized.includes(`${path.win32.sep}minecraft launcher${path.win32.sep}`));
 }
 
 export function localMinecraftRootCandidates({ homePath = '', documentsPath = '' } = {}) {
@@ -226,8 +208,7 @@ export async function planWindowsMinecraftLauncherRoutes({
   documentsPath = '',
   pathExists = async () => false,
   storeInstalled = false,
-  minecraftLauncherPaths = [],
-  curseForgeAppPaths = []
+  minecraftLauncherPaths = []
 } = {}) {
   const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot('win32', env);
   const syncRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
@@ -268,41 +249,6 @@ export async function planWindowsMinecraftLauncherRoutes({
           args: candidate.args || [],
           cwd: launchRoot,
           rootDir: launchRoot,
-          source: candidate.source || 'default-path'
-        });
-      }
-    }
-  }
-
-  for (const profileRoot of profileRoots) {
-    if (isCurseForgeMinecraftRoot(profileRoot)) {
-      continue;
-    }
-    const command = path.win32.join(profileRoot, 'minecraft.exe');
-    if (await pathExists(command)) {
-      addRoute(routes, {
-        kind: 'root',
-        label: 'Minecraft Launcher',
-        command,
-        args: ['--workDir', profileRoot],
-        cwd: profileRoot,
-        rootDir: profileRoot,
-        source: 'root-owned',
-        observeExitMs: 1200
-      });
-    }
-  }
-
-  if (existingCurseForgeRoots.length && !routes.some((route) => route.kind === 'curseforge')) {
-    for (const candidate of windowsCurseForgeAppExecutableCandidates(env, curseForgeAppPaths)) {
-      if (await pathExists(candidate.path)) {
-        addRoute(routes, {
-          kind: candidate.kind,
-          label: candidate.label,
-          command: candidate.path,
-          args: candidate.args,
-          cwd: existingCurseForgeRoots[0],
-          rootDir: existingCurseForgeRoots[0],
           source: candidate.source || 'default-path'
         });
       }
