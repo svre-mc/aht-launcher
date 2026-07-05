@@ -362,11 +362,14 @@ try {
   if (repairedIndex.objects?.['minecraft/lang/en_us.lang']?.hash !== assetHash) {
     throw new Error(`Minecraft asset index was not repaired before launch: ${JSON.stringify(repairedIndex)}`);
   }
-  if (fs.existsSync(assetObjectPath)) {
-    throw new Error('Minecraft asset object should not be downloaded during Play.');
+  if (!fs.existsSync(assetObjectPath)) {
+    throw new Error('Minecraft asset object should be repaired before opening Minecraft Launcher.');
   }
-  if (!assetRequests.includes('/assets/1.12.json') || assetObjectRequestCount !== 0) {
-    throw new Error(`Play should repair the asset index without full asset-object downloads: ${JSON.stringify(assetRequests)}`);
+  if (sha1(await fsp.readFile(assetObjectPath)) !== assetHash) {
+    throw new Error('Minecraft asset object was repaired with the wrong bytes.');
+  }
+  if (!assetRequests.includes('/assets/1.12.json') || assetObjectRequestCount !== 2) {
+    throw new Error(`Play should repair the asset index and retry bad asset-object downloads before launch: ${JSON.stringify(assetRequests)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {

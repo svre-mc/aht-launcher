@@ -2669,7 +2669,8 @@ async function runUpdate(forceRepair = false, options = {}) {
           latest: latestAfterInstall,
           installed: result.installed,
           profile,
-          ensureAssetObjects: false,
+          ensureAssetObjects: true,
+          verifyAssetHashes: true,
           logger: { log: (line) => assetLines.push(String(line)) }
         });
         appendOperationLines(updateState, assetLines);
@@ -6158,7 +6159,8 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
     installed,
     profile,
     assetBaseUrl: testMinecraftAssetBaseUrl() || undefined,
-    ensureAssetObjects: false
+    ensureAssetObjects: true,
+    verifyAssetHashes: true
   });
   const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity, {
     allowLegacyRelease: developerClientBypass
