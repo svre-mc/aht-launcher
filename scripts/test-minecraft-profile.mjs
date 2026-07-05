@@ -563,6 +563,23 @@ const assetIndexPath = path.join(assetRoot, 'assets', 'indexes', '1.12.json');
 if (!JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
   throw new Error('Asset index was not written correctly.');
 }
+const legacyAssetIndexPath = path.join(assetRoot, 'assets', 'indexes', 'legacy.json');
+if (!JSON.parse(await fs.readFile(legacyAssetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
+  throw new Error('Legacy asset index alias was not written for Minecraft 1.12.2.');
+}
+await fs.writeFile(legacyAssetIndexPath, '', 'utf8');
+const legacyAliasRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: assetProfile,
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile
+});
+if (!legacyAliasRepair.repaired || !JSON.parse(await fs.readFile(legacyAssetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
+  throw new Error('Corrupt legacy asset index alias was not repaired.');
+}
 await fs.writeFile(assetIndexPath, '', 'utf8');
 const secondAssetRepair = await ensureMinecraftLauncherAssets({
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },

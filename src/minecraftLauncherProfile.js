@@ -466,6 +466,28 @@ function validAssetIndexJson(value = null) {
   return Boolean(value && typeof value === 'object' && value.objects && typeof value.objects === 'object');
 }
 
+function legacyAssetIndexAliasIds(minecraftVersion = '', assetId = '') {
+  const version = String(minecraftVersion || '').trim();
+  const aliases = new Set();
+  if (/^1\.(?:[0-9]|1[0-2])(?:\.|$)/.test(version)) {
+    aliases.add('legacy');
+  }
+  aliases.delete(String(assetId || '').trim());
+  return [...aliases].filter(Boolean);
+}
+
+async function ensureAssetIndexAliases(rootDir = '', minecraftVersion = '', assetId = '', assetIndex = null, actions = []) {
+  for (const aliasId of legacyAssetIndexAliasIds(minecraftVersion, assetId)) {
+    const aliasPath = path.join(rootDir, 'assets', 'indexes', `${aliasId}.json`);
+    const existing = await readRepairableJsonFile(aliasPath, null);
+    if (validAssetIndexJson(existing)) {
+      continue;
+    }
+    await writeJsonFile(aliasPath, assetIndex);
+    actions.push(`wrote ${aliasPath}`);
+  }
+}
+
 function validAssetObjectHash(value = '') {
   return /^[a-f0-9]{40}$/i.test(String(value || '').trim());
 }
@@ -612,6 +634,7 @@ async function ensureMinecraftRootAssets({
     await writeJsonFile(assetIndexPath, assetIndex);
     actions.push(`wrote ${assetIndexPath}`);
   }
+  await ensureAssetIndexAliases(rootDir, minecraftVersion, assetId, assetIndex, actions);
   const assetObjects = ensureAssetObjects
     ? await ensureMinecraftAssetObjects({
       rootDir,

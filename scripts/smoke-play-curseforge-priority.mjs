@@ -6,11 +6,11 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-const port = Number(process.argv[2] || 10880);
+const port = Number(process.argv[2] || 10876);
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-play-signin-guidance-'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-play-curseforge-priority-'));
 const fakeUserProfile = path.join(root, 'home');
 const fakeHome = fakeUserProfile;
 const fakeAppData = path.join(fakeUserProfile, 'AppData', 'Roaming');
@@ -19,8 +19,9 @@ const fakeProgramFiles = path.join(root, 'Program Files');
 const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
-const mcRoot = path.join(root, '.minecraft');
-const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
+const configuredMcRoot = path.join(fakeAppData, '.minecraft');
+const curseForgeRoot = path.join(fakeUserProfile, 'curseforge', 'minecraft', 'Install');
+const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -37,6 +38,10 @@ function sleep(ms) {
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function sha1(value) {
+  return crypto.createHash('sha1').update(value).digest('hex');
 }
 
 async function writeJson(file, value) {
@@ -114,15 +119,7 @@ async function evaluate(client, expression) {
   return result.result?.value;
 }
 
-async function click(client, selector) {
-  const result = await client.call('Runtime.evaluate', {
-    expression: `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; el.click(); return true; })()`,
-    returnByValue: true
-  });
-  if (!result.result?.value) throw new Error(`Unable to click ${selector}`);
-}
-
-async function waitFor(client, expression, label, attempts = 180) {
+async function waitFor(client, expression, label, attempts = 160) {
   let last;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -136,24 +133,44 @@ async function waitFor(client, expression, label, attempts = 180) {
   throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(last)}`);
 }
 
+async function readJsonLines(file) {
+  if (!fs.existsSync(file)) return [];
+  const text = await fsp.readFile(file, 'utf8');
+  return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
+async function writeReadyMinecraftRoot(rootDir, options = {}) {
+  await writeJson(path.join(rootDir, 'versions', versionId, `${versionId}.json`), { id: versionId, type: 'release' });
+  await writeJson(
+    path.join(rootDir, 'versions', '1.12.2', '1.12.2.json'),
+    { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
+  );
+  if (options.launcherExe) {
+    await fsp.mkdir(rootDir, { recursive: true });
+    await fsp.writeFile(path.join(rootDir, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher'), 'test launcher placeholder\n', 'utf8');
+  }
+}
+
 const latest = {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time',
-  version: '8.8.9',
+  version: '8.9.3',
   required: true,
   installMode: 'full-client-zip',
   zipFormat: 'aht-full-client-zip',
-  zip: { url: 'packs/a-hard-time-8.8.9.zip' },
+  zip: { url: 'packs/a-hard-time-8.9.3.zip' },
   minecraft: {
     version: '1.12.2',
     modLoaders: [{ id: 'forge-14.23.5.2860', primary: true }]
   }
 };
 const managedModContent = 'managed mod bytes\n';
-const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
+const assetBytes = Buffer.from('curseforge-first repaired asset\n');
+const assetHash = sha1(assetBytes);
+const assetRequests = [];
 
-await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.mkdir(fakeProgramFiles, { recursive: true });
+await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-clean.jar'), managedModContent, 'utf8');
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: latest.packId,
@@ -168,16 +185,13 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
   source: 'full-client-zip',
   sha256: sha256(managedModContent)
 }]);
-await writeJson(
-  path.join(mcRoot, 'versions', versionId, `${versionId}.json`),
-  { id: versionId, type: 'release' }
-);
-await writeJson(
-  path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
-  { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
-);
-await writeJson(path.join(mcRoot, 'assets', 'indexes', '1.12.json'), { objects: {} });
-await fsp.mkdir(mcRoot, { recursive: true });
+await writeReadyMinecraftRoot(configuredMcRoot);
+await writeReadyMinecraftRoot(curseForgeRoot, { launcherExe: true });
+await fsp.mkdir(path.join(configuredMcRoot, 'assets', 'indexes'), { recursive: true });
+await fsp.writeFile(path.join(configuredMcRoot, 'assets', 'indexes', '1.12.json'), '', 'utf8');
+await fsp.mkdir(path.join(curseForgeRoot, 'assets', 'indexes'), { recursive: true });
+await fsp.writeFile(path.join(curseForgeRoot, 'assets', 'indexes', '1.12.json'), '', 'utf8');
+
 await writeJson(defaultsPath, {
   packId: latest.packId,
   instanceDir,
@@ -188,14 +202,12 @@ await writeJson(defaultsPath, {
   launcherUpdate: { enabled: false, latestUrl: '' },
   minecraftLauncher: {
     enabled: true,
-    rootDir: mcRoot,
+    rootDir: configuredMcRoot,
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,
-    autoImportAccount: false,
-    openCommand: process.execPath,
-    openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
+    autoImportAccount: false
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -207,6 +219,21 @@ const server = http.createServer((request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(latest));
+    return;
+  }
+  if (url.pathname === '/assets/1.12.json') {
+    assetRequests.push(url.pathname);
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify({ objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: assetBytes.length } } }));
+    return;
+  }
+  if (url.pathname === `/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`) {
+    assetRequests.push(url.pathname);
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/octet-stream');
+    response.setHeader('Content-Length', String(assetBytes.length));
+    response.end(assetBytes);
     return;
   }
   if (url.pathname === '/api/users/register') {
@@ -239,7 +266,7 @@ const server = http.createServer((request, response) => {
       response.statusCode = 200;
       response.setHeader('Content-Type', 'application/json; charset=utf-8');
       response.end(JSON.stringify({
-        token: 'signin-guidance-proof-token',
+        token: 'curseforge-priority-proof-token',
         payload,
         signature: { alg: 'HS256', kid: 'smoke', value: 'smoke-signature' }
       }));
@@ -264,7 +291,8 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
-    AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/asset-objects/`,
+    AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
     APPDATA: fakeAppData,
@@ -285,7 +313,7 @@ try {
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
   const registration = await evaluate(client, `
-    window.aht.accountRegister('SigninGuide')
+    window.aht.accountRegister('CFFirstUser')
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
   `);
@@ -293,92 +321,75 @@ try {
     throw new Error(`Player registration failed: ${JSON.stringify(registration)}`);
   }
   const before = await waitFor(client, `
-    window.aht.getStatus().then((status) => status.latest?.version === '8.8.9' ? status : false)
-  `, 'ready status before sign-in guidance Play');
+    window.aht.getStatus().then((status) => status.latest?.version === '8.9.3' ? status : false)
+  `, 'ready status before CurseForge-first Play');
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
-    throw new Error(`Smoke setup should be launch-ready before Play: ${JSON.stringify(before)}`);
+    throw new Error(`Smoke setup should be launch-ready before CurseForge-first Play: ${JSON.stringify(before)}`);
   }
-  if (before.minecraftProfile?.accountReuseAvailable || before.minecraftProfile?.accountProfileKnown || before.minecraftProfile?.accountCredentialOnly) {
-    throw new Error(`Smoke setup should start with no Minecraft account evidence: ${JSON.stringify(before.minecraftProfile)}`);
+  if (before.setup?.minecraftLauncherOpenState !== 'curseforge') {
+    throw new Error(`Setup did not report CurseForge as the preferred Minecraft route: ${JSON.stringify(before.setup)}`);
   }
 
-  await click(client, '#playButton');
-  const signInToast = await waitFor(client, `
+  await evaluate(client, `document.querySelector('#playButton')?.click(); true`);
+  const toast = await waitFor(client, `
     (() => {
-      const toast = [...document.querySelectorAll('.toast')].find((item) => item.innerText.includes('Minecraft Launcher opened'));
+      const nodes = [...document.querySelectorAll('.toast')];
+      const toast = nodes.find((item) => /Minecraft Launcher opened/i.test(item.querySelector('strong')?.textContent || ''));
       if (!toast) return false;
-      return { text: toast.innerText.replace(/\\s+/g, ' ').trim(), className: toast.className };
+      return {
+        title: toast.querySelector('strong')?.textContent || '',
+        detail: toast.querySelector('span')?.textContent || '',
+        log: document.querySelector('#log')?.textContent || ''
+      };
     })()
-  `, 'Play success toast with required sign-in guidance');
-  if (!/Sign in with Microsoft inside Minecraft Launcher/i.test(signInToast.text) || /finish Microsoft sign-in/i.test(signInToast.text)) {
-    throw new Error(`Play toast did not use no-account sign-in guidance: ${JSON.stringify(signInToast)}`);
+  `, 'Play success toast after CurseForge root prep');
+  if (/REQUEST_FAILED|Unable to prepare assets|Unexpected end of JSON|Launch failed|Error invoking remote method/i.test(`${toast.title}\n${toast.detail}\n${toast.log}`)) {
+    throw new Error(`CurseForge-first Play leaked a launcher asset failure: ${JSON.stringify(toast)}`);
   }
-  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
-    await sleep(250);
+  const spawnCaptures = await readJsonLines(spawnCapturePath);
+  const spawnCapture = spawnCaptures.at(-1);
+  const expectedLauncher = path.join(curseForgeRoot, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher');
+  if (!spawnCapture || path.resolve(spawnCapture.command) !== path.resolve(expectedLauncher)) {
+    throw new Error(`Play did not prefer the CurseForge Minecraft launcher root: ${JSON.stringify(spawnCaptures)}`);
   }
-  if (!fs.existsSync(fakeLauncherMarker)) {
-    throw new Error('Play returned success, but the Minecraft Launcher command was not spawned for no-account guidance.');
+  if (process.platform === 'win32' && JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', curseForgeRoot])) {
+    throw new Error(`Play did not pass --workDir to CurseForge minecraft.exe: ${JSON.stringify(spawnCapture)}`);
   }
-  const firstLauncherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
-  if (path.resolve(firstLauncherMarker.cwd) !== path.resolve(mcRoot)) {
-    throw new Error(`Minecraft Launcher opened with the wrong cwd for no-account guidance: ${JSON.stringify(firstLauncherMarker)}`);
+  if (path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
+    throw new Error(`Play did not launch from the CurseForge Minecraft root cwd: ${JSON.stringify(spawnCapture)}`);
   }
 
-  await fsp.rm(fakeLauncherMarker, { force: true });
-  await fsp.writeFile(path.join(mcRoot, 'launcher_msa_credentials.bin'), 'credential-cache-only', 'utf8');
-  await evaluate(client, `document.querySelectorAll('.toast').forEach((toast) => toast.remove()); true`);
-  const credentialOnly = await waitFor(client, `
-    window.aht.getStatus().then((status) => status.minecraftProfile?.accountReuseAvailable === true && status.minecraftProfile?.accountCredentialOnly === true && status.minecraftProfile?.accountProfileKnown === false ? status : false)
-  `, 'credential-only Minecraft auth status');
-
-  await click(client, '#playButton');
-  const credentialToast = await waitFor(client, `
-    (() => {
-      const toast = [...document.querySelectorAll('.toast')].find((item) => item.innerText.includes('Minecraft Launcher opened'));
-      if (!toast) return false;
-      return { text: toast.innerText.replace(/\\s+/g, ' ').trim(), className: toast.className };
-    })()
-  `, 'Play success toast with credential-only sign-in guidance');
-  if (!/finish Microsoft sign-in/i.test(credentialToast.text) || /Sign in with Microsoft inside/i.test(credentialToast.text)) {
-    throw new Error(`Play toast did not use credential-only sign-in guidance: ${JSON.stringify(credentialToast)}`);
-  }
-  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
-    await sleep(250);
-  }
-  if (!fs.existsSync(fakeLauncherMarker)) {
-    throw new Error('Play returned success, but the Minecraft Launcher command was not spawned for credential-only guidance.');
-  }
-  const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
-  if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
-    throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
-  }
-  const proof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
-  if (!proof.trusted || proof.source !== 'worker') {
-    throw new Error(`Play did not write trusted proof before launcher handoff: ${JSON.stringify(proof)}`);
-  }
-  const profile = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8')).profiles?.['a-hard-time'];
-  if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
-    throw new Error(`Play did not prepare the Minecraft profile: ${JSON.stringify(profile)}`);
+  for (const rootDir of [configuredMcRoot, curseForgeRoot]) {
+    const profile = JSON.parse(await fsp.readFile(path.join(rootDir, 'launcher_profiles.json'), 'utf8')).profiles?.['a-hard-time'];
+    if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
+      throw new Error(`AHT profile was not prepared in ${rootDir}: ${JSON.stringify(profile)}`);
+    }
+    const assetIndex = JSON.parse(await fsp.readFile(path.join(rootDir, 'assets', 'indexes', '1.12.json'), 'utf8'));
+    const legacyIndex = JSON.parse(await fsp.readFile(path.join(rootDir, 'assets', 'indexes', 'legacy.json'), 'utf8'));
+    if (assetIndex.objects?.['minecraft/lang/en_us.lang']?.hash !== assetHash || legacyIndex.objects?.['minecraft/lang/en_us.lang']?.hash !== assetHash) {
+      throw new Error(`Asset indexes were not repaired in ${rootDir}: ${JSON.stringify({ assetIndex, legacyIndex })}`);
+    }
+    const assetObject = path.join(rootDir, 'assets', 'objects', assetHash.slice(0, 2), assetHash);
+    if (sha1(await fsp.readFile(assetObject)) !== assetHash) {
+      throw new Error(`Asset object was not repaired in ${rootDir}.`);
+    }
   }
 
   console.log(JSON.stringify({
     ok: true,
     root,
     packaged: Boolean(smokeExe),
-    noAccountToast: signInToast.text,
-    credentialOnlyToast: credentialToast.text,
-    credentialOnlyAccount: credentialOnly.minecraftProfile,
-    proofSource: proof.source,
-    profile: {
-      gameDir: profile.gameDir,
-      lastVersionId: profile.lastVersionId
-    }
+    configuredMcRoot,
+    curseForgeRoot,
+    requests: assetRequests,
+    spawnCapture
   }, null, 2));
 } finally {
-  if (client) {
-    await client.call('Browser.close').catch(() => {});
-    client.close();
+  try {
+    client?.close?.();
+  } catch {}
+  server.close();
+  if (!child.killed) {
+    child.kill();
   }
-  child.kill();
-  await new Promise((resolve) => server.close(resolve));
 }

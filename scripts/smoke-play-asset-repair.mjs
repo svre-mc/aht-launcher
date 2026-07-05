@@ -11,6 +11,11 @@ const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-play-asset-repair-'));
+const fakeUserProfile = path.join(root, 'home');
+const fakeHome = fakeUserProfile;
+const fakeAppData = path.join(fakeUserProfile, 'AppData', 'Roaming');
+const fakeLocalAppData = path.join(fakeUserProfile, 'AppData', 'Local');
+const fakeProgramFiles = path.join(root, 'Program Files');
 const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
@@ -169,6 +174,7 @@ const assetRequests = [];
 let assetObjectRequestCount = 0;
 
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
+await fsp.mkdir(fakeProgramFiles, { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-clean.jar'), managedModContent, 'utf8');
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: latest.packId,
@@ -294,7 +300,13 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/asset-objects/`,
     AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
-    ELECTRON_ENABLE_LOGGING: '0'
+    ELECTRON_ENABLE_LOGGING: '0',
+    LOCALAPPDATA: fakeLocalAppData,
+    APPDATA: fakeAppData,
+    USERPROFILE: fakeUserProfile,
+    HOME: fakeHome,
+    ProgramFiles: fakeProgramFiles,
+    'ProgramFiles(x86)': fakeProgramFiles
   },
   stdio: 'ignore',
   windowsHide: true

@@ -54,6 +54,7 @@ const electronChecks = [
   ['test:play-java-setup'],
   ['test:play-service-outage'],
   ['test:play-asset-repair'],
+  ['test:play-curseforge-priority'],
   ['test:play-signin-guidance'],
   ['test:player-update-play'],
   ['test:account-duplicate'],

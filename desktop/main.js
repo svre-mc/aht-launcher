@@ -1145,8 +1145,6 @@ function localInstanceCandidates() {
 }
 
 function localMinecraftLauncherCandidates() {
-  const home = localUserHomePath();
-  const documents = localDocumentsPath();
   const normalRoots = minecraftRootCandidates(process.platform, {
     ...process.env,
     HOME: process.env.HOME || app.getPath('home'),
@@ -1154,9 +1152,98 @@ function localMinecraftLauncherCandidates() {
   });
   return [...new Set([
     ...normalRoots,
+    ...curseForgeMinecraftRootCandidates()
+  ])];
+}
+
+function curseForgeMinecraftRootCandidates() {
+  const home = localUserHomePath();
+  const documents = localDocumentsPath();
+  return uniquePaths([
     path.join(home, 'curseforge', 'minecraft', 'Install'),
     path.join(documents, 'CurseForge', 'minecraft', 'Install')
-  ])];
+  ]);
+}
+
+async function windowsStoreMinecraftRoot() {
+  if (process.platform !== 'win32' || !(await windowsStoreMinecraftLauncherInstalled(process.env))) {
+    return '';
+  }
+  return minecraftRootCandidates(process.platform, {
+    ...process.env,
+    HOME: process.env.HOME || app.getPath('home'),
+    USERPROFILE: process.env.USERPROFILE || app.getPath('home')
+  }).find((root) => root.includes(WINDOWS_MINECRAFT_PACKAGE_FAMILY)) || '';
+}
+
+async function minecraftLauncherPreparationRoots(config = {}) {
+  const configuredRoot = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
+  const explicitSyncRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
+    ? config.minecraftLauncher.syncRoots
+    : [];
+  const defaultRoots = minecraftRootCandidates(process.platform, {
+    ...process.env,
+    HOME: process.env.HOME || app.getPath('home'),
+    USERPROFILE: process.env.USERPROFILE || app.getPath('home')
+  });
+  const storeRoot = await windowsStoreMinecraftRoot();
+  const candidateRoots = uniquePaths([
+    configuredRoot,
+    ...explicitSyncRoots,
+    ...defaultRoots,
+    ...localMinecraftLauncherCandidates(),
+    storeRoot
+  ]);
+  const roots = [];
+  for (const root of candidateRoots) {
+    const explicit = samePath(root, configuredRoot)
+      || explicitSyncRoots.some((item) => samePath(item, root))
+      || (storeRoot && samePath(root, storeRoot));
+    if (explicit || await pathExists(root)) {
+      roots.push(root);
+    }
+  }
+  return uniquePaths(roots);
+}
+
+async function firstRootOwnedMinecraftExecutableRoot(roots = []) {
+  const executableName = process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher';
+  for (const root of uniquePaths(roots)) {
+    if (await pathExists(path.join(root, executableName))) {
+      return root;
+    }
+  }
+  return '';
+}
+
+async function minecraftLauncherRuntimeConfig(config = {}) {
+  const configuredRoot = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
+  const preparationRoots = await minecraftLauncherPreparationRoots(config);
+  let rootDir = configuredRoot;
+  if (process.platform === 'win32' && !String(config.minecraftLauncher?.openCommand || '').trim()) {
+    const curseForgeRoot = await firstRootOwnedMinecraftExecutableRoot(curseForgeMinecraftRootCandidates());
+    if (curseForgeRoot) {
+      rootDir = curseForgeRoot;
+    } else {
+      const executable = await firstWindowsMinecraftLauncherExecutable(configuredRoot, process.env);
+      rootDir = await firstRootOwnedMinecraftExecutableRoot(preparationRoots)
+        || (executable ? configuredRoot : '')
+        || await windowsStoreMinecraftRoot()
+        || configuredRoot;
+    }
+  }
+  return {
+    ...config,
+    minecraftLauncher: {
+      ...(config.minecraftLauncher || {}),
+      rootDir,
+      syncDefaultRoots: false,
+      syncRoots: uniquePaths([
+        ...(Array.isArray(config.minecraftLauncher?.syncRoots) ? config.minecraftLauncher.syncRoots : []),
+        ...preparationRoots
+      ]).filter((root) => !samePath(root, rootDir))
+    }
+  };
 }
 
 function localReleaseCandidates() {
@@ -1263,6 +1350,18 @@ function mergeConfig(defaults, stored) {
 function samePath(left = '', right = '') {
   if (!left || !right) return false;
   return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
+}
+
+function uniquePaths(paths = []) {
+  const unique = [];
+  for (const item of paths) {
+    const text = String(item || '').trim();
+    if (!text) continue;
+    if (!unique.some((candidate) => samePath(candidate, text))) {
+      unique.push(text);
+    }
+  }
+  return unique;
 }
 
 function packagedDefaultFiles() {
@@ -1460,7 +1559,8 @@ async function refreshMinecraftLauncherProfile(config) {
     };
   }
 
-  const minecraftProfile = await ensureMinecraftLauncherProfile({ config, latest, installed });
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+  const minecraftProfile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
   return { profileUpdated: true, minecraftProfile };
 }
 
@@ -2488,6 +2588,7 @@ function minecraftLaunchResultForRenderer(result = {}) {
 
 async function getStatus(configOverride = null) {
   const config = configOverride || await loadConfig();
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
   const identity = await identityPayload(config);
   let latest = null;
   let latestError = null;
@@ -2529,13 +2630,13 @@ async function getStatus(configOverride = null) {
   }
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
   const launchLatestError = developerClientBypass && installed ? null : latestError;
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
+  const minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
   const updateRequired = !updateBlockedReason && latest && latest.required !== false
     ? installed?.version !== latest.version
     : false;
-  const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
+  const launchState = evaluateLaunchState(launcherConfig, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
     skipLoaderCheck: true,
     installedManifestError: installedState.manifestError,
     allowLegacyRelease: developerClientBypass
@@ -2640,9 +2741,10 @@ async function runUpdate(forceRepair = false, options = {}) {
     let latestAfterInstall = null;
     if (config.minecraftLauncher?.enabled !== false) {
       try {
+        const launcherConfig = await minecraftLauncherRuntimeConfig(config);
         latestAfterInstall = await readLatest(config);
         const launcherProof = await writeRegisteredLauncherProof({
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed,
           identity
@@ -2653,19 +2755,19 @@ async function runUpdate(forceRepair = false, options = {}) {
           source: launcherProof.source || ''
         };
         let profile = await ensureMinecraftLauncherProfile({
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed
         });
         profile = await installMinecraftProfileLoaders(profile, {
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed,
           operationState: updateState
         });
         const assetLines = [];
         result.minecraftAssets = await ensureMinecraftLauncherAssets({
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed,
           profile,
@@ -5813,6 +5915,10 @@ async function minecraftLauncherOpenStatus(config = {}) {
     };
   }
   if (process.platform === 'win32') {
+    const curseForgeRoot = await firstRootOwnedMinecraftExecutableRoot(curseForgeMinecraftRootCandidates());
+    if (curseForgeRoot) {
+      return { available: true, state: 'curseforge', label: 'CurseForge' };
+    }
     const executable = await firstWindowsMinecraftLauncherExecutable(rootDir, process.env);
     if (executable) {
       return { available: true, state: executable.kind, label: 'Ready' };
@@ -5961,7 +6067,7 @@ async function runSetupAction(action = '') {
         'Minecraft Launcher is not installed. AHT opened the official download page.'
       );
     }
-    await openMinecraftLauncher(current);
+    await openMinecraftLauncher(await minecraftLauncherRuntimeConfig(current));
     return { ok: true, message: 'Minecraft Launcher opened.' };
   }
   if (normalized === 'open-java-help') {
@@ -6115,6 +6221,7 @@ ipcMain.handle('changes:sync', async () => {
 });
 ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
   const config = await loadConfig();
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
   const developerClientBypass = developerClientBypassAllowed();
 
   const installedState = await readInstalledPackState(config);
@@ -6134,8 +6241,8 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
   const integrity = developerClientBypass
     ? null
     : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest, { installedPackState: installedState }), 'play-check');
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
-  const initialLaunchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
+  const minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
+  const initialLaunchState = evaluateLaunchState(launcherConfig, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
     skipLoaderCheck: true,
     installedManifestError: installedState.manifestError,
     allowLegacyRelease: developerClientBypass
@@ -6146,15 +6253,15 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
 
   const identity = await identityPayload(config);
   const launcherProof = await writeRegisteredLauncherProof({
-    config,
+    config: launcherConfig,
     latest: launchLatest,
     installed,
     identity
   });
-  let profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
-  profile = await installMinecraftProfileLoaders(profile, { config, latest: launchLatest, installed });
+  let profile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
+  profile = await installMinecraftProfileLoaders(profile, { config: launcherConfig, latest: launchLatest, installed });
   const minecraftAssets = await ensureMinecraftLauncherAssets({
-    config,
+    config: launcherConfig,
     latest: launchLatest,
     installed,
     profile,
@@ -6162,13 +6269,13 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
     ensureAssetObjects: true,
     verifyAssetHashes: true
   });
-  const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity, {
+  const finalLaunchState = evaluateLaunchState(launcherConfig, launchLatest, null, installed, profile, integrity, {
     allowLegacyRelease: developerClientBypass
   });
   if (!finalLaunchState.launchReady) {
     throw new Error(finalLaunchState.launchBlockedReason);
   }
-  const launchResult = await openMinecraftLauncher(config);
+  const launchResult = await openMinecraftLauncher(launcherConfig);
   return {
     ...minecraftLaunchResultForRenderer(launchResult),
     minecraftProfile: minecraftProfileForRenderer(profile),
