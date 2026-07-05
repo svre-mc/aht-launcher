@@ -191,7 +191,7 @@ await writeJson(defaultsPath, {
   minecraftLauncher: {
     enabled: true,
     rootDir: mcRoot,
-    profileId: 'a-hard-time-dregora',
+    profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,
@@ -364,7 +364,7 @@ try {
     throw new Error(`Minecraft service outage should not dirty the installed pack state: ${JSON.stringify(after)}`);
   }
   const profiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
-  const profile = profiles.profiles?.['a-hard-time-dregora'];
+  const profile = profiles.profiles?.['a-hard-time'];
   if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
     throw new Error(`Play did not prepare the Minecraft profile before service outage: ${JSON.stringify(profile)}`);
   }

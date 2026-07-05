@@ -182,7 +182,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: 'SmokeUser' },
   developer: { adminBaseUrl: workerEndpoint, defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: bucket },
   launcherUpdate: { enabled: true, latestUrl: `${workerEndpoint}/launcher/latest.json` },
-  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
+  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096 },
   playCommand: { command: '', args: [], cwd: path.join(root, 'instance') }
 });
 await writeJson(path.join(userData, 'identity.json'), {

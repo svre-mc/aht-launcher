@@ -74,7 +74,7 @@ const config = {
   minecraftLauncher: {
     enabled: true,
     rootDir: minecraftRoot,
-    profileId: 'a-hard-time-dregora',
+    profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     syncDefaultRoots: false
   }
@@ -87,7 +87,7 @@ if (loaderVersionId(latest.minecraft) !== versionId) {
 const created = await ensureMinecraftLauncherProfile({ config, latest, installed: null });
 const inspected = await inspectMinecraftLauncherProfile({ config, latest, installed: null });
 const profiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
-const profile = profiles.profiles['a-hard-time-dregora'];
+const profile = profiles.profiles['a-hard-time'];
 
 if (!created.profileExists || !inspected.loaderInstalled || !profile) {
   throw new Error('Minecraft Launcher profile was not created or inspected correctly.');
@@ -101,6 +101,79 @@ if (profile.gameDir !== path.resolve(instanceDir)) {
 if (!profile.javaArgs.includes('-Xmx4096m') || !profile.javaArgs.includes('-Daht.launcher.present=true') || !profile.javaArgs.includes('-Daht.launcher.proofFile=')) {
   throw new Error(`Expected RAM and launcher proof args, got ${profile.javaArgs}`);
 }
+profiles.profiles['a-hard-time'] = {
+  ...profile,
+  gameDir: path.join(os.tmpdir(), 'aht-stale-player-instance')
+};
+profiles.profiles['a-hard-time-dregora'] = {
+  name: 'A Hard Time',
+  type: 'custom',
+  lastVersionId: versionId,
+  gameDir: path.join(root, 'AHT', 'A Hard Time Developer')
+};
+profiles.profiles['a-hard-time-developer'] = {
+  name: 'A Hard Time',
+  type: 'custom',
+  lastVersionId: versionId,
+  gameDir: path.join(root, 'AHT', 'A Hard Time')
+};
+await fs.writeFile(path.join(minecraftRoot, 'launcher_profiles.json'), JSON.stringify(profiles, null, 2));
+const cleanedProfile = await ensureMinecraftLauncherProfile({ config, latest, installed: null });
+const cleanedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+if (cleanedProfiles.profiles['a-hard-time'].gameDir !== path.resolve(instanceDir)) {
+  throw new Error(`Current player profile was not repaired from a stale temp gameDir: ${JSON.stringify(cleanedProfiles.profiles['a-hard-time'])}`);
+}
+if (cleanedProfiles.profiles['a-hard-time-dregora'] || cleanedProfiles.profiles['a-hard-time-developer']) {
+  throw new Error(`Stale legacy/wrong-folder AHT profiles were not cleaned: ${JSON.stringify(cleanedProfiles.profiles)}`);
+}
+const removedProfileIds = (cleanedProfile.profileCleanup || []).map((item) => item.profileId).sort();
+if (removedProfileIds.join(',') !== 'a-hard-time-developer,a-hard-time-dregora') {
+  throw new Error(`Expected stale managed profile cleanup, got ${JSON.stringify(cleanedProfile.profileCleanup)}`);
+}
+const dualProfileRoot = path.join(root, 'dual-profile-root');
+const playerNamedDir = path.join(root, 'AHT', 'A Hard Time');
+const developerNamedDir = path.join(root, 'AHT', 'A Hard Time Developer');
+await fs.mkdir(path.join(dualProfileRoot, 'versions', versionId), { recursive: true });
+await fs.writeFile(path.join(dualProfileRoot, 'versions', versionId, `${versionId}.json`), '{}');
+await fs.writeFile(path.join(dualProfileRoot, 'launcher_profiles.json'), JSON.stringify({
+  profiles: {
+    'a-hard-time': {
+      name: 'A Hard Time',
+      type: 'custom',
+      lastVersionId: versionId,
+      gameDir: playerNamedDir
+    },
+    'a-hard-time-dregora': {
+      name: 'A Hard Time',
+      type: 'custom',
+      lastVersionId: versionId,
+      gameDir: path.join(os.tmpdir(), 'aht-legacy-profile')
+    }
+  }
+}, null, 2));
+await ensureMinecraftLauncherProfile({
+  config: {
+    ...config,
+    instanceDir: developerNamedDir,
+    minecraftLauncher: {
+      ...config.minecraftLauncher,
+      rootDir: dualProfileRoot,
+      profileId: 'a-hard-time-developer'
+    }
+  },
+  latest,
+  installed: null
+});
+const dualProfiles = JSON.parse(await fs.readFile(path.join(dualProfileRoot, 'launcher_profiles.json'), 'utf8'));
+if (!dualProfiles.profiles['a-hard-time'] || dualProfiles.profiles['a-hard-time'].gameDir !== playerNamedDir) {
+  throw new Error(`Valid player profile should coexist with developer profile: ${JSON.stringify(dualProfiles.profiles)}`);
+}
+if (!dualProfiles.profiles['a-hard-time-developer'] || dualProfiles.profiles['a-hard-time-developer'].gameDir !== path.resolve(developerNamedDir)) {
+  throw new Error(`Developer profile was not written to the developer instance: ${JSON.stringify(dualProfiles.profiles)}`);
+}
+if (dualProfiles.profiles['a-hard-time-dregora']) {
+  throw new Error(`Legacy AHT profile was not removed during developer profile write: ${JSON.stringify(dualProfiles.profiles)}`);
+}
 await ensureMinecraftLauncherProfile({
   config: {
     ...config,
@@ -113,7 +186,7 @@ await ensureMinecraftLauncherProfile({
   installed: null
 });
 const ramProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
-const ramProfile = ramProfiles.profiles['a-hard-time-dregora'];
+const ramProfile = ramProfiles.profiles['a-hard-time'];
 if (!ramProfile.javaArgs.includes('-Xmx8192m') || !ramProfile.javaArgs.includes('-Daht.launcher.proofFile=')) {
   throw new Error(`Expected updated RAM and launcher proof args, got ${ramProfile.javaArgs}`);
 }
@@ -360,8 +433,11 @@ if (!curseForgeProfile.accountProfileKnown || curseForgeProfile.accountCredentia
 if (curseForgeProfile.preferredMinecraftUsername !== 'ActiveUser') {
   throw new Error(`Expected active launcher account username, got ${curseForgeProfile.preferredMinecraftUsername}`);
 }
+if (curseForgeProfile.syncedProfileCount !== 1) {
+  throw new Error(`Expected only the selected Minecraft root to be written by default, got ${curseForgeProfile.syncedProfileCount}`);
+}
 const curseForgeProfiles = JSON.parse(await fs.readFile(path.join(curseForgeRoot, 'launcher_profiles.json'), 'utf8'));
-const curseForgeProfileJson = curseForgeProfiles.profiles['a-hard-time-dregora'];
+const curseForgeProfileJson = curseForgeProfiles.profiles['a-hard-time'];
 if (
   !curseForgeProfileJson.javaArgs.includes('-Xmx4096m')
   || !curseForgeProfileJson.javaArgs.includes('-DlibraryDirectory=')
@@ -382,10 +458,10 @@ const syncedConfig = {
 };
 const syncedState = await ensureMinecraftLauncherProfile({ config: syncedConfig, latest, installed: null });
 if (syncedState.syncedProfileCount !== 2) {
-  throw new Error(`Expected profile to sync to CurseForge and normal roots, got ${syncedState.syncedProfileCount}`);
+  throw new Error(`Expected explicit syncRoots to write both selected and synced roots, got ${syncedState.syncedProfileCount}`);
 }
 const syncedProfiles = JSON.parse(await fs.readFile(path.join(syncedMinecraftRoot, 'launcher_profiles.json'), 'utf8'));
-const syncedProfileJson = syncedProfiles.profiles['a-hard-time-dregora'];
+const syncedProfileJson = syncedProfiles.profiles['a-hard-time'];
 if (!syncedProfileJson || syncedProfileJson.gameDir !== path.resolve(instanceDir)) {
   throw new Error(`Synced Minecraft profile did not point at the AHT instance: ${JSON.stringify(syncedProfileJson)}`);
 }
@@ -429,7 +505,7 @@ const corruptProfileConfig = {
 };
 await ensureMinecraftLauncherProfile({ config: corruptProfileConfig, latest, installed: null });
 const repairedProfiles = JSON.parse(await fs.readFile(path.join(corruptProfileRoot, 'launcher_profiles.json'), 'utf8'));
-if (!repairedProfiles.profiles?.['a-hard-time-dregora']) {
+if (!repairedProfiles.profiles?.['a-hard-time']) {
   throw new Error(`Corrupt launcher_profiles.json was not repaired: ${JSON.stringify(repairedProfiles)}`);
 }
 const profileBackups = (await fs.readdir(corruptProfileRoot)).filter((name) => name.includes('launcher_profiles.json.aht-corrupt-'));

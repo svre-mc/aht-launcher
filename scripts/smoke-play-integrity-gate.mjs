@@ -154,7 +154,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   minecraftLauncher: {
     enabled: true,
     rootDir: mcRoot,
-    profileId: 'a-hard-time-dregora',
+    profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,

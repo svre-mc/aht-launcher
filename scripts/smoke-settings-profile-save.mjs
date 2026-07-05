@@ -139,7 +139,7 @@ await writeJson(defaultsPath, {
   minecraftLauncher: {
     enabled: true,
     rootDir: minecraftRoot,
-    profileId: 'a-hard-time-dregora',
+    profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096
   },
@@ -227,7 +227,7 @@ try {
   }
 
   const profiles = JSON.parse(await fsp.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
-  const profile = profiles.profiles?.['a-hard-time-dregora'];
+  const profile = profiles.profiles?.['a-hard-time'];
   if (!profile) {
     throw new Error('Minecraft Launcher profile was not written.');
   }

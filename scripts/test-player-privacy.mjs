@@ -141,7 +141,7 @@ const dirtyPrivateConfig = {
   },
   launcherUpdate: { enabled: true, latestUrl: `${workerEndpoint}/launcher/latest.json` },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 }
+  minecraftLauncher: { enabled: true, profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096 }
 };
 const stalePlayerConfig = {
   ...dirtyPrivateConfig,

@@ -127,7 +127,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   developer: { adminBaseUrl: `${workerEndpoint}/`, defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
-  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096, autoImportAccount: false },
+  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096, autoImportAccount: false },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 

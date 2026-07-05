@@ -123,6 +123,14 @@ function uniqueVersionIds(values = []) {
 
 const MOJANG_VERSION_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
 const MINECRAFT_ASSET_OBJECT_BASE_URL = 'https://resources.download.minecraft.net/';
+export const PLAYER_MINECRAFT_PROFILE_ID = 'a-hard-time';
+export const DEVELOPER_MINECRAFT_PROFILE_ID = 'a-hard-time-developer';
+export const LEGACY_AHT_MINECRAFT_PROFILE_IDS = ['a-hard-time-dregora'];
+const AHT_MANAGED_PROFILE_IDS = [
+  PLAYER_MINECRAFT_PROFILE_ID,
+  DEVELOPER_MINECRAFT_PROFILE_ID,
+  ...LEGACY_AHT_MINECRAFT_PROFILE_IDS
+];
 
 function repairableJsonError(error = null) {
   return error instanceof SyntaxError || error?.code === 'ENOENT' || /Unexpected end of JSON input|Unexpected token/i.test(String(error?.message || error || ''));
@@ -191,12 +199,23 @@ function loaderVersionIdCandidates(minecraft = {}) {
   return uniqueVersionIds(candidates);
 }
 
-function profileIdFor(packId = 'a-hard-time-dregora') {
+function profileIdFor(packId = PLAYER_MINECRAFT_PROFILE_ID) {
   return String(packId)
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'aht-dregora';
+    .replace(/^-+|-+$/g, '') || PLAYER_MINECRAFT_PROFILE_ID;
+}
+
+function profileIdForConfig(config = {}, latest = null, installed = null) {
+  const requested = String(config.minecraftLauncher?.profileId || '').trim();
+  const requestedKey = ahtProfileIdKey(requested);
+  if (!requested || LEGACY_AHT_MINECRAFT_PROFILE_IDS.includes(requestedKey)) {
+    return isAhtDeveloperGameDir(config.instanceDir)
+      ? DEVELOPER_MINECRAFT_PROFILE_ID
+      : PLAYER_MINECRAFT_PROFILE_ID;
+  }
+  return requested || profileIdFor(latest?.packId || installed?.packId || config.packId);
 }
 
 function quoteJavaValue(value = '') {
@@ -237,9 +256,9 @@ function minecraftRoot(config = {}) {
 }
 
 function minecraftProfileRoots(config = {}) {
-  const defaultRoots = config.minecraftLauncher?.syncDefaultRoots === false
-    ? []
-    : minecraftRootCandidates();
+  const defaultRoots = config.minecraftLauncher?.syncDefaultRoots === true
+    ? minecraftRootCandidates()
+    : [];
   const extraRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
     ? config.minecraftLauncher.syncRoots
     : [];
@@ -248,6 +267,80 @@ function minecraftProfileRoots(config = {}) {
     ...defaultRoots,
     ...extraRoots
   ]);
+}
+
+function normalizedPathText(value = '') {
+  return String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function ahtProfileIdKey(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isManagedAhtProfileId(profileId = '') {
+  return AHT_MANAGED_PROFILE_IDS.includes(ahtProfileIdKey(profileId));
+}
+
+function profileLooksAhtOwned(profileId = '', profile = {}) {
+  if (isManagedAhtProfileId(profileId)) {
+    return true;
+  }
+  const name = String(profile?.name || '').trim().toLowerCase();
+  return name === 'a hard time';
+}
+
+function isTemporaryAhtGameDir(gameDir = '') {
+  const normalized = normalizedPathText(gameDir);
+  return /\/(?:temp|tmp)\/aht-[^/]+/.test(normalized);
+}
+
+function isAhtDeveloperGameDir(gameDir = '') {
+  const normalized = normalizedPathText(gameDir);
+  return normalized.endsWith('/a hard time developer');
+}
+
+function isAhtPlayerGameDir(gameDir = '') {
+  const normalized = normalizedPathText(gameDir);
+  return normalized.endsWith('/a hard time') && !isAhtDeveloperGameDir(gameDir);
+}
+
+function staleAhtProfileReason(profileId = '', profile = {}) {
+  const id = ahtProfileIdKey(profileId);
+  const gameDir = profile?.gameDir || '';
+  if (isTemporaryAhtGameDir(gameDir) && !isManagedAhtProfileId(id)) {
+    return 'temp-game-dir';
+  }
+  if (LEGACY_AHT_MINECRAFT_PROFILE_IDS.includes(id)) {
+    return 'legacy-profile-id';
+  }
+  if (id === PLAYER_MINECRAFT_PROFILE_ID && isAhtDeveloperGameDir(gameDir)) {
+    return 'player-points-at-developer';
+  }
+  if (id === DEVELOPER_MINECRAFT_PROFILE_ID && isAhtPlayerGameDir(gameDir)) {
+    return 'developer-points-at-player';
+  }
+  return '';
+}
+
+function cleanupStaleAhtProfiles(profiles = {}, state = {}) {
+  const removed = [];
+  const profileMap = profiles.profiles && typeof profiles.profiles === 'object' ? profiles.profiles : {};
+  for (const [profileId, profile] of Object.entries(profileMap)) {
+    if (profileId === state.profileId || !profileLooksAhtOwned(profileId, profile)) {
+      continue;
+    }
+    const reason = staleAhtProfileReason(profileId, profile);
+    if (!reason) {
+      continue;
+    }
+    removed.push({
+      profileId,
+      reason,
+      gameDir: profile?.gameDir || ''
+    });
+    delete profileMap[profileId];
+  }
+  return removed;
 }
 
 function pushMinecraftUsername(usernames, value = '') {
@@ -612,7 +705,7 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
       break;
     }
   }
-  const profileId = config.minecraftLauncher?.profileId || profileIdFor(latest?.packId || installed?.packId || config.packId);
+  const profileId = profileIdForConfig(config, latest, installed);
   const profile = await readProfiles(profilesPath).then((profiles) => profiles.profiles?.[profileId] || null).catch(() => null);
   const allAuthRoots = uniqueLauncherRoots(authRoots || [rootDir]);
   const auth = await inspectMinecraftLauncherAuth(rootDir, {
@@ -674,6 +767,7 @@ async function writeMinecraftLauncherProfile(state) {
   await ensureDir(state.rootDir);
   const profiles = await readProfiles(state.profilesPath);
   profiles.profiles = profiles.profiles && typeof profiles.profiles === 'object' ? profiles.profiles : {};
+  const profileCleanup = cleanupStaleAhtProfiles(profiles, state);
 
   const now = new Date().toISOString();
   const existing = profiles.profiles[state.profileId] || {};
@@ -694,7 +788,8 @@ async function writeMinecraftLauncherProfile(state) {
   await writeJsonFile(state.profilesPath, profiles);
   return {
     ...state,
-    profileExists: true
+    profileExists: true,
+    profileCleanup
   };
 }
 

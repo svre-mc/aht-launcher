@@ -205,7 +205,7 @@ await writeJson(defaultsPath, {
   minecraftLauncher: {
     enabled: true,
     rootDir: mcRoot,
-    profileId: 'a-hard-time-dregora',
+    profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
     javaPath: missingJavaPath,
@@ -397,7 +397,7 @@ try {
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
     throw new Error(`Java setup failure should not dirty the installed pack state: ${JSON.stringify(after)}`);
   }
-  const profile = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8')).profiles?.['a-hard-time-dregora'];
+  const profile = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8')).profiles?.['a-hard-time'];
   if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
     throw new Error(`Play did not prepare the Minecraft profile before Java setup failure: ${JSON.stringify(profile)}`);
   }

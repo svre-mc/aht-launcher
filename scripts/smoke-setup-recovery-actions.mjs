@@ -186,7 +186,7 @@ await writeJson(appDefaults, {
   minecraftLauncher: {
     enabled: true,
     rootDir: minecraftRoot,
-    profileId: 'a-hard-time-dregora',
+    profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096
   },

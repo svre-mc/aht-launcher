@@ -15,7 +15,7 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
-const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
+const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -141,6 +141,12 @@ async function waitForFile(file, label) {
   throw new Error(`Timed out waiting for ${label}: ${lastError || file}`);
 }
 
+async function readJsonLines(file) {
+  if (!fs.existsSync(file)) return [];
+  const text = await fsp.readFile(file, 'utf8');
+  return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
 const latest = {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time',
@@ -159,7 +165,6 @@ const assetBytes = Buffer.from('aht launcher repaired asset\n');
 const assetHash = sha1(assetBytes);
 const assetObjectPath = path.join(mcRoot, 'assets', 'objects', assetHash.slice(0, 2), assetHash);
 const assetIndexPath = path.join(mcRoot, 'assets', 'indexes', '1.12.json');
-const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd() }, null, 2))';
 const assetRequests = [];
 let assetObjectRequestCount = 0;
 
@@ -179,6 +184,7 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
   sha256: sha256(managedModContent)
 }]);
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), { id: versionId, type: 'release' });
+await fsp.writeFile(path.join(mcRoot, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher'), 'test launcher placeholder\n', 'utf8');
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
   { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
@@ -196,13 +202,11 @@ await writeJson(defaultsPath, {
   minecraftLauncher: {
     enabled: true,
     rootDir: mcRoot,
-    profileId: 'a-hard-time-dregora',
+    profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,
-    autoImportAccount: false,
-    openCommand: process.execPath,
-    openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
+    autoImportAccount: false
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -289,6 +293,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/asset-objects/`,
+    AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
@@ -312,9 +317,9 @@ try {
   }
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '8.9.2' ? status : false)
-  `, 'ready status before Play asset repair');
+  `, 'ready status before Play asset index repair');
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
-    throw new Error(`Smoke setup should be launch-ready before asset repair Play: ${JSON.stringify(before)}`);
+    throw new Error(`Smoke setup should be launch-ready before asset index repair Play: ${JSON.stringify(before)}`);
   }
 
   await evaluate(client, `document.querySelector('#playButton')?.click(); true`);
@@ -329,27 +334,45 @@ try {
         log: document.querySelector('#log')?.textContent || ''
       };
     })()
-  `, 'Play success toast after asset repair');
+  `, 'Play success toast after asset index repair');
   if (/REQUEST_FAILED|Unable to prepare assets|Unexpected end of JSON|Launch failed|Error invoking remote method/i.test(`${toast.title}\n${toast.detail}\n${toast.log}`)) {
     throw new Error(`Asset repair Play leaked a launcher asset failure: ${JSON.stringify(toast)}`);
   }
-  await waitForFile(fakeLauncherMarker, 'fake Minecraft Launcher marker');
+  await waitForFile(spawnCapturePath, 'Minecraft Launcher spawn capture');
+  const spawnCaptures = await readJsonLines(spawnCapturePath);
+  const spawnCapture = spawnCaptures.at(-1);
+  const expectedLauncher = path.join(mcRoot, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher');
+  if (!spawnCapture || path.resolve(spawnCapture.command) !== path.resolve(expectedLauncher)) {
+    throw new Error(`Play did not use the root-owned Minecraft Launcher executable: ${JSON.stringify(spawnCaptures)}`);
+  }
+  if (process.platform === 'win32' && JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', mcRoot])) {
+    throw new Error(`Play did not pass --workDir to root-owned minecraft.exe: ${JSON.stringify(spawnCapture)}`);
+  }
+  if (path.resolve(spawnCapture.cwd) !== path.resolve(mcRoot)) {
+    throw new Error(`Play did not launch from the verified Minecraft root cwd: ${JSON.stringify(spawnCapture)}`);
+  }
+  if (spawnCapture.windowsHide === true) {
+    throw new Error(`Play launched Minecraft Launcher hidden instead of visible: ${JSON.stringify(spawnCapture)}`);
+  }
+  if (spawnCapture.env?.DISABLE_RTSS_LAYER !== '1' || spawnCapture.env?.DISABLE_VULKAN_OBS_CAPTURE !== '1') {
+    throw new Error(`Play did not pass launcher overlay-safety environment flags: ${JSON.stringify(spawnCapture)}`);
+  }
 
   const repairedIndex = JSON.parse(await fsp.readFile(assetIndexPath, 'utf8'));
   if (repairedIndex.objects?.['minecraft/lang/en_us.lang']?.hash !== assetHash) {
     throw new Error(`Minecraft asset index was not repaired before launch: ${JSON.stringify(repairedIndex)}`);
   }
-  if (sha1(await fsp.readFile(assetObjectPath)) !== assetHash) {
-    throw new Error('Minecraft asset object was not repaired before launch.');
+  if (fs.existsSync(assetObjectPath)) {
+    throw new Error('Minecraft asset object should not be downloaded during Play.');
   }
-  if (!assetRequests.includes('/assets/1.12.json') || assetObjectRequestCount < 2) {
-    throw new Error(`Asset repair did not fetch the expected index and object: ${JSON.stringify(assetRequests)}`);
+  if (!assetRequests.includes('/assets/1.12.json') || assetObjectRequestCount !== 0) {
+    throw new Error(`Play should repair the asset index without full asset-object downloads: ${JSON.stringify(assetRequests)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
     throw new Error(`Asset repair Play should leave the installed pack launch-ready: ${JSON.stringify(after)}`);
   }
-  const profile = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8')).profiles?.['a-hard-time-dregora'];
+  const profile = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8')).profiles?.['a-hard-time'];
   if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
     throw new Error(`Play did not prepare the Minecraft profile before launch: ${JSON.stringify(profile)}`);
   }
@@ -361,6 +384,7 @@ try {
     repairedObject: assetObjectPath,
     requests: assetRequests,
     assetObjectRequestCount,
+    spawnCapture,
     profile: {
       gameDir: profile.gameDir,
       lastVersionId: profile.lastVersionId

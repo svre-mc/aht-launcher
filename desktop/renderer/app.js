@@ -50,7 +50,7 @@ if (!window.aht) {
       minecraftLauncher: {
         enabled: true,
         rootDir: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft",
-        profileId: "a-hard-time-dregora",
+        profileId: "a-hard-time-developer",
         profileName: "A Hard Time"
       },
       playCommand: { command: "", args: [] }
@@ -77,7 +77,7 @@ if (!window.aht) {
       enabled: true,
       rootDir: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft",
       profilesPath: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft\\launcher_profiles.json",
-      profileId: "a-hard-time-dregora",
+      profileId: "a-hard-time-developer",
       profileName: "A Hard Time",
       profileExists: true,
       versionId: "1.12.2-forge-14.23.5.2860",

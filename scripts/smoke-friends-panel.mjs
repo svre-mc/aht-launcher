@@ -162,7 +162,7 @@ await writeJson(defaultsPath, {
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
   social: { enabled: true },
-  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 }
+  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096 }
 });
 
 const server = http.createServer((request, response) => {
