@@ -196,7 +196,7 @@ try {
   if (proof.developerMode || proof.developerClientBypass || proof.configHasDeveloper || proof.configHasServerTransfer || proof.configPath || proof.platformProfileHasInstanceDir || proof.devApiKeys.length || proof.bodyDevMode || proof.bodyDevLocked || !proof.developerTabHidden || !proof.developerTileHidden || proof.devTextVisible) {
     throw new Error(`Player launcher exposed developer/private surface: ${JSON.stringify(proof)}`);
   }
-  const allowedSetupKeys = ['canAutoConfigure', 'instanceExists', 'instanceHasPack', 'javaRuntimeMode', 'latestConfigured', 'minecraftAccountCredentialOnly', 'minecraftAccountProfileKnown', 'minecraftAccountReuseAvailable', 'minecraftLauncherOpenAvailable', 'minecraftLauncherOpenLabel', 'minecraftLauncherOpenState'];
+  const allowedSetupKeys = ['canAutoConfigure', 'instanceExists', 'instanceHasPack', 'javaRuntimeMode', 'latestConfigured', 'minecraftAccountCredentialOnly', 'minecraftAccountProfileKnown', 'minecraftAccountReuseAvailable', 'minecraftLauncherFirstRouteSource', 'minecraftLauncherHasCurseForgeRoute', 'minecraftLauncherOpenAvailable', 'minecraftLauncherOpenLabel', 'minecraftLauncherOpenState', 'minecraftLauncherRouteCount', 'minecraftLauncherRouteDegraded', 'minecraftLauncherRouteKinds'];
   if (JSON.stringify(proof.setupKeys) !== JSON.stringify(allowedSetupKeys)) {
     throw new Error(`Player setup exposed diagnostic keys: ${JSON.stringify(proof)}`);
   }

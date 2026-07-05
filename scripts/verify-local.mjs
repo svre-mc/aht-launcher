@@ -26,6 +26,7 @@ const pureChecks = [
   ['test:release-builder-default-outdir'],
   ['test:update-repair-state'],
   ['test:minecraft-service-status'],
+  ['test:minecraft-launcher-routes'],
   ['test:social-client'],
   ['test:item-fire-fix-release']
 ];
@@ -55,6 +56,8 @@ const electronChecks = [
   ['test:play-service-outage'],
   ['test:play-asset-repair'],
   ['test:play-curseforge-priority'],
+  ['test:play-curseforge-fallback'],
+  ['test:play-curseforge-app-fallback'],
   ['test:play-signin-guidance'],
   ['test:player-update-play'],
   ['test:account-duplicate'],

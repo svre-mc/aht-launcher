@@ -250,6 +250,7 @@ try {
     || !report.platform?.platform
     || !report.config
     || !report.minecraftRuntime?.configuredRoot
+    || !Array.isArray(report.minecraftRuntime?.plannedRoutes)
     || report.minecraftRuntime?.profile?.profileId !== 'a-hard-time'
     || !report.operations?.update
   ) {
@@ -297,6 +298,7 @@ try {
     || !updateOperation.lines.some((line) => /Reading release feed from 127\.0\.0\.1/i.test(line))
     || updateOperation.progress?.phase !== 'Update failed'
     || updateReport.config?.latestHost !== `127.0.0.1:${workerPort}`
+    || !Array.isArray(updateReport.minecraftRuntime?.plannedRoutes)
     || !updateReport.minecraftRuntime?.executableCandidates
   ) {
     throw new Error(`Captured update failure report is missing operation diagnostics: ${JSON.stringify(updateReport, null, 2)}`);

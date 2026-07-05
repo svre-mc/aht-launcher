@@ -6,7 +6,11 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-const port = Number(process.argv[2] || 10876);
+const expectFallback = process.argv.includes('--fallback');
+const expectCurseForgeAppFallback = process.argv.includes('--curseforge-app-fallback');
+const useDesktopMinecraftLauncher = !process.argv.includes('--no-desktop');
+const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
+const port = Number(portArg || (expectFallback ? 10976 : 10876));
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
@@ -20,7 +24,12 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const configuredMcRoot = path.join(fakeAppData, '.minecraft');
+const storePackageFamily = 'Microsoft.4297127D64EC6_8wekyb3d8bbwe';
+const storePackageDir = path.join(fakeLocalAppData, 'Packages', storePackageFamily);
+const storeMcRoot = path.join(storePackageDir, 'LocalCache', 'Roaming', '.minecraft');
 const curseForgeRoot = path.join(fakeUserProfile, 'curseforge', 'minecraft', 'Install');
+const desktopMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
+const curseForgeApp = path.join(fakeLocalAppData, 'Programs', 'CurseForge', 'CurseForge.exe');
 const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
@@ -170,6 +179,14 @@ const assetHash = sha1(assetBytes);
 const assetRequests = [];
 
 await fsp.mkdir(fakeProgramFiles, { recursive: true });
+if (useDesktopMinecraftLauncher) {
+  await fsp.mkdir(path.dirname(desktopMinecraftLauncher), { recursive: true });
+  await fsp.writeFile(desktopMinecraftLauncher, 'desktop launcher placeholder\n', 'utf8');
+}
+if (expectCurseForgeAppFallback) {
+  await fsp.mkdir(path.dirname(curseForgeApp), { recursive: true });
+  await fsp.writeFile(curseForgeApp, 'curseforge app placeholder\n', 'utf8');
+}
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-clean.jar'), managedModContent, 'utf8');
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
@@ -186,11 +203,15 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
   sha256: sha256(managedModContent)
 }]);
 await writeReadyMinecraftRoot(configuredMcRoot);
-await writeReadyMinecraftRoot(curseForgeRoot, { launcherExe: true });
+await writeReadyMinecraftRoot(curseForgeRoot);
+await fsp.mkdir(path.join(storePackageDir, 'LocalState'), { recursive: true });
+await writeReadyMinecraftRoot(storeMcRoot);
 await fsp.mkdir(path.join(configuredMcRoot, 'assets', 'indexes'), { recursive: true });
 await fsp.writeFile(path.join(configuredMcRoot, 'assets', 'indexes', '1.12.json'), '', 'utf8');
 await fsp.mkdir(path.join(curseForgeRoot, 'assets', 'indexes'), { recursive: true });
 await fsp.writeFile(path.join(curseForgeRoot, 'assets', 'indexes', '1.12.json'), '', 'utf8');
+await fsp.mkdir(path.join(storeMcRoot, 'assets', 'indexes'), { recursive: true });
+await fsp.writeFile(path.join(storeMcRoot, 'assets', 'indexes', '1.12.json'), '', 'utf8');
 
 await writeJson(defaultsPath, {
   packId: latest.packId,
@@ -293,6 +314,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/asset-objects/`,
     AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
+    AHT_TEST_SPAWN_DETACHED_FAIL_KINDS: expectFallback ? 'curseforge' : '',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
     APPDATA: fakeAppData,
@@ -326,8 +348,18 @@ try {
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
     throw new Error(`Smoke setup should be launch-ready before CurseForge-first Play: ${JSON.stringify(before)}`);
   }
-  if (before.setup?.minecraftLauncherOpenState !== 'curseforge') {
-    throw new Error(`Setup did not report CurseForge as the preferred Minecraft route: ${JSON.stringify(before.setup)}`);
+  const expectedOpenState = 'preferred';
+  if (before.setup?.minecraftLauncherOpenState !== expectedOpenState) {
+    throw new Error(`Setup did not report the expected first Minecraft route ${expectedOpenState}: ${JSON.stringify(before.setup)}`);
+  }
+  if (!Array.isArray(before.setup?.minecraftLauncherRouteKinds) || before.setup.minecraftLauncherRouteKinds[0] !== expectedOpenState) {
+    throw new Error(`Setup did not expose the expected safe route summary: ${JSON.stringify(before.setup)}`);
+  }
+  if (!before.setup.minecraftLauncherHasCurseForgeRoute || before.setup.minecraftLauncherRouteCount < 1) {
+    throw new Error(`Setup did not report CurseForge route availability: ${JSON.stringify(before.setup)}`);
+  }
+  if (expectCurseForgeAppFallback && !before.setup.minecraftLauncherRouteDegraded) {
+    throw new Error(`CurseForge app fallback should be marked as a degraded route before Store: ${JSON.stringify(before.setup)}`);
   }
 
   await evaluate(client, `document.querySelector('#playButton')?.click(); true`);
@@ -348,18 +380,43 @@ try {
   }
   const spawnCaptures = await readJsonLines(spawnCapturePath);
   const spawnCapture = spawnCaptures.at(-1);
-  const expectedLauncher = path.join(curseForgeRoot, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher');
-  if (!spawnCapture || path.resolve(spawnCapture.command) !== path.resolve(expectedLauncher)) {
-    throw new Error(`Play did not prefer the CurseForge Minecraft launcher root: ${JSON.stringify(spawnCaptures)}`);
-  }
-  if (process.platform === 'win32' && JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', curseForgeRoot])) {
-    throw new Error(`Play did not pass --workDir to CurseForge minecraft.exe: ${JSON.stringify(spawnCapture)}`);
-  }
-  if (path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
-    throw new Error(`Play did not launch from the CurseForge Minecraft root cwd: ${JSON.stringify(spawnCapture)}`);
+  if (expectCurseForgeAppFallback) {
+    if (!spawnCapture || spawnCapture.kind !== 'curseforge-app' || path.resolve(spawnCapture.command) !== path.resolve(curseForgeApp)) {
+      throw new Error(`Play did not open CurseForge before the Store fallback when no desktop Minecraft Launcher exists: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if (JSON.stringify(spawnCapture.args) !== JSON.stringify([])) {
+      throw new Error(`CurseForge app fallback should not receive Minecraft Launcher args it cannot honor: ${JSON.stringify(spawnCapture)}`);
+    }
+    if (path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
+      throw new Error(`CurseForge app fallback did not launch from the CurseForge Minecraft root cwd: ${JSON.stringify(spawnCapture)}`);
+    }
+  } else if (expectFallback) {
+    const firstCapture = spawnCaptures[0];
+    if (!firstCapture || firstCapture.kind !== 'curseforge' || firstCapture.outcome !== 'forced-failure') {
+      throw new Error(`Fallback smoke did not try CurseForge first and record the forced failure: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if (!spawnCapture || spawnCapture.kind !== 'desktop' || path.resolve(spawnCapture.command) !== path.resolve(desktopMinecraftLauncher)) {
+      throw new Error(`Fallback smoke did not open the normal Minecraft Launcher after the CurseForge-root route failed: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if (JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', configuredMcRoot])) {
+      throw new Error(`Fallback smoke did not retry the desktop launcher with the configured Minecraft root: ${JSON.stringify(spawnCapture)}`);
+    }
+    if (path.resolve(spawnCapture.cwd) !== path.resolve(configuredMcRoot)) {
+      throw new Error(`Fallback smoke did not launch the normal Minecraft route from the configured root cwd: ${JSON.stringify(spawnCapture)}`);
+    }
+  } else {
+    if (!spawnCapture || spawnCapture.kind !== 'curseforge' || path.resolve(spawnCapture.command) !== path.resolve(desktopMinecraftLauncher)) {
+      throw new Error(`Play did not open the Minecraft Launcher with the CurseForge root first: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if (JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', curseForgeRoot])) {
+      throw new Error(`Play did not pass the CurseForge Minecraft root as --workDir: ${JSON.stringify(spawnCapture)}`);
+    }
+    if (path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
+      throw new Error(`Play did not launch the CurseForge-root route from the CurseForge cwd: ${JSON.stringify(spawnCapture)}`);
+    }
   }
 
-  for (const rootDir of [configuredMcRoot, curseForgeRoot]) {
+  for (const rootDir of [configuredMcRoot, curseForgeRoot, storeMcRoot]) {
     const profile = JSON.parse(await fsp.readFile(path.join(rootDir, 'launcher_profiles.json'), 'utf8')).profiles?.['a-hard-time'];
     if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
       throw new Error(`AHT profile was not prepared in ${rootDir}: ${JSON.stringify(profile)}`);
@@ -381,6 +438,9 @@ try {
     packaged: Boolean(smokeExe),
     configuredMcRoot,
     curseForgeRoot,
+    storeMcRoot,
+    expectFallback,
+    expectCurseForgeAppFallback,
     requests: assetRequests,
     spawnCapture
   }, null, 2));
