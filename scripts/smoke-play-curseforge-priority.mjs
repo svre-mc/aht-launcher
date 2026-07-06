@@ -8,6 +8,7 @@ import path from 'node:path';
 
 const expectFallback = process.argv.includes('--fallback');
 const expectStoreFallback = process.argv.includes('--store-fallback');
+const expectStartFallback = process.argv.includes('--app-alias-start-fallback');
 const useDesktopMinecraftLauncher = !process.argv.includes('--no-desktop');
 const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
 const port = Number(portArg || (expectFallback ? 10976 : expectStoreFallback ? 11076 : 10876));
@@ -29,6 +30,7 @@ const storePackageDir = path.join(fakeLocalAppData, 'Packages', storePackageFami
 const storeMcRoot = path.join(storePackageDir, 'LocalCache', 'Roaming', '.minecraft');
 const curseForgeRoot = path.join(fakeUserProfile, 'curseforge', 'minecraft', 'Install');
 const desktopMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
+const appAliasMinecraftLauncher = path.join(fakeLocalAppData, 'Microsoft', 'WindowsApps', 'MinecraftLauncher.exe');
 const curseForgeApp = path.join(fakeLocalAppData, 'Programs', 'CurseForge', 'CurseForge.exe');
 const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
 const versionId = '1.12.2-forge-14.23.5.2860';
@@ -183,6 +185,10 @@ if (useDesktopMinecraftLauncher) {
   await fsp.mkdir(path.dirname(desktopMinecraftLauncher), { recursive: true });
   await fsp.writeFile(desktopMinecraftLauncher, 'desktop launcher placeholder\n', 'utf8');
 }
+if (expectStartFallback) {
+  await fsp.mkdir(path.dirname(appAliasMinecraftLauncher), { recursive: true });
+  await fsp.writeFile(appAliasMinecraftLauncher, 'app alias launcher placeholder\n', 'utf8');
+}
 if (expectStoreFallback) {
   await fsp.mkdir(path.dirname(curseForgeApp), { recursive: true });
   await fsp.writeFile(curseForgeApp, 'curseforge app placeholder\n', 'utf8');
@@ -315,13 +321,15 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/asset-objects/`,
     AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
     AHT_TEST_SPAWN_DETACHED_FAIL_KINDS: expectFallback ? 'curseforge' : '',
+    AHT_TEST_SPAWN_DETACHED_FAIL_SOURCES: expectStartFallback ? 'windows-app-alias' : '',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
     APPDATA: fakeAppData,
     USERPROFILE: fakeUserProfile,
     HOME: fakeHome,
     ProgramFiles: fakeProgramFiles,
-    'ProgramFiles(x86)': fakeProgramFiles
+    'ProgramFiles(x86)': fakeProgramFiles,
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: (expectStoreFallback || expectStartFallback) ? '1' : ''
   },
   stdio: 'ignore',
   windowsHide: true
@@ -382,7 +390,20 @@ try {
   }
   const spawnCaptures = await readJsonLines(spawnCapturePath);
   const spawnCapture = spawnCaptures.at(-1);
-  if (expectStoreFallback) {
+  if (expectStartFallback) {
+    if (!spawnCaptures.some((capture) => capture.outcome === 'forced-source-failure' && capture.source === 'windows-app-alias')) {
+      throw new Error(`App-alias direct launch failure was not exercised: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if (!spawnCapture || !String(spawnCapture.source || '').endsWith('-start') || !Array.isArray(spawnCapture.args) || !spawnCapture.args.includes('start') || !spawnCapture.args.includes(appAliasMinecraftLauncher)) {
+      throw new Error(`Play did not retry the app-alias Minecraft Launcher through Windows start: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if (!spawnCapture.args.includes('--workDir') || !spawnCapture.args.includes(curseForgeRoot)) {
+      throw new Error(`Windows start retry did not preserve the CurseForge --workDir handoff: ${JSON.stringify(spawnCapture)}`);
+    }
+    if (path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
+      throw new Error(`Windows start retry did not run from the CurseForge root cwd: ${JSON.stringify(spawnCapture)}`);
+    }
+  } else if (expectStoreFallback) {
     if (spawnCaptures.some((capture) => path.resolve(String(capture.command || '')) === path.resolve(curseForgeApp) || capture.kind === 'curseforge-app')) {
       throw new Error(`Play opened CurseForge.exe; AHT must only open Minecraft Launcher routes: ${JSON.stringify(spawnCaptures)}`);
     }

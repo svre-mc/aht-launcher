@@ -5859,16 +5859,21 @@ function captureTestSpawnDetached(command, args = [], cwd = '', env = process.en
   const capturePath = String(process.env.AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH || '').trim();
   if (!capturePath) return false;
   const kind = String(options.kind || '').trim().toLowerCase();
+  const source = String(options.source || '').trim().toLowerCase();
   const forcedFailureKinds = testLauncherRouteSet('AHT_TEST_SPAWN_DETACHED_FAIL_KINDS');
+  const forcedFailureSources = testLauncherRouteSet('AHT_TEST_SPAWN_DETACHED_FAIL_SOURCES');
   const forcedQuickExitKinds = testLauncherRouteSet('AHT_TEST_SPAWN_DETACHED_QUICK_EXIT_KINDS');
   const outcome = forcedFailureKinds.has(kind)
     ? 'forced-failure'
-    : forcedQuickExitKinds.has(kind)
-      ? 'forced-quick-exit'
-      : 'captured';
+    : forcedFailureSources.has(source)
+      ? 'forced-source-failure'
+      : forcedQuickExitKinds.has(kind)
+        ? 'forced-quick-exit'
+        : 'captured';
   fsSync.mkdirSync(path.dirname(capturePath), { recursive: true });
   fsSync.appendFileSync(capturePath, `${JSON.stringify({
     kind,
+    source,
     routeLabel: options.routeLabel || '',
     outcome,
     command,
@@ -5883,6 +5888,11 @@ function captureTestSpawnDetached(command, args = [], cwd = '', env = process.en
   })}\n`, 'utf8');
   if (outcome === 'forced-failure') {
     throw new Error(`Test forced launcher route failure for ${kind || command}`);
+  }
+  if (outcome === 'forced-source-failure') {
+    const error = new Error(`spawn ${command} ENOENT`);
+    error.code = 'ENOENT';
+    throw error;
   }
   if (outcome === 'forced-quick-exit') {
     throw new Error(`Test forced launcher route quick exit for ${kind || command}`);
@@ -5933,6 +5943,58 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
       });
     });
   });
+}
+
+function shouldRetryWindowsLauncherWithStart(error) {
+  if (process.platform !== 'win32') {
+    return false;
+  }
+  const message = String(error?.message || error || '');
+  if (/^Test forced launcher route failure/i.test(message)) {
+    return false;
+  }
+  const code = String(error?.code || '').toUpperCase();
+  return ['ENOENT', 'EINVAL', 'UNKNOWN', 'EACCES', 'EPERM'].includes(code)
+    || /\bENOENT\b|\bEINVAL\b|\bUNKNOWN\b|\bEACCES\b|\bEPERM\b|access is denied|cannot find|not recognized|not a valid win32/i.test(message);
+}
+
+function windowsStartCommand(env = process.env) {
+  return env.ComSpec || (env.SystemRoot ? path.join(env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
+}
+
+function windowsStartArgs(command = '', args = []) {
+  return ['/d', '/s', '/c', 'start', '""', command, ...args.map((arg) => String(arg))];
+}
+
+async function spawnWindowsMinecraftLauncherRoute(route, cwd, env) {
+  const options = {
+    kind: route.kind,
+    routeLabel: route.label,
+    observeExitMs: route.observeExitMs || 0,
+    source: route.source || ''
+  };
+  try {
+    return await spawnDetached(route.command, route.args || [], cwd, env, options);
+  } catch (error) {
+    if (!shouldRetryWindowsLauncherWithStart(error)) {
+      throw error;
+    }
+    const commandPrompt = windowsStartCommand(env);
+    const startArgs = windowsStartArgs(route.command, route.args || []);
+    const fallback = await spawnDetached(commandPrompt, startArgs, cwd, env, {
+      ...options,
+      source: `${route.source || route.kind || 'launcher'}-start`,
+      routeLabel: `${route.label || 'Minecraft Launcher'} via Windows start`
+    });
+    return {
+      ...fallback,
+      command: route.command,
+      args: route.args || [],
+      startFallback: true,
+      fallbackCommand: commandPrompt,
+      fallbackArgs: startArgs
+    };
+  }
 }
 
 async function existingLaunchCwd(preferred = '') {
@@ -6325,11 +6387,7 @@ async function openMinecraftLauncher(config) {
       try {
         const launch = route.kind === 'store'
           ? await openWindowsStoreMinecraftLauncher(route.cwd || cwd, env)
-          : await spawnDetached(route.command, route.args || [], await existingLaunchCwd(route.cwd || cwd), env, {
-            kind: route.kind,
-            routeLabel: route.label,
-            observeExitMs: route.observeExitMs || 0
-          });
+          : await spawnWindowsMinecraftLauncherRoute(route, await existingLaunchCwd(route.cwd || cwd), env);
         return {
           ...launch,
           kind: route.kind,

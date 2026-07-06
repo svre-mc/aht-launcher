@@ -76,16 +76,76 @@ export function windowsStoreMinecraftPackageDir(env = process.env) {
     : '';
 }
 
+function windowsDriveRootFromPath(value = '') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  if (/^[a-z]:$/i.test(text)) {
+    return `${text}\\`;
+  }
+  return path.win32.parse(path.win32.normalize(text)).root || '';
+}
+
+const WINDOWS_MINECRAFT_LAUNCHER_SOURCE_PRIORITY = {
+  'program-files-x86': 10,
+  'program-files': 20,
+  localappdata: 30,
+  'xbox-games': 40,
+  shortcut: 50,
+  'windows-app-alias': 90
+};
+
+function windowsMinecraftLauncherSourcePriority(source = '') {
+  return WINDOWS_MINECRAFT_LAUNCHER_SOURCE_PRIORITY[String(source || '').trim().toLowerCase()] ?? 80;
+}
+
+export function windowsMinecraftLauncherDriveRoots(env = process.env) {
+  if (env.AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES === '1') {
+    return [];
+  }
+  return uniquePaths([
+    windowsDriveRootFromPath(env.SystemDrive || ''),
+    windowsDriveRootFromPath(env.HOMEDRIVE || ''),
+    windowsDriveRootFromPath(env.SystemRoot || ''),
+    windowsDriveRootFromPath(env.ProgramW6432 || ''),
+    'C:\\',
+    'D:\\',
+    'E:\\',
+    'F:\\'
+  ]);
+}
+
+function windowsMinecraftLauncherKnownCandidates(env = process.env) {
+  const xboxGamesCandidates = windowsMinecraftLauncherDriveRoots(env).map((driveRoot) => ({
+    path: path.win32.join(driveRoot, 'XboxGames', 'Minecraft Launcher', 'Content', 'Minecraft.exe'),
+    source: 'xbox-games'
+  }));
+  return [
+    env['ProgramFiles(x86)'] ? { path: path.win32.join(env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe'), source: 'program-files-x86' } : null,
+    env.ProgramFiles ? { path: path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe'), source: 'program-files' } : null,
+    env.LOCALAPPDATA ? { path: path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe'), source: 'localappdata' } : null,
+    ...xboxGamesCandidates,
+    env.LOCALAPPDATA ? { path: path.win32.join(env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'MinecraftLauncher.exe'), source: 'windows-app-alias' } : null
+  ].filter((item) => item?.path && isWindowsMinecraftLauncherExecutablePath(item.path));
+}
+
 export function windowsMinecraftLauncherExecutableCandidates(rootDir = '', env = process.env, extraPaths = []) {
   const workDirArgs = rootDir ? ['--workDir', rootDir] : [];
   const candidates = [
-    env['ProgramFiles(x86)'] ? { path: path.win32.join(env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
-    env.ProgramFiles ? { path: path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
-    env.LOCALAPPDATA ? { path: path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe'), args: workDirArgs, kind: 'desktop' } : null,
+    ...windowsMinecraftLauncherKnownCandidates(env)
+      .map((item) => ({ ...item, args: workDirArgs, kind: 'desktop' })),
     ...uniquePaths(extraPaths)
       .filter((item) => isWindowsMinecraftLauncherExecutablePath(item))
       .map((item) => ({ path: item, args: workDirArgs, kind: 'desktop', source: 'shortcut' }))
-  ].filter((item) => item?.path);
+  ]
+    .filter((item) => item?.path)
+    .map((item, index) => ({
+      ...item,
+      priority: windowsMinecraftLauncherSourcePriority(item.source),
+      order: index
+    }))
+    .sort((a, b) => a.priority - b.priority || a.order - b.order);
   const seen = new Set();
   const result = [];
   for (const candidate of candidates) {
@@ -94,7 +154,8 @@ export function windowsMinecraftLauncherExecutableCandidates(rootDir = '', env =
       continue;
     }
     seen.add(key);
-    result.push(candidate);
+    const { order, ...cleanCandidate } = candidate;
+    result.push(cleanCandidate);
   }
   return result;
 }
