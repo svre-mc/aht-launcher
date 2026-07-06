@@ -100,6 +100,14 @@ function windowsMinecraftLauncherSourcePriority(source = '') {
   return WINDOWS_MINECRAFT_LAUNCHER_SOURCE_PRIORITY[String(source || '').trim().toLowerCase()] ?? 80;
 }
 
+function windowsXboxGamesDriveRoots() {
+  const roots = [];
+  for (let code = 'C'.charCodeAt(0); code <= 'Z'.charCodeAt(0); code += 1) {
+    roots.push(`${String.fromCharCode(code)}:\\`);
+  }
+  return roots;
+}
+
 export function windowsMinecraftLauncherDriveRoots(env = process.env) {
   if (env.AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES === '1') {
     return [];
@@ -109,10 +117,7 @@ export function windowsMinecraftLauncherDriveRoots(env = process.env) {
     windowsDriveRootFromPath(env.HOMEDRIVE || ''),
     windowsDriveRootFromPath(env.SystemRoot || ''),
     windowsDriveRootFromPath(env.ProgramW6432 || ''),
-    'C:\\',
-    'D:\\',
-    'E:\\',
-    'F:\\'
+    ...windowsXboxGamesDriveRoots()
   ]);
 }
 
@@ -295,24 +300,25 @@ export async function planWindowsMinecraftLauncherRoutes({
     rootDir,
     ...existingNonCurseForgeRoots
   ]);
+  const launcherCandidates = [];
+  for (const candidate of windowsMinecraftLauncherExecutableCandidates('', env, minecraftLauncherPaths)) {
+    if (await pathExists(candidate.path)) {
+      launcherCandidates.push(candidate);
+    }
+  }
 
   for (const launchRoot of desktopRoots) {
-    for (const candidate of windowsMinecraftLauncherExecutableCandidates(launchRoot, env, minecraftLauncherPaths)) {
-      if (candidate.kind !== 'desktop') {
-        continue;
-      }
-      if (await pathExists(candidate.path)) {
-        const curseForgeRoot = isCurseForgeMinecraftRoot(launchRoot);
-        addRoute(routes, {
-          kind: curseForgeRoot ? 'curseforge' : 'desktop',
-          label: curseForgeRoot ? 'Minecraft Launcher (CurseForge root)' : 'Minecraft Launcher',
-          command: candidate.path,
-          args: candidate.args || [],
-          cwd: launchRoot,
-          rootDir: launchRoot,
-          source: candidate.source || 'default-path'
-        });
-      }
+    for (const candidate of launcherCandidates) {
+      const curseForgeRoot = isCurseForgeMinecraftRoot(launchRoot);
+      addRoute(routes, {
+        kind: curseForgeRoot ? 'curseforge' : 'desktop',
+        label: curseForgeRoot ? 'Minecraft Launcher (CurseForge root)' : 'Minecraft Launcher',
+        command: candidate.path,
+        args: launchRoot ? ['--workDir', launchRoot] : [],
+        cwd: launchRoot,
+        rootDir: launchRoot,
+        source: candidate.source || 'default-path'
+      });
     }
   }
 

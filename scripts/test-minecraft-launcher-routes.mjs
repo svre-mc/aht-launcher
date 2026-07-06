@@ -31,6 +31,7 @@ const curseForgeRoot = path.win32.join(homePath, 'curseforge', 'minecraft', 'Ins
 const desktopLauncher = path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const localDesktopLauncher = path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const xboxGamesLauncher = 'D:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe';
+const extraDriveXboxGamesLauncher = 'M:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe';
 const nonLocalXboxGamesLauncher = 'Z:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe';
 const windowsAppAliasLauncher = path.win32.join(env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'MinecraftLauncher.exe');
 const rootOwnedLauncher = path.win32.join(defaultRoot, 'minecraft.exe');
@@ -128,6 +129,19 @@ async function macRoutes(existing, options = {}) {
   assert.equal(planned[0].source, 'xbox-games');
   assert.deepEqual(planned[0].args, ['--workDir', curseForgeRoot]);
   assert.equal(planned[1].command, xboxGamesLauncher);
+  assert.deepEqual(planned[1].args, ['--workDir', defaultRoot]);
+}
+
+{
+  const planned = await routes([
+    curseForgeRoot,
+    extraDriveXboxGamesLauncher
+  ], { storeInstalled: false });
+  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop']);
+  assert.equal(planned[0].command, extraDriveXboxGamesLauncher);
+  assert.equal(planned[0].source, 'xbox-games');
+  assert.deepEqual(planned[0].args, ['--workDir', curseForgeRoot]);
+  assert.equal(planned[1].command, extraDriveXboxGamesLauncher);
   assert.deepEqual(planned[1].args, ['--workDir', defaultRoot]);
 }
 
@@ -291,6 +305,7 @@ assert.equal(isWindowsMinecraftLauncherExecutablePath(path.win32.join(curseForge
 assert.deepEqual(uniquePaths(['C:\\A\\B', 'c:/a/b/', 'C:\\A\\C']).map((item) => path.win32.normalize(item)), ['C:\\A\\B', 'C:\\A\\C']);
 assert.deepEqual(windowsMinecraftLauncherDriveRoots({ ...env, SystemDrive: 'C:', HOMEDRIVE: 'D:' }).slice(0, 4), ['C:\\', 'D:\\', 'E:\\', 'F:\\']);
 assert.deepEqual(windowsMinecraftLauncherDriveRoots({ ...env, SystemDrive: 'Z:', HOMEDRIVE: 'Y:' }).slice(0, 4), ['Z:\\', 'Y:\\', 'C:\\', 'D:\\']);
+assert.equal(windowsMinecraftLauncherDriveRoots(env).includes('M:\\'), true);
 assert.deepEqual(windowsMinecraftLauncherDriveRoots({ ...env, AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1' }), []);
 assert.equal(windowsStoreMinecraftPackageDir(env), path.win32.join(env.LOCALAPPDATA, 'Packages', WINDOWS_MINECRAFT_PACKAGE_FAMILY));
 
@@ -332,6 +347,7 @@ console.log(JSON.stringify({
     'desktop-store',
     'root-owned-executable-ignored',
     'xbox-games-launcher',
+    'extra-drive-xbox-games-launcher',
     'non-local-xbox-games-launcher',
     'windows-app-alias-launcher',
     'shortcut-before-windows-app-alias',

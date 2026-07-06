@@ -488,6 +488,28 @@ async function ensureAssetIndexAliases(rootDir = '', minecraftVersion = '', asse
   }
 }
 
+async function readFallbackBaseVersionJson(rootDirs = [], minecraftVersion = '') {
+  for (const rootDir of uniqueLauncherRoots(rootDirs)) {
+    const file = path.join(rootDir, 'versions', minecraftVersion, `${minecraftVersion}.json`);
+    const value = await readRepairableJsonFile(file, null);
+    if (validBaseVersionJson(value, minecraftVersion)) {
+      return { value, file };
+    }
+  }
+  return null;
+}
+
+async function readFallbackAssetIndexJson(rootDirs = [], assetId = '') {
+  for (const rootDir of uniqueLauncherRoots(rootDirs)) {
+    const file = path.join(rootDir, 'assets', 'indexes', `${assetId}.json`);
+    const value = await readRepairableJsonFile(file, null);
+    if (validAssetIndexJson(value)) {
+      return { value, file };
+    }
+  }
+  return null;
+}
+
 function validAssetObjectHash(value = '') {
   return /^[a-f0-9]{40}$/i.test(String(value || '').trim());
 }
@@ -555,19 +577,47 @@ async function repairMinecraftAssetObject({ entry, dest, source, downloadFileImp
   throw new Error(serviceMessage || lastError?.message || String(lastError));
 }
 
+async function copyMinecraftAssetObjectFromRoots({ entry, dest, rootDirs = [], logger }) {
+  const destKey = launcherRootKey(dest);
+  for (const rootDir of uniqueLauncherRoots(rootDirs)) {
+    const candidate = assetObjectPath(rootDir, entry.hash);
+    if (launcherRootKey(candidate) === destKey) {
+      continue;
+    }
+    if (await assetObjectNeedsRepair(candidate, entry, true)) {
+      continue;
+    }
+    await ensureDir(path.dirname(dest));
+    await fs.copyFile(candidate, dest);
+    if (await assetObjectNeedsRepair(dest, entry, true)) {
+      await fs.rm(dest, { force: true }).catch(() => {});
+      continue;
+    }
+    logger?.log?.(`Copied Minecraft asset ${entry.name || entry.hash} from ${rootDir}`);
+    return true;
+  }
+  return false;
+}
+
 async function ensureMinecraftAssetObjects({
   rootDir = '',
   assetIndex = null,
   assetBaseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL,
   downloadFileImpl = downloadToFile,
+  fallbackRootDirs = [],
   verifyAssetHashes = false,
   logger = null
 } = {}) {
   const entries = assetObjectEntries(assetIndex);
   let downloaded = 0;
+  let copied = 0;
   for (const entry of entries) {
     const dest = assetObjectPath(rootDir, entry.hash);
     if (!(await assetObjectNeedsRepair(dest, entry, verifyAssetHashes))) {
+      continue;
+    }
+    if (await copyMinecraftAssetObjectFromRoots({ entry, dest, rootDirs: fallbackRootDirs, logger })) {
+      copied += 1;
       continue;
     }
     const source = assetObjectUrl(entry.hash, assetBaseUrl);
@@ -577,7 +627,8 @@ async function ensureMinecraftAssetObjects({
   }
   return {
     checked: entries.length,
-    downloaded
+    downloaded,
+    copied
   };
 }
 
@@ -604,6 +655,7 @@ async function ensureMinecraftRootAssets({
   downloadFileImpl = downloadToFile,
   assetBaseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL,
   ensureAssetObjects = true,
+  fallbackRootDirs = [],
   verifyAssetHashes = false,
   logger = null
 } = {}) {
@@ -615,8 +667,14 @@ async function ensureMinecraftRootAssets({
   const versionJsonPath = path.join(versionDir, `${minecraftVersion}.json`);
   let versionJson = await readRepairableJsonFile(versionJsonPath, null);
   if (!validBaseVersionJson(versionJson, minecraftVersion)) {
-    logger?.log?.(`Repairing Minecraft ${minecraftVersion} version metadata in ${rootDir}`);
-    versionJson = await fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl, fetchJsonImpl });
+    const fallback = await readFallbackBaseVersionJson(fallbackRootDirs, minecraftVersion);
+    if (fallback) {
+      logger?.log?.(`Copying Minecraft ${minecraftVersion} version metadata from ${fallback.file}`);
+      versionJson = fallback.value;
+    } else {
+      logger?.log?.(`Repairing Minecraft ${minecraftVersion} version metadata in ${rootDir}`);
+      versionJson = await fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl, fetchJsonImpl });
+    }
     await writeJsonFile(versionJsonPath, versionJson);
     actions.push(`wrote ${versionJsonPath}`);
   }
@@ -626,8 +684,14 @@ async function ensureMinecraftRootAssets({
   const assetIndexPath = path.join(rootDir, 'assets', 'indexes', `${assetId}.json`);
   let assetIndex = await readRepairableJsonFile(assetIndexPath, null);
   if (!validAssetIndexJson(assetIndex)) {
-    logger?.log?.(`Repairing Minecraft asset index ${assetId} in ${rootDir}`);
-    assetIndex = await fetchMinecraftJson(assetUrl, fetchJsonImpl);
+    const fallback = await readFallbackAssetIndexJson(fallbackRootDirs, assetId);
+    if (fallback) {
+      logger?.log?.(`Copying Minecraft asset index ${assetId} from ${fallback.file}`);
+      assetIndex = fallback.value;
+    } else {
+      logger?.log?.(`Repairing Minecraft asset index ${assetId} in ${rootDir}`);
+      assetIndex = await fetchMinecraftJson(assetUrl, fetchJsonImpl);
+    }
     if (!validAssetIndexJson(assetIndex)) {
       throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
     }
@@ -641,12 +705,16 @@ async function ensureMinecraftRootAssets({
       assetIndex,
       downloadFileImpl,
       assetBaseUrl,
+      fallbackRootDirs,
       verifyAssetHashes,
       logger
     })
-    : { checked: 0, downloaded: 0 };
+    : { checked: 0, downloaded: 0, copied: 0 };
   if (assetObjects.downloaded > 0) {
     actions.push(`downloaded ${assetObjects.downloaded} Minecraft asset object${assetObjects.downloaded === 1 ? '' : 's'}`);
+  }
+  if (assetObjects.copied > 0) {
+    actions.push(`copied ${assetObjects.copied} Minecraft asset object${assetObjects.copied === 1 ? '' : 's'} from another launcher root`);
   }
 
   return {
@@ -694,6 +762,7 @@ export async function ensureMinecraftLauncherAssets({
       downloadFileImpl,
       assetBaseUrl,
       ensureAssetObjects,
+      fallbackRootDirs: roots.filter((candidate) => launcherRootKey(candidate) !== launcherRootKey(rootDir)),
       verifyAssetHashes,
       logger
     }));
@@ -704,7 +773,8 @@ export async function ensureMinecraftLauncherAssets({
     roots: results,
     assetObjects: {
       checked: results.reduce((total, item) => total + (Number(item.assetObjects?.checked) || 0), 0),
-      downloaded: results.reduce((total, item) => total + (Number(item.assetObjects?.downloaded) || 0), 0)
+      downloaded: results.reduce((total, item) => total + (Number(item.assetObjects?.downloaded) || 0), 0),
+      copied: results.reduce((total, item) => total + (Number(item.assetObjects?.copied) || 0), 0)
     },
     repaired: results.some((item) => item.repaired)
   };

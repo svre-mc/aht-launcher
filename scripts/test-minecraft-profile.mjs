@@ -567,6 +567,43 @@ const legacyAssetIndexPath = path.join(assetRoot, 'assets', 'indexes', 'legacy.j
 if (!JSON.parse(await fs.readFile(legacyAssetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
   throw new Error('Legacy asset index alias was not written for Minecraft 1.12.2.');
 }
+const multiAssetPrimaryRoot = path.join(root, 'asset-multi-primary-root');
+const multiAssetSyncedRoot = path.join(root, 'asset-multi-synced-root');
+const multiAssetDownloadsBefore = fakeAssetDownloads.length;
+const multiAssetRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: multiAssetPrimaryRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: {
+    rootDir: multiAssetPrimaryRoot,
+    syncedProfiles: [
+      { rootDir: multiAssetPrimaryRoot },
+      { rootDir: multiAssetSyncedRoot }
+    ],
+    minecraftVersion: '1.12.2'
+  },
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile,
+  verifyAssetHashes: true
+});
+const multiPrimaryObject = path.join(multiAssetPrimaryRoot, 'assets', 'objects', fakeAssetHash.slice(0, 2), fakeAssetHash);
+const multiSyncedObject = path.join(multiAssetSyncedRoot, 'assets', 'objects', fakeAssetHash.slice(0, 2), fakeAssetHash);
+if (
+  multiAssetRepair.assetObjects.downloaded !== 1
+  || multiAssetRepair.assetObjects.copied !== 1
+  || fakeAssetDownloads.length !== multiAssetDownloadsBefore + 1
+) {
+  throw new Error(`Synced asset roots should share local repaired assets before downloading again: ${JSON.stringify({ multiAssetRepair, fakeAssetDownloads })}`);
+}
+for (const item of [multiPrimaryObject, multiSyncedObject]) {
+  if (createHash('sha1').update(await fs.readFile(item)).digest('hex') !== fakeAssetHash) {
+    throw new Error(`Synced asset object did not match the asset index hash: ${item}`);
+  }
+}
+if (!JSON.parse(await fs.readFile(path.join(multiAssetSyncedRoot, 'assets', 'indexes', 'legacy.json'), 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
+  throw new Error('Synced launcher root did not get the legacy asset index alias.');
+}
 await fs.writeFile(legacyAssetIndexPath, '', 'utf8');
 const legacyAliasRepair = await ensureMinecraftLauncherAssets({
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
