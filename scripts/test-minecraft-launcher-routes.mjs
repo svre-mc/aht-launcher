@@ -5,6 +5,7 @@ import {
   WINDOWS_MINECRAFT_PACKAGE_FAMILY,
   isCurseForgeMinecraftRoot,
   isWindowsMinecraftLauncherExecutablePath,
+  localMinecraftRootCandidates,
   macCurseForgeMinecraftRootCandidates,
   macMinecraftLauncherAppPaths,
   planMacMinecraftLauncherRoutes,
@@ -29,6 +30,9 @@ const defaultRoot = path.win32.join(env.APPDATA, '.minecraft');
 const storeRoot = windowsStoreMinecraftRoot(env);
 const curseForgeRoot = path.win32.join(homePath, 'curseforge', 'minecraft', 'Install');
 const documentsCurseForgeRoot = path.win32.join(documentsPath, 'CurseForge', 'minecraft', 'Install');
+const appDataCurseForgeRoot = path.win32.join(env.APPDATA, 'CurseForge', 'minecraft', 'Install');
+const localAppDataCurseForgeRoot = path.win32.join(env.LOCALAPPDATA, 'CurseForge', 'minecraft', 'Install');
+const curseForgeInstanceDir = path.win32.join(homePath, 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora');
 const desktopLauncher = path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const localDesktopLauncher = path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const xboxGamesLauncher = 'D:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe';
@@ -50,6 +54,7 @@ const macDocumentsPath = '/Users/player/Documents';
 const macDefaultRoot = '/Users/player/Library/Application Support/minecraft';
 const macCurseForgeRoot = '/Users/player/curseforge/minecraft/Install';
 const macLibraryCurseForgeRoot = '/Users/player/Library/Application Support/CurseForge/minecraft/Install';
+const macDocumentsLowerCurseForgeRoot = '/Users/player/Documents/curseforge/minecraft/Install';
 const macLauncherApp = '/Applications/Minecraft Launcher.app';
 
 function existsSet(paths = []) {
@@ -133,6 +138,25 @@ async function macRoutes(existing, options = {}) {
 
 {
   const planned = await routes([
+    appDataCurseForgeRoot,
+    desktopLauncher
+  ], { storeInstalled: true });
+  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop', 'store']);
+  assert.equal(planned[0].rootDir, appDataCurseForgeRoot);
+  assert.deepEqual(planned[0].args, ['--workDir', appDataCurseForgeRoot]);
+}
+
+{
+  const planned = await routes([
+    localAppDataCurseForgeRoot,
+    localDesktopLauncher
+  ], { storeInstalled: false });
+  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop']);
+  assert.equal(planned[0].rootDir, localAppDataCurseForgeRoot);
+}
+
+{
+  const planned = await routes([
     curseForgeRoot,
     defaultRoot,
     xboxGamesLauncher
@@ -182,12 +206,9 @@ async function macRoutes(existing, options = {}) {
     curseForgeRoot,
     windowsAppAliasLauncher
   ], { storeInstalled: true });
-  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop', 'store']);
-  assert.equal(planned[0].command, windowsAppAliasLauncher);
-  assert.equal(planned[0].source, 'windows-app-alias');
-  assert.deepEqual(planned[0].args, ['--workDir', curseForgeRoot]);
-  assert.equal(planned[1].command, windowsAppAliasLauncher);
-  assert.deepEqual(planned[1].args, ['--workDir', defaultRoot]);
+  assert.deepEqual(planned.map((route) => route.kind), ['store']);
+  assert.equal(planned[0].cwd, storeRoot);
+  assert.notEqual(planned[0].command, windowsAppAliasLauncher);
 }
 
 {
@@ -199,17 +220,13 @@ async function macRoutes(existing, options = {}) {
     storeInstalled: true,
     minecraftLauncherPaths: [shortcutMinecraftLauncher]
   });
-  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'curseforge', 'desktop', 'desktop', 'store']);
+  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop', 'store']);
   assert.equal(planned[0].command, shortcutMinecraftLauncher);
   assert.equal(planned[0].source, 'shortcut');
   assert.deepEqual(planned[0].args, ['--workDir', curseForgeRoot]);
-  assert.equal(planned[1].command, windowsAppAliasLauncher);
-  assert.equal(planned[1].source, 'windows-app-alias');
-  assert.deepEqual(planned[1].args, ['--workDir', curseForgeRoot]);
-  assert.equal(planned[2].command, shortcutMinecraftLauncher);
-  assert.deepEqual(planned[2].args, ['--workDir', defaultRoot]);
-  assert.equal(planned[3].command, windowsAppAliasLauncher);
-  assert.deepEqual(planned[3].args, ['--workDir', defaultRoot]);
+  assert.equal(planned[1].command, shortcutMinecraftLauncher);
+  assert.deepEqual(planned[1].args, ['--workDir', defaultRoot]);
+  assert.equal(planned.some((route) => route.command === windowsAppAliasLauncher), false);
 }
 
 {
@@ -308,10 +325,14 @@ async function macRoutes(existing, options = {}) {
 }
 
 assert.equal(isCurseForgeMinecraftRoot('C:\\Users\\Player\\curseforge\\minecraft\\Install'), true);
+assert.equal(isCurseForgeMinecraftRoot('C:\\Users\\Player\\CurseForge\\minecraft\\Install\\'), true);
+assert.equal(isCurseForgeMinecraftRoot('C:\\Users\\Player\\AppData\\Roaming\\CurseForge\\minecraft\\Install'), true);
+assert.equal(isCurseForgeMinecraftRoot(curseForgeInstanceDir), false);
+assert.equal(isCurseForgeMinecraftRoot('C:\\Users\\Player\\curseforge\\minecraft\\Install-old'), false);
 assert.equal(isCurseForgeMinecraftRoot('C:\\Users\\Player\\AppData\\Roaming\\.minecraft'), false);
 assert.equal(isWindowsMinecraftLauncherExecutablePath(desktopLauncher), true);
 assert.equal(isWindowsMinecraftLauncherExecutablePath(xboxGamesLauncher), true);
-assert.equal(isWindowsMinecraftLauncherExecutablePath(windowsAppAliasLauncher), true);
+assert.equal(isWindowsMinecraftLauncherExecutablePath(windowsAppAliasLauncher), false);
 assert.equal(isWindowsMinecraftLauncherExecutablePath(shortcutMinecraftExeLauncher), true);
 assert.equal(isWindowsMinecraftLauncherExecutablePath(shortcutBadMinecraftExe), false);
 assert.equal(isWindowsMinecraftLauncherExecutablePath(path.win32.join(curseForgeRoot, 'minecraft.exe')), false);
@@ -321,6 +342,9 @@ assert.deepEqual(windowsMinecraftLauncherDriveRoots({ ...env, SystemDrive: 'Z:',
 assert.equal(windowsMinecraftLauncherDriveRoots(env).includes('M:\\'), true);
 assert.deepEqual(windowsMinecraftLauncherDriveRoots({ ...env, AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1' }), []);
 assert.equal(windowsStoreMinecraftPackageDir(env), path.win32.join(env.LOCALAPPDATA, 'Packages', WINDOWS_MINECRAFT_PACKAGE_FAMILY));
+const windowsCurseForgeCandidates = localMinecraftRootCandidates({ homePath, documentsPath, env });
+assert.equal(windowsCurseForgeCandidates.includes(appDataCurseForgeRoot), true);
+assert.equal(windowsCurseForgeCandidates.includes(localAppDataCurseForgeRoot), true);
 
 {
   const planned = await macRoutes([
@@ -346,6 +370,17 @@ assert.equal(windowsStoreMinecraftPackageDir(env), path.win32.join(env.LOCALAPPD
 
 {
   const planned = await macRoutes([
+    macDocumentsLowerCurseForgeRoot,
+    macLauncherApp
+  ]);
+  assert.equal(planned[0].kind, 'curseforge');
+  assert.equal(isCurseForgeMinecraftRoot(planned[0].cwd), true);
+  assert.equal(planned[0].cwd.toLowerCase(), macDocumentsLowerCurseForgeRoot.toLowerCase());
+  assert.deepEqual(planned[0].args, [macLauncherApp, '--args', '--workDir', planned[0].cwd]);
+}
+
+{
+  const planned = await macRoutes([
     macCurseForgeRoot
   ]);
   assert.equal(planned[0].kind, 'curseforge-bundle');
@@ -361,6 +396,7 @@ assert.equal(windowsStoreMinecraftPackageDir(env), path.win32.join(env.LOCALAPPD
 }
 
 assert.equal(macCurseForgeMinecraftRootCandidates({ homePath: macHomePath, documentsPath: macDocumentsPath })[0], macCurseForgeRoot);
+assert.equal(macCurseForgeMinecraftRootCandidates({ homePath: macHomePath, documentsPath: macDocumentsPath }).some((candidate) => candidate.toLowerCase() === macDocumentsLowerCurseForgeRoot.toLowerCase()), true);
 assert.equal(macMinecraftLauncherAppPaths({ env: macEnv, homePath: macHomePath })[1], macLauncherApp);
 
 console.log(JSON.stringify({
@@ -369,12 +405,14 @@ console.log(JSON.stringify({
     'curseforge-desktop-store',
     'desktop-store',
     'documents-curseforge-root',
+    'appdata-curseforge-root',
+    'localappdata-curseforge-root',
     'root-owned-executable-ignored',
     'xbox-games-launcher',
     'extra-drive-xbox-games-launcher',
     'non-local-xbox-games-launcher',
-    'windows-app-alias-launcher',
-    'shortcut-before-windows-app-alias',
+    'windows-app-alias-ignored-store',
+    'shortcut-before-ignored-app-alias',
     'store-only',
     'dedupe-curseforge',
     'curseforge-app-ignored-before-store',
@@ -385,6 +423,7 @@ console.log(JSON.stringify({
     'missing-launcher',
     'macos-curseforge-app-path',
     'macos-library-curseforge-root',
+    'macos-documents-lower-curseforge-root',
     'macos-curseforge-bundle-fallback',
     'macos-custom-app'
   ]

@@ -25,6 +25,8 @@ import {
   WINDOWS_MINECRAFT_PACKAGE_FAMILY,
   isCurseForgeMinecraftRoot,
   isWindowsMinecraftLauncherExecutablePath,
+  localMinecraftRootCandidates,
+  macCurseForgeMinecraftRootCandidates,
   macMinecraftLauncherAppPaths,
   planMacMinecraftLauncherRoutes,
   planWindowsMinecraftLauncherRoutes,
@@ -1206,10 +1208,9 @@ function localMinecraftLauncherCandidates() {
 function curseForgeMinecraftRootCandidates() {
   const home = localUserHomePath();
   const documents = localDocumentsPath();
-  return uniquePaths([
-    path.join(home, 'curseforge', 'minecraft', 'Install'),
-    path.join(documents, 'CurseForge', 'minecraft', 'Install')
-  ]);
+  return process.platform === 'darwin'
+    ? macCurseForgeMinecraftRootCandidates({ homePath: home, documentsPath: documents })
+    : localMinecraftRootCandidates({ homePath: home, documentsPath: documents, env: process.env });
 }
 
 async function windowsStoreMinecraftRoot(env = process.env) {
@@ -5988,9 +5989,6 @@ async function spawnWindowsMinecraftLauncherRoute(route, cwd, env) {
     observeExitMs: route.observeExitMs || 0,
     source: route.source || ''
   };
-  if (route.source === 'windows-app-alias') {
-    return spawnWindowsStartRoute(route, cwd, env, options);
-  }
   try {
     return await spawnDetached(route.command, route.args || [], cwd, env, options);
   } catch (error) {

@@ -13,7 +13,7 @@ export const MAC_MINECRAFT_APP_NAMES = [
 
 export function isCurseForgeMinecraftRoot(value = '') {
   const normalized = String(value || '').replaceAll('\\', '/').toLowerCase();
-  return normalized.includes('/curseforge/minecraft/install');
+  return /\/curseforge\/minecraft\/install(?:\/|$)/.test(normalized);
 }
 
 function pathKey(value = '') {
@@ -92,8 +92,7 @@ const WINDOWS_MINECRAFT_LAUNCHER_SOURCE_PRIORITY = {
   'program-files': 20,
   localappdata: 30,
   'xbox-games': 40,
-  shortcut: 50,
-  'windows-app-alias': 90
+  shortcut: 50
 };
 
 function windowsMinecraftLauncherSourcePriority(source = '') {
@@ -121,6 +120,11 @@ export function windowsMinecraftLauncherDriveRoots(env = process.env) {
   ]);
 }
 
+export function isWindowsAppAliasMinecraftLauncherPath(value = '') {
+  const normalized = path.win32.normalize(String(value || '')).toLowerCase();
+  return normalized.endsWith(`${path.win32.sep}microsoft${path.win32.sep}windowsapps${path.win32.sep}minecraftlauncher.exe`);
+}
+
 function windowsMinecraftLauncherKnownCandidates(env = process.env) {
   const xboxGamesCandidates = windowsMinecraftLauncherDriveRoots(env).map((driveRoot) => ({
     path: path.win32.join(driveRoot, 'XboxGames', 'Minecraft Launcher', 'Content', 'Minecraft.exe'),
@@ -130,8 +134,7 @@ function windowsMinecraftLauncherKnownCandidates(env = process.env) {
     env['ProgramFiles(x86)'] ? { path: path.win32.join(env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe'), source: 'program-files-x86' } : null,
     env.ProgramFiles ? { path: path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe'), source: 'program-files' } : null,
     env.LOCALAPPDATA ? { path: path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe'), source: 'localappdata' } : null,
-    ...xboxGamesCandidates,
-    env.LOCALAPPDATA ? { path: path.win32.join(env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'MinecraftLauncher.exe'), source: 'windows-app-alias' } : null
+    ...xboxGamesCandidates
   ].filter((item) => item?.path && isWindowsMinecraftLauncherExecutablePath(item.path));
 }
 
@@ -167,23 +170,35 @@ export function windowsMinecraftLauncherExecutableCandidates(rootDir = '', env =
 
 export function isWindowsMinecraftLauncherExecutablePath(value = '') {
   const normalized = path.win32.normalize(String(value || '')).toLowerCase();
+  if (isWindowsAppAliasMinecraftLauncherPath(normalized)) {
+    return false;
+  }
   const fileName = path.win32.basename(normalized);
   return fileName === 'minecraftlauncher.exe'
     || (fileName === 'minecraft.exe' && normalized.includes(`${path.win32.sep}minecraft launcher${path.win32.sep}`));
 }
 
-export function localMinecraftRootCandidates({ homePath = '', documentsPath = '' } = {}) {
+export function localMinecraftRootCandidates({ homePath = '', documentsPath = '', env = process.env } = {}) {
   return uniquePaths([
     homePath ? path.win32.join(homePath, 'curseforge', 'minecraft', 'Install') : '',
-    documentsPath ? path.win32.join(documentsPath, 'CurseForge', 'minecraft', 'Install') : ''
+    homePath ? path.win32.join(homePath, 'CurseForge', 'minecraft', 'Install') : '',
+    documentsPath ? path.win32.join(documentsPath, 'CurseForge', 'minecraft', 'Install') : '',
+    documentsPath ? path.win32.join(documentsPath, 'curseforge', 'minecraft', 'Install') : '',
+    env.APPDATA ? path.win32.join(env.APPDATA, 'CurseForge', 'minecraft', 'Install') : '',
+    env.APPDATA ? path.win32.join(env.APPDATA, 'curseforge', 'minecraft', 'Install') : '',
+    env.LOCALAPPDATA ? path.win32.join(env.LOCALAPPDATA, 'CurseForge', 'minecraft', 'Install') : '',
+    env.LOCALAPPDATA ? path.win32.join(env.LOCALAPPDATA, 'curseforge', 'minecraft', 'Install') : ''
   ]);
 }
 
 export function macCurseForgeMinecraftRootCandidates({ homePath = '', documentsPath = '' } = {}) {
   return uniquePosixPaths([
     homePath ? path.posix.join(homePath, 'curseforge', 'minecraft', 'Install') : '',
+    homePath ? path.posix.join(homePath, 'CurseForge', 'minecraft', 'Install') : '',
     documentsPath ? path.posix.join(documentsPath, 'CurseForge', 'minecraft', 'Install') : '',
-    homePath ? path.posix.join(homePath, 'Library', 'Application Support', 'CurseForge', 'minecraft', 'Install') : ''
+    documentsPath ? path.posix.join(documentsPath, 'curseforge', 'minecraft', 'Install') : '',
+    homePath ? path.posix.join(homePath, 'Library', 'Application Support', 'CurseForge', 'minecraft', 'Install') : '',
+    homePath ? path.posix.join(homePath, 'Library', 'Application Support', 'curseforge', 'minecraft', 'Install') : ''
   ]);
 }
 
@@ -288,7 +303,7 @@ export async function planWindowsMinecraftLauncherRoutes({
   const profileRoots = uniquePaths([rootDir, ...syncRoots, ...defaultRoots]);
   const routes = [];
   const existingCurseForgeRoots = await existingRoots([
-    ...localMinecraftRootCandidates({ homePath, documentsPath }),
+    ...localMinecraftRootCandidates({ homePath, documentsPath, env }),
     ...profileRoots.filter((item) => isCurseForgeMinecraftRoot(item))
   ], pathExists);
   const existingNonCurseForgeRoots = await existingRoots([

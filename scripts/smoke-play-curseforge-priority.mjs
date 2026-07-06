@@ -9,11 +9,12 @@ import path from 'node:path';
 
 const expectFallback = process.argv.includes('--fallback');
 const expectStoreFallback = process.argv.includes('--store-fallback');
-const expectStartFallback = process.argv.includes('--app-alias-start-fallback');
+const expectStartFallback = process.argv.includes('--desktop-start-retry');
+const expectAppAliasIgnored = process.argv.includes('--app-alias-ignored');
 const expectCustomFallback = process.argv.includes('--custom-fallback');
 const useDesktopMinecraftLauncher = !process.argv.includes('--no-desktop');
 const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
-const defaultPort = expectFallback ? 10976 : expectStoreFallback ? 11076 : expectCustomFallback ? 11176 : 10876;
+const defaultPort = expectFallback ? 10976 : expectStoreFallback ? 11076 : expectCustomFallback ? 11176 : expectStartFallback ? 11276 : expectAppAliasIgnored ? 11376 : 10876;
 const port = Number(portArg || await availablePortPair(defaultPort));
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
@@ -212,7 +213,7 @@ if (useDesktopMinecraftLauncher) {
   await fsp.mkdir(path.dirname(desktopMinecraftLauncher), { recursive: true });
   await fsp.writeFile(desktopMinecraftLauncher, 'desktop launcher placeholder\n', 'utf8');
 }
-if (expectStartFallback) {
+if (expectAppAliasIgnored) {
   await fsp.mkdir(path.dirname(appAliasMinecraftLauncher), { recursive: true });
   await fsp.writeFile(appAliasMinecraftLauncher, 'app alias launcher placeholder\n', 'utf8');
 }
@@ -355,7 +356,7 @@ const child = spawn(electronBin, electronArgs, {
       expectFallback ? 'curseforge' : '',
       expectCustomFallback ? 'custom' : ''
     ].filter(Boolean).join(','),
-    AHT_TEST_SPAWN_DETACHED_FAIL_SOURCES: expectStartFallback ? 'windows-app-alias' : '',
+    AHT_TEST_SPAWN_DETACHED_FAIL_SOURCES: expectStartFallback ? 'program-files-x86' : '',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
     APPDATA: fakeAppData,
@@ -363,7 +364,7 @@ const child = spawn(electronBin, electronArgs, {
     HOME: fakeHome,
     ProgramFiles: fakeProgramFiles,
     'ProgramFiles(x86)': fakeProgramFiles,
-    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: (expectStoreFallback || expectStartFallback) ? '1' : ''
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: (expectStoreFallback || expectAppAliasIgnored) ? '1' : ''
   },
   stdio: 'ignore',
   windowsHide: true
@@ -390,17 +391,17 @@ try {
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
     throw new Error(`Smoke setup should be launch-ready before CurseForge-first Play: ${JSON.stringify(before)}`);
   }
-  const expectedOpenState = expectStoreFallback ? 'store-fallback' : 'preferred';
+  const expectedOpenState = (expectStoreFallback || expectAppAliasIgnored) ? 'store-fallback' : 'preferred';
   if (before.setup?.minecraftLauncherOpenState !== expectedOpenState) {
     throw new Error(`Setup did not report the expected first Minecraft route ${expectedOpenState}: ${JSON.stringify(before.setup)}`);
   }
   if (!Array.isArray(before.setup?.minecraftLauncherRouteKinds) || before.setup.minecraftLauncherRouteKinds[0] !== expectedOpenState) {
     throw new Error(`Setup did not expose the expected safe route summary: ${JSON.stringify(before.setup)}`);
   }
-  if (!expectStoreFallback && (!before.setup.minecraftLauncherHasCurseForgeRoute || before.setup.minecraftLauncherRouteCount < 1)) {
+  if (!expectStoreFallback && !expectAppAliasIgnored && (!before.setup.minecraftLauncherHasCurseForgeRoute || before.setup.minecraftLauncherRouteCount < 1)) {
     throw new Error(`Setup did not report CurseForge route availability: ${JSON.stringify(before.setup)}`);
   }
-  if (expectStoreFallback) {
+  if (expectStoreFallback || expectAppAliasIgnored) {
     if (!before.setup.minecraftLauncherRouteDegraded || before.setup.minecraftLauncherHasCurseForgeRoute) {
       throw new Error(`Store fallback should be degraded and must not expose a CurseForge app route: ${JSON.stringify(before.setup)}`);
     }
@@ -428,11 +429,11 @@ try {
     throw new Error(`Play used a custom launcher command before safe Minecraft Launcher routes: ${JSON.stringify(spawnCaptures)}`);
   }
   if (expectStartFallback) {
-    if (spawnCaptures.some((capture) => capture.source === 'windows-app-alias')) {
-      throw new Error(`App-alias routes should use Windows start directly instead of spawning the alias first: ${JSON.stringify(spawnCaptures)}`);
+    if (spawnCaptures.some((capture) => capture.source === 'windows-app-alias' || path.resolve(String(capture.command || '')) === path.resolve(appAliasMinecraftLauncher))) {
+      throw new Error(`Windows app aliases must not be spawned as Minecraft Launcher routes: ${JSON.stringify(spawnCaptures)}`);
     }
-    if (!spawnCapture || !String(spawnCapture.source || '').endsWith('-start') || !Array.isArray(spawnCapture.args) || !spawnCapture.args.includes('start') || !spawnCapture.args.includes(appAliasMinecraftLauncher)) {
-      throw new Error(`Play did not retry the app-alias Minecraft Launcher through Windows start: ${JSON.stringify(spawnCaptures)}`);
+    if (!spawnCapture || !String(spawnCapture.source || '').endsWith('-start') || !Array.isArray(spawnCapture.args) || !spawnCapture.args.includes('start') || !spawnCapture.args.includes(desktopMinecraftLauncher)) {
+      throw new Error(`Play did not retry the desktop Minecraft Launcher through Windows start: ${JSON.stringify(spawnCaptures)}`);
     }
     if (!spawnCapture.args.includes('--workDir') || !spawnCapture.args.includes(curseForgeRoot)) {
       throw new Error(`Windows start retry did not preserve the CurseForge --workDir handoff: ${JSON.stringify(spawnCapture)}`);
@@ -440,9 +441,12 @@ try {
     if (path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
       throw new Error(`Windows start retry did not run from the CurseForge root cwd: ${JSON.stringify(spawnCapture)}`);
     }
-  } else if (expectStoreFallback) {
+  } else if (expectStoreFallback || expectAppAliasIgnored) {
     if (spawnCaptures.some((capture) => path.resolve(String(capture.command || '')) === path.resolve(curseForgeApp) || capture.kind === 'curseforge-app')) {
       throw new Error(`Play opened CurseForge.exe; AHT must only open Minecraft Launcher routes: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if (spawnCaptures.some((capture) => capture.source === 'windows-app-alias' || path.resolve(String(capture.command || '')) === path.resolve(appAliasMinecraftLauncher))) {
+      throw new Error(`Play opened the fragile WindowsApps MinecraftLauncher.exe alias instead of the Store route: ${JSON.stringify(spawnCaptures)}`);
     }
     if (!spawnCapture || spawnCapture.kind !== 'store') {
       throw new Error(`Play did not use the Store Minecraft Launcher fallback when no desktop Minecraft Launcher exists: ${JSON.stringify(spawnCaptures)}`);
