@@ -391,8 +391,8 @@ try {
   const spawnCaptures = await readJsonLines(spawnCapturePath);
   const spawnCapture = spawnCaptures.at(-1);
   if (expectStartFallback) {
-    if (!spawnCaptures.some((capture) => capture.outcome === 'forced-source-failure' && capture.source === 'windows-app-alias')) {
-      throw new Error(`App-alias direct launch failure was not exercised: ${JSON.stringify(spawnCaptures)}`);
+    if (spawnCaptures.some((capture) => capture.source === 'windows-app-alias')) {
+      throw new Error(`App-alias routes should use Windows start directly instead of spawning the alias first: ${JSON.stringify(spawnCaptures)}`);
     }
     if (!spawnCapture || !String(spawnCapture.source || '').endsWith('-start') || !Array.isArray(spawnCapture.args) || !spawnCapture.args.includes('start') || !spawnCapture.args.includes(appAliasMinecraftLauncher)) {
       throw new Error(`Play did not retry the app-alias Minecraft Launcher through Windows start: ${JSON.stringify(spawnCaptures)}`);

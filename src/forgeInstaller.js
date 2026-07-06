@@ -217,6 +217,23 @@ function certificateFailureMessage(error = null) {
   return /PKIX|certification path|unable to find valid certification path|Failed to validate certificates/i.test(text);
 }
 
+function javaRuntimeLaunchFailureMessage(error = null) {
+  const text = `${error?.message || error || ''}`;
+  return error?.code === 'ENOENT'
+    || /ENOENT|not found|spawn .* ENOENT|Java 8 runtime was not found/i.test(text)
+    || /(?:could not open|no such file or directory|open).*?(?:java-runtime-[a-z0-9-]+|jre-legacy|[\\/]runtime[\\/].*(?:java-runtime|jre|jdk)|Microsoft\.4297127D64EC6_8wekyb3d8bbwe).*?(?:javaw?|jvm)\.cfg/i.test(text);
+}
+
+function managedJavaRetryReason(error = null) {
+  if (certificateFailureMessage(error)) {
+    return 'failed HTTPS certificate validation';
+  }
+  if (javaRuntimeLaunchFailureMessage(error)) {
+    return 'was missing or could not start cleanly';
+  }
+  return '';
+}
+
 export function javaSetupHelpMessage(platform = process.platform) {
   const runtime = platform === 'win32'
     ? 'Eclipse Temurin JDK 8 (HotSpot) x64'
@@ -295,6 +312,8 @@ async function resolveForgeInstallerJavaPath(profile = {}, plan = {}, options = 
 async function runForgeInstallerProcess(plan, options = {}, javaPath = plan.javaPath) {
   plan.javaPath = javaPath;
   options.logger?.log?.(`Running ${plan.javaPath} ${plan.args.map((arg) => arg.includes(' ') ? `"${arg}"` : arg).join(' ')}`);
+  const testRun = await maybeRunForgeInstallerProcessForTest(plan, options, javaPath);
+  if (testRun) return testRun;
   return runProcess(plan.javaPath, plan.args, {
     cwd: plan.rootDir,
     logger: options.logger
@@ -566,6 +585,44 @@ async function maybeInstallForgeLoaderForTest(plan = {}) {
     versionJson
   };
 }
+
+async function writeForgeVersionForTest(plan = {}) {
+  const versionId = plan.versionId || `${plan.minecraftVersion}-forge-${forgeLoaderVersion(plan.loaderId)}`;
+  const versionDir = path.join(plan.rootDir, 'versions', versionId);
+  const versionJson = path.join(versionDir, `${versionId}.json`);
+  await ensureDir(versionDir);
+  await writeJsonFile(versionJson, {
+    id: versionId,
+    type: 'release',
+    inheritsFrom: plan.minecraftVersion,
+    ahtTestForgeInstaller: true
+  });
+  return { versionId, versionJson };
+}
+
+async function maybeRunForgeInstallerProcessForTest(plan = {}, options = {}, javaPath = plan.javaPath) {
+  if (process.env.AHT_TEST_HOOKS !== '1') {
+    return null;
+  }
+  const cacheDir = defaultJavaCacheDir(plan, options);
+  if (
+    process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAIL_ONCE === '1'
+    && process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAILED !== '1'
+    && !isManagedAhtJavaPath(javaPath, cacheDir)
+  ) {
+    process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAILED = '1';
+    const brokenCfg = path.join(path.dirname(path.dirname(javaPath)), 'lib', 'amd64', 'jvm.cfg');
+    throw new Error(`Forge installer exited with code 1: Error: could not open ${brokenCfg}`);
+  }
+  if (process.env.AHT_TEST_FORGE_INSTALLER_RUN_SUCCESS !== '1') {
+    return null;
+  }
+  const { versionId, versionJson } = await writeForgeVersionForTest(plan);
+  return {
+    code: 0,
+    output: `AHT test Forge installer process wrote ${versionId} using ${javaPath}.\nVersion JSON: ${versionJson}`
+  };
+}
 export async function installForgeLoader(profile, options = {}) {
   const plan = buildForgeInstallPlan(profile, options);
   if (profile.loaderInstalled && await pathExists(profile.versionJson)) {
@@ -594,11 +651,12 @@ export async function installForgeLoader(profile, options = {}) {
     result = await runForgeInstallerProcess(plan, options, plan.javaPath);
   } catch (error) {
     const cacheDir = defaultJavaCacheDir(plan, options);
-    if (!certificateFailureMessage(error) || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
+    const retryReason = managedJavaRetryReason(error);
+    if (!retryReason || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
       const friendly = friendlyForgeJavaErrorMessage(error, plan.javaPath);
       throw new Error(friendly || error.message || String(error));
     }
-    options.logger?.log?.('Forge installer Java failed HTTPS certificate validation. Retrying with current Java 8 runtime...');
+    options.logger?.log?.(`Forge installer Java ${retryReason}. Retrying with AHT managed Java 8 runtime...`);
     let managedJava = '';
     try {
       managedJava = await ensureManagedJava8Runtime(plan, { ...options, forceDownloadJava: true });

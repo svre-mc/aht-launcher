@@ -5966,6 +5966,24 @@ function windowsStartArgs(command = '', args = []) {
   return ['/d', '/s', '/c', 'start', '""', command, ...args.map((arg) => String(arg))];
 }
 
+async function spawnWindowsStartRoute(route, cwd, env, options = {}) {
+  const commandPrompt = windowsStartCommand(env);
+  const startArgs = windowsStartArgs(route.command, route.args || []);
+  const fallback = await spawnDetached(commandPrompt, startArgs, cwd, env, {
+    ...options,
+    source: `${route.source || route.kind || 'launcher'}-start`,
+    routeLabel: `${route.label || 'Minecraft Launcher'} via Windows start`
+  });
+  return {
+    ...fallback,
+    command: route.command,
+    args: route.args || [],
+    startFallback: true,
+    fallbackCommand: commandPrompt,
+    fallbackArgs: startArgs
+  };
+}
+
 async function spawnWindowsMinecraftLauncherRoute(route, cwd, env) {
   const options = {
     kind: route.kind,
@@ -5973,27 +5991,16 @@ async function spawnWindowsMinecraftLauncherRoute(route, cwd, env) {
     observeExitMs: route.observeExitMs || 0,
     source: route.source || ''
   };
+  if (route.source === 'windows-app-alias') {
+    return spawnWindowsStartRoute(route, cwd, env, options);
+  }
   try {
     return await spawnDetached(route.command, route.args || [], cwd, env, options);
   } catch (error) {
     if (!shouldRetryWindowsLauncherWithStart(error)) {
       throw error;
     }
-    const commandPrompt = windowsStartCommand(env);
-    const startArgs = windowsStartArgs(route.command, route.args || []);
-    const fallback = await spawnDetached(commandPrompt, startArgs, cwd, env, {
-      ...options,
-      source: `${route.source || route.kind || 'launcher'}-start`,
-      routeLabel: `${route.label || 'Minecraft Launcher'} via Windows start`
-    });
-    return {
-      ...fallback,
-      command: route.command,
-      args: route.args || [],
-      startFallback: true,
-      fallbackCommand: commandPrompt,
-      fallbackArgs: startArgs
-    };
+    return spawnWindowsStartRoute(route, cwd, env, options);
   }
 }
 

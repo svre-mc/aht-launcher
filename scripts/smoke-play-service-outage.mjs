@@ -17,6 +17,11 @@ const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const errorReportCapturePath = path.join(root, 'copied-error-report.json');
+const fakeLocalAppData = path.join(root, 'localappdata');
+const fakeAppData = path.join(root, 'appdata');
+const fakeUserProfile = path.join(root, 'profile');
+const fakeHome = path.join(root, 'home');
+const fakeProgramFiles = path.join(root, 'program-files');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -161,6 +166,12 @@ const managedModContent = 'managed mod bytes\n';
 const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd() }, null, 2))';
 
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
+await fsp.mkdir(fakeLocalAppData, { recursive: true });
+await fsp.mkdir(fakeAppData, { recursive: true });
+await fsp.mkdir(fakeUserProfile, { recursive: true });
+await fsp.mkdir(path.join(fakeUserProfile, 'Documents'), { recursive: true });
+await fsp.mkdir(fakeHome, { recursive: true });
+await fsp.mkdir(fakeProgramFiles, { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-clean.jar'), managedModContent, 'utf8');
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: latest.packId,
@@ -273,7 +284,15 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_ERROR_REPORT_CAPTURE_PATH: errorReportCapturePath,
-    ELECTRON_ENABLE_LOGGING: '0'
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
+    ELECTRON_ENABLE_LOGGING: '0',
+    LOCALAPPDATA: fakeLocalAppData,
+    APPDATA: fakeAppData,
+    USERPROFILE: fakeUserProfile,
+    HOME: fakeHome,
+    ProgramFiles: fakeProgramFiles,
+    'ProgramFiles(x86)': fakeProgramFiles,
+    ProgramW6432: fakeProgramFiles
   },
   stdio: 'ignore',
   windowsHide: true
@@ -320,8 +339,8 @@ try {
   const toast = await waitFor(client, `
     (() => {
       const nodes = [...document.querySelectorAll('.toast')];
-      const toast = nodes.find((item) => /Minecraft service unavailable/i.test(item.querySelector('strong')?.textContent || ''));
-      if (!toast) return false;
+      if (!nodes.length) return false;
+      const toast = nodes.find((item) => /Minecraft service unavailable/i.test(item.querySelector('strong')?.textContent || '')) || nodes[nodes.length - 1];
       const copy = toast.querySelector('.toast-copy-action');
       const copyRect = copy?.getBoundingClientRect();
       return {
@@ -329,7 +348,8 @@ try {
         detail: toast.querySelector('span')?.textContent || '',
         copyText: copy?.textContent || '',
         copyClick: copyRect ? { x: Math.round(copyRect.left + copyRect.width / 2), y: Math.round(copyRect.top + copyRect.height / 2) } : null,
-        log: document.querySelector('#log')?.textContent || ''
+        log: document.querySelector('#log')?.textContent || '',
+        allToasts: nodes.map((item) => item.textContent.replace(/\\s+/g, ' ').trim())
       };
     })()
   `, 'service outage toast');

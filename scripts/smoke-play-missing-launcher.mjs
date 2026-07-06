@@ -16,6 +16,7 @@ const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
 const externalCapturePath = path.join(root, 'external-open.jsonl');
+const errorReportCapturePath = path.join(root, 'copied-error-report.json');
 const fakeLocalAppData = path.join(root, 'localappdata');
 const fakeAppData = path.join(root, 'appdata');
 const fakeUserProfile = path.join(root, 'profile');
@@ -267,6 +268,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_OPEN_EXTERNAL_CAPTURE_PATH: externalCapturePath,
+    AHT_TEST_ERROR_REPORT_CAPTURE_PATH: errorReportCapturePath,
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
     APPDATA: fakeAppData,
@@ -301,20 +304,33 @@ try {
     throw new Error(`Smoke setup should be launch-ready before opening Minecraft Launcher: ${JSON.stringify(before)}`);
   }
 
-  const playResult = await evaluate(client, `
-    window.aht.play()
-      .then((result) => ({ ok: true, result }))
-      .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
-  `);
-  if (playResult.ok) {
-    throw new Error(`Play unexpectedly succeeded without Minecraft Launcher installed: ${JSON.stringify(playResult)}`);
+  await evaluate(client, `document.querySelector('#playButton')?.click(); true`);
+  const toast = await waitFor(client, `
+    (() => {
+      const nodes = [...document.querySelectorAll('.toast')];
+      const toast = nodes.find((item) => /Setup needed/i.test(item.querySelector('strong')?.textContent || ''));
+      if (!toast) return false;
+      const copy = toast.querySelector('.toast-copy-action');
+      return {
+        title: toast.querySelector('strong')?.textContent || '',
+        detail: toast.querySelector('span')?.textContent || '',
+        copyText: copy?.textContent || '',
+        log: document.querySelector('#log')?.textContent || ''
+      };
+    })()
+  `, 'missing Minecraft Launcher setup toast');
+  if (toast.title !== 'Setup needed') {
+    throw new Error(`Missing Minecraft Launcher toast had the wrong title: ${JSON.stringify(toast)}`);
   }
-  const message = String(playResult.message || '');
+  const message = String(toast.detail || '');
   if (!/Minecraft Launcher is not installed|official Minecraft Launcher download page/i.test(message)) {
-    throw new Error(`Missing Minecraft Launcher did not produce setup-focused wording: ${JSON.stringify(playResult)}`);
+    throw new Error(`Missing Minecraft Launcher did not produce setup-focused wording: ${JSON.stringify(toast)}`);
   }
-  if (/ENOENT|spawn\s+.*not found|event/i.test(message)) {
-    throw new Error(`Missing Minecraft Launcher leaked a low-level spawn error: ${JSON.stringify(playResult)}`);
+  if (/ENOENT|spawn\s+.*not found|event|Error invoking remote method/i.test(`${message}\n${toast.log}`)) {
+    throw new Error(`Missing Minecraft Launcher leaked a low-level spawn error: ${JSON.stringify(toast)}`);
+  }
+  if (toast.copyText !== 'Copy full error details') {
+    throw new Error(`Missing Minecraft Launcher toast did not expose clickable diagnostics: ${JSON.stringify(toast)}`);
   }
   const captures = await readJsonLines(externalCapturePath);
   if (!captures.some((entry) => entry.url === 'https://www.minecraft.net/download')) {

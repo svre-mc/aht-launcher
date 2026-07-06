@@ -16,6 +16,7 @@ import {
   findInstalledForgeVersion,
   forgeInstallerUrl,
   friendlyForgeJavaErrorMessage,
+  installForgeLoader,
   javaSetupHelpMessage,
   resolveJavaPath
 } from '../src/forgeInstaller.js';
@@ -332,6 +333,68 @@ await fs.writeFile(explicitJava, 'custom');
 const resolvedExplicitJava = await resolveJavaPath(created, { javaPath: explicitJava, javaRoots: [fakeRuntimeRoot] });
 if (resolvedExplicitJava !== explicitJava) {
   throw new Error(`Expected explicit Java path, got ${resolvedExplicitJava}`);
+}
+
+const forgeRetryRoot = path.join(root, 'forge-runtime-retry-root');
+const brokenRuntimeHome = path.join(forgeRetryRoot, 'runtime', 'java-runtime-gamma');
+const brokenRuntimeJava = path.join(brokenRuntimeHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const managedJavaCacheDir = path.join(forgeRetryRoot, '.aht-launcher', 'java');
+const managedJavaHome = path.join(managedJavaCacheDir, 'temurin-8');
+const managedJava = path.join(managedJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+await fs.mkdir(path.dirname(brokenRuntimeJava), { recursive: true });
+await fs.writeFile(brokenRuntimeJava, 'broken runtime java');
+await fs.writeFile(path.join(brokenRuntimeHome, 'release'), 'JAVA_VERSION="1.8.0_51"\n');
+await fs.mkdir(path.dirname(managedJava), { recursive: true });
+await fs.writeFile(managedJava, 'managed java 8');
+await fs.writeFile(path.join(managedJavaHome, 'release'), 'JAVA_VERSION="1.8.0_452"\n');
+const forgeRetryProfile = {
+  minecraftVersion: '1.12.2',
+  loaderId: 'forge-14.23.5.2860',
+  versionId,
+  rootDir: forgeRetryRoot
+};
+const forgeRetryPlan = buildForgeInstallPlan(forgeRetryProfile, {
+  javaPath: brokenRuntimeJava,
+  installerUrl: 'https://example.test/forge-installer.jar'
+});
+await fs.mkdir(forgeRetryPlan.installerDir, { recursive: true });
+await fs.writeFile(forgeRetryPlan.installerPath, 'fake forge installer');
+const previousForgeHookEnv = new Map([
+  ['AHT_TEST_HOOKS', process.env.AHT_TEST_HOOKS],
+  ['AHT_TEST_FORGE_JAVA_RUNTIME_FAIL_ONCE', process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAIL_ONCE],
+  ['AHT_TEST_FORGE_JAVA_RUNTIME_FAILED', process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAILED],
+  ['AHT_TEST_FORGE_INSTALLER_RUN_SUCCESS', process.env.AHT_TEST_FORGE_INSTALLER_RUN_SUCCESS]
+]);
+try {
+  process.env.AHT_TEST_HOOKS = '1';
+  process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAIL_ONCE = '1';
+  delete process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAILED;
+  process.env.AHT_TEST_FORGE_INSTALLER_RUN_SUCCESS = '1';
+  const retryLog = [];
+  const retryResult = await installForgeLoader(forgeRetryProfile, {
+    javaPath: brokenRuntimeJava,
+    installerUrl: 'https://example.test/forge-installer.jar',
+    javaCacheDir: managedJavaCacheDir,
+    logger: { log: (line) => retryLog.push(String(line)) },
+    versionWaitMs: 1
+  });
+  if (!retryResult.loaderInstalled || retryResult.versionId !== versionId) {
+    throw new Error(`Broken Java retry did not install Forge metadata: ${JSON.stringify(retryResult)}`);
+  }
+  if (!retryLog.some((line) => /could not start cleanly|AHT managed Java 8 runtime/i.test(line))) {
+    throw new Error(`Broken Java retry did not log managed Java fallback: ${retryLog.join('\n')}`);
+  }
+  if (!retryResult.output.includes(managedJava)) {
+    throw new Error(`Broken Java retry did not run the managed Java path: ${retryResult.output}`);
+  }
+} finally {
+  for (const [name, value] of previousForgeHookEnv) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
 }
 const javaHelp = javaSetupHelpMessage('win32');
 if (!javaHelp.includes('Eclipse Temurin JDK 8') || !javaHelp.includes('restart AHT Launcher') || !javaHelp.includes('then try again') || javaHelp.includes('click Update again')) {
