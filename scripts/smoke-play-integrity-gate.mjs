@@ -15,7 +15,12 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
-const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
+const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
+const fakeProgramFiles = path.join(root, 'program-files');
+const fakeLocalAppData = path.join(root, 'localappdata');
+const fakeAppData = path.join(root, 'appdata');
+const fakeUserProfile = path.join(root, 'profile');
+const fakeMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -32,6 +37,12 @@ function sleep(ms) {
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+async function readJsonLines(file) {
+  if (!fs.existsSync(file)) return [];
+  const text = await fsp.readFile(file, 'utf8');
+  return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 function sha256(value) {
@@ -134,7 +145,8 @@ const latest = {
 
 const expectedContent = 'managed=true\n';
 const corruptContent = 'managed=false\n';
-const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
+await fsp.mkdir(path.dirname(fakeMinecraftLauncher), { recursive: true });
+await fsp.writeFile(fakeMinecraftLauncher, 'official Minecraft Launcher placeholder\n', 'utf8');
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
   latestUrl: `${workerEndpoint}/latest.json`,
@@ -157,9 +169,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
-    syncDefaultRoots: false,
-    openCommand: process.execPath,
-    openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
+    syncDefaultRoots: false
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -277,7 +287,21 @@ await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', AHT_APP_DEFAULTS: defaultsPath },
+  env: {
+    ...process.env,
+    ELECTRON_ENABLE_LOGGING: '0',
+    AHT_APP_DEFAULTS: defaultsPath,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
+    ProgramFiles: fakeProgramFiles,
+    'ProgramFiles(x86)': fakeProgramFiles,
+    ProgramW6432: fakeProgramFiles,
+    LOCALAPPDATA: fakeLocalAppData,
+    APPDATA: fakeAppData,
+    USERPROFILE: fakeUserProfile,
+    HOME: fakeUserProfile
+  },
   stdio: 'ignore',
   windowsHide: true
 });
@@ -326,7 +350,7 @@ try {
   }
 
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
-  await fsp.rm(fakeLauncherMarker, { force: true });
+  await fsp.rm(spawnCapturePath, { force: true });
   const cleanPlayResult = await evaluate(client, `
     window.aht.play()
       .then((result) => ({ ok: true, result }))
@@ -335,17 +359,20 @@ try {
   if (!cleanPlayResult.ok || !cleanPlayResult.result?.ok) {
     throw new Error(`Clean install did not open Minecraft Launcher: ${JSON.stringify(cleanPlayResult)}`);
   }
-  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
+  let spawnCaptures = [];
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    spawnCaptures = await readJsonLines(spawnCapturePath);
+    if (spawnCaptures.length) break;
     await sleep(250);
   }
-  if (!fs.existsSync(fakeLauncherMarker)) {
+  if (!spawnCaptures.length) {
     throw new Error('Clean Play returned success, but the Minecraft Launcher command was not spawned.');
   }
-  const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
+  const launcherMarker = spawnCaptures.at(-1);
   if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
   }
-  if (launcherMarker.disableRtss !== '1' || launcherMarker.disableObs !== '1') {
+  if ((launcherMarker.env?.DISABLE_RTSS_LAYER || launcherMarker.disableRtss) !== '1' || (launcherMarker.env?.DISABLE_VULKAN_OBS_CAPTURE || launcherMarker.disableObs) !== '1') {
     throw new Error(`Minecraft Launcher environment hardening was not applied: ${JSON.stringify(launcherMarker)}`);
   }
   const cleanStatus = await evaluate(client, 'window.aht.getStatus()');

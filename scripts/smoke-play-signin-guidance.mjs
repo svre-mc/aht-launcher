@@ -20,7 +20,8 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
-const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
+const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
+const fakeMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -42,6 +43,12 @@ function sha256(value) {
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+async function readJsonLines(file) {
+  if (!fs.existsSync(file)) return [];
+  const text = await fsp.readFile(file, 'utf8');
+  return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 async function waitForTarget() {
@@ -150,7 +157,6 @@ const latest = {
   }
 };
 const managedModContent = 'managed mod bytes\n';
-const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
 
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.mkdir(fakeProgramFiles, { recursive: true });
@@ -178,6 +184,9 @@ await writeJson(
 );
 await writeJson(path.join(mcRoot, 'assets', 'indexes', '1.12.json'), { objects: {} });
 await fsp.mkdir(mcRoot, { recursive: true });
+await fsp.mkdir(path.dirname(fakeMinecraftLauncher), { recursive: true });
+await fsp.writeFile(fakeMinecraftLauncher, 'official Minecraft Launcher placeholder\n', 'utf8');
+
 await writeJson(defaultsPath, {
   packId: latest.packId,
   instanceDir,
@@ -193,9 +202,7 @@ await writeJson(defaultsPath, {
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,
-    autoImportAccount: false,
-    openCommand: process.execPath,
-    openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
+    autoImportAccount: false
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -264,14 +271,17 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
     APPDATA: fakeAppData,
     USERPROFILE: fakeUserProfile,
     HOME: fakeHome,
     ProgramFiles: fakeProgramFiles,
-    'ProgramFiles(x86)': fakeProgramFiles
+    'ProgramFiles(x86)': fakeProgramFiles,
+    ProgramW6432: fakeProgramFiles
   },
   stdio: 'ignore',
   windowsHide: true
@@ -313,18 +323,21 @@ try {
   if (!/Sign in with Microsoft inside Minecraft Launcher/i.test(signInToast.text) || /finish Microsoft sign-in/i.test(signInToast.text)) {
     throw new Error(`Play toast did not use no-account sign-in guidance: ${JSON.stringify(signInToast)}`);
   }
-  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
+  let spawnCaptures = [];
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    spawnCaptures = await readJsonLines(spawnCapturePath);
+    if (spawnCaptures.length) break;
     await sleep(250);
   }
-  if (!fs.existsSync(fakeLauncherMarker)) {
+  if (!spawnCaptures.length) {
     throw new Error('Play returned success, but the Minecraft Launcher command was not spawned for no-account guidance.');
   }
-  const firstLauncherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
+  const firstLauncherMarker = spawnCaptures.at(-1);
   if (path.resolve(firstLauncherMarker.cwd) !== path.resolve(mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd for no-account guidance: ${JSON.stringify(firstLauncherMarker)}`);
   }
 
-  await fsp.rm(fakeLauncherMarker, { force: true });
+  await fsp.rm(spawnCapturePath, { force: true });
   await fsp.writeFile(path.join(mcRoot, 'launcher_msa_credentials.bin'), 'credential-cache-only', 'utf8');
   await evaluate(client, `document.querySelectorAll('.toast').forEach((toast) => toast.remove()); true`);
   const credentialOnly = await waitFor(client, `
@@ -342,13 +355,16 @@ try {
   if (!/finish Microsoft sign-in/i.test(credentialToast.text) || /Sign in with Microsoft inside/i.test(credentialToast.text)) {
     throw new Error(`Play toast did not use credential-only sign-in guidance: ${JSON.stringify(credentialToast)}`);
   }
-  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
+  spawnCaptures = [];
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    spawnCaptures = await readJsonLines(spawnCapturePath);
+    if (spawnCaptures.length) break;
     await sleep(250);
   }
-  if (!fs.existsSync(fakeLauncherMarker)) {
+  if (!spawnCaptures.length) {
     throw new Error('Play returned success, but the Minecraft Launcher command was not spawned for credential-only guidance.');
   }
-  const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
+  const launcherMarker = spawnCaptures.at(-1);
   if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
   }

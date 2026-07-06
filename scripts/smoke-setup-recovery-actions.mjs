@@ -17,10 +17,10 @@ const instanceDir = path.join(root, 'A Hard Time');
 const minecraftRoot = path.join(root, '.minecraft');
 const latestPath = path.join(root, 'latest.json');
 const externalCapturePath = path.join(root, 'external-open.jsonl');
-const fakeOpenScript = path.join(root, 'fake-minecraft-launcher.cjs');
-const fakeOpenMarker = path.join(root, 'fake-minecraft-launcher-opened.json');
+const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
 const fakeLocalAppData = path.join(root, 'localappdata');
 const fakeProgramFiles = path.join(root, 'program-files');
+const fakeMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const fakeProgramData = path.join(root, 'program-data');
 const fakePublic = path.join(root, 'public');
 const fakeAppData = path.join(root, 'appdata');
@@ -131,16 +131,6 @@ async function readJsonLines(file) {
   return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
-async function waitForFile(file, label, attempts = 80) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (fs.existsSync(file)) {
-      return JSON.parse(await fsp.readFile(file, 'utf8'));
-    }
-    await sleep(100);
-  }
-  throw new Error(`Timed out waiting for ${label}: ${file}`);
-}
-
 await fsp.mkdir(instanceDir, { recursive: true });
 await fsp.mkdir(minecraftRoot, { recursive: true });
 await fsp.mkdir(fakeLocalAppData, { recursive: true });
@@ -153,18 +143,6 @@ await fsp.mkdir(path.join(fakeUserProfile, 'Documents'), { recursive: true });
 await fsp.mkdir(fakeHome, { recursive: true });
 await fsp.mkdir(path.join(detectedInstanceDir, 'mods'), { recursive: true });
 await fsp.writeFile(path.join(detectedInstanceDir, 'mods', 'detected-aht-pack.jar'), 'detected-pack', 'utf8');
-await fsp.writeFile(fakeOpenScript, `
-const fs = require('fs');
-const path = require('path');
-const out = process.argv[2];
-fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, JSON.stringify({
-  cwd: process.cwd(),
-  argv: process.argv.slice(2),
-  disableRtss: process.env.DISABLE_RTSS_LAYER || '',
-  disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || ''
-}, null, 2));
-`, 'utf8');
 await writeJson(latestPath, {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time',
@@ -213,6 +191,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_LOCAL_INSTANCE_DIR: detectedInstanceDir,
     AHT_TEST_OPEN_EXTERNAL_CAPTURE_PATH: externalCapturePath,
+    AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
     AHT_TEST_SETUP_JAVA_MODE: 'checked-on-play',
     AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
     ELECTRON_ENABLE_LOGGING: '0',
@@ -324,6 +303,8 @@ try {
 
   await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-setup-smoke.jar'), 'pack-present', 'utf8');
+  await fsp.mkdir(path.dirname(fakeMinecraftLauncher), { recursive: true });
+  await fsp.writeFile(fakeMinecraftLauncher, 'official Minecraft Launcher placeholder\n', 'utf8');
 
   await evaluate(client, `
     (async () => {
@@ -332,9 +313,7 @@ try {
         ...status.config,
         minecraftLauncher: {
           ...status.config.minecraftLauncher,
-          rootDir: ${JSON.stringify(minecraftRoot)},
-          openCommand: ${JSON.stringify(process.execPath)},
-          openArgs: [${JSON.stringify(fakeOpenScript)}, ${JSON.stringify(fakeOpenMarker)}]
+          rootDir: ${JSON.stringify(minecraftRoot)}
         }
       });
       window.location.reload();
@@ -364,8 +343,17 @@ try {
   }
 
   await evaluate(client, `document.querySelector('#setupOpenMinecraftButton')?.click(); true`);
-  const fakeOpen = await waitForFile(fakeOpenMarker, 'fake Minecraft Launcher open');
-  if (fakeOpen.disableRtss !== '1' || fakeOpen.disableObs !== '1') {
+  let spawnCaptures = [];
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    spawnCaptures = await readJsonLines(spawnCapturePath);
+    if (spawnCaptures.length) break;
+    await sleep(100);
+  }
+  if (!spawnCaptures.length) {
+    throw new Error('Setup Open Minecraft returned success, but the Minecraft Launcher route was not spawned.');
+  }
+  const fakeOpen = spawnCaptures.at(-1);
+  if ((fakeOpen.env?.DISABLE_RTSS_LAYER || fakeOpen.disableRtss) !== '1' || (fakeOpen.env?.DISABLE_VULKAN_OBS_CAPTURE || fakeOpen.disableObs) !== '1') {
     throw new Error(`Minecraft Launcher setup action did not use the protected launch env: ${JSON.stringify(fakeOpen)}`);
   }
 

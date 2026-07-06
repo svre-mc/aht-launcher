@@ -15,12 +15,13 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
-const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
+const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
 const errorReportCapturePath = path.join(root, 'copied-error-report.json');
 const missingJavaPath = path.join(root, 'missing-java', process.platform === 'win32' ? 'java.exe' : 'java');
 const fakeLocalAppData = path.join(root, 'localappdata');
 const fakeAppData = path.join(root, 'appdata');
 const fakeProgramFiles = path.join(root, 'program-files');
+const fakeMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const fakeProgramData = path.join(root, 'program-data');
 const fakeUserProfile = path.join(root, 'profile');
 const fakeHome = path.join(root, 'home');
@@ -46,6 +47,12 @@ function sha256(value) {
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+async function readJsonLines(file) {
+  if (!fs.existsSync(file)) return [];
+  const text = await fsp.readFile(file, 'utf8');
+  return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 async function waitForTarget() {
@@ -164,12 +171,13 @@ const latest = {
   }
 };
 const managedModContent = 'managed mod bytes\n';
-const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd() }, null, 2))';
 
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.mkdir(fakeLocalAppData, { recursive: true });
 await fsp.mkdir(fakeAppData, { recursive: true });
 await fsp.mkdir(fakeProgramFiles, { recursive: true });
+await fsp.mkdir(path.dirname(fakeMinecraftLauncher), { recursive: true });
+await fsp.writeFile(fakeMinecraftLauncher, 'official Minecraft Launcher placeholder\n', 'utf8');
 await fsp.mkdir(fakeProgramData, { recursive: true });
 await fsp.mkdir(fakeUserProfile, { recursive: true });
 await fsp.mkdir(path.join(fakeUserProfile, 'Documents'), { recursive: true });
@@ -210,9 +218,7 @@ await writeJson(defaultsPath, {
     memoryMb: 4096,
     javaPath: missingJavaPath,
     syncDefaultRoots: false,
-    autoImportAccount: false,
-    openCommand: process.execPath,
-    openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
+    autoImportAccount: false
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -300,6 +306,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_ERROR_REPORT_CAPTURE_PATH: errorReportCapturePath,
+    AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
     AHT_JAVA8_DOWNLOAD_URL: `${workerEndpoint}/java8.zip`,
     AHT_JAVA_HOME: '',
     JAVA8_HOME: '',
@@ -390,8 +398,9 @@ try {
   ) {
     throw new Error(`Copied Java setup report did not contain clean renderer text plus detailed main error: ${JSON.stringify(report, null, 2)}`);
   }
-  if (fs.existsSync(fakeLauncherMarker)) {
-    throw new Error('Minecraft Launcher was opened even though Forge Java setup failed.');
+  const spawnCaptures = await readJsonLines(spawnCapturePath);
+  if (spawnCaptures.length) {
+    throw new Error(`Minecraft Launcher was opened even though Forge Java setup failed: ${JSON.stringify(spawnCaptures)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
