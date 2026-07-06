@@ -698,15 +698,99 @@ const fakeAssetUrl = 'https://example.invalid/1.12.json';
 const fakeAssetBytes = Buffer.from('aht asset object\n');
 const fakeAssetHash = createHash('sha1').update(fakeAssetBytes).digest('hex');
 const fakeAssetObjectPath = path.join(assetRoot, 'assets', 'objects', fakeAssetHash.slice(0, 2), fakeAssetHash);
+const minecraftLibraryOsName = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux';
+const minecraftLibraryArch = /64/.test(process.arch) ? '64' : '32';
+const fakeLibraryBytes = Buffer.from('aht minecraft library jar\n');
+const fakeNativeBytes = Buffer.from('aht minecraft native jar\n');
+const fakeClientJarBytes = Buffer.from('aht minecraft client jar\n');
+const fakeLogConfigBytes = Buffer.from('<Configuration>aht log config</Configuration>\n');
+const fakeLibraryHash = createHash('sha1').update(fakeLibraryBytes).digest('hex');
+const fakeNativeHash = createHash('sha1').update(fakeNativeBytes).digest('hex');
+const fakeClientJarHash = createHash('sha1').update(fakeClientJarBytes).digest('hex');
+const fakeLogConfigHash = createHash('sha1').update(fakeLogConfigBytes).digest('hex');
+const fakeLibraryRelPath = 'com/example/base-lib/1.0.0/base-lib-1.0.0.jar';
+const fakeNativeClassifier = `natives-${minecraftLibraryOsName}-${minecraftLibraryArch}`;
+const fakeNativeRelPath = `com/example/native-lib/1.0.0/native-lib-1.0.0-${fakeNativeClassifier}.jar`;
+const fakeLibraryUrl = 'https://libraries.example.invalid/base-lib-1.0.0.jar';
+const fakeNativeUrl = 'https://libraries.example.invalid/native-lib-1.0.0-native.jar';
+const fakeClientJarUrl = 'https://piston-data.example.invalid/client.jar';
+const fakeLogConfigUrl = 'https://piston-data.example.invalid/client-1.12.xml';
+const fakeLibraryPath = path.join(assetRoot, 'libraries', fakeLibraryRelPath);
+const fakeNativePath = path.join(assetRoot, 'libraries', fakeNativeRelPath);
+const fakeClientJarPath = path.join(assetRoot, 'versions', '1.12.2', '1.12.2.jar');
+const fakeLogConfigPath = path.join(assetRoot, 'assets', 'log_configs', 'client-1.12.xml');
 const fakeFetches = [];
 const fakeAssetDownloads = [];
+const fakeLibraryDownloads = [];
+const fakeRuntimeDownloads = [];
 const fakeFetchJson = async (url) => {
   fakeFetches.push(String(url));
   if (url === fakeManifestUrl) {
     return { versions: [{ id: '1.12.2', url: fakeVersionUrl }] };
   }
   if (url === fakeVersionUrl) {
-    return { id: '1.12.2', assetIndex: { id: '1.12', url: fakeAssetUrl } };
+    return {
+      id: '1.12.2',
+      assetIndex: { id: '1.12', url: fakeAssetUrl },
+      downloads: {
+        client: {
+          sha1: fakeClientJarHash,
+          size: fakeClientJarBytes.length,
+          url: fakeClientJarUrl
+        }
+      },
+      logging: {
+        client: {
+          argument: '-Dlog4j.configurationFile=${path}',
+          file: {
+            id: 'client-1.12.xml',
+            sha1: fakeLogConfigHash,
+            size: fakeLogConfigBytes.length,
+            url: fakeLogConfigUrl
+          },
+          type: 'log4j2-xml'
+        }
+      },
+      libraries: [
+        {
+          name: 'com.example:base-lib:1.0.0',
+          downloads: {
+            artifact: {
+              path: fakeLibraryRelPath,
+              url: fakeLibraryUrl,
+              sha1: fakeLibraryHash,
+              size: fakeLibraryBytes.length
+            }
+          }
+        },
+        {
+          name: 'com.example:native-lib:1.0.0',
+          natives: { [minecraftLibraryOsName]: `natives-${minecraftLibraryOsName}-${'${arch}'}` },
+          downloads: {
+            classifiers: {
+              [fakeNativeClassifier]: {
+                path: fakeNativeRelPath,
+                url: fakeNativeUrl,
+                sha1: fakeNativeHash,
+                size: fakeNativeBytes.length
+              }
+            }
+          }
+        },
+        {
+          name: 'com.example:blocked-lib:1.0.0',
+          rules: [{ action: 'allow', os: { name: 'not-this-os' } }],
+          downloads: {
+            artifact: {
+              path: 'com/example/blocked-lib/1.0.0/blocked-lib-1.0.0.jar',
+              url: 'https://libraries.example.invalid/blocked-lib.jar',
+              sha1: fakeLibraryHash,
+              size: fakeLibraryBytes.length
+            }
+          }
+        }
+      ]
+    };
   }
   if (url === fakeAssetUrl) {
     return { objects: { 'minecraft/lang/en_us.lang': { hash: fakeAssetHash, size: fakeAssetBytes.length } } };
@@ -714,8 +798,28 @@ const fakeFetchJson = async (url) => {
   throw new Error(`Unexpected fake fetch ${url}`);
 };
 const fakeDownloadFile = async (source, dest) => {
-  fakeAssetDownloads.push({ source, dest });
   await fs.mkdir(path.dirname(dest), { recursive: true });
+  if (source === fakeLibraryUrl) {
+    fakeLibraryDownloads.push({ source, dest });
+    await fs.writeFile(dest, fakeLibraryBytes);
+    return;
+  }
+  if (source === fakeNativeUrl) {
+    fakeLibraryDownloads.push({ source, dest });
+    await fs.writeFile(dest, fakeNativeBytes);
+    return;
+  }
+  if (source === fakeClientJarUrl) {
+    fakeRuntimeDownloads.push({ source, dest });
+    await fs.writeFile(dest, fakeClientJarBytes);
+    return;
+  }
+  if (source === fakeLogConfigUrl) {
+    fakeRuntimeDownloads.push({ source, dest });
+    await fs.writeFile(dest, fakeLogConfigBytes);
+    return;
+  }
+  fakeAssetDownloads.push({ source, dest });
   await fs.writeFile(dest, fakeAssetBytes);
 };
 const assetProfile = { rootDir: assetRoot, syncedProfiles: [{ rootDir: assetRoot }], minecraftVersion: '1.12.2' };
@@ -734,8 +838,26 @@ if (!firstAssetRepair.ok || !firstAssetRepair.repaired) {
 if (firstAssetRepair.assetObjects.downloaded !== 1 || fakeAssetDownloads.length !== 1) {
   throw new Error(`Missing Minecraft asset object was not downloaded: ${JSON.stringify({ firstAssetRepair, fakeAssetDownloads })}`);
 }
+if (firstAssetRepair.libraries.downloaded !== 2 || fakeLibraryDownloads.length !== 2) {
+  throw new Error(`Missing Minecraft libraries were not downloaded: ${JSON.stringify({ firstAssetRepair, fakeLibraryDownloads })}`);
+}
+if (firstAssetRepair.runtimeArtifacts.downloaded !== 2 || fakeRuntimeDownloads.length !== 2) {
+  throw new Error(`Missing Minecraft runtime artifacts were not downloaded: ${JSON.stringify({ firstAssetRepair, fakeRuntimeDownloads })}`);
+}
 if (createHash('sha1').update(await fs.readFile(fakeAssetObjectPath)).digest('hex') !== fakeAssetHash) {
   throw new Error('Downloaded Minecraft asset object did not match the asset index hash.');
+}
+if (createHash('sha1').update(await fs.readFile(fakeLibraryPath)).digest('hex') !== fakeLibraryHash) {
+  throw new Error('Downloaded Minecraft base library did not match the version metadata hash.');
+}
+if (createHash('sha1').update(await fs.readFile(fakeNativePath)).digest('hex') !== fakeNativeHash) {
+  throw new Error('Downloaded Minecraft native library did not match the version metadata hash.');
+}
+if (createHash('sha1').update(await fs.readFile(fakeClientJarPath)).digest('hex') !== fakeClientJarHash) {
+  throw new Error('Downloaded Minecraft client jar did not match the version metadata hash.');
+}
+if (createHash('sha1').update(await fs.readFile(fakeLogConfigPath)).digest('hex') !== fakeLogConfigHash) {
+  throw new Error('Downloaded Minecraft logging config did not match the version metadata hash.');
 }
 const assetIndexPath = path.join(assetRoot, 'assets', 'indexes', '1.12.json');
 if (!JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
@@ -748,6 +870,8 @@ if (!JSON.parse(await fs.readFile(legacyAssetIndexPath, 'utf8')).objects?.['mine
 const multiAssetPrimaryRoot = path.join(root, 'asset-multi-primary-root');
 const multiAssetSyncedRoot = path.join(root, 'asset-multi-synced-root');
 const multiAssetDownloadsBefore = fakeAssetDownloads.length;
+const multiLibraryDownloadsBefore = fakeLibraryDownloads.length;
+const multiRuntimeDownloadsBefore = fakeRuntimeDownloads.length;
 const multiAssetRepair = await ensureMinecraftLauncherAssets({
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: multiAssetPrimaryRoot, syncDefaultRoots: false } },
   latest,
@@ -770,13 +894,37 @@ const multiSyncedObject = path.join(multiAssetSyncedRoot, 'assets', 'objects', f
 if (
   multiAssetRepair.assetObjects.downloaded !== 1
   || multiAssetRepair.assetObjects.copied !== 1
+  || multiAssetRepair.libraries.downloaded !== 2
+  || multiAssetRepair.libraries.copied !== 2
+  || multiAssetRepair.runtimeArtifacts.downloaded !== 2
+  || multiAssetRepair.runtimeArtifacts.copied !== 2
   || fakeAssetDownloads.length !== multiAssetDownloadsBefore + 1
+  || fakeLibraryDownloads.length !== multiLibraryDownloadsBefore + 2
+  || fakeRuntimeDownloads.length !== multiRuntimeDownloadsBefore + 2
 ) {
-  throw new Error(`Synced asset roots should share local repaired assets before downloading again: ${JSON.stringify({ multiAssetRepair, fakeAssetDownloads })}`);
+  throw new Error(`Synced asset roots should share local repaired assets, libraries, and runtime files before downloading again: ${JSON.stringify({ multiAssetRepair, fakeAssetDownloads, fakeLibraryDownloads, fakeRuntimeDownloads })}`);
 }
 for (const item of [multiPrimaryObject, multiSyncedObject]) {
   if (createHash('sha1').update(await fs.readFile(item)).digest('hex') !== fakeAssetHash) {
     throw new Error(`Synced asset object did not match the asset index hash: ${item}`);
+  }
+}
+for (const rootDir of [multiAssetPrimaryRoot, multiAssetSyncedRoot]) {
+  const libraryFile = path.join(rootDir, 'libraries', fakeLibraryRelPath);
+  const nativeFile = path.join(rootDir, 'libraries', fakeNativeRelPath);
+  if (createHash('sha1').update(await fs.readFile(libraryFile)).digest('hex') !== fakeLibraryHash) {
+    throw new Error(`Synced base library did not match version metadata hash: ${libraryFile}`);
+  }
+  if (createHash('sha1').update(await fs.readFile(nativeFile)).digest('hex') !== fakeNativeHash) {
+    throw new Error(`Synced native library did not match version metadata hash: ${nativeFile}`);
+  }
+  const clientJarFile = path.join(rootDir, 'versions', '1.12.2', '1.12.2.jar');
+  const logConfigFile = path.join(rootDir, 'assets', 'log_configs', 'client-1.12.xml');
+  if (createHash('sha1').update(await fs.readFile(clientJarFile)).digest('hex') !== fakeClientJarHash) {
+    throw new Error(`Synced client jar did not match version metadata hash: ${clientJarFile}`);
+  }
+  if (createHash('sha1').update(await fs.readFile(logConfigFile)).digest('hex') !== fakeLogConfigHash) {
+    throw new Error(`Synced logging config did not match version metadata hash: ${logConfigFile}`);
   }
 }
 if (!JSON.parse(await fs.readFile(path.join(multiAssetSyncedRoot, 'assets', 'indexes', 'legacy.json'), 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
@@ -822,6 +970,46 @@ const corruptObjectRepair = await ensureMinecraftLauncherAssets({
 if (!corruptObjectRepair.repaired || corruptObjectRepair.assetObjects.downloaded !== 1 || fakeAssetDownloads.length !== downloadsBeforeCorruptObjectRepair + 1) {
   throw new Error(`Corrupt Minecraft asset object was not repaired: ${JSON.stringify({ corruptObjectRepair, fakeAssetDownloads })}`);
 }
+await fs.writeFile(fakeLibraryPath, Buffer.from('bad minecraft library bytes\n'));
+const downloadsBeforeCorruptLibraryRepair = fakeLibraryDownloads.length;
+const corruptLibraryRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: assetProfile,
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile,
+  verifyAssetHashes: true
+});
+if (
+  !corruptLibraryRepair.repaired
+  || corruptLibraryRepair.libraries.downloaded !== 1
+  || fakeLibraryDownloads.length !== downloadsBeforeCorruptLibraryRepair + 1
+  || createHash('sha1').update(await fs.readFile(fakeLibraryPath)).digest('hex') !== fakeLibraryHash
+) {
+  throw new Error(`Corrupt Minecraft library was not repaired: ${JSON.stringify({ corruptLibraryRepair, fakeLibraryDownloads })}`);
+}
+await fs.writeFile(fakeClientJarPath, Buffer.from('bad minecraft client jar bytes\n'));
+const downloadsBeforeCorruptRuntimeRepair = fakeRuntimeDownloads.length;
+const corruptRuntimeRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: assetProfile,
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile,
+  verifyAssetHashes: true
+});
+if (
+  !corruptRuntimeRepair.repaired
+  || corruptRuntimeRepair.runtimeArtifacts.downloaded !== 1
+  || fakeRuntimeDownloads.length !== downloadsBeforeCorruptRuntimeRepair + 1
+  || createHash('sha1').update(await fs.readFile(fakeClientJarPath)).digest('hex') !== fakeClientJarHash
+) {
+  throw new Error(`Corrupt Minecraft runtime artifact was not repaired: ${JSON.stringify({ corruptRuntimeRepair, fakeRuntimeDownloads })}`);
+}
 const assetBackupDir = path.join(assetRoot, 'assets', 'indexes');
 const assetBackups = (await fs.readdir(assetBackupDir)).filter((name) => name.includes('1.12.json.aht-corrupt-'));
 if (!assetBackups.length) {
@@ -833,10 +1021,12 @@ const flakyAssetRepair = await ensureMinecraftLauncherAssets({
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: flakyAssetRoot, syncDefaultRoots: false } },
   latest,
   installed: null,
-  profile: { rootDir: flakyAssetRoot, syncedProfiles: [{ rootDir: flakyAssetRoot }], minecraftVersion: '1.12.2' },
-  manifestUrl: fakeManifestUrl,
-  fetchJsonImpl: fakeFetchJson,
-  downloadFileImpl: async (source, dest) => {
+    profile: { rootDir: flakyAssetRoot, syncedProfiles: [{ rootDir: flakyAssetRoot }], minecraftVersion: '1.12.2' },
+    manifestUrl: fakeManifestUrl,
+    fetchJsonImpl: fakeFetchJson,
+    ensureLibraries: false,
+    ensureRuntimeArtifacts: false,
+    downloadFileImpl: async (source, dest) => {
     flakyDownloadAttempts += 1;
     await fs.mkdir(path.dirname(dest), { recursive: true });
     await fs.writeFile(dest, flakyDownloadAttempts === 1 ? Buffer.from('bad asset bytes\n') : fakeAssetBytes);
@@ -856,6 +1046,8 @@ try {
     profile: { rootDir: badAssetRoot, syncedProfiles: [{ rootDir: badAssetRoot }], minecraftVersion: '1.12.2' },
     manifestUrl: fakeManifestUrl,
     fetchJsonImpl: fakeFetchJson,
+    ensureLibraries: false,
+    ensureRuntimeArtifacts: false,
     downloadFileImpl: async (_source, dest) => {
       await fs.mkdir(path.dirname(dest), { recursive: true });
       await fs.writeFile(dest, Buffer.from('always bad asset bytes\n'));
@@ -866,6 +1058,53 @@ try {
 }
 if (!badAssetMessage.includes('Minecraft services') || badAssetMessage.includes('Mojang metadata after download') || badAssetMessage.includes('minecraft/lang/en_us.lang')) {
   throw new Error(`Repeated Minecraft asset hash failures should produce a clean service message: ${badAssetMessage}`);
+}
+const badLibraryRoot = path.join(root, 'library-bad-root');
+let badLibraryMessage = '';
+try {
+  await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: badLibraryRoot, syncDefaultRoots: false } },
+    latest,
+    installed: null,
+    profile: { rootDir: badLibraryRoot, syncedProfiles: [{ rootDir: badLibraryRoot }], minecraftVersion: '1.12.2' },
+    manifestUrl: fakeManifestUrl,
+    fetchJsonImpl: fakeFetchJson,
+    ensureAssetObjects: false,
+    downloadFileImpl: async (_source, dest) => {
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, Buffer.from('always bad library bytes\n'));
+    },
+    verifyAssetHashes: true
+  });
+} catch (error) {
+  badLibraryMessage = error.message;
+}
+if (!badLibraryMessage.includes('Minecraft services') || badLibraryMessage.includes('Mojang metadata after download') || badLibraryMessage.includes('base-lib')) {
+  throw new Error(`Repeated Minecraft library hash failures should produce a clean service message: ${badLibraryMessage}`);
+}
+const badRuntimeRoot = path.join(root, 'runtime-bad-root');
+let badRuntimeMessage = '';
+try {
+  await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: badRuntimeRoot, syncDefaultRoots: false } },
+    latest,
+    installed: null,
+    profile: { rootDir: badRuntimeRoot, syncedProfiles: [{ rootDir: badRuntimeRoot }], minecraftVersion: '1.12.2' },
+    manifestUrl: fakeManifestUrl,
+    fetchJsonImpl: fakeFetchJson,
+    ensureAssetObjects: false,
+    ensureLibraries: false,
+    downloadFileImpl: async (_source, dest) => {
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, Buffer.from('always bad runtime bytes\n'));
+    },
+    verifyAssetHashes: true
+  });
+} catch (error) {
+  badRuntimeMessage = error.message;
+}
+if (!badRuntimeMessage.includes('Minecraft services') || badRuntimeMessage.includes('Mojang metadata after download') || badRuntimeMessage.includes('client jar') || badRuntimeMessage.includes('1.12.2.jar')) {
+  throw new Error(`Repeated Minecraft runtime hash failures should produce a clean service message: ${badRuntimeMessage}`);
 }
 const outageAssetRoot = path.join(root, 'asset-outage-root');
 let assetOutageMessage = '';

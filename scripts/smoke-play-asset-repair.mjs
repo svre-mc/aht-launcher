@@ -181,7 +181,26 @@ const assetBytes = Buffer.from('aht launcher repaired asset\n');
 const assetHash = sha1(assetBytes);
 const assetObjectPath = path.join(mcRoot, 'assets', 'objects', assetHash.slice(0, 2), assetHash);
 const assetIndexPath = path.join(mcRoot, 'assets', 'indexes', '1.12.json');
+const minecraftLibraryOsName = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux';
+const minecraftLibraryArch = /64/.test(process.arch) ? '64' : '32';
+const libraryBytes = Buffer.from('aht launcher repaired minecraft library\n');
+const nativeBytes = Buffer.from('aht launcher repaired minecraft native\n');
+const clientJarBytes = Buffer.from('aht launcher repaired minecraft client jar\n');
+const logConfigBytes = Buffer.from('<Configuration>aht launcher log config</Configuration>\n');
+const libraryHash = sha1(libraryBytes);
+const nativeHash = sha1(nativeBytes);
+const clientJarHash = sha1(clientJarBytes);
+const logConfigHash = sha1(logConfigBytes);
+const libraryRelPath = 'com/example/base-lib/1.0.0/base-lib-1.0.0.jar';
+const nativeClassifier = `natives-${minecraftLibraryOsName}-${minecraftLibraryArch}`;
+const nativeRelPath = `com/example/native-lib/1.0.0/native-lib-1.0.0-${nativeClassifier}.jar`;
+const libraryPath = path.join(mcRoot, 'libraries', libraryRelPath);
+const nativePath = path.join(mcRoot, 'libraries', nativeRelPath);
+const clientJarPath = path.join(mcRoot, 'versions', '1.12.2', '1.12.2.jar');
+const logConfigPath = path.join(mcRoot, 'assets', 'log_configs', 'client-1.12.xml');
 const assetRequests = [];
+const libraryRequests = [];
+const runtimeRequests = [];
 let assetObjectRequestCount = 0;
 
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
@@ -204,7 +223,56 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), forgeVersionMetadata());
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
-  { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
+  {
+    id: '1.12.2',
+    assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` },
+    downloads: {
+      client: {
+        sha1: clientJarHash,
+        size: clientJarBytes.length,
+        url: `${workerEndpoint}/runtime/client.jar`
+      }
+    },
+    logging: {
+      client: {
+        argument: '-Dlog4j.configurationFile=${path}',
+        file: {
+          id: 'client-1.12.xml',
+          sha1: logConfigHash,
+          size: logConfigBytes.length,
+          url: `${workerEndpoint}/runtime/client-1.12.xml`
+        },
+        type: 'log4j2-xml'
+      }
+    },
+    libraries: [
+      {
+        name: 'com.example:base-lib:1.0.0',
+        downloads: {
+          artifact: {
+            path: libraryRelPath,
+            url: `${workerEndpoint}/libraries/base-lib-1.0.0.jar`,
+            sha1: libraryHash,
+            size: libraryBytes.length
+          }
+        }
+      },
+      {
+        name: 'com.example:native-lib:1.0.0',
+        natives: { [minecraftLibraryOsName]: `natives-${minecraftLibraryOsName}-${'${arch}'}` },
+        downloads: {
+          classifiers: {
+            [nativeClassifier]: {
+              path: nativeRelPath,
+              url: `${workerEndpoint}/libraries/native-lib-1.0.0-native.jar`,
+              sha1: nativeHash,
+              size: nativeBytes.length
+            }
+          }
+        }
+      }
+    ]
+  }
 );
 await fsp.mkdir(path.dirname(assetIndexPath), { recursive: true });
 await fsp.writeFile(assetIndexPath, '', 'utf8');
@@ -252,6 +320,38 @@ const server = http.createServer((request, response) => {
     response.setHeader('Content-Type', 'application/octet-stream');
     response.setHeader('Content-Length', String(body.length));
     response.end(body);
+    return;
+  }
+  if (url.pathname === '/libraries/base-lib-1.0.0.jar') {
+    libraryRequests.push(url.pathname);
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/java-archive');
+    response.setHeader('Content-Length', String(libraryBytes.length));
+    response.end(libraryBytes);
+    return;
+  }
+  if (url.pathname === '/libraries/native-lib-1.0.0-native.jar') {
+    libraryRequests.push(url.pathname);
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/java-archive');
+    response.setHeader('Content-Length', String(nativeBytes.length));
+    response.end(nativeBytes);
+    return;
+  }
+  if (url.pathname === '/runtime/client.jar') {
+    runtimeRequests.push(url.pathname);
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/java-archive');
+    response.setHeader('Content-Length', String(clientJarBytes.length));
+    response.end(clientJarBytes);
+    return;
+  }
+  if (url.pathname === '/runtime/client-1.12.xml') {
+    runtimeRequests.push(url.pathname);
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/xml');
+    response.setHeader('Content-Length', String(logConfigBytes.length));
+    response.end(logConfigBytes);
     return;
   }
   if (url.pathname === '/api/users/register') {
@@ -390,6 +490,24 @@ try {
   if (repairedAssetHash !== assetHash || assetObjectRequestCount !== 2 || !assetRequests.includes(`/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`)) {
     throw new Error(`Play did not fully repair and verify the Minecraft asset object before launch: ${JSON.stringify({ assetRequests, assetObjectRequestCount, repairedAssetHash, expected: assetHash })}`);
   }
+  if (!fs.existsSync(libraryPath) || sha1(fs.readFileSync(libraryPath)) !== libraryHash) {
+    throw new Error(`Play did not repair the base Minecraft library before opening Minecraft Launcher: ${libraryPath}`);
+  }
+  if (!fs.existsSync(nativePath) || sha1(fs.readFileSync(nativePath)) !== nativeHash) {
+    throw new Error(`Play did not repair the Minecraft native library before opening Minecraft Launcher: ${nativePath}`);
+  }
+  if (!fs.existsSync(clientJarPath) || sha1(fs.readFileSync(clientJarPath)) !== clientJarHash) {
+    throw new Error(`Play did not repair the Minecraft client jar before opening Minecraft Launcher: ${clientJarPath}`);
+  }
+  if (!fs.existsSync(logConfigPath) || sha1(fs.readFileSync(logConfigPath)) !== logConfigHash) {
+    throw new Error(`Play did not repair the Minecraft logging config before opening Minecraft Launcher: ${logConfigPath}`);
+  }
+  if (!libraryRequests.includes('/libraries/base-lib-1.0.0.jar') || !libraryRequests.includes('/libraries/native-lib-1.0.0-native.jar')) {
+    throw new Error(`Play did not request the expected Minecraft library artifacts: ${JSON.stringify(libraryRequests)}`);
+  }
+  if (!runtimeRequests.includes('/runtime/client.jar') || !runtimeRequests.includes('/runtime/client-1.12.xml')) {
+    throw new Error(`Play did not request the expected Minecraft runtime artifacts: ${JSON.stringify(runtimeRequests)}`);
+  }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
     throw new Error(`Asset repair Play should leave the installed pack launch-ready: ${JSON.stringify(after)}`);
@@ -403,7 +521,11 @@ try {
     root,
     packaged: Boolean(smokeExe),
     assetObjectRepairOnPlay: true,
+    libraryRepairOnPlay: true,
+    runtimeRepairOnPlay: true,
     requests: assetRequests,
+    libraryRequests,
+    runtimeRequests,
     assetObjectRequestCount,
     spawnCapture,
     profile: {

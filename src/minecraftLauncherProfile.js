@@ -124,6 +124,7 @@ function uniqueVersionIds(values = []) {
 
 const MOJANG_VERSION_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
 const MINECRAFT_ASSET_OBJECT_BASE_URL = 'https://resources.download.minecraft.net/';
+const MINECRAFT_LIBRARY_BASE_URL = 'https://libraries.minecraft.net/';
 export const PLAYER_MINECRAFT_PROFILE_ID = 'a-hard-time';
 export const DEVELOPER_MINECRAFT_PROFILE_ID = 'a-hard-time-developer';
 export const LEGACY_AHT_MINECRAFT_PROFILE_IDS = ['a-hard-time-dregora'];
@@ -556,6 +557,324 @@ async function assetObjectValidationError(entry = {}, source = '', dest = '') {
   return new Error(`Minecraft asset ${entry.name || entry.hash} from ${source} did not match Mojang metadata after download. Expected ${entry.hash}, got ${actualHash}.`);
 }
 
+function minecraftLibraryOsName(platform = process.platform) {
+  if (platform === 'win32') return 'windows';
+  if (platform === 'darwin') return 'osx';
+  return 'linux';
+}
+
+function minecraftLibraryArchValue(arch = process.arch) {
+  return /64/.test(String(arch || '')) ? '64' : '32';
+}
+
+function minecraftLibraryRuleMatches(rule = {}, platform = process.platform, arch = process.arch) {
+  const osRule = rule?.os && typeof rule.os === 'object' ? rule.os : null;
+  if (!osRule) return true;
+  const osName = String(osRule.name || '').trim();
+  if (osName && osName !== minecraftLibraryOsName(platform)) return false;
+  const osArch = String(osRule.arch || '').trim();
+  if (osArch && osArch !== arch && osArch !== minecraftLibraryArchValue(arch)) return false;
+  const osVersion = String(osRule.version || '').trim();
+  if (osVersion) {
+    try {
+      if (!(new RegExp(osVersion).test(os.release()))) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function minecraftLibraryAllowed(library = {}, platform = process.platform, arch = process.arch) {
+  const rules = Array.isArray(library?.rules) ? library.rules : [];
+  if (!rules.length) return true;
+  let allowed = false;
+  for (const rule of rules) {
+    if (!minecraftLibraryRuleMatches(rule, platform, arch)) continue;
+    allowed = String(rule?.action || '').trim().toLowerCase() === 'allow';
+  }
+  return allowed;
+}
+
+function minecraftLibraryCoordinatePath(name = '') {
+  const parts = String(name || '').trim().split(':');
+  if (parts.length < 3) return '';
+  const [group, artifact, version, classifier] = parts;
+  if (!group || !artifact || !version) return '';
+  const fileName = `${artifact}-${version}${classifier ? `-${classifier}` : ''}.jar`;
+  return `${group.replace(/\./g, '/')}/${artifact}/${version}/${fileName}`;
+}
+
+function minecraftLibraryUrl(artifactPath = '', artifactUrl = '', baseUrl = MINECRAFT_LIBRARY_BASE_URL) {
+  const explicit = String(artifactUrl || '').trim();
+  if (explicit) return explicit;
+  const rel = String(artifactPath || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!rel) return '';
+  return new URL(rel, String(baseUrl || MINECRAFT_LIBRARY_BASE_URL)).toString();
+}
+
+function minecraftNativeClassifier(library = {}, platform = process.platform, arch = process.arch) {
+  const natives = library?.natives && typeof library.natives === 'object' ? library.natives : {};
+  const raw = String(natives[minecraftLibraryOsName(platform)] || '').trim();
+  return raw ? raw.replace('${arch}', minecraftLibraryArchValue(arch)) : '';
+}
+
+function minecraftLibraryArtifactEntries(versionJson = null, options = {}) {
+  const libraries = Array.isArray(versionJson?.libraries) ? versionJson.libraries : [];
+  const platform = options.platform || process.platform;
+  const arch = options.arch || process.arch;
+  const entries = [];
+  for (const library of libraries) {
+    if (!minecraftLibraryAllowed(library, platform, arch)) continue;
+    const name = String(library?.name || '').trim();
+    const hasDownloads = library?.downloads && typeof library.downloads === 'object';
+    const artifact = library?.downloads?.artifact && typeof library.downloads.artifact === 'object'
+      ? library.downloads.artifact
+      : {};
+    const artifactPath = String(artifact.path || (!hasDownloads ? minecraftLibraryCoordinatePath(name) : '')).trim();
+    if (artifactPath) {
+      entries.push({
+        name,
+        path: artifactPath,
+        url: minecraftLibraryUrl(artifactPath, artifact.url, options.libraryBaseUrl),
+        sha1: String(artifact.sha1 || '').trim().toLowerCase(),
+        size: Number.isFinite(Number(artifact.size)) ? Number(artifact.size) : null,
+        classifier: ''
+      });
+    }
+    const classifier = minecraftNativeClassifier(library, platform, arch);
+    const nativeArtifact = classifier && library?.downloads?.classifiers?.[classifier]
+      ? library.downloads.classifiers[classifier]
+      : null;
+    const nativePath = String(nativeArtifact?.path || (classifier ? minecraftLibraryCoordinatePath(`${name}:${classifier}`) : '')).trim();
+    if (nativeArtifact && nativePath) {
+      entries.push({
+        name,
+        path: nativePath,
+        url: minecraftLibraryUrl(nativePath, nativeArtifact.url, options.libraryBaseUrl),
+        sha1: String(nativeArtifact.sha1 || '').trim().toLowerCase(),
+        size: Number.isFinite(Number(nativeArtifact.size)) ? Number(nativeArtifact.size) : null,
+        classifier
+      });
+    }
+  }
+  const seen = new Set();
+  return entries.filter((entry) => {
+    const key = entry.path.toLowerCase();
+    if (!entry.path || !entry.url || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function minecraftLibraryNeedsRepair(file = '', entry = {}, verifyHashes = false) {
+  const stat = await fs.stat(file).catch(() => null);
+  if (!stat || !stat.isFile()) return true;
+  if (Number.isFinite(entry.size) && entry.size >= 0 && stat.size !== entry.size) return true;
+  if (verifyHashes && /^[a-f0-9]{40}$/i.test(entry.sha1 || '')) {
+    return await hashFile(file, 'sha1') !== entry.sha1;
+  }
+  return false;
+}
+
+async function minecraftLibraryValidationError(entry = {}, source = '', dest = '') {
+  const actualHash = await hashFile(dest, 'sha1').catch(() => 'missing');
+  return new Error(`Minecraft library ${entry.path || entry.name} from ${source} did not match Mojang metadata after download. Expected ${entry.sha1 || 'unknown'}, got ${actualHash}.`);
+}
+
+async function copyMinecraftLibraryFromRoots({ entry, dest, rootDirs = [], verifyHashes = false, logger }) {
+  const destKey = launcherRootKey(dest);
+  for (const rootDir of uniqueLauncherRoots(rootDirs)) {
+    const candidate = path.join(rootDir, 'libraries', entry.path);
+    if (launcherRootKey(candidate) === destKey) continue;
+    if (await minecraftLibraryNeedsRepair(candidate, entry, verifyHashes)) continue;
+    await ensureDir(path.dirname(dest));
+    await fs.copyFile(candidate, dest);
+    if (await minecraftLibraryNeedsRepair(dest, entry, verifyHashes)) {
+      await fs.rm(dest, { force: true }).catch(() => {});
+      continue;
+    }
+    logger?.log?.(`Copied Minecraft library ${entry.path} from ${rootDir}`);
+    return true;
+  }
+  return false;
+}
+
+async function repairMinecraftLibraryArtifact({ entry, dest, downloadFileImpl, verifyHashes, logger }) {
+  const attempts = 3;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fs.rm(dest, { force: true }).catch(() => {});
+      await downloadFileImpl(entry.url, dest, { logger, retries: 3 });
+      if (await minecraftLibraryNeedsRepair(dest, entry, verifyHashes)) {
+        throw await minecraftLibraryValidationError(entry, entry.url, dest);
+      }
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        logger?.log?.(`Minecraft library ${entry.path} failed validation; retrying (${attempt + 1}/${attempts})...`);
+      }
+    }
+  }
+  const serviceMessage = minecraftServiceFailureMessage(`${entry.url} ${lastError?.message || lastError}`);
+  throw new Error(serviceMessage || lastError?.message || String(lastError));
+}
+
+async function ensureMinecraftLibraries({
+  rootDir = '',
+  versionJson = null,
+  downloadFileImpl = downloadToFile,
+  fallbackRootDirs = [],
+  verifyHashes = false,
+  libraryBaseUrl = MINECRAFT_LIBRARY_BASE_URL,
+  platform = process.platform,
+  arch = process.arch,
+  logger = null
+} = {}) {
+  const entries = minecraftLibraryArtifactEntries(versionJson, { libraryBaseUrl, platform, arch });
+  let downloaded = 0;
+  let copied = 0;
+  for (const entry of entries) {
+    const dest = path.join(rootDir, 'libraries', entry.path);
+    if (!(await minecraftLibraryNeedsRepair(dest, entry, verifyHashes))) {
+      continue;
+    }
+    if (await copyMinecraftLibraryFromRoots({ entry, dest, rootDirs: fallbackRootDirs, verifyHashes, logger })) {
+      copied += 1;
+      continue;
+    }
+    logger?.log?.(`Repairing Minecraft library ${entry.path}`);
+    await repairMinecraftLibraryArtifact({ entry, dest, downloadFileImpl, verifyHashes, logger });
+    downloaded += 1;
+  }
+  return {
+    checked: entries.length,
+    downloaded,
+    copied
+  };
+}
+
+function minecraftRuntimeArtifactEntries(versionJson = null) {
+  const entries = [];
+  const versionId = String(versionJson?.id || '').trim();
+  const client = versionJson?.downloads?.client && typeof versionJson.downloads.client === 'object'
+    ? versionJson.downloads.client
+    : null;
+  if (versionId && client?.url) {
+    entries.push({
+      kind: 'client jar',
+      name: `${versionId}.jar`,
+      path: path.join('versions', versionId, `${versionId}.jar`),
+      url: String(client.url || '').trim(),
+      sha1: String(client.sha1 || '').trim().toLowerCase(),
+      size: Number.isFinite(Number(client.size)) ? Number(client.size) : null
+    });
+  }
+  const loggingFile = versionJson?.logging?.client?.file && typeof versionJson.logging.client.file === 'object'
+    ? versionJson.logging.client.file
+    : null;
+  const loggingId = String(loggingFile?.id || '').trim();
+  if (loggingId && loggingFile?.url) {
+    entries.push({
+      kind: 'logging config',
+      name: loggingId,
+      path: path.join('assets', 'log_configs', loggingId),
+      url: String(loggingFile.url || '').trim(),
+      sha1: String(loggingFile.sha1 || '').trim().toLowerCase(),
+      size: Number.isFinite(Number(loggingFile.size)) ? Number(loggingFile.size) : null
+    });
+  }
+  return entries;
+}
+
+async function minecraftRuntimeArtifactNeedsRepair(file = '', entry = {}, verifyHashes = false) {
+  const stat = await fs.stat(file).catch(() => null);
+  if (!stat || !stat.isFile()) return true;
+  if (Number.isFinite(entry.size) && entry.size >= 0 && stat.size !== entry.size) return true;
+  if (verifyHashes && /^[a-f0-9]{40}$/i.test(entry.sha1 || '')) {
+    return await hashFile(file, 'sha1') !== entry.sha1;
+  }
+  return false;
+}
+
+async function minecraftRuntimeArtifactValidationError(entry = {}, dest = '') {
+  const actualHash = await hashFile(dest, 'sha1').catch(() => 'missing');
+  return new Error(`Minecraft ${entry.kind || 'runtime file'} ${entry.name || entry.path} from ${entry.url} did not match Mojang metadata after download. Expected ${entry.sha1 || 'unknown'}, got ${actualHash}.`);
+}
+
+async function copyMinecraftRuntimeArtifactFromRoots({ entry, dest, rootDirs = [], verifyHashes = false, logger }) {
+  const destKey = launcherRootKey(dest);
+  for (const rootDir of uniqueLauncherRoots(rootDirs)) {
+    const candidate = path.join(rootDir, entry.path);
+    if (launcherRootKey(candidate) === destKey) continue;
+    if (await minecraftRuntimeArtifactNeedsRepair(candidate, entry, verifyHashes)) continue;
+    await ensureDir(path.dirname(dest));
+    await fs.copyFile(candidate, dest);
+    if (await minecraftRuntimeArtifactNeedsRepair(dest, entry, verifyHashes)) {
+      await fs.rm(dest, { force: true }).catch(() => {});
+      continue;
+    }
+    logger?.log?.(`Copied Minecraft ${entry.kind} ${entry.name} from ${rootDir}`);
+    return true;
+  }
+  return false;
+}
+
+async function repairMinecraftRuntimeArtifact({ entry, dest, downloadFileImpl, verifyHashes, logger }) {
+  const attempts = 3;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fs.rm(dest, { force: true }).catch(() => {});
+      await downloadFileImpl(entry.url, dest, { logger, retries: 3 });
+      if (await minecraftRuntimeArtifactNeedsRepair(dest, entry, verifyHashes)) {
+        throw await minecraftRuntimeArtifactValidationError(entry, dest);
+      }
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        logger?.log?.(`Minecraft ${entry.kind} ${entry.name} failed validation; retrying (${attempt + 1}/${attempts})...`);
+      }
+    }
+  }
+  const serviceMessage = minecraftServiceFailureMessage(`${entry.url} ${lastError?.message || lastError}`);
+  throw new Error(serviceMessage || lastError?.message || String(lastError));
+}
+
+async function ensureMinecraftRuntimeArtifacts({
+  rootDir = '',
+  versionJson = null,
+  downloadFileImpl = downloadToFile,
+  fallbackRootDirs = [],
+  verifyHashes = false,
+  logger = null
+} = {}) {
+  const entries = minecraftRuntimeArtifactEntries(versionJson);
+  let downloaded = 0;
+  let copied = 0;
+  for (const entry of entries) {
+    const dest = path.join(rootDir, entry.path);
+    if (!(await minecraftRuntimeArtifactNeedsRepair(dest, entry, verifyHashes))) {
+      continue;
+    }
+    if (await copyMinecraftRuntimeArtifactFromRoots({ entry, dest, rootDirs: fallbackRootDirs, verifyHashes, logger })) {
+      copied += 1;
+      continue;
+    }
+    logger?.log?.(`Repairing Minecraft ${entry.kind} ${entry.name}`);
+    await repairMinecraftRuntimeArtifact({ entry, dest, downloadFileImpl, verifyHashes, logger });
+    downloaded += 1;
+  }
+  return {
+    checked: entries.length,
+    downloaded,
+    copied
+  };
+}
+
 async function repairMinecraftAssetObject({ entry, dest, source, downloadFileImpl, logger }) {
   const attempts = 3;
   let lastError = null;
@@ -655,9 +974,14 @@ async function ensureMinecraftRootAssets({
   fetchJsonImpl = fetchJson,
   downloadFileImpl = downloadToFile,
   assetBaseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL,
+  libraryBaseUrl = MINECRAFT_LIBRARY_BASE_URL,
   ensureAssetObjects = true,
+  ensureLibraries = true,
+  ensureRuntimeArtifacts = true,
   fallbackRootDirs = [],
   verifyAssetHashes = false,
+  verifyLibraryHashes = verifyAssetHashes,
+  verifyRuntimeHashes = verifyAssetHashes,
   logger = null
 } = {}) {
   if (!rootDir || !minecraftVersion) {
@@ -717,6 +1041,39 @@ async function ensureMinecraftRootAssets({
   if (assetObjects.copied > 0) {
     actions.push(`copied ${assetObjects.copied} Minecraft asset object${assetObjects.copied === 1 ? '' : 's'} from another launcher root`);
   }
+  const libraries = ensureLibraries
+    ? await ensureMinecraftLibraries({
+      rootDir,
+      versionJson,
+      downloadFileImpl,
+      fallbackRootDirs,
+      verifyHashes: verifyLibraryHashes,
+      libraryBaseUrl,
+      logger
+    })
+    : { checked: 0, downloaded: 0, copied: 0 };
+  if (libraries.downloaded > 0) {
+    actions.push(`downloaded ${libraries.downloaded} Minecraft librar${libraries.downloaded === 1 ? 'y' : 'ies'}`);
+  }
+  if (libraries.copied > 0) {
+    actions.push(`copied ${libraries.copied} Minecraft librar${libraries.copied === 1 ? 'y' : 'ies'} from another launcher root`);
+  }
+  const runtimeArtifacts = ensureRuntimeArtifacts
+    ? await ensureMinecraftRuntimeArtifacts({
+      rootDir,
+      versionJson,
+      downloadFileImpl,
+      fallbackRootDirs,
+      verifyHashes: verifyRuntimeHashes,
+      logger
+    })
+    : { checked: 0, downloaded: 0, copied: 0 };
+  if (runtimeArtifacts.downloaded > 0) {
+    actions.push(`downloaded ${runtimeArtifacts.downloaded} Minecraft runtime file${runtimeArtifacts.downloaded === 1 ? '' : 's'}`);
+  }
+  if (runtimeArtifacts.copied > 0) {
+    actions.push(`copied ${runtimeArtifacts.copied} Minecraft runtime file${runtimeArtifacts.copied === 1 ? '' : 's'} from another launcher root`);
+  }
 
   return {
     ok: true,
@@ -726,6 +1083,8 @@ async function ensureMinecraftRootAssets({
     assetIndexPath,
     assetId,
     assetObjects,
+    libraries,
+    runtimeArtifacts,
     repaired: actions.length > 0,
     actions
   };
@@ -740,8 +1099,13 @@ export async function ensureMinecraftLauncherAssets({
   fetchJsonImpl = fetchJson,
   downloadFileImpl = downloadToFile,
   assetBaseUrl = MINECRAFT_ASSET_OBJECT_BASE_URL,
+  libraryBaseUrl = MINECRAFT_LIBRARY_BASE_URL,
   ensureAssetObjects = true,
+  ensureLibraries = true,
+  ensureRuntimeArtifacts = true,
   verifyAssetHashes = false,
+  verifyLibraryHashes = verifyAssetHashes,
+  verifyRuntimeHashes = verifyAssetHashes,
   logger = null
 } = {}) {
   const minecraft = minecraftMetadata(latest, installed);
@@ -762,9 +1126,14 @@ export async function ensureMinecraftLauncherAssets({
       fetchJsonImpl,
       downloadFileImpl,
       assetBaseUrl,
+      libraryBaseUrl,
       ensureAssetObjects,
+      ensureLibraries,
+      ensureRuntimeArtifacts,
       fallbackRootDirs: roots.filter((candidate) => launcherRootKey(candidate) !== launcherRootKey(rootDir)),
       verifyAssetHashes,
+      verifyLibraryHashes,
+      verifyRuntimeHashes,
       logger
     }));
   }
@@ -776,6 +1145,16 @@ export async function ensureMinecraftLauncherAssets({
       checked: results.reduce((total, item) => total + (Number(item.assetObjects?.checked) || 0), 0),
       downloaded: results.reduce((total, item) => total + (Number(item.assetObjects?.downloaded) || 0), 0),
       copied: results.reduce((total, item) => total + (Number(item.assetObjects?.copied) || 0), 0)
+    },
+    libraries: {
+      checked: results.reduce((total, item) => total + (Number(item.libraries?.checked) || 0), 0),
+      downloaded: results.reduce((total, item) => total + (Number(item.libraries?.downloaded) || 0), 0),
+      copied: results.reduce((total, item) => total + (Number(item.libraries?.copied) || 0), 0)
+    },
+    runtimeArtifacts: {
+      checked: results.reduce((total, item) => total + (Number(item.runtimeArtifacts?.checked) || 0), 0),
+      downloaded: results.reduce((total, item) => total + (Number(item.runtimeArtifacts?.downloaded) || 0), 0),
+      copied: results.reduce((total, item) => total + (Number(item.runtimeArtifacts?.copied) || 0), 0)
     },
     repaired: results.some((item) => item.repaired)
   };
