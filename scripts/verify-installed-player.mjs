@@ -26,6 +26,7 @@ const checks = [
   ['test:play-curseforge-priority'],
   ['test:play-curseforge-fallback'],
   ['test:play-curseforge-auth-import'],
+  ['test:play-curseforge-storage-root'],
   ['test:play-localappdata-launcher'],
   ['test:play-shortcut-launcher'],
   ['test:play-generic-shortcut-launcher'],

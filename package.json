@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.73",
+  "version": "0.1.74",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -48,6 +48,7 @@
     "test:play-curseforge-priority": "node scripts/smoke-play-curseforge-priority.mjs",
     "test:play-curseforge-fallback": "node scripts/smoke-play-curseforge-priority.mjs --fallback",
     "test:play-curseforge-auth-import": "node scripts/smoke-play-curseforge-priority.mjs --curseforge-auth-import",
+    "test:play-curseforge-storage-root": "node scripts/smoke-play-curseforge-priority.mjs --curseforge-storage-root",
     "test:play-localappdata-launcher": "node scripts/smoke-play-curseforge-priority.mjs --localappdata-launcher",
     "test:play-shortcut-launcher": "node scripts/smoke-play-curseforge-priority.mjs --shortcut-launcher",
     "test:play-generic-shortcut-launcher": "node scripts/smoke-play-curseforge-priority.mjs --generic-shortcut-launcher",

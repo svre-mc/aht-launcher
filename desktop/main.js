@@ -1211,9 +1211,95 @@ function localMinecraftLauncherCandidates() {
 function curseForgeMinecraftRootCandidates() {
   const home = localUserHomePath();
   const documents = localDocumentsPath();
-  return process.platform === 'darwin'
+  const staticRoots = process.platform === 'darwin'
     ? macCurseForgeMinecraftRootCandidates({ homePath: home, documentsPath: documents })
     : localMinecraftRootCandidates({ homePath: home, documentsPath: documents, env: process.env });
+  return uniquePaths([
+    ...curseForgeStorageMinecraftRootCandidates(),
+    ...staticRoots
+  ]);
+}
+
+function currentPlatformPathApi() {
+  return process.platform === 'win32' ? path.win32 : path.posix;
+}
+
+function normalizeCurrentPlatformPath(value = '') {
+  const text = String(value || '').trim();
+  return text ? currentPlatformPathApi().normalize(text) : '';
+}
+
+function curseForgeInstallRootFromMinecraftRoot(value = '') {
+  const platformPath = currentPlatformPathApi();
+  const root = normalizeCurrentPlatformPath(value);
+  if (!root) return '';
+  const normalizedForMatch = root.replaceAll('\\', '/');
+  const instanceMatch = normalizedForMatch.match(/^(.*)\/Instances\/[^/]+$/i);
+  if (instanceMatch?.[1]) {
+    return platformPath.join(instanceMatch[1], 'Install');
+  }
+  if (/\/Install$/i.test(normalizedForMatch)) {
+    return root;
+  }
+  return platformPath.join(root, 'Install');
+}
+
+function collectCurseForgeMinecraftRoots(value, key = '', roots = []) {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return roots;
+    if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+      try {
+        collectCurseForgeMinecraftRoots(JSON.parse(text), key, roots);
+      } catch {}
+      return roots;
+    }
+    if (/minecraft[-_ ]?root|minecraft[-_ ]?dir|minecraft[-_ ]?path/i.test(key)) {
+      const installRoot = curseForgeInstallRootFromMinecraftRoot(text);
+      if (installRoot) roots.push(installRoot);
+    }
+    return roots;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectCurseForgeMinecraftRoots(item, key, roots);
+    }
+    return roots;
+  }
+  if (value && typeof value === 'object') {
+    for (const [childKey, childValue] of Object.entries(value)) {
+      collectCurseForgeMinecraftRoots(childValue, childKey, roots);
+    }
+  }
+  return roots;
+}
+
+function curseForgeStorageFileCandidates() {
+  const home = localUserHomePath();
+  if (process.platform === 'darwin') {
+    return uniquePaths([
+      home ? path.posix.join(home, 'Library', 'Application Support', 'CurseForge', 'storage.json') : '',
+      home ? path.posix.join(home, 'Library', 'Application Support', 'curseforge', 'storage.json') : ''
+    ]);
+  }
+  return uniquePaths([
+    process.env.APPDATA ? path.win32.join(process.env.APPDATA, 'CurseForge', 'storage.json') : '',
+    process.env.APPDATA ? path.win32.join(process.env.APPDATA, 'curseforge', 'storage.json') : '',
+    process.env.LOCALAPPDATA ? path.win32.join(process.env.LOCALAPPDATA, 'CurseForge', 'storage.json') : '',
+    process.env.LOCALAPPDATA ? path.win32.join(process.env.LOCALAPPDATA, 'curseforge', 'storage.json') : ''
+  ]);
+}
+
+function curseForgeStorageMinecraftRootCandidates() {
+  const roots = [];
+  for (const file of curseForgeStorageFileCandidates()) {
+    try {
+      if (!fsSync.existsSync(file)) continue;
+      const parsed = JSON.parse(fsSync.readFileSync(file, 'utf8'));
+      collectCurseForgeMinecraftRoots(parsed, '', roots);
+    } catch {}
+  }
+  return uniquePaths(roots);
 }
 
 async function windowsStoreMinecraftRoot(env = process.env) {
@@ -1228,6 +1314,7 @@ async function minecraftLauncherPreparationRoots(config = {}) {
   const explicitSyncRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
     ? config.minecraftLauncher.syncRoots
     : [];
+  const curseForgeRoots = curseForgeMinecraftRootCandidates();
   const defaultRoots = minecraftRootCandidates(process.platform, {
     ...process.env,
     HOME: process.env.HOME || app.getPath('home'),
@@ -1237,6 +1324,7 @@ async function minecraftLauncherPreparationRoots(config = {}) {
   const candidateRoots = uniquePaths([
     configuredRoot,
     ...explicitSyncRoots,
+    ...curseForgeRoots,
     ...defaultRoots,
     ...localMinecraftLauncherCandidates(),
     storeRoot
@@ -1256,9 +1344,10 @@ async function minecraftLauncherPreparationRoots(config = {}) {
 async function minecraftLauncherRuntimeConfig(config = {}) {
   const configuredRoot = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
   const preparationRoots = await minecraftLauncherPreparationRoots(config);
+  const curseForgeRoots = curseForgeMinecraftRootCandidates();
   let rootDir = configuredRoot;
   if (process.platform === 'win32') {
-    const curseForgeRoot = await firstExistingDirectory(curseForgeMinecraftRootCandidates());
+    const curseForgeRoot = await firstExistingDirectory(curseForgeRoots);
     rootDir = curseForgeRoot
       || configuredRoot
       || await windowsStoreMinecraftRoot(process.env)
@@ -1270,6 +1359,7 @@ async function minecraftLauncherRuntimeConfig(config = {}) {
       ...(config.minecraftLauncher || {}),
       rootDir,
       syncDefaultRoots: false,
+      curseForgeRootHints: curseForgeRoots,
       syncRoots: uniquePaths([
         ...(Array.isArray(config.minecraftLauncher?.syncRoots) ? config.minecraftLauncher.syncRoots : []),
         ...preparationRoots

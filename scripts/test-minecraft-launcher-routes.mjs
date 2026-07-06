@@ -33,6 +33,7 @@ const curseForgeRoot = path.win32.join(homePath, 'curseforge', 'minecraft', 'Ins
 const documentsCurseForgeRoot = path.win32.join(documentsPath, 'CurseForge', 'minecraft', 'Install');
 const appDataCurseForgeRoot = path.win32.join(env.APPDATA, 'CurseForge', 'minecraft', 'Install');
 const localAppDataCurseForgeRoot = path.win32.join(env.LOCALAPPDATA, 'CurseForge', 'minecraft', 'Install');
+const storageCurseForgeRoot = 'D:\\PlayerData\\CustomMinecraftRoot\\Install';
 const curseForgeInstanceDir = path.win32.join(homePath, 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora');
 const desktopLauncher = path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const localDesktopLauncher = path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe');
@@ -56,6 +57,7 @@ const macDefaultRoot = '/Users/player/Library/Application Support/minecraft';
 const macCurseForgeRoot = '/Users/player/curseforge/minecraft/Install';
 const macLibraryCurseForgeRoot = '/Users/player/Library/Application Support/CurseForge/minecraft/Install';
 const macDocumentsLowerCurseForgeRoot = '/Users/player/Documents/curseforge/minecraft/Install';
+const macStorageCurseForgeRoot = '/Volumes/Games/CustomMinecraftRoot/Install';
 const macLauncherApp = '/Applications/Minecraft Launcher.app';
 const macCurseForgeApp = '/Applications/CurseForge.app';
 
@@ -74,7 +76,8 @@ async function routes(existing, options = {}) {
     config: {
       minecraftLauncher: {
         rootDir: options.rootDir || defaultRoot,
-        syncRoots: options.syncRoots || []
+        syncRoots: options.syncRoots || [],
+        curseForgeRootHints: options.curseForgeRootHints || []
       }
     },
     env: {
@@ -94,7 +97,8 @@ async function macRoutes(existing, options = {}) {
     config: {
       minecraftLauncher: {
         rootDir: options.rootDir || macDefaultRoot,
-        syncRoots: options.syncRoots || []
+        syncRoots: options.syncRoots || [],
+        curseForgeRootHints: options.curseForgeRootHints || []
       }
     },
     env: {
@@ -155,6 +159,16 @@ async function macRoutes(existing, options = {}) {
   ], { storeInstalled: false });
   assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop']);
   assert.equal(planned[0].rootDir, localAppDataCurseForgeRoot);
+}
+
+{
+  const planned = await routes([
+    storageCurseForgeRoot,
+    desktopLauncher
+  ], { curseForgeRootHints: [storageCurseForgeRoot] });
+  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop']);
+  assert.equal(planned[0].rootDir, storageCurseForgeRoot);
+  assert.deepEqual(planned[0].args, ['--workDir', storageCurseForgeRoot]);
 }
 
 {
@@ -379,6 +393,16 @@ assert.equal(windowsCurseForgeCandidates.includes(localAppDataCurseForgeRoot), t
   assert.equal(isCurseForgeMinecraftRoot(planned[0].cwd), true);
   assert.equal(planned[0].cwd.toLowerCase(), macDocumentsLowerCurseForgeRoot.toLowerCase());
   assert.deepEqual(planned[0].args, [macLauncherApp, '--args', '--workDir', planned[0].cwd]);
+}
+
+{
+  const planned = await macRoutes([
+    macStorageCurseForgeRoot,
+    macLauncherApp
+  ], { curseForgeRootHints: [macStorageCurseForgeRoot] });
+  assert.equal(planned[0].kind, 'curseforge');
+  assert.deepEqual(planned[0].args, [macLauncherApp, '--args', '--workDir', macStorageCurseForgeRoot]);
+  assert.equal(planned[0].cwd, macStorageCurseForgeRoot);
 }
 
 {

@@ -14,12 +14,13 @@ const expectStartFallback = process.argv.includes('--desktop-start-retry');
 const expectAppAliasIgnored = process.argv.includes('--app-alias-ignored');
 const expectCustomFallback = process.argv.includes('--custom-fallback');
 const expectCurseForgeAuthImport = process.argv.includes('--curseforge-auth-import');
+const expectCurseForgeStorageRoot = process.argv.includes('--curseforge-storage-root');
 const expectLocalAppDataLauncher = process.argv.includes('--localappdata-launcher');
 const expectShortcutLauncher = process.argv.includes('--shortcut-launcher');
 const expectGenericShortcutLauncher = process.argv.includes('--generic-shortcut-launcher');
 const useDesktopMinecraftLauncher = !process.argv.includes('--no-desktop');
 const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
-const defaultPort = expectFallback ? 10976 : expectStoreFallback ? 11076 : expectCustomFallback ? 11176 : expectStartFallback ? 11276 : expectAppAliasIgnored ? 11376 : expectStoreNoProcess ? 11476 : expectCurseForgeAuthImport ? 11576 : expectLocalAppDataLauncher ? 11676 : expectShortcutLauncher ? 11776 : expectGenericShortcutLauncher ? 11876 : 10876;
+const defaultPort = expectFallback ? 10976 : expectStoreFallback ? 11076 : expectCustomFallback ? 11176 : expectStartFallback ? 11276 : expectAppAliasIgnored ? 11376 : expectStoreNoProcess ? 11476 : expectCurseForgeAuthImport ? 11576 : expectLocalAppDataLauncher ? 11676 : expectShortcutLauncher ? 11776 : expectGenericShortcutLauncher ? 11876 : expectCurseForgeStorageRoot ? 11976 : 10876;
 const port = Number(portArg || await availablePortPair(defaultPort));
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
@@ -37,7 +38,10 @@ const configuredMcRoot = path.join(fakeAppData, '.minecraft');
 const storePackageFamily = 'Microsoft.4297127D64EC6_8wekyb3d8bbwe';
 const storePackageDir = path.join(fakeLocalAppData, 'Packages', storePackageFamily);
 const storeMcRoot = path.join(storePackageDir, 'LocalCache', 'Roaming', '.minecraft');
-const curseForgeRoot = path.join(fakeUserProfile, 'curseforge', 'minecraft', 'Install');
+const curseForgeStorageMinecraftRoot = path.join(root, 'cf-storage-minecraft-root');
+const curseForgeRoot = expectCurseForgeStorageRoot
+  ? path.join(curseForgeStorageMinecraftRoot, 'Install')
+  : path.join(fakeUserProfile, 'curseforge', 'minecraft', 'Install');
 const desktopMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const localAppDataMinecraftLauncher = path.join(fakeLocalAppData, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const shortcutMinecraftLauncher = path.join(root, 'Games', 'Minecraft Launcher', 'MinecraftLauncher.exe');
@@ -337,6 +341,13 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
 }]);
 await writeReadyMinecraftRoot(configuredMcRoot);
 await writeReadyMinecraftRoot(curseForgeRoot);
+if (expectCurseForgeStorageRoot) {
+  await writeJson(path.join(fakeAppData, 'CurseForge', 'storage.json'), {
+    'minecraft-settings': JSON.stringify({
+      minecraftRoot: curseForgeStorageMinecraftRoot
+    })
+  });
+}
 if (expectCurseForgeAuthImport) {
   await writeJson(path.join(curseForgeRoot, 'launcher_accounts.json'), {
     activeAccountLocalId: 'curseforge-account',
@@ -667,6 +678,7 @@ try {
     expectStoreFallback,
     expectCustomFallback,
     expectCurseForgeAuthImport,
+    expectCurseForgeStorageRoot,
     expectLocalAppDataLauncher,
     expectShortcutLauncher,
     expectGenericShortcutLauncher,

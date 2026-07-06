@@ -56,6 +56,24 @@ function uniquePosixPaths(paths = []) {
   return result;
 }
 
+function isHintedCurseForgeMinecraftRoot(value = '', hints = []) {
+  const winKey = pathKey(value);
+  const posixKey = posixPathKey(value);
+  if (!winKey && !posixKey) {
+    return false;
+  }
+  return hints.some((hint) => {
+    const hintWinKey = pathKey(hint);
+    const hintPosixKey = posixPathKey(hint);
+    return (winKey && hintWinKey && winKey === hintWinKey)
+      || (posixKey && hintPosixKey && posixKey === hintPosixKey);
+  });
+}
+
+function isCurseForgeLaunchRoot(value = '', hints = []) {
+  return isCurseForgeMinecraftRoot(value) || isHintedCurseForgeMinecraftRoot(value, hints);
+}
+
 export function windowsStoreMinecraftRoot(env = process.env) {
   if (!env.LOCALAPPDATA) {
     return '';
@@ -302,6 +320,9 @@ export async function planWindowsMinecraftLauncherRoutes({
   const syncRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
     ? config.minecraftLauncher.syncRoots
     : [];
+  const curseForgeRootHints = Array.isArray(config.minecraftLauncher?.curseForgeRootHints)
+    ? uniquePaths(config.minecraftLauncher.curseForgeRootHints)
+    : [];
   const defaultRoots = minecraftRootCandidates('win32', {
     ...env,
     HOME: env.HOME || homePath,
@@ -310,12 +331,13 @@ export async function planWindowsMinecraftLauncherRoutes({
   const profileRoots = uniquePaths([rootDir, ...syncRoots, ...defaultRoots]);
   const routes = [];
   const existingCurseForgeRoots = await existingRoots([
+    ...curseForgeRootHints,
     ...localMinecraftRootCandidates({ homePath, documentsPath, env }),
-    ...profileRoots.filter((item) => isCurseForgeMinecraftRoot(item))
+    ...profileRoots.filter((item) => isCurseForgeLaunchRoot(item, curseForgeRootHints))
   ], pathExists);
   const existingNonCurseForgeRoots = await existingRoots([
-    ...syncRoots.filter((item) => !isCurseForgeMinecraftRoot(item)),
-    ...defaultRoots.filter((item) => !isCurseForgeMinecraftRoot(item))
+    ...syncRoots.filter((item) => !isCurseForgeLaunchRoot(item, curseForgeRootHints)),
+    ...defaultRoots.filter((item) => !isCurseForgeLaunchRoot(item, curseForgeRootHints))
   ], pathExists);
   const desktopRoots = uniquePaths([
     ...existingCurseForgeRoots,
@@ -331,7 +353,7 @@ export async function planWindowsMinecraftLauncherRoutes({
 
   for (const launchRoot of desktopRoots) {
     for (const candidate of launcherCandidates) {
-      const curseForgeRoot = isCurseForgeMinecraftRoot(launchRoot);
+      const curseForgeRoot = isCurseForgeLaunchRoot(launchRoot, curseForgeRootHints);
       addRoute(routes, {
         kind: curseForgeRoot ? 'curseforge' : 'desktop',
         label: curseForgeRoot ? 'Minecraft Launcher (CurseForge root)' : 'Minecraft Launcher',
@@ -369,8 +391,14 @@ export async function planMacMinecraftLauncherRoutes({
   const syncRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
     ? config.minecraftLauncher.syncRoots
     : [];
+  const curseForgeRootHints = Array.isArray(config.minecraftLauncher?.curseForgeRootHints)
+    ? uniquePosixPaths(config.minecraftLauncher.curseForgeRootHints)
+    : [];
   const defaultRoots = minecraftRootCandidates('darwin', { ...env, HOME: home });
-  const existingCurseForgeRoots = await existingMacRoots(macCurseForgeMinecraftRootCandidates({ homePath: home, documentsPath }), pathExists);
+  const existingCurseForgeRoots = await existingMacRoots([
+    ...curseForgeRootHints,
+    ...macCurseForgeMinecraftRootCandidates({ homePath: home, documentsPath })
+  ], pathExists);
   const launchRoots = uniquePosixPaths([
     ...existingCurseForgeRoots,
     rootDir,
@@ -382,7 +410,7 @@ export async function planMacMinecraftLauncherRoutes({
   for (const launchRoot of launchRoots) {
     for (const appPath of macMinecraftLauncherAppPaths({ env, homePath: home })) {
       if (await pathExists(appPath)) {
-        const curseForgeRoot = isCurseForgeMinecraftRoot(launchRoot);
+        const curseForgeRoot = isCurseForgeLaunchRoot(launchRoot, curseForgeRootHints);
         addMacRoute(routes, {
           kind: curseForgeRoot ? 'curseforge' : 'app',
           label: curseForgeRoot ? 'Minecraft Launcher (CurseForge root)' : 'Minecraft Launcher',
@@ -396,7 +424,7 @@ export async function planMacMinecraftLauncherRoutes({
 
   for (const launchRoot of launchRoots) {
     for (const bundleId of MAC_MINECRAFT_BUNDLE_IDS) {
-      const curseForgeRoot = isCurseForgeMinecraftRoot(launchRoot);
+      const curseForgeRoot = isCurseForgeLaunchRoot(launchRoot, curseForgeRootHints);
       addMacRoute(routes, {
         kind: curseForgeRoot ? 'curseforge-bundle' : 'bundle',
         label: curseForgeRoot ? 'Minecraft Launcher (CurseForge root)' : 'Minecraft Launcher',
@@ -406,7 +434,7 @@ export async function planMacMinecraftLauncherRoutes({
       });
     }
     for (const appName of MAC_MINECRAFT_APP_NAMES) {
-      const curseForgeRoot = isCurseForgeMinecraftRoot(launchRoot);
+      const curseForgeRoot = isCurseForgeLaunchRoot(launchRoot, curseForgeRootHints);
       addMacRoute(routes, {
         kind: curseForgeRoot ? 'curseforge-app-name' : 'app-name',
         label: curseForgeRoot ? 'Minecraft Launcher (CurseForge root)' : 'Minecraft Launcher',
