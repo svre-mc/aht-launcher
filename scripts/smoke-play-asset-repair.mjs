@@ -347,7 +347,7 @@ try {
         log: document.querySelector('#log')?.textContent || ''
       };
     })()
-  `, 'Play success toast without blocking on asset-object repair');
+  `, 'Play success toast after asset-object repair');
   if (/REQUEST_FAILED|Unable to prepare assets|Unexpected end of JSON|Launch failed|Error invoking remote method/i.test(`${toast.title}\n${toast.detail}\n${toast.log}`)) {
     throw new Error(`Asset repair Play leaked a launcher asset failure: ${JSON.stringify(toast)}`);
   }
@@ -373,8 +373,12 @@ try {
     throw new Error(`Play did not pass launcher overlay-safety environment flags: ${JSON.stringify(spawnCapture)}`);
   }
 
-  if (fs.existsSync(assetObjectPath) || assetObjectRequestCount !== 0 || assetRequests.includes(`/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`)) {
-    throw new Error(`Play should not block on asset-object repair before opening Minecraft Launcher: ${JSON.stringify({ assetRequests, assetObjectRequestCount, assetObjectPath })}`);
+  if (!fs.existsSync(assetObjectPath)) {
+    throw new Error(`Play did not repair the missing Minecraft asset object before opening Minecraft Launcher: ${assetObjectPath}`);
+  }
+  const repairedAssetHash = sha1(fs.readFileSync(assetObjectPath));
+  if (repairedAssetHash !== assetHash || assetObjectRequestCount !== 2 || !assetRequests.includes(`/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`)) {
+    throw new Error(`Play did not fully repair and verify the Minecraft asset object before launch: ${JSON.stringify({ assetRequests, assetObjectRequestCount, repairedAssetHash, expected: assetHash })}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
@@ -388,7 +392,7 @@ try {
     ok: true,
     root,
     packaged: Boolean(smokeExe),
-    assetObjectRepairSkippedOnPlay: true,
+    assetObjectRepairOnPlay: true,
     requests: assetRequests,
     assetObjectRequestCount,
     spawnCapture,

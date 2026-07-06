@@ -598,8 +598,12 @@ try {
       throw new Error(`AHT profile was not prepared in ${rootDir}: ${JSON.stringify(profile)}`);
     }
     const assetObject = path.join(rootDir, 'assets', 'objects', assetHash.slice(0, 2), assetHash);
-    if (fs.existsSync(assetObject)) {
-      throw new Error(`Play should not block on asset-object repair in ${rootDir}.`);
+    if (!fs.existsSync(assetObject)) {
+      throw new Error(`Play did not repair the Minecraft asset object in ${rootDir}.`);
+    }
+    const repairedHash = sha1(fs.readFileSync(assetObject));
+    if (repairedHash !== assetHash) {
+      throw new Error(`Play wrote an invalid Minecraft asset object in ${rootDir}: ${JSON.stringify({ repairedHash, expected: assetHash })}`);
     }
   }
 

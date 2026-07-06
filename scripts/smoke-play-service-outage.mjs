@@ -52,6 +52,20 @@ async function readJsonLines(file) {
   return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
+async function waitForFile(file, label) {
+  let lastError = '';
+  for (let attempt = 0; attempt < 160; attempt += 1) {
+    try {
+      const stat = await fsp.stat(file);
+      if (stat.isFile()) return true;
+    } catch (error) {
+      lastError = error.message;
+    }
+    await sleep(250);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${lastError || file}`);
+}
+
 async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -359,14 +373,24 @@ try {
         allToasts: nodes.map((item) => item.textContent.replace(/\\s+/g, ' ').trim())
       };
     })()
-  `, 'Minecraft Launcher opened toast during service outage');
+  `, 'Minecraft service unavailable toast during service outage');
   const message = String(toast.detail || '');
-  if (toast.title !== 'Minecraft Launcher opened') {
-    throw new Error(`Play should open Minecraft Launcher instead of blocking on Mojang asset-service preflight: ${JSON.stringify(toast)}`);
+  if (toast.title !== 'Minecraft service unavailable' || !/Minecraft services|Mojang\/Microsoft/i.test(message)) {
+    throw new Error(`Play should stop with service-focused wording instead of opening Minecraft into REQUEST_FAILED: ${JSON.stringify(toast)}`);
   }
   const spawnCaptures = await readJsonLines(spawnCapturePath);
-  if (!spawnCaptures.length) {
-    throw new Error(`Minecraft Launcher was not opened during Mojang asset-service outage: ${JSON.stringify(spawnCaptures)}`);
+  if (spawnCaptures.length) {
+    throw new Error(`Minecraft Launcher was opened even though asset preparation detected service outage: ${JSON.stringify(spawnCaptures)}`);
+  }
+  if (toast.copyText !== 'Copy full error details' || !toast.copyClick) {
+    throw new Error(`Service outage toast did not expose copyable diagnostics: ${JSON.stringify(toast)}`);
+  }
+  await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: toast.copyClick.x, y: toast.copyClick.y, button: 'left', clickCount: 1 });
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: toast.copyClick.x, y: toast.copyClick.y, button: 'left', clickCount: 1 });
+  await waitForFile(errorReportCapturePath, 'service outage diagnostic report');
+  const report = JSON.parse(await fsp.readFile(errorReportCapturePath, 'utf8'));
+  if (report.rendererError?.context !== 'play-start' || !/Minecraft services|Mojang\/Microsoft/i.test(report.rendererError?.message || '') || !report.minecraftRuntime?.versions) {
+    throw new Error(`Service outage diagnostic report did not capture the launch context: ${JSON.stringify(report)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
@@ -383,7 +407,7 @@ try {
     root,
     packaged: Boolean(smokeExe),
     message,
-    spawnCapture: spawnCaptures.at(-1),
+    spawnCaptureCount: spawnCaptures.length,
     profile: {
       gameDir: profile.gameDir,
       lastVersionId: profile.lastVersionId

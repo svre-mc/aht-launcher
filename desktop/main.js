@@ -2812,6 +2812,7 @@ async function runUpdate(forceRepair = false, options = {}) {
           latest: latestAfterInstall,
           installed: result.installed,
           profile,
+          assetBaseUrl: testMinecraftAssetBaseUrl() || undefined,
           ensureAssetObjects: true,
           verifyAssetHashes: true,
           logger: { log: (line) => assetLines.push(String(line)) }
@@ -6655,7 +6656,10 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
     throw new Error('Install the pack before playing.');
   }
 
-  const launchLatest = installed || null;
+  let launchLatest = installed || null;
+  if (!launchLatest?.minecraft && config.latestUrl) {
+    launchLatest = await readLatest(config);
+  }
   const identity = await identityPayload(launcherConfig);
   let launcherProof = { enabled: false, trusted: false, source: 'not-written' };
   try {
@@ -6680,20 +6684,31 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
     };
   }
   let profile = null;
-  let profileWarning = '';
-  try {
-    profile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
-  } catch (error) {
-    profileWarning = error.message || String(error);
-  }
-  const launchResult = await openMinecraftLauncher(launcherConfig);
-  const minecraftAssets = {
-    ok: true,
+  let minecraftAssets = {
+    ok: false,
     skipped: true,
-    reason: 'Play does not block on Mojang asset downloads. Update or Repair performs full Minecraft asset repair before launch.'
+    reason: 'Minecraft Launcher setup was skipped because the pack is not installed.'
   };
+  if (!installed) {
+    throw new Error('Install the pack before playing.');
+  }
+  profile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
+  profile = await installMinecraftProfileLoaders(profile, {
+    config: launcherConfig,
+    latest: launchLatest,
+    installed
+  });
+  minecraftAssets = await ensureMinecraftLauncherAssets({
+    config: launcherConfig,
+    latest: launchLatest,
+    installed,
+    profile,
+    assetBaseUrl: testMinecraftAssetBaseUrl() || undefined,
+    ensureAssetObjects: true,
+    verifyAssetHashes: true
+  });
+  const launchResult = await openMinecraftLauncher(launcherConfig);
   const warnings = [
-    profileWarning ? `Minecraft profile warning: ${profileWarning}` : '',
     launcherProof?.error ? `Launcher proof warning: ${launcherProof.error}` : ''
   ].filter(Boolean);
   return {
