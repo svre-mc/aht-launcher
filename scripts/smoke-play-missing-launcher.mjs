@@ -67,6 +67,10 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function sha1(value) {
+  return crypto.createHash('sha1').update(value).digest('hex');
+}
+
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -186,6 +190,16 @@ const latest = {
   }
 };
 const managedModContent = 'managed mod bytes\n';
+const assetBytes = Buffer.from('missing launcher asset bytes\n');
+const assetHash = sha1(assetBytes);
+const assetIndex = { objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: assetBytes.length } } };
+const assetIndexBytes = Buffer.from(`${JSON.stringify(assetIndex)}\n`);
+const assetIndexHash = sha1(assetIndexBytes);
+const clientJarBytes = Buffer.from('missing launcher client jar bytes\n');
+const libraryBytes = Buffer.from('missing launcher library bytes\n');
+const clientJarHash = sha1(clientJarBytes);
+const libraryHash = sha1(libraryBytes);
+const libraryRelPath = 'com/example/missing-launcher-lib/1.0.0/missing-launcher-lib-1.0.0.jar';
 await fsp.mkdir(instanceDir, { recursive: true });
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-clean.jar'), managedModContent, 'utf8');
@@ -208,11 +222,38 @@ await writeJson(
 );
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
-  { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
+  {
+    id: '1.12.2',
+    assetIndex: {
+      id: '1.12',
+      url: `${workerEndpoint}/assets/1.12.json`,
+      sha1: assetIndexHash,
+      size: assetIndexBytes.length,
+      totalSize: assetBytes.length
+    },
+    downloads: {
+      client: {
+        sha1: clientJarHash,
+        size: clientJarBytes.length,
+        url: `${workerEndpoint}/runtime/client.jar`
+      }
+    },
+    libraries: [{
+      name: 'com.example:missing-launcher-lib:1.0.0',
+      downloads: {
+        artifact: {
+          path: libraryRelPath,
+          sha1: libraryHash,
+          size: libraryBytes.length,
+          url: `${workerEndpoint}/libraries/missing-launcher-lib-1.0.0.jar`
+        }
+      }
+    }]
+  }
 );
 await writeJson(
   path.join(mcRoot, 'assets', 'indexes', '1.12.json'),
-  { objects: {} }
+  assetIndex
 );
 await fsp.mkdir(fakeLocalAppData, { recursive: true });
 await fsp.mkdir(fakeAppData, { recursive: true });
@@ -251,6 +292,30 @@ const server = http.createServer((request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(latest));
+    return;
+  }
+  if (url.pathname === '/assets/1.12.json') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify(assetIndex));
+    return;
+  }
+  if (url.pathname === `/assets/objects/${assetHash.slice(0, 2)}/${assetHash}`) {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/octet-stream');
+    response.end(assetBytes);
+    return;
+  }
+  if (url.pathname === '/runtime/client.jar') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/octet-stream');
+    response.end(clientJarBytes);
+    return;
+  }
+  if (url.pathname === '/libraries/missing-launcher-lib-1.0.0.jar') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/octet-stream');
+    response.end(libraryBytes);
     return;
   }
   if (url.pathname === '/api/users/register') {
@@ -310,6 +375,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_OPEN_EXTERNAL_CAPTURE_PATH: externalCapturePath,
     AHT_TEST_ERROR_REPORT_CAPTURE_PATH: errorReportCapturePath,
+    AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/assets/objects/`,
     AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,

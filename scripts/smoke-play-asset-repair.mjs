@@ -179,6 +179,9 @@ const latest = {
 const managedModContent = 'managed mod bytes\n';
 const assetBytes = Buffer.from('aht launcher repaired asset\n');
 const assetHash = sha1(assetBytes);
+const assetIndex = { objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: assetBytes.length } } };
+const assetIndexBytes = Buffer.from(`${JSON.stringify(assetIndex)}\n`);
+const assetIndexHash = sha1(assetIndexBytes);
 const assetObjectPath = path.join(mcRoot, 'assets', 'objects', assetHash.slice(0, 2), assetHash);
 const assetIndexPath = path.join(mcRoot, 'assets', 'indexes', '1.12.json');
 const minecraftLibraryOsName = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux';
@@ -225,7 +228,13 @@ await writeJson(
   path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
   {
     id: '1.12.2',
-    assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` },
+    assetIndex: {
+      id: '1.12',
+      url: `${workerEndpoint}/assets/1.12.json`,
+      sha1: assetIndexHash,
+      size: assetIndexBytes.length,
+      totalSize: assetBytes.length
+    },
     downloads: {
       client: {
         sha1: clientJarHash,
@@ -275,7 +284,9 @@ await writeJson(
   }
 );
 await fsp.mkdir(path.dirname(assetIndexPath), { recursive: true });
-await fsp.writeFile(assetIndexPath, '', 'utf8');
+await writeJson(assetIndexPath, {
+  objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: 1 } }
+});
 await writeJson(defaultsPath, {
   packId: latest.packId,
   instanceDir,
@@ -309,7 +320,7 @@ const server = http.createServer((request, response) => {
     assetRequests.push(url.pathname);
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify({ objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: assetBytes.length } } }));
+    response.end(JSON.stringify(assetIndex));
     return;
   }
   if (url.pathname === `/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`) {
@@ -489,6 +500,10 @@ try {
   const repairedAssetHash = sha1(fs.readFileSync(assetObjectPath));
   if (repairedAssetHash !== assetHash || assetObjectRequestCount !== 2 || !assetRequests.includes(`/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`)) {
     throw new Error(`Play did not fully repair and verify the Minecraft asset object before launch: ${JSON.stringify({ assetRequests, assetObjectRequestCount, repairedAssetHash, expected: assetHash })}`);
+  }
+  const repairedAssetIndex = JSON.parse(fs.readFileSync(assetIndexPath, 'utf8'));
+  if (repairedAssetIndex.objects?.['minecraft/lang/en_us.lang']?.size !== assetBytes.length) {
+    throw new Error(`Play did not refresh a valid-looking stale Minecraft asset index before launch: ${JSON.stringify(repairedAssetIndex)}`);
   }
   if (!fs.existsSync(libraryPath) || sha1(fs.readFileSync(libraryPath)) !== libraryHash) {
     throw new Error(`Play did not repair the base Minecraft library before opening Minecraft Launcher: ${libraryPath}`);

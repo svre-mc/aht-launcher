@@ -452,6 +452,38 @@ function minecraftMetadata(latest = null, installed = null) {
   return latest?.minecraft || installed?.minecraft || null;
 }
 
+function validSha1(value = '') {
+  return /^[a-f0-9]{40}$/i.test(String(value || '').trim());
+}
+
+function validNonNegativeSize(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0;
+}
+
+function validDownloadMetadata(value = null) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && String(value.url || '').trim()
+    && validSha1(value.sha1)
+    && validNonNegativeSize(value.size)
+  );
+}
+
+function hasUsableLibraryMetadata(value = null) {
+  const libraries = Array.isArray(value?.libraries) ? value.libraries : [];
+  return libraries.some((library) => {
+    if (!minecraftLibraryAllowed(library)) return false;
+    const hasArtifact = validDownloadMetadata(library?.downloads?.artifact);
+    const classifier = minecraftNativeClassifier(library);
+    const hasNative = classifier
+      ? validDownloadMetadata(library?.downloads?.classifiers?.[classifier])
+      : false;
+    return hasArtifact || hasNative || (!library?.downloads && Boolean(minecraftLibraryCoordinatePath(library?.name)));
+  });
+}
+
 function validBaseVersionJson(value = null, minecraftVersion = '') {
   return Boolean(
     value
@@ -461,11 +493,51 @@ function validBaseVersionJson(value = null, minecraftVersion = '') {
     && typeof value.assetIndex === 'object'
     && value.assetIndex.id
     && value.assetIndex.url
+    && validSha1(value.assetIndex.sha1)
+    && validNonNegativeSize(value.assetIndex.size)
+    && validNonNegativeSize(value.assetIndex.totalSize)
+    && validDownloadMetadata(value.downloads?.client)
+    && hasUsableLibraryMetadata(value)
   );
 }
 
-function validAssetIndexJson(value = null) {
-  return Boolean(value && typeof value === 'object' && value.objects && typeof value.objects === 'object');
+function assetIndexObjectEntries(value = null) {
+  const objects = value?.objects && typeof value.objects === 'object' ? value.objects : {};
+  return Object.entries(objects);
+}
+
+function assetIndexTotalObjectSize(value = null) {
+  return assetIndexObjectEntries(value).reduce((total, [, item]) => {
+    const size = Number(item?.size);
+    return total + (Number.isFinite(size) && size >= 0 ? size : 0);
+  }, 0);
+}
+
+function validAssetIndexJson(value = null, expected = {}) {
+  if (!value || typeof value !== 'object' || !value.objects || typeof value.objects !== 'object') {
+    return false;
+  }
+  const entries = assetIndexObjectEntries(value);
+  if (!entries.length) {
+    return false;
+  }
+  for (const [, item] of entries) {
+    if (!validSha1(item?.hash) || !validNonNegativeSize(item?.size)) {
+      return false;
+    }
+  }
+  if (validNonNegativeSize(expected.totalSize) && assetIndexTotalObjectSize(value) !== Number(expected.totalSize)) {
+    return false;
+  }
+  return true;
+}
+
+function assetIndexExpectation(versionJson = null) {
+  const assetIndex = versionJson?.assetIndex && typeof versionJson.assetIndex === 'object' ? versionJson.assetIndex : {};
+  return {
+    id: String(assetIndex.id || '').trim(),
+    totalSize: validNonNegativeSize(assetIndex.totalSize) ? Number(assetIndex.totalSize) : null
+  };
 }
 
 function legacyAssetIndexAliasIds(minecraftVersion = '', assetId = '') {
@@ -478,11 +550,11 @@ function legacyAssetIndexAliasIds(minecraftVersion = '', assetId = '') {
   return [...aliases].filter(Boolean);
 }
 
-async function ensureAssetIndexAliases(rootDir = '', minecraftVersion = '', assetId = '', assetIndex = null, actions = []) {
+async function ensureAssetIndexAliases(rootDir = '', minecraftVersion = '', assetId = '', assetIndex = null, actions = [], expected = {}) {
   for (const aliasId of legacyAssetIndexAliasIds(minecraftVersion, assetId)) {
     const aliasPath = path.join(rootDir, 'assets', 'indexes', `${aliasId}.json`);
     const existing = await readRepairableJsonFile(aliasPath, null);
-    if (validAssetIndexJson(existing)) {
+    if (validAssetIndexJson(existing, expected)) {
       continue;
     }
     await writeJsonFile(aliasPath, assetIndex);
@@ -501,19 +573,15 @@ async function readFallbackBaseVersionJson(rootDirs = [], minecraftVersion = '')
   return null;
 }
 
-async function readFallbackAssetIndexJson(rootDirs = [], assetId = '') {
+async function readFallbackAssetIndexJson(rootDirs = [], assetId = '', expected = {}) {
   for (const rootDir of uniqueLauncherRoots(rootDirs)) {
     const file = path.join(rootDir, 'assets', 'indexes', `${assetId}.json`);
     const value = await readRepairableJsonFile(file, null);
-    if (validAssetIndexJson(value)) {
+    if (validAssetIndexJson(value, expected)) {
       return { value, file };
     }
   }
   return null;
-}
-
-function validAssetObjectHash(value = '') {
-  return /^[a-f0-9]{40}$/i.test(String(value || '').trim());
 }
 
 function assetObjectEntries(assetIndex = null) {
@@ -524,7 +592,7 @@ function assetObjectEntries(assetIndex = null) {
       hash: String(item?.hash || '').trim().toLowerCase(),
       size: Number.isFinite(Number(item?.size)) ? Number(item.size) : null
     }))
-    .filter((item) => validAssetObjectHash(item.hash));
+    .filter((item) => validSha1(item.hash));
 }
 
 function assetObjectPath(rootDir = '', hash = '') {
@@ -1006,10 +1074,11 @@ async function ensureMinecraftRootAssets({
 
   const assetId = String(versionJson.assetIndex.id || '').trim();
   const assetUrl = String(versionJson.assetIndex.url || '').trim();
+  const assetExpected = assetIndexExpectation(versionJson);
   const assetIndexPath = path.join(rootDir, 'assets', 'indexes', `${assetId}.json`);
   let assetIndex = await readRepairableJsonFile(assetIndexPath, null);
-  if (!validAssetIndexJson(assetIndex)) {
-    const fallback = await readFallbackAssetIndexJson(fallbackRootDirs, assetId);
+  if (!validAssetIndexJson(assetIndex, assetExpected)) {
+    const fallback = await readFallbackAssetIndexJson(fallbackRootDirs, assetId, assetExpected);
     if (fallback) {
       logger?.log?.(`Copying Minecraft asset index ${assetId} from ${fallback.file}`);
       assetIndex = fallback.value;
@@ -1017,13 +1086,13 @@ async function ensureMinecraftRootAssets({
       logger?.log?.(`Repairing Minecraft asset index ${assetId} in ${rootDir}`);
       assetIndex = await fetchMinecraftJson(assetUrl, fetchJsonImpl);
     }
-    if (!validAssetIndexJson(assetIndex)) {
+    if (!validAssetIndexJson(assetIndex, assetExpected)) {
       throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
     }
     await writeJsonFile(assetIndexPath, assetIndex);
     actions.push(`wrote ${assetIndexPath}`);
   }
-  await ensureAssetIndexAliases(rootDir, minecraftVersion, assetId, assetIndex, actions);
+  await ensureAssetIndexAliases(rootDir, minecraftVersion, assetId, assetIndex, actions, assetExpected);
   const assetObjects = ensureAssetObjects
     ? await ensureMinecraftAssetObjects({
       rootDir,

@@ -41,6 +41,10 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function sha1(value) {
+  return crypto.createHash('sha1').update(value).digest('hex');
+}
+
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -194,6 +198,15 @@ const latest = {
   }
 };
 const managedModContent = 'managed mod bytes\n';
+const assetBytes = Buffer.from('service outage asset bytes\n');
+const assetHash = sha1(assetBytes);
+const assetIndex = { objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: assetBytes.length } } };
+const assetIndexBytes = Buffer.from(`${JSON.stringify(assetIndex)}\n`);
+const assetIndexHash = sha1(assetIndexBytes);
+const clientJarBytes = Buffer.from('service outage client jar bytes\n');
+const libraryBytes = Buffer.from('service outage library bytes\n');
+const clientJarHash = sha1(clientJarBytes);
+const libraryHash = sha1(libraryBytes);
 
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.mkdir(fakeLocalAppData, { recursive: true });
@@ -221,7 +234,34 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), forgeVersionMetadata());
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
-  { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
+  {
+    id: '1.12.2',
+    assetIndex: {
+      id: '1.12',
+      url: `${workerEndpoint}/assets/1.12.json`,
+      sha1: assetIndexHash,
+      size: assetIndexBytes.length,
+      totalSize: assetBytes.length
+    },
+    downloads: {
+      client: {
+        sha1: clientJarHash,
+        size: clientJarBytes.length,
+        url: `${workerEndpoint}/runtime/client.jar`
+      }
+    },
+    libraries: [{
+      name: 'com.example:service-outage-lib:1.0.0',
+      downloads: {
+        artifact: {
+          path: 'com/example/service-outage-lib/1.0.0/service-outage-lib-1.0.0.jar',
+          sha1: libraryHash,
+          size: libraryBytes.length,
+          url: `${workerEndpoint}/libraries/service-outage-lib-1.0.0.jar`
+        }
+      }
+    }]
+  }
 );
 await writeJson(defaultsPath, {
   packId: latest.packId,

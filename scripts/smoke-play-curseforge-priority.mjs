@@ -208,8 +208,39 @@ async function writeReadyMinecraftRoot(rootDir, options = {}) {
   await writeJson(path.join(rootDir, 'versions', versionId, `${versionId}.json`), forgeVersionMetadata());
   await writeJson(
     path.join(rootDir, 'versions', '1.12.2', '1.12.2.json'),
-    { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
+    {
+      id: '1.12.2',
+      assetIndex: {
+        id: '1.12',
+        url: `${workerEndpoint}/assets/1.12.json`,
+        sha1: assetIndexHash,
+        size: assetIndexBytes.length,
+        totalSize: assetBytes.length
+      },
+      downloads: {
+        client: {
+          sha1: clientJarHash,
+          size: clientJarBytes.length,
+          url: `${workerEndpoint}/runtime/client.jar`
+        }
+      },
+      libraries: [{
+        name: 'com.example:curseforge-route-lib:1.0.0',
+        downloads: {
+          artifact: {
+            path: libraryRelPath,
+            sha1: libraryHash,
+            size: libraryBytes.length,
+            url: `${workerEndpoint}/libraries/curseforge-route-lib-1.0.0.jar`
+          }
+        }
+      }]
+    }
   );
+  await fsp.mkdir(path.join(rootDir, 'versions', '1.12.2'), { recursive: true });
+  await fsp.writeFile(path.join(rootDir, 'versions', '1.12.2', '1.12.2.jar'), clientJarBytes);
+  await fsp.mkdir(path.dirname(path.join(rootDir, 'libraries', libraryRelPath)), { recursive: true });
+  await fsp.writeFile(path.join(rootDir, 'libraries', libraryRelPath), libraryBytes);
   if (options.launcherExe) {
     await fsp.mkdir(rootDir, { recursive: true });
     await fsp.writeFile(path.join(rootDir, process.platform === 'win32' ? 'minecraft.exe' : 'minecraft-launcher'), 'test launcher placeholder\n', 'utf8');
@@ -257,6 +288,14 @@ const latest = {
 const managedModContent = 'managed mod bytes\n';
 const assetBytes = Buffer.from('curseforge-first repaired asset\n');
 const assetHash = sha1(assetBytes);
+const assetIndex = { objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: assetBytes.length } } };
+const assetIndexBytes = Buffer.from(`${JSON.stringify(assetIndex)}\n`);
+const assetIndexHash = sha1(assetIndexBytes);
+const clientJarBytes = Buffer.from('curseforge-first client jar\n');
+const libraryBytes = Buffer.from('curseforge-first library jar\n');
+const clientJarHash = sha1(clientJarBytes);
+const libraryHash = sha1(libraryBytes);
+const libraryRelPath = 'com/example/curseforge-route-lib/1.0.0/curseforge-route-lib-1.0.0.jar';
 const assetRequests = [];
 
 await fsp.mkdir(fakeProgramFiles, { recursive: true });
@@ -355,7 +394,7 @@ const server = http.createServer((request, response) => {
     assetRequests.push(url.pathname);
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify({ objects: { 'minecraft/lang/en_us.lang': { hash: assetHash, size: assetBytes.length } } }));
+    response.end(JSON.stringify(assetIndex));
     return;
   }
   if (url.pathname === `/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`) {

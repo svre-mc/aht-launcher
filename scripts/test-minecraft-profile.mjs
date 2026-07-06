@@ -697,6 +697,9 @@ const fakeVersionUrl = 'https://example.invalid/1.12.2.json';
 const fakeAssetUrl = 'https://example.invalid/1.12.json';
 const fakeAssetBytes = Buffer.from('aht asset object\n');
 const fakeAssetHash = createHash('sha1').update(fakeAssetBytes).digest('hex');
+const fakeAssetIndex = { objects: { 'minecraft/lang/en_us.lang': { hash: fakeAssetHash, size: fakeAssetBytes.length } } };
+const fakeAssetIndexBytes = Buffer.from(`${JSON.stringify(fakeAssetIndex)}\n`);
+const fakeAssetIndexHash = createHash('sha1').update(fakeAssetIndexBytes).digest('hex');
 const fakeAssetObjectPath = path.join(assetRoot, 'assets', 'objects', fakeAssetHash.slice(0, 2), fakeAssetHash);
 const minecraftLibraryOsName = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux';
 const minecraftLibraryArch = /64/.test(process.arch) ? '64' : '32';
@@ -731,7 +734,13 @@ const fakeFetchJson = async (url) => {
   if (url === fakeVersionUrl) {
     return {
       id: '1.12.2',
-      assetIndex: { id: '1.12', url: fakeAssetUrl },
+      assetIndex: {
+        id: '1.12',
+        url: fakeAssetUrl,
+        sha1: fakeAssetIndexHash,
+        size: fakeAssetIndexBytes.length,
+        totalSize: fakeAssetBytes.length
+      },
       downloads: {
         client: {
           sha1: fakeClientJarHash,
@@ -793,7 +802,7 @@ const fakeFetchJson = async (url) => {
     };
   }
   if (url === fakeAssetUrl) {
-    return { objects: { 'minecraft/lang/en_us.lang': { hash: fakeAssetHash, size: fakeAssetBytes.length } } };
+    return JSON.parse(JSON.stringify(fakeAssetIndex));
   }
   throw new Error(`Unexpected fake fetch ${url}`);
 };
@@ -929,6 +938,80 @@ for (const rootDir of [multiAssetPrimaryRoot, multiAssetSyncedRoot]) {
 }
 if (!JSON.parse(await fs.readFile(path.join(multiAssetSyncedRoot, 'assets', 'indexes', 'legacy.json'), 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
   throw new Error('Synced launcher root did not get the legacy asset index alias.');
+}
+const staleVersionRoot = path.join(root, 'asset-stale-version-root');
+await fs.mkdir(path.join(staleVersionRoot, 'versions', '1.12.2'), { recursive: true });
+await fs.writeFile(path.join(staleVersionRoot, 'versions', '1.12.2', '1.12.2.json'), JSON.stringify({
+  id: '1.12.2',
+  assetIndex: { id: '1.12', url: fakeAssetUrl }
+}, null, 2));
+const staleVersionFetchesBefore = fakeFetches.length;
+const staleVersionRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: staleVersionRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: { rootDir: staleVersionRoot, syncedProfiles: [{ rootDir: staleVersionRoot }], minecraftVersion: '1.12.2' },
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile
+});
+if (
+  !staleVersionRepair.repaired
+  || !fakeFetches.slice(staleVersionFetchesBefore).includes(fakeManifestUrl)
+  || !fakeFetches.slice(staleVersionFetchesBefore).includes(fakeVersionUrl)
+) {
+  throw new Error(`Syntactically valid but incomplete Minecraft version metadata was not refreshed: ${JSON.stringify({ staleVersionRepair, fakeFetches: fakeFetches.slice(staleVersionFetchesBefore) })}`);
+}
+const staleAssetIndexRoot = path.join(root, 'asset-stale-index-root');
+await fs.mkdir(path.join(staleAssetIndexRoot, 'versions', '1.12.2'), { recursive: true });
+await fs.mkdir(path.join(staleAssetIndexRoot, 'assets', 'indexes'), { recursive: true });
+await fs.writeFile(path.join(staleAssetIndexRoot, 'versions', '1.12.2', '1.12.2.json'), JSON.stringify({
+  id: '1.12.2',
+  assetIndex: {
+    id: '1.12',
+    url: fakeAssetUrl,
+    sha1: fakeAssetIndexHash,
+    size: fakeAssetIndexBytes.length,
+    totalSize: fakeAssetBytes.length
+  },
+  downloads: {
+    client: {
+      sha1: fakeClientJarHash,
+      size: fakeClientJarBytes.length,
+      url: fakeClientJarUrl
+    }
+  },
+  libraries: [{
+    name: 'com.example:base-lib:1.0.0',
+    downloads: {
+      artifact: {
+        path: fakeLibraryRelPath,
+        url: fakeLibraryUrl,
+        sha1: fakeLibraryHash,
+        size: fakeLibraryBytes.length
+      }
+    }
+  }]
+}, null, 2));
+await fs.writeFile(path.join(staleAssetIndexRoot, 'assets', 'indexes', '1.12.json'), JSON.stringify({
+  objects: { 'minecraft/lang/en_us.lang': { hash: fakeAssetHash, size: 1 } }
+}, null, 2));
+const staleIndexFetchesBefore = fakeFetches.length;
+const staleAssetIndexRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: staleAssetIndexRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: { rootDir: staleAssetIndexRoot, syncedProfiles: [{ rootDir: staleAssetIndexRoot }], minecraftVersion: '1.12.2' },
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson,
+  downloadFileImpl: fakeDownloadFile
+});
+if (
+  !staleAssetIndexRepair.repaired
+  || !fakeFetches.slice(staleIndexFetchesBefore).includes(fakeAssetUrl)
+  || !JSON.parse(await fs.readFile(path.join(staleAssetIndexRoot, 'assets', 'indexes', 'legacy.json'), 'utf8')).objects?.['minecraft/lang/en_us.lang']
+) {
+  throw new Error(`Valid-looking stale Minecraft asset index was not refreshed: ${JSON.stringify({ staleAssetIndexRepair, fakeFetches: fakeFetches.slice(staleIndexFetchesBefore) })}`);
 }
 await fs.writeFile(legacyAssetIndexPath, '', 'utf8');
 const legacyAliasRepair = await ensureMinecraftLauncherAssets({
