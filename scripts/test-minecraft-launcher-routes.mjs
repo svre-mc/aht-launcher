@@ -4,6 +4,7 @@ import {
   MAC_MINECRAFT_BUNDLE_IDS,
   WINDOWS_MINECRAFT_PACKAGE_FAMILY,
   isCurseForgeMinecraftRoot,
+  isMacCurseForgeAppPath,
   isWindowsMinecraftLauncherExecutablePath,
   localMinecraftRootCandidates,
   macCurseForgeMinecraftRootCandidates,
@@ -56,6 +57,7 @@ const macCurseForgeRoot = '/Users/player/curseforge/minecraft/Install';
 const macLibraryCurseForgeRoot = '/Users/player/Library/Application Support/CurseForge/minecraft/Install';
 const macDocumentsLowerCurseForgeRoot = '/Users/player/Documents/curseforge/minecraft/Install';
 const macLauncherApp = '/Applications/Minecraft Launcher.app';
+const macCurseForgeApp = '/Applications/CurseForge.app';
 
 function existsSet(paths = []) {
   const normalized = new Set(paths.map((item) => path.win32.normalize(item).toLowerCase()));
@@ -389,12 +391,24 @@ assert.equal(windowsCurseForgeCandidates.includes(localAppDataCurseForgeRoot), t
 }
 
 {
+  const planned = await macRoutes([
+    macCurseForgeRoot,
+    macCurseForgeApp
+  ], { env: { AHT_MINECRAFT_MAC_APP: macCurseForgeApp } });
+  assert.equal(planned[0].kind, 'curseforge-bundle');
+  assert.equal(planned.some((route) => JSON.stringify(route.args).includes('CurseForge.app')), false);
+  assert.equal(planned.some((route) => route.kind === 'curseforge-app-name' && route.args[0] === '-a' && route.args[1] === 'Minecraft Launcher'), true);
+}
+
+{
   const customApp = '/Users/player/Apps/Minecraft Custom.app';
   const planned = await macRoutes([customApp], { env: { AHT_MINECRAFT_MAC_APP: customApp } });
   assert.equal(planned[0].kind, 'app');
   assert.deepEqual(planned[0].args, [customApp, '--args', '--workDir', macDefaultRoot]);
 }
 
+assert.equal(isMacCurseForgeAppPath(macCurseForgeApp), true);
+assert.equal(isMacCurseForgeAppPath('/Users/player/Applications/Minecraft Launcher.app'), false);
 assert.equal(macCurseForgeMinecraftRootCandidates({ homePath: macHomePath, documentsPath: macDocumentsPath })[0], macCurseForgeRoot);
 assert.equal(macCurseForgeMinecraftRootCandidates({ homePath: macHomePath, documentsPath: macDocumentsPath }).some((candidate) => candidate.toLowerCase() === macDocumentsLowerCurseForgeRoot.toLowerCase()), true);
 assert.equal(macMinecraftLauncherAppPaths({ env: macEnv, homePath: macHomePath })[1], macLauncherApp);
@@ -425,6 +439,8 @@ console.log(JSON.stringify({
     'macos-library-curseforge-root',
     'macos-documents-lower-curseforge-root',
     'macos-curseforge-bundle-fallback',
+    'macos-curseforge-app-ignored',
+    'macos-curseforge-app-name-fallback',
     'macos-custom-app'
   ]
 }, null, 2));

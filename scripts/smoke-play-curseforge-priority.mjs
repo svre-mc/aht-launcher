@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
@@ -9,12 +9,17 @@ import path from 'node:path';
 
 const expectFallback = process.argv.includes('--fallback');
 const expectStoreFallback = process.argv.includes('--store-fallback');
+const expectStoreNoProcess = process.argv.includes('--store-no-process');
 const expectStartFallback = process.argv.includes('--desktop-start-retry');
 const expectAppAliasIgnored = process.argv.includes('--app-alias-ignored');
 const expectCustomFallback = process.argv.includes('--custom-fallback');
+const expectCurseForgeAuthImport = process.argv.includes('--curseforge-auth-import');
+const expectLocalAppDataLauncher = process.argv.includes('--localappdata-launcher');
+const expectShortcutLauncher = process.argv.includes('--shortcut-launcher');
+const expectGenericShortcutLauncher = process.argv.includes('--generic-shortcut-launcher');
 const useDesktopMinecraftLauncher = !process.argv.includes('--no-desktop');
 const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
-const defaultPort = expectFallback ? 10976 : expectStoreFallback ? 11076 : expectCustomFallback ? 11176 : expectStartFallback ? 11276 : expectAppAliasIgnored ? 11376 : 10876;
+const defaultPort = expectFallback ? 10976 : expectStoreFallback ? 11076 : expectCustomFallback ? 11176 : expectStartFallback ? 11276 : expectAppAliasIgnored ? 11376 : expectStoreNoProcess ? 11476 : expectCurseForgeAuthImport ? 11576 : expectLocalAppDataLauncher ? 11676 : expectShortcutLauncher ? 11776 : expectGenericShortcutLauncher ? 11876 : 10876;
 const port = Number(portArg || await availablePortPair(defaultPort));
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
@@ -34,9 +39,20 @@ const storePackageDir = path.join(fakeLocalAppData, 'Packages', storePackageFami
 const storeMcRoot = path.join(storePackageDir, 'LocalCache', 'Roaming', '.minecraft');
 const curseForgeRoot = path.join(fakeUserProfile, 'curseforge', 'minecraft', 'Install');
 const desktopMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
+const localAppDataMinecraftLauncher = path.join(fakeLocalAppData, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe');
+const shortcutMinecraftLauncher = path.join(root, 'Games', 'Minecraft Launcher', 'MinecraftLauncher.exe');
+const startMenuShortcut = path.join(
+  fakeAppData,
+  'Microsoft',
+  'Windows',
+  'Start Menu',
+  'Programs',
+  expectGenericShortcutLauncher ? 'Launcher.lnk' : 'Minecraft Launcher.lnk'
+);
 const appAliasMinecraftLauncher = path.join(fakeLocalAppData, 'Microsoft', 'WindowsApps', 'MinecraftLauncher.exe');
 const curseForgeApp = path.join(fakeLocalAppData, 'Programs', 'CurseForge', 'CurseForge.exe');
 const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
+const externalOpenCapturePath = path.join(root, 'external-open.jsonl');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -190,6 +206,31 @@ async function writeReadyMinecraftRoot(rootDir, options = {}) {
   }
 }
 
+function psSingleQuoted(value = '') {
+  return `'${String(value || '').replaceAll("'", "''")}'`;
+}
+
+function createWindowsShortcut(shortcutPath, targetPath) {
+  if (process.platform !== 'win32') {
+    throw new Error('Windows shortcut discovery smoke can only run on Windows.');
+  }
+  fs.mkdirSync(path.dirname(shortcutPath), { recursive: true });
+  const script = [
+    '$shell = New-Object -ComObject WScript.Shell',
+    `$shortcut = $shell.CreateShortcut(${psSingleQuoted(shortcutPath)})`,
+    `$shortcut.TargetPath = ${psSingleQuoted(targetPath)}`,
+    `$shortcut.WorkingDirectory = ${psSingleQuoted(path.dirname(targetPath))}`,
+    '$shortcut.Save()'
+  ].join('; ');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    encoding: 'utf8',
+    windowsHide: true
+  });
+  if (result.status !== 0) {
+    throw new Error(`Failed to create Windows shortcut: ${result.stderr || result.stdout || result.status}`);
+  }
+}
+
 const latest = {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time',
@@ -209,15 +250,24 @@ const assetHash = sha1(assetBytes);
 const assetRequests = [];
 
 await fsp.mkdir(fakeProgramFiles, { recursive: true });
-if (useDesktopMinecraftLauncher) {
+if (useDesktopMinecraftLauncher && !expectLocalAppDataLauncher && !expectShortcutLauncher && !expectGenericShortcutLauncher) {
   await fsp.mkdir(path.dirname(desktopMinecraftLauncher), { recursive: true });
   await fsp.writeFile(desktopMinecraftLauncher, 'desktop launcher placeholder\n', 'utf8');
+}
+if (expectLocalAppDataLauncher) {
+  await fsp.mkdir(path.dirname(localAppDataMinecraftLauncher), { recursive: true });
+  await fsp.writeFile(localAppDataMinecraftLauncher, 'local appdata launcher placeholder\n', 'utf8');
+}
+if (expectShortcutLauncher || expectGenericShortcutLauncher) {
+  await fsp.mkdir(path.dirname(shortcutMinecraftLauncher), { recursive: true });
+  await fsp.writeFile(shortcutMinecraftLauncher, 'shortcut target launcher placeholder\n', 'utf8');
+  createWindowsShortcut(startMenuShortcut, shortcutMinecraftLauncher);
 }
 if (expectAppAliasIgnored) {
   await fsp.mkdir(path.dirname(appAliasMinecraftLauncher), { recursive: true });
   await fsp.writeFile(appAliasMinecraftLauncher, 'app alias launcher placeholder\n', 'utf8');
 }
-if (expectStoreFallback) {
+if (expectStoreFallback || expectStoreNoProcess) {
   await fsp.mkdir(path.dirname(curseForgeApp), { recursive: true });
   await fsp.writeFile(curseForgeApp, 'curseforge app placeholder\n', 'utf8');
 }
@@ -238,6 +288,17 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
 }]);
 await writeReadyMinecraftRoot(configuredMcRoot);
 await writeReadyMinecraftRoot(curseForgeRoot);
+if (expectCurseForgeAuthImport) {
+  await writeJson(path.join(curseForgeRoot, 'launcher_accounts.json'), {
+    activeAccountLocalId: 'curseforge-account',
+    accounts: {
+      'curseforge-account': {
+        type: 'Xbox',
+        minecraftProfile: { name: 'CFFirstUser' }
+      }
+    }
+  });
+}
 await fsp.mkdir(path.join(storePackageDir, 'LocalState'), { recursive: true });
 await writeReadyMinecraftRoot(storeMcRoot);
 await fsp.mkdir(path.join(configuredMcRoot, 'assets', 'indexes'), { recursive: true });
@@ -262,7 +323,7 @@ await writeJson(defaultsPath, {
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,
-    autoImportAccount: false,
+    autoImportAccount: expectCurseForgeAuthImport,
     ...(expectCustomFallback ? {
       openCommand: path.join(root, 'missing-custom-launcher', 'MinecraftLauncher.exe'),
       openArgs: ['--bad-custom']
@@ -352,6 +413,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/asset-objects/`,
     AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
+    AHT_TEST_OPEN_EXTERNAL_CAPTURE_PATH: externalOpenCapturePath,
+    AHT_TEST_STORE_PROCESS_STATE: expectStoreNoProcess ? 'missing' : '',
     AHT_TEST_SPAWN_DETACHED_FAIL_KINDS: [
       expectFallback ? 'curseforge' : '',
       expectCustomFallback ? 'custom' : ''
@@ -364,7 +427,7 @@ const child = spawn(electronBin, electronArgs, {
     HOME: fakeHome,
     ProgramFiles: fakeProgramFiles,
     'ProgramFiles(x86)': fakeProgramFiles,
-    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: (expectStoreFallback || expectAppAliasIgnored) ? '1' : ''
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: (expectStoreFallback || expectAppAliasIgnored || expectStoreNoProcess || expectShortcutLauncher || expectGenericShortcutLauncher) ? '1' : ''
   },
   stdio: 'ignore',
   windowsHide: true
@@ -377,13 +440,15 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
-  const registration = await evaluate(client, `
-    window.aht.accountRegister('CFFirstUser')
-      .then((result) => ({ ok: true, result }))
-      .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
-  `);
-  if (!registration.ok || !registration.result?.ok) {
-    throw new Error(`Player registration failed: ${JSON.stringify(registration)}`);
+  if (!expectCurseForgeAuthImport) {
+    const registration = await evaluate(client, `
+      window.aht.accountRegister('CFFirstUser')
+        .then((result) => ({ ok: true, result }))
+        .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
+    `);
+    if (!registration.ok || !registration.result?.ok) {
+      throw new Error(`Player registration failed: ${JSON.stringify(registration)}`);
+    }
   }
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '8.9.3' ? status : false)
@@ -391,23 +456,56 @@ try {
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
     throw new Error(`Smoke setup should be launch-ready before CurseForge-first Play: ${JSON.stringify(before)}`);
   }
-  const expectedOpenState = (expectStoreFallback || expectAppAliasIgnored) ? 'store-fallback' : 'preferred';
+  const expectedOpenState = (expectStoreFallback || expectAppAliasIgnored || expectStoreNoProcess) ? 'store-fallback' : 'preferred';
   if (before.setup?.minecraftLauncherOpenState !== expectedOpenState) {
     throw new Error(`Setup did not report the expected first Minecraft route ${expectedOpenState}: ${JSON.stringify(before.setup)}`);
   }
   if (!Array.isArray(before.setup?.minecraftLauncherRouteKinds) || before.setup.minecraftLauncherRouteKinds[0] !== expectedOpenState) {
     throw new Error(`Setup did not expose the expected safe route summary: ${JSON.stringify(before.setup)}`);
   }
-  if (!expectStoreFallback && !expectAppAliasIgnored && (!before.setup.minecraftLauncherHasCurseForgeRoute || before.setup.minecraftLauncherRouteCount < 1)) {
+  if (!expectStoreFallback && !expectAppAliasIgnored && !expectStoreNoProcess && (!before.setup.minecraftLauncherHasCurseForgeRoute || before.setup.minecraftLauncherRouteCount < 1)) {
     throw new Error(`Setup did not report CurseForge route availability: ${JSON.stringify(before.setup)}`);
   }
-  if (expectStoreFallback || expectAppAliasIgnored) {
+  if (expectStoreFallback || expectAppAliasIgnored || expectStoreNoProcess) {
     if (!before.setup.minecraftLauncherRouteDegraded || before.setup.minecraftLauncherHasCurseForgeRoute) {
       throw new Error(`Store fallback should be degraded and must not expose a CurseForge app route: ${JSON.stringify(before.setup)}`);
     }
   }
 
   await evaluate(client, `document.querySelector('#playButton')?.click(); true`);
+  if (expectStoreNoProcess) {
+    const toast = await waitFor(client, `
+      (() => {
+        const nodes = [...document.querySelectorAll('.toast')];
+        const toast = nodes.find((item) => /Setup needed/i.test(item.querySelector('strong')?.textContent || ''));
+        if (!toast) return false;
+        return {
+          title: toast.querySelector('strong')?.textContent || '',
+          detail: toast.querySelector('span')?.textContent || '',
+          log: document.querySelector('#log')?.textContent || ''
+        };
+      })()
+    `, 'setup-needed toast after Store route failed to start a launcher process');
+    if (!/Windows app execution did not open|official Minecraft Launcher download page|minecraft\.net\/download/i.test(`${toast.detail}\n${toast.log}`)) {
+      throw new Error(`Store no-process failure did not give actionable Minecraft Launcher setup guidance: ${JSON.stringify(toast)}`);
+    }
+    const spawnCaptures = await readJsonLines(spawnCapturePath);
+    if (!spawnCaptures.length || !spawnCaptures.every((capture) => capture.kind === 'store')) {
+      throw new Error(`Store no-process smoke should only try Store launcher routes: ${JSON.stringify(spawnCaptures)}`);
+    }
+    const externalCaptures = await readJsonLines(externalOpenCapturePath);
+    if (!externalCaptures.some((capture) => /minecraft\.net\/download/i.test(String(capture.url || capture.message || '')))) {
+      throw new Error(`Store no-process smoke did not open the official Minecraft Launcher download page: ${JSON.stringify(externalCaptures)}`);
+    }
+    console.log(JSON.stringify({
+      ok: true,
+      root,
+      packaged: Boolean(smokeExe),
+      expectStoreNoProcess,
+      spawnCaptures,
+      externalCaptures
+    }, null, 2));
+  } else {
   const toast = await waitFor(client, `
     (() => {
       const nodes = [...document.querySelectorAll('.toast')];
@@ -422,6 +520,15 @@ try {
   `, 'Play success toast after CurseForge root prep');
   if (/REQUEST_FAILED|Unable to prepare assets|Unexpected end of JSON|Launch failed|Error invoking remote method/i.test(`${toast.title}\n${toast.detail}\n${toast.log}`)) {
     throw new Error(`CurseForge-first Play leaked a launcher asset failure: ${JSON.stringify(toast)}`);
+  }
+  if (expectCurseForgeAuthImport) {
+    const identity = JSON.parse(await fsp.readFile(path.join(userData, 'identity.json'), 'utf8'));
+    if (identity.minecraftUsername !== 'CFFirstUser' || identity.usernameRegistrationMode !== 'minecraft-launcher') {
+      throw new Error(`Play did not import the Minecraft username from the CurseForge launcher root: ${JSON.stringify(identity)}`);
+    }
+    if (!registeredUsers.has('cffirstuser')) {
+      throw new Error(`Play did not register the imported CurseForge-root username before launcher proof: ${JSON.stringify([...registeredUsers.entries()])}`);
+    }
   }
   const spawnCaptures = await readJsonLines(spawnCapturePath);
   const spawnCapture = spawnCaptures.at(-1);
@@ -466,8 +573,16 @@ try {
       throw new Error(`Fallback smoke did not launch the normal Minecraft route from the configured root cwd: ${JSON.stringify(spawnCapture)}`);
     }
   } else {
-    if (!spawnCapture || spawnCapture.kind !== 'curseforge' || path.resolve(spawnCapture.command) !== path.resolve(desktopMinecraftLauncher)) {
+    const expectedMinecraftLauncher = expectLocalAppDataLauncher
+      ? localAppDataMinecraftLauncher
+      : (expectShortcutLauncher || expectGenericShortcutLauncher)
+        ? shortcutMinecraftLauncher
+        : desktopMinecraftLauncher;
+    if (!spawnCapture || spawnCapture.kind !== 'curseforge' || path.resolve(spawnCapture.command) !== path.resolve(expectedMinecraftLauncher)) {
       throw new Error(`Play did not open the Minecraft Launcher with the CurseForge root first: ${JSON.stringify(spawnCaptures)}`);
+    }
+    if ((expectShortcutLauncher || expectGenericShortcutLauncher) && spawnCapture.source !== 'shortcut') {
+      throw new Error(`Play did not use the discovered Start Menu shortcut route: ${JSON.stringify(spawnCapture)}`);
     }
     if (JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', curseForgeRoot])) {
       throw new Error(`Play did not pass the CurseForge Minecraft root as --workDir: ${JSON.stringify(spawnCapture)}`);
@@ -482,14 +597,9 @@ try {
     if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
       throw new Error(`AHT profile was not prepared in ${rootDir}: ${JSON.stringify(profile)}`);
     }
-    const assetIndex = JSON.parse(await fsp.readFile(path.join(rootDir, 'assets', 'indexes', '1.12.json'), 'utf8'));
-    const legacyIndex = JSON.parse(await fsp.readFile(path.join(rootDir, 'assets', 'indexes', 'legacy.json'), 'utf8'));
-    if (assetIndex.objects?.['minecraft/lang/en_us.lang']?.hash !== assetHash || legacyIndex.objects?.['minecraft/lang/en_us.lang']?.hash !== assetHash) {
-      throw new Error(`Asset indexes were not repaired in ${rootDir}: ${JSON.stringify({ assetIndex, legacyIndex })}`);
-    }
     const assetObject = path.join(rootDir, 'assets', 'objects', assetHash.slice(0, 2), assetHash);
-    if (sha1(await fsp.readFile(assetObject)) !== assetHash) {
-      throw new Error(`Asset object was not repaired in ${rootDir}.`);
+    if (fs.existsSync(assetObject)) {
+      throw new Error(`Play should not block on asset-object repair in ${rootDir}.`);
     }
   }
 
@@ -503,9 +613,14 @@ try {
     expectFallback,
     expectStoreFallback,
     expectCustomFallback,
+    expectCurseForgeAuthImport,
+    expectLocalAppDataLauncher,
+    expectShortcutLauncher,
+    expectGenericShortcutLauncher,
     requests: assetRequests,
     spawnCapture
   }, null, 2));
+  }
 } finally {
   try {
     client?.close?.();

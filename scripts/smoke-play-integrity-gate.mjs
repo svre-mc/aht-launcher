@@ -325,31 +325,36 @@ try {
     window.aht.getStatus().then((status) => status.latest?.version === '2.8.2' ? status : false)
   `, 'release feed');
   if (!before.launchReady) {
-    throw new Error(`Pre-play status should be launch-ready before the forced integrity scan: ${JSON.stringify(before)}`);
+    throw new Error(`Pre-scan status should start launch-ready before explicit integrity scan: ${JSON.stringify(before)}`);
   }
 
-  const playResult = await evaluate(client, `
-    window.aht.play()
+  const scanResult = await evaluate(client, `
+    window.aht.scanFiles()
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
   `);
-  if (playResult.ok || !/Repair required.*mod file issue/i.test(playResult.message || '')) {
-    throw new Error(`Play IPC failure path did not surface the corrupted mod file: ${JSON.stringify(playResult)}`);
+  if (!scanResult.ok || scanResult.result?.counts?.corrupted !== 1 || scanResult.result?.changed?.[0]?.path !== 'mods/aht-integrity-test.jar') {
+    throw new Error(`Explicit scan did not surface the corrupted mod file: ${JSON.stringify(scanResult)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (after.launchReady || !/Repair required.*mod file issue/i.test(after.launchBlockedReason || '')) {
-    throw new Error(`Status did not stay blocked after play integrity scan: ${JSON.stringify(after)}`);
-  }
-  if (after.integrity?.counts?.corrupted !== 1 || after.integrity?.changed?.[0]?.path !== 'mods/aht-integrity-test.jar') {
-    throw new Error(`Integrity state did not record the corrupted file: ${JSON.stringify(after.integrity)}`);
+    throw new Error(`Status did not block after explicit integrity scan: ${JSON.stringify(after)}`);
   }
 
   const persistedIntegrity = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'integrity.json'), 'utf8'));
-  if (persistedIntegrity.source !== 'play-check' || persistedIntegrity.counts?.corrupted !== 1) {
-    throw new Error(`Play check integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
+  if (persistedIntegrity.source !== 'scan' || persistedIntegrity.counts?.corrupted !== 1) {
+    throw new Error(`Explicit scan integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
   }
 
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
+  const cleanScanResult = await evaluate(client, `
+    window.aht.scanFiles()
+      .then((result) => ({ ok: true, result }))
+      .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
+  `);
+  if (!cleanScanResult.ok || cleanScanResult.result?.counts?.corrupted !== 0) {
+    throw new Error(`Explicit clean scan did not clear the repair gate: ${JSON.stringify(cleanScanResult)}`);
+  }
   await fsp.rm(spawnCapturePath, { force: true });
   const cleanPlayResult = await evaluate(client, `
     window.aht.play()
@@ -469,7 +474,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     root,
-    blockedPlayResult: playResult,
+    blockedScanResult: scanResult,
     cleanPlayResult,
     blockedReason: after.launchBlockedReason,
     cleanLaunchCommand: cleanPlayResult.result.command,

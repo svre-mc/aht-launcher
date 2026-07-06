@@ -2996,10 +2996,10 @@ function renderStatus(status) {
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
   setUnavailable(els.updateButton, launcherUpdateRequired || Boolean(status.updateBlockedReason) || !status.latest || !status.updateRequired || updateRunning);
-  setUnavailable(els.playButton, launcherUpdateRequired || !status.launchReady || updateRunning);
+  setUnavailable(els.playButton, updateRunning);
   setUnavailable(els.scanButton, launcherUpdateRequired || !status.latest || updateRunning);
   els.updateButton.title = status.updateBlockedReason || (status.updateRequired ? "Update pack" : "No update available.");
-  els.playButton.title = status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing.");
+  els.playButton.title = updateRunning ? "Wait for the current install to finish." : "Launch Minecraft";
   if (shouldShowUpdateProgress(lastUpdateState)) {
     setProgress(true, estimateProgress(lastUpdateState), updateProgressLabel(lastUpdateState));
   } else {
@@ -3323,7 +3323,7 @@ async function scanFilesForRepair() {
         || Boolean(lastIntegrityScan?.installedManifestError)
         || (lastIntegrityScan?.counts?.managed === 0 && Boolean(currentStatus.installed || lastIntegrityScan?.repairable));
       setUnavailable(els.updateButton, Boolean(currentStatus.updateBlockedReason) || !currentStatus.latest || !currentStatus.updateRequired || updateRunning);
-      setUnavailable(els.playButton, !currentStatus.launchReady || updateRunning || repairNeeded);
+      setUnavailable(els.playButton, updateRunning);
     }
     if (scanCompleted) {
       const scanLog = currentLogText();
@@ -3423,12 +3423,13 @@ els.playButton.addEventListener("click", () => {
         const launcherMode = Boolean(result?.minecraftProfile);
         const signInNeeded = launcherMode && result.minecraftProfile?.accountReuseAvailable === false;
         const signInCheckNeeded = launcherMode && result.minecraftProfile?.accountReuseAvailable === true && result.minecraftProfile?.accountProfileKnown === false;
+        const launchWarning = String(result?.warning || "").trim();
         showToast(
           launcherMode ? "Minecraft Launcher opened" : "Minecraft Launcher opened",
-          signInNeeded
+          launchWarning || (signInNeeded
             ? "Sign in with Microsoft inside Minecraft Launcher, then click Play on the A Hard Time profile."
-            : (signInCheckNeeded ? "If Minecraft Launcher asks, finish Microsoft sign-in, then click Play on the A Hard Time profile." : (launcherMode ? "The A Hard Time profile is selected. Click Play inside Minecraft Launcher." : "Click Play inside Minecraft Launcher.")),
-          "success"
+            : (signInCheckNeeded ? "If Minecraft Launcher asks, finish Microsoft sign-in, then click Play on the A Hard Time profile." : (launcherMode ? "The A Hard Time profile is selected. Click Play inside Minecraft Launcher." : "Click Play inside Minecraft Launcher."))),
+          launchWarning ? "warn" : "success"
         );
       })
       .catch((error) => {

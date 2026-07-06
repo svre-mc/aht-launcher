@@ -330,7 +330,7 @@ try {
   }
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '8.9.2' ? status : false)
-  `, 'ready status before Play asset index repair');
+  `, 'ready status before Play asset index handoff');
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
     throw new Error(`Smoke setup should be launch-ready before asset index repair Play: ${JSON.stringify(before)}`);
   }
@@ -347,7 +347,7 @@ try {
         log: document.querySelector('#log')?.textContent || ''
       };
     })()
-  `, 'Play success toast after asset index repair');
+  `, 'Play success toast without blocking on asset-object repair');
   if (/REQUEST_FAILED|Unable to prepare assets|Unexpected end of JSON|Launch failed|Error invoking remote method/i.test(`${toast.title}\n${toast.detail}\n${toast.log}`)) {
     throw new Error(`Asset repair Play leaked a launcher asset failure: ${JSON.stringify(toast)}`);
   }
@@ -373,18 +373,8 @@ try {
     throw new Error(`Play did not pass launcher overlay-safety environment flags: ${JSON.stringify(spawnCapture)}`);
   }
 
-  const repairedIndex = JSON.parse(await fsp.readFile(assetIndexPath, 'utf8'));
-  if (repairedIndex.objects?.['minecraft/lang/en_us.lang']?.hash !== assetHash) {
-    throw new Error(`Minecraft asset index was not repaired before launch: ${JSON.stringify(repairedIndex)}`);
-  }
-  if (!fs.existsSync(assetObjectPath)) {
-    throw new Error('Minecraft asset object should be repaired before opening Minecraft Launcher.');
-  }
-  if (sha1(await fsp.readFile(assetObjectPath)) !== assetHash) {
-    throw new Error('Minecraft asset object was repaired with the wrong bytes.');
-  }
-  if (!assetRequests.includes('/assets/1.12.json') || assetObjectRequestCount !== 2) {
-    throw new Error(`Play should repair the asset index and retry bad asset-object downloads before launch: ${JSON.stringify(assetRequests)}`);
+  if (fs.existsSync(assetObjectPath) || assetObjectRequestCount !== 0 || assetRequests.includes(`/asset-objects/${assetHash.slice(0, 2)}/${assetHash}`)) {
+    throw new Error(`Play should not block on asset-object repair before opening Minecraft Launcher: ${JSON.stringify({ assetRequests, assetObjectRequestCount, assetObjectPath })}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
@@ -398,8 +388,7 @@ try {
     ok: true,
     root,
     packaged: Boolean(smokeExe),
-    repairedIndex: assetIndexPath,
-    repairedObject: assetObjectPath,
+    assetObjectRepairSkippedOnPlay: true,
     requests: assetRequests,
     assetObjectRequestCount,
     spawnCapture,

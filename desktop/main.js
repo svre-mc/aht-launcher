@@ -384,9 +384,11 @@ async function minecraftLauncherLogTail(rootDir = '') {
 async function launcherExecutableDiagnostics(rootDir = '') {
   if (process.platform === 'win32') {
     const items = [];
-    for (const candidate of windowsMinecraftLauncherExecutableCandidates(rootDir, process.env)) {
+    const discovered = await windowsDiscoveredLauncherPaths(process.env);
+    for (const candidate of windowsMinecraftLauncherExecutableCandidates(rootDir, process.env, discovered.minecraftLauncherPaths)) {
       items.push({
         kind: candidate.kind,
+        source: candidate.source || '',
         path: candidate.path,
         args: candidate.args || [],
         exists: await pathExists(candidate.path)
@@ -418,6 +420,7 @@ function routeForDiagnostic(route = {}) {
     cwd: route.cwd || '',
     rootDir: route.rootDir || '',
     source: route.source || '',
+    message: route.message || '',
     observeExitMs: Number(route.observeExitMs) || 0
   };
 }
@@ -2627,7 +2630,7 @@ function minecraftLaunchResultForRenderer(result = {}) {
 async function getStatus(configOverride = null) {
   const config = configOverride || await loadConfig();
   const launcherConfig = await minecraftLauncherRuntimeConfig(config);
-  const identity = await identityPayload(config);
+  const identity = await identityPayload(launcherConfig);
   let latest = null;
   let latestError = null;
   let updateLogs = [];
@@ -5964,6 +5967,135 @@ function windowsStartArgs(command = '', args = []) {
   return ['/d', '/s', '/c', 'start', '""', command, ...args.map((arg) => String(arg))];
 }
 
+const WINDOWS_MINECRAFT_LAUNCHER_PROCESS_NAMES = [
+  'MinecraftLauncher.exe',
+  'Minecraft.exe',
+  'Minecraft.Windows.exe'
+];
+
+function windowsTasklistCommand(env = process.env) {
+  return env.SystemRoot ? path.join(env.SystemRoot, 'System32', 'tasklist.exe') : 'tasklist.exe';
+}
+
+function tasklistOutputHasImage(output = '', imageName = '') {
+  const needle = `"${String(imageName || '').toLowerCase()}"`;
+  return String(output || '').toLowerCase().split(/\r?\n/).some((line) => line.trim().startsWith(needle));
+}
+
+async function windowsProcessImageIsRunning(imageName = '', env = process.env) {
+  if (process.platform !== 'win32' || !imageName) {
+    return { checked: false, running: false, name: imageName };
+  }
+  try {
+    const output = await spawnLogged(
+      windowsTasklistCommand(env),
+      ['/FI', `IMAGENAME eq ${imageName}`, '/FO', 'CSV', '/NH'],
+      { env, timeoutMs: 3000 }
+    );
+    return {
+      checked: true,
+      running: tasklistOutputHasImage(output, imageName),
+      name: imageName
+    };
+  } catch (error) {
+    return {
+      checked: false,
+      running: false,
+      name: imageName,
+      error: error.message || String(error)
+    };
+  }
+}
+
+async function waitForWindowsMinecraftLauncherProcess(env = process.env, timeoutMs = 30000) {
+  if (process.platform !== 'win32') {
+    return { checked: false, running: false, names: [] };
+  }
+  const testState = process.env.AHT_TEST_HOOKS === '1'
+    ? String(env.AHT_TEST_STORE_PROCESS_STATE || process.env.AHT_TEST_STORE_PROCESS_STATE || '').trim().toLowerCase()
+    : '';
+  if (testState === 'running') {
+    return { checked: true, running: true, name: WINDOWS_MINECRAFT_LAUNCHER_PROCESS_NAMES[0], test: true };
+  }
+  if (testState === 'missing') {
+    return { checked: true, running: false, names: WINDOWS_MINECRAFT_LAUNCHER_PROCESS_NAMES, test: true };
+  }
+
+  const started = Date.now();
+  let checked = false;
+  let lastError = '';
+  do {
+    for (const imageName of WINDOWS_MINECRAFT_LAUNCHER_PROCESS_NAMES) {
+      const result = await windowsProcessImageIsRunning(imageName, env);
+      checked = checked || result.checked;
+      lastError = result.error || lastError;
+      if (result.running) {
+        return { ...result, names: WINDOWS_MINECRAFT_LAUNCHER_PROCESS_NAMES };
+      }
+    }
+    await sleep(500);
+  } while (Date.now() - started < timeoutMs);
+  return {
+    checked,
+    running: false,
+    names: WINDOWS_MINECRAFT_LAUNCHER_PROCESS_NAMES,
+    error: lastError
+  };
+}
+
+function trimErrorSentence(value = '') {
+  return String(value || '').trim().replace(/[.\s]+$/g, '');
+}
+
+function minecraftLauncherRouteLabel(route = {}) {
+  return String(route.label || route.kind || 'Minecraft Launcher').trim();
+}
+
+function minecraftLauncherRouteLocation(route = {}) {
+  return [
+    route.source ? `source=${route.source}` : '',
+    route.rootDir ? `root=${route.rootDir}` : '',
+    route.command ? `command=${route.command}` : ''
+  ].filter(Boolean).join(', ');
+}
+
+function minecraftLauncherRouteOptions(route = {}) {
+  return {
+    kind: route.kind || 'launcher',
+    routeLabel: minecraftLauncherRouteLabel(route),
+    observeExitMs: Number(route.observeExitMs) || 0,
+    source: route.source || ''
+  };
+}
+
+function minecraftLauncherRouteResult(route = {}, launch = {}, cwd = '') {
+  return {
+    ...launch,
+    ok: launch.ok !== false,
+    kind: route.kind || launch.kind || 'launcher',
+    routeLabel: route.label || launch.routeLabel || '',
+    source: route.source || launch.source || '',
+    rootDir: route.rootDir || '',
+    cwd: cwd || route.cwd || '',
+    command: launch.command || route.command || '',
+    args: Array.isArray(launch.args) ? launch.args : (Array.isArray(route.args) ? route.args : []),
+    attemptedCommand: route.command || launch.command || '',
+    attemptedArgs: Array.isArray(route.args) ? route.args : []
+  };
+}
+
+function minecraftLauncherRouteFailure(route = {}, error) {
+  const location = minecraftLauncherRouteLocation(route);
+  return {
+    kind: route.kind || '',
+    label: minecraftLauncherRouteLabel(route),
+    source: route.source || '',
+    rootDir: route.rootDir || '',
+    command: route.command || '',
+    message: `${error?.message || error || 'Unknown launcher error'}${location ? ` (${location})` : ''}`
+  };
+}
+
 async function spawnWindowsStartRoute(route, cwd, env, options = {}) {
   const commandPrompt = windowsStartCommand(env);
   const startArgs = windowsStartArgs(route.command, route.args || []);
@@ -5983,12 +6115,7 @@ async function spawnWindowsStartRoute(route, cwd, env, options = {}) {
 }
 
 async function spawnWindowsMinecraftLauncherRoute(route, cwd, env) {
-  const options = {
-    kind: route.kind,
-    routeLabel: route.label,
-    observeExitMs: route.observeExitMs || 0,
-    source: route.source || ''
-  };
+  const options = minecraftLauncherRouteOptions(route);
   try {
     return await spawnDetached(route.command, route.args || [], cwd, env, options);
   } catch (error) {
@@ -6106,11 +6233,6 @@ async function readWindowsLauncherShortcutTargets(env = process.env) {
       if (!entry.isFile() || !/\.lnk$/i.test(entry.name)) {
         continue;
       }
-      const lowerName = entry.name.toLowerCase();
-      const maybeMinecraft = lowerName.includes('minecraft');
-      if (!maybeMinecraft) {
-        continue;
-      }
       try {
         const shortcut = shell.readShortcutLink(fullPath);
         const target = String(shortcut?.target || '').trim();
@@ -6226,34 +6348,59 @@ async function openWindowsStoreMinecraftLauncher(cwd, env) {
       'Minecraft Launcher is not installed, or Windows app execution is disabled on this PC.'
     );
   }
+  const verifyStoreLaunch = async (launchResult) => {
+    if (launchResult?.captured && !String(env.AHT_TEST_STORE_PROCESS_STATE || process.env.AHT_TEST_STORE_PROCESS_STATE || '').trim()) {
+      return { ...launchResult, kind: 'store', warning };
+    }
+    const processState = await waitForWindowsMinecraftLauncherProcess(env);
+    if (processState.running) {
+      return {
+        ...launchResult,
+        kind: 'store',
+        warning,
+        processName: processState.name || ''
+      };
+    }
+    if (!processState.checked) {
+      return {
+        ...launchResult,
+        kind: 'store',
+        warning: `${warning} AHT could not verify the Minecraft Launcher process because Windows process listing failed${processState.error ? `: ${processState.error}` : '.'}`
+      };
+    }
+    throw new Error(`Windows app execution did not start Minecraft Launcher. No ${processState.names.join(', ')} process appeared.`);
+  };
   const explorer = env.SystemRoot ? path.join(env.SystemRoot, 'explorer.exe') : 'explorer.exe';
   try {
-    return { ...await spawnDetached(explorer, [appTarget], cwd, env, { kind: 'store', routeLabel: 'Microsoft Store Minecraft Launcher' }), kind: 'store', warning };
+    return await verifyStoreLaunch(await spawnDetached(explorer, [appTarget], cwd, env, { kind: 'store', routeLabel: 'Microsoft Store Minecraft Launcher' }));
   } catch (explorerError) {
     const commandPrompt = env.ComSpec || (env.SystemRoot ? path.join(env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
     try {
-      return { ...await spawnDetached(commandPrompt, ['/d', '/s', '/c', 'start', '""', appTarget], cwd, env, { kind: 'store', routeLabel: 'Microsoft Store Minecraft Launcher' }), kind: 'store', warning };
+      return await verifyStoreLaunch(await spawnDetached(commandPrompt, ['/d', '/s', '/c', 'start', '""', appTarget], cwd, env, { kind: 'store', routeLabel: 'Microsoft Store Minecraft Launcher' }));
     } catch (startError) {
-      throw new Error(`Minecraft Launcher could not be opened. Explorer failed: ${explorerError.message}. Start failed: ${startError.message}`);
+      return openMinecraftLauncherInstallHelp(
+        `Minecraft Launcher is installed, but Windows app execution did not open it. Explorer failed: ${trimErrorSentence(explorerError.message)}. Start failed: ${trimErrorSentence(startError.message)}.`
+      );
     }
   }
 }
 
 async function openMinecraftLauncherRoute(route, cwd, env) {
+  let launch = null;
   if (process.platform === 'win32') {
     if (route.kind === 'store') {
-      return openWindowsStoreMinecraftLauncher(cwd, env);
+      launch = await openWindowsStoreMinecraftLauncher(cwd, env);
+    } else {
+      launch = await spawnWindowsMinecraftLauncherRoute(route, cwd, env);
     }
-    return spawnWindowsMinecraftLauncherRoute(route, cwd, env);
+    return minecraftLauncherRouteResult(route, launch, cwd);
   }
   if (process.platform === 'darwin') {
-    return openMacApplication(route.args || [], cwd, env);
+    launch = await openMacApplication(route.args || [], cwd, env);
+    return minecraftLauncherRouteResult(route, launch, cwd);
   }
-  return spawnDetached(route.command || 'minecraft-launcher', route.args || [], cwd, env, {
-    kind: route.kind || 'launcher',
-    routeLabel: route.label || 'Minecraft Launcher',
-    source: route.source || ''
-  });
+  launch = await spawnDetached(route.command || 'minecraft-launcher', route.args || [], cwd, env, minecraftLauncherRouteOptions(route));
+  return minecraftLauncherRouteResult(route, launch, cwd);
 }
 
 async function windowsStoreMinecraftLauncherInstalled(env = process.env) {
@@ -6353,16 +6500,16 @@ async function openMinecraftLauncher(config) {
         failedRoutes: failures
       };
     } catch (error) {
-      failures.push({
-        kind: route.kind,
-        label: route.label || route.kind,
-        message: error.message || String(error)
-      });
+      failures.push(minecraftLauncherRouteFailure(route, error));
     }
   }
   if (failures.length) {
     const tried = failures.map((failure) => `${failure.label}: ${failure.message}`).join(' | ');
-    throw new Error(`Minecraft Launcher could not be opened after trying ${failures.length} route${failures.length === 1 ? '' : 's'}. ${tried}`);
+    const message = `Minecraft Launcher could not be opened after trying ${failures.length} route${failures.length === 1 ? '' : 's'}. ${tried}`;
+    if (process.platform === 'darwin') {
+      return openMinecraftLauncherInstallHelp(message);
+    }
+    throw new Error(message);
   }
   if (process.platform === 'win32') {
     return openMinecraftLauncherInstallHelp(
@@ -6371,7 +6518,7 @@ async function openMinecraftLauncher(config) {
   }
 
   if (process.platform === 'darwin') {
-    throw new Error('Minecraft Launcher could not be opened on macOS.');
+    return openMinecraftLauncherInstallHelp('Minecraft Launcher could not be opened on macOS.');
   }
 
   return spawnDetached('minecraft-launcher', [], cwd, env);
@@ -6501,59 +6648,58 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
 
   const installedState = await readInstalledPackState(config);
   const installed = installedState.installed;
-  let latest = null;
-  let latestError = null;
+  if (installedState.manifestError && !developerClientBypass) {
+    throw new Error('Repair required. The installed manifest is damaged.');
+  }
+  if (!installed && !developerClientBypass) {
+    throw new Error('Install the pack before playing.');
+  }
+
+  const launchLatest = installed || null;
+  const identity = await identityPayload(launcherConfig);
+  let launcherProof = { enabled: false, trusted: false, source: 'not-written' };
   try {
-    latest = await readLatest(config);
+    launcherProof = await writeRegisteredLauncherProof({
+      config: {
+        ...launcherConfig,
+        launcherProof: {
+          ...(launcherConfig.launcherProof || {}),
+          required: false
+        }
+      },
+      latest: launchLatest,
+      installed,
+      identity
+    });
   } catch (error) {
-    latestError = error.message;
-    if (!developerClientBypass) {
-      throw new Error(`Release feed cannot be checked: ${error.message}`);
-    }
+    launcherProof = {
+      enabled: true,
+      trusted: false,
+      source: 'play-warning',
+      error: error.message || String(error)
+    };
   }
-
-  const launchLatest = latest || (developerClientBypass && installed ? installed : null);
-  const integrity = developerClientBypass
-    ? null
-    : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest, { installedPackState: installedState }), 'play-check');
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
-  const initialLaunchState = evaluateLaunchState(launcherConfig, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
-    skipLoaderCheck: true,
-    installedManifestError: installedState.manifestError,
-    allowLegacyRelease: developerClientBypass
-  });
-  if (!initialLaunchState.launchReady) {
-    throw new Error(initialLaunchState.launchBlockedReason);
-  }
-
-  const identity = await identityPayload(config);
-  const launcherProof = await writeRegisteredLauncherProof({
-    config: launcherConfig,
-    latest: launchLatest,
-    installed,
-    identity
-  });
-  let profile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
-  profile = await installMinecraftProfileLoaders(profile, { config: launcherConfig, latest: launchLatest, installed });
-  const minecraftAssets = await ensureMinecraftLauncherAssets({
-    config: launcherConfig,
-    latest: launchLatest,
-    installed,
-    profile,
-    assetBaseUrl: testMinecraftAssetBaseUrl() || undefined,
-    ensureAssetObjects: true,
-    verifyAssetHashes: true
-  });
-  const finalLaunchState = evaluateLaunchState(launcherConfig, launchLatest, null, installed, profile, integrity, {
-    allowLegacyRelease: developerClientBypass
-  });
-  if (!finalLaunchState.launchReady) {
-    throw new Error(finalLaunchState.launchBlockedReason);
+  let profile = null;
+  let profileWarning = '';
+  try {
+    profile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
+  } catch (error) {
+    profileWarning = error.message || String(error);
   }
   const launchResult = await openMinecraftLauncher(launcherConfig);
+  const minecraftAssets = {
+    ok: true,
+    skipped: true,
+    reason: 'Play does not block on Mojang asset downloads. Update or Repair performs full Minecraft asset repair before launch.'
+  };
+  const warnings = [
+    profileWarning ? `Minecraft profile warning: ${profileWarning}` : '',
+    launcherProof?.error ? `Launcher proof warning: ${launcherProof.error}` : ''
+  ].filter(Boolean);
   return {
     ...minecraftLaunchResultForRenderer(launchResult),
-    minecraftProfile: minecraftProfileForRenderer(profile),
+    warning: warnings.join(' '),
+    minecraftProfile: minecraftProfileForRenderer(profile || {}),
     launcherProof: launcherProofForRenderer({
       proofFile: launcherProof.proofFile || '',
       trusted: Boolean(launcherProof.trusted),

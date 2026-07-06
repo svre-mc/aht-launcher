@@ -210,7 +210,14 @@ export function macMinecraftLauncherAppPaths({ env = process.env, homePath = '' 
     '/Applications/Minecraft Launcher.app',
     home ? path.posix.join(home, 'Applications', 'Minecraft.app') : '',
     home ? path.posix.join(home, 'Applications', 'Minecraft Launcher.app') : ''
-  ]);
+  ]).filter((item) => !isMacCurseForgeAppPath(item));
+}
+
+export function isMacCurseForgeAppPath(value = '') {
+  const normalized = path.posix.normalize(String(value || '')).toLowerCase();
+  return normalized.endsWith('/curseforge.app')
+    || normalized.includes('/curseforge/')
+    || normalized.includes('/curseforge.app/');
 }
 
 function addRoute(routes, route) {

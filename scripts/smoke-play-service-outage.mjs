@@ -347,7 +347,7 @@ try {
     (() => {
       const nodes = [...document.querySelectorAll('.toast')];
       if (!nodes.length) return false;
-      const toast = nodes.find((item) => /Minecraft service unavailable/i.test(item.querySelector('strong')?.textContent || '')) || nodes[nodes.length - 1];
+      const toast = nodes.find((item) => /Minecraft Launcher opened/i.test(item.querySelector('strong')?.textContent || '')) || nodes[nodes.length - 1];
       const copy = toast.querySelector('.toast-copy-action');
       const copyRect = copy?.getBoundingClientRect();
       return {
@@ -359,33 +359,14 @@ try {
         allToasts: nodes.map((item) => item.textContent.replace(/\\s+/g, ' ').trim())
       };
     })()
-  `, 'service outage toast');
+  `, 'Minecraft Launcher opened toast during service outage');
   const message = String(toast.detail || '');
-  if (toast.title !== 'Minecraft service unavailable') {
-    throw new Error(`Minecraft service outage toast had the wrong title: ${JSON.stringify(toast)}`);
-  }
-  if (!/Minecraft services|Mojang\/Microsoft/i.test(message)) {
-    throw new Error(`Minecraft service outage did not produce service-focused wording: ${JSON.stringify(toast)}`);
-  }
-  if (/Unexpected end of JSON input|SyntaxError|REQUEST_FAILED|ENOENT|spawn|Error invoking remote method/i.test(`${message}\n${toast.log}`)) {
-    throw new Error(`Minecraft service outage leaked a low-level error in player-visible text: ${JSON.stringify(toast)}`);
-  }
-  if (toast.copyText !== 'Copy full error details' || !toast.copyClick) {
-    throw new Error(`Minecraft service outage toast did not expose clickable diagnostics: ${JSON.stringify(toast)}`);
-  }
-  await evaluate(client, `document.querySelector('.toast .toast-copy-action')?.click(); true`);
-  const report = await waitForReport();
-  if (
-    report.title !== 'Minecraft service unavailable'
-    || report.rendererError?.context !== 'play-start'
-    || !/Minecraft services|Mojang\/Microsoft/i.test(report.rendererError?.message || '')
-    || !/Unexpected end of JSON input|Original error/i.test(report.lastMainError?.error?.message || '')
-  ) {
-    throw new Error(`Copied service outage report did not contain clean renderer text plus detailed main error: ${JSON.stringify(report, null, 2)}`);
+  if (toast.title !== 'Minecraft Launcher opened') {
+    throw new Error(`Play should open Minecraft Launcher instead of blocking on Mojang asset-service preflight: ${JSON.stringify(toast)}`);
   }
   const spawnCaptures = await readJsonLines(spawnCapturePath);
-  if (spawnCaptures.length) {
-    throw new Error(`Minecraft Launcher was opened even though asset preparation failed: ${JSON.stringify(spawnCaptures)}`);
+  if (!spawnCaptures.length) {
+    throw new Error(`Minecraft Launcher was not opened during Mojang asset-service outage: ${JSON.stringify(spawnCaptures)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (!after.launchReady || after.launchBlockedReason || after.integrity?.counts?.corrupted) {
@@ -402,11 +383,7 @@ try {
     root,
     packaged: Boolean(smokeExe),
     message,
-    report: {
-      title: report.title,
-      context: report.rendererError?.context,
-      hasMainError: Boolean(report.lastMainError?.error?.message)
-    },
+    spawnCapture: spawnCaptures.at(-1),
     profile: {
       gameDir: profile.gameDir,
       lastVersionId: profile.lastVersionId
