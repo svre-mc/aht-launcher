@@ -98,20 +98,127 @@ function forgeVersionScore(name = '', plan = {}) {
   return 100;
 }
 
-export async function findInstalledForgeVersion(plan = {}) {
+function forgeVersionJsonBackupPath(file = '') {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${file}.aht-invalid-${stamp}.bak`;
+}
+
+async function backupInvalidForgeVersionJson(file = '') {
+  try {
+    if (await pathExists(file)) {
+      await fs.copyFile(file, forgeVersionJsonBackupPath(file));
+    }
+  } catch {
+    // Backup is best-effort; Forge reinstall should still be allowed to continue.
+  }
+}
+
+function validForgeVersionJson(value = null, versionId = '', plan = {}) {
+  if (!value || typeof value !== 'object') return false;
+  const id = String(value.id || '').trim();
+  const inheritsFrom = String(value.inheritsFrom || '').trim();
+  const minecraftArguments = String(value.minecraftArguments || '').trim();
+  const libraries = Array.isArray(value.libraries) ? value.libraries : [];
+  const validIds = forgeVersionCandidates(plan).map((candidate) => candidate.toLowerCase());
+  if (!id || (versionId && id.toLowerCase() !== String(versionId).toLowerCase() && !validIds.includes(id.toLowerCase()))) {
+    return false;
+  }
+  if (plan.minecraftVersion && inheritsFrom !== plan.minecraftVersion) {
+    return false;
+  }
+  if (!minecraftArguments.includes('net.minecraftforge.fml.common.launcher.FMLTweaker')) {
+    return false;
+  }
+  return libraries.length > 0 && libraries.some((item) => String(item?.name || '').startsWith('net.minecraftforge:forge:'));
+}
+
+function forgeLibraryArtifacts(versionJson = null) {
+  const libraries = Array.isArray(versionJson?.libraries) ? versionJson.libraries : [];
+  return libraries
+    .map((item) => ({
+      name: String(item?.name || '').trim(),
+      path: String(item?.downloads?.artifact?.path || '').trim()
+    }))
+    .filter((item) => item.name && item.path);
+}
+
+async function missingForgeLibraryArtifacts(versionJson = null, plan = {}) {
+  const missing = [];
+  for (const item of forgeLibraryArtifacts(versionJson)) {
+    const file = path.join(plan.rootDir || '', 'libraries', item.path);
+    if (!(await pathExists(file))) {
+      missing.push({ ...item, file });
+    }
+  }
+  return missing;
+}
+
+async function inspectForgeVersionJson(jsonPath = '', versionId = '', plan = {}, options = {}) {
+  if (!(await pathExists(jsonPath))) {
+    return { installed: false, invalid: false, versionId, versionJson: jsonPath };
+  }
+  let parsed = null;
+  try {
+    parsed = await readJsonFile(jsonPath);
+  } catch (error) {
+    if (options.backupInvalid !== false) {
+      await backupInvalidForgeVersionJson(jsonPath);
+    }
+    return {
+      installed: false,
+      invalid: true,
+      versionId,
+      versionJson: jsonPath,
+      reason: error.message || String(error)
+    };
+  }
+  if (!validForgeVersionJson(parsed, versionId, plan)) {
+    if (options.backupInvalid !== false) {
+      await backupInvalidForgeVersionJson(jsonPath);
+    }
+    return {
+      installed: false,
+      invalid: true,
+      versionId,
+      versionJson: jsonPath,
+      reason: 'incomplete Forge launcher version metadata'
+    };
+  }
+  if (options.verifyLibraries) {
+    const missingLibraries = await missingForgeLibraryArtifacts(parsed, plan);
+    if (missingLibraries.length) {
+      return {
+        installed: false,
+        invalid: true,
+        versionId,
+        versionJson: jsonPath,
+        reason: `missing ${missingLibraries.length} Forge library file${missingLibraries.length === 1 ? '' : 's'}`,
+        missingLibraries
+      };
+    }
+  }
+  return { installed: true, invalid: false, versionId, versionJson: jsonPath };
+}
+
+export async function findInstalledForgeVersion(plan = {}, options = {}) {
   const versionsDir = path.join(plan.rootDir || '', 'versions');
   const candidates = forgeVersionCandidates(plan);
+  const invalidVersions = [];
   for (const candidate of candidates) {
     const jsonPath = path.join(versionsDir, candidate, `${candidate}.json`);
-    if (await pathExists(jsonPath)) {
-      return { installed: true, versionId: candidate, versionJson: jsonPath };
+    const inspected = await inspectForgeVersionJson(jsonPath, candidate, plan, options);
+    if (inspected.installed) {
+      return { installed: true, versionId: candidate, versionJson: jsonPath, invalidVersions };
+    }
+    if (inspected.invalid) {
+      invalidVersions.push(inspected);
     }
   }
   let entries = [];
   try {
     entries = await fs.readdir(versionsDir, { withFileTypes: true });
   } catch {
-    return { installed: false, versionId: plan.versionId || '', versionJson: '' };
+    return { installed: false, versionId: plan.versionId || '', versionJson: '', invalidVersions };
   }
   const matches = [];
   for (const entry of entries) {
@@ -119,21 +226,24 @@ export async function findInstalledForgeVersion(plan = {}) {
     const score = forgeVersionScore(entry.name, plan);
     if (score >= 100) continue;
     const jsonPath = path.join(versionsDir, entry.name, `${entry.name}.json`);
-    if (await pathExists(jsonPath)) {
+    const inspected = await inspectForgeVersionJson(jsonPath, entry.name, plan, options);
+    if (inspected.installed) {
       matches.push({ score, versionId: entry.name, versionJson: jsonPath });
+    } else if (inspected.invalid) {
+      invalidVersions.push(inspected);
     }
   }
   matches.sort((left, right) => left.score - right.score || left.versionId.localeCompare(right.versionId));
   const best = matches[0];
-  return best ? { installed: true, versionId: best.versionId, versionJson: best.versionJson } : { installed: false, versionId: plan.versionId || '', versionJson: '' };
+  return best ? { installed: true, versionId: best.versionId, versionJson: best.versionJson, invalidVersions } : { installed: false, versionId: plan.versionId || '', versionJson: '', invalidVersions };
 }
 
-async function waitForInstalledForgeVersion(plan = {}, timeoutMs = 15000) {
+async function waitForInstalledForgeVersion(plan = {}, timeoutMs = 15000, options = {}) {
   const started = Date.now();
-  let result = await findInstalledForgeVersion(plan);
+  let result = await findInstalledForgeVersion(plan, options);
   while (!result.installed && Date.now() - started < timeoutMs) {
     await sleep(500);
-    result = await findInstalledForgeVersion(plan);
+    result = await findInstalledForgeVersion(plan, options);
   }
   return result;
 }
@@ -298,6 +408,36 @@ async function ensureManagedJava8Runtime(plan = {}, options = {}) {
     throw new Error(`Downloaded Java runtime, but ${javaExecutableName()} was not found in ${cacheDir}.`);
   }
   return javaPath;
+}
+
+function forgeVersionJsonForPlan(plan = {}, versionId = plan.versionId || '') {
+  const forgeVersion = forgeLoaderVersion(plan.loaderId);
+  const artifactPath = `net/minecraftforge/forge/${plan.minecraftVersion}-${forgeVersion}/forge-${plan.minecraftVersion}-${forgeVersion}.jar`;
+  return {
+    id: versionId,
+    type: 'release',
+    inheritsFrom: plan.minecraftVersion,
+    minecraftArguments: '--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker --versionType Forge',
+    libraries: [
+      {
+        name: `net.minecraftforge:forge:${plan.minecraftVersion}-${forgeVersion}`,
+        downloads: {
+          artifact: {
+            path: artifactPath
+          }
+        }
+      }
+    ]
+  };
+}
+
+async function writeForgeLibraryFixturesForTest(plan = {}, versionJson = null) {
+  if (process.env.AHT_TEST_HOOKS !== '1') return;
+  for (const item of forgeLibraryArtifacts(versionJson)) {
+    const file = path.join(plan.rootDir || '', 'libraries', item.path);
+    await ensureDir(path.dirname(file));
+    await fs.writeFile(file, `aht test forge library ${item.name}\n`, 'utf8');
+  }
 }
 
 async function resolveForgeInstallerJavaPath(profile = {}, plan = {}, options = {}) {
@@ -568,12 +708,12 @@ async function maybeInstallForgeLoaderForTest(plan = {}) {
   const versionDir = path.join(plan.rootDir, 'versions', versionId);
   const versionJson = path.join(versionDir, `${versionId}.json`);
   await ensureDir(versionDir);
+  const metadata = forgeVersionJsonForPlan(plan, versionId);
   await writeJsonFile(versionJson, {
-    id: versionId,
-    type: 'release',
-    inheritsFrom: plan.minecraftVersion,
+    ...metadata,
     ahtTestForgeInstaller: true
   });
+  await writeForgeLibraryFixturesForTest(plan, metadata);
   return {
     ok: true,
     skipped: false,
@@ -591,12 +731,12 @@ async function writeForgeVersionForTest(plan = {}) {
   const versionDir = path.join(plan.rootDir, 'versions', versionId);
   const versionJson = path.join(versionDir, `${versionId}.json`);
   await ensureDir(versionDir);
+  const metadata = forgeVersionJsonForPlan(plan, versionId);
   await writeJsonFile(versionJson, {
-    id: versionId,
-    type: 'release',
-    inheritsFrom: plan.minecraftVersion,
+    ...metadata,
     ahtTestForgeInstaller: true
   });
+  await writeForgeLibraryFixturesForTest(plan, metadata);
   return { versionId, versionJson };
 }
 
@@ -625,7 +765,25 @@ async function maybeRunForgeInstallerProcessForTest(plan = {}, options = {}, jav
 }
 export async function installForgeLoader(profile, options = {}) {
   const plan = buildForgeInstallPlan(profile, options);
-  if (profile.loaderInstalled && await pathExists(profile.versionJson)) {
+  if (profile.versionJson) {
+    const existing = await inspectForgeVersionJson(profile.versionJson, profile.versionId, plan, {
+      backupInvalid: true,
+      verifyLibraries: Boolean(options.verifyLibraries)
+    });
+    if (existing.installed) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: `${profile.versionId} is already installed.`,
+        plan
+      };
+    }
+    if (existing.invalid) {
+      const reason = existing.reason ? ` (${existing.reason})` : '';
+      options.logger?.log?.(`Forge ${profile.versionId} metadata or libraries were invalid${reason}; reinstalling before launch.`);
+    }
+  }
+  if (profile.loaderInstalled && !profile.versionJson) {
     return {
       ok: true,
       skipped: true,
@@ -666,7 +824,10 @@ export async function installForgeLoader(profile, options = {}) {
       throw new Error(friendly || managedJavaDownloadFailureMessage(retryError));
     }
   }
-  const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs ?? DEFAULT_FORGE_VERSION_WAIT_MS);
+  const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs ?? DEFAULT_FORGE_VERSION_WAIT_MS, {
+    backupInvalid: true,
+    verifyLibraries: Boolean(options.verifyLibraries)
+  });
   if (!installed.installed) {
     const tail = outputTail(result.output);
     const friendly = friendlyForgeJavaErrorMessage(tail, plan.javaPath);

@@ -36,6 +36,16 @@ async function writeJson(file, value) {
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+function forgeVersionMetadata(id = versionId, minecraftVersion = '1.12.2') {
+  return {
+    id,
+    type: 'release',
+    inheritsFrom: minecraftVersion,
+    minecraftArguments: '--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker --versionType Forge',
+    libraries: [{ name: `net.minecraftforge:forge:${minecraftVersion}-14.23.5.2860` }]
+  };
+}
+
 async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -116,7 +126,7 @@ async function waitFor(client, expression, label, attempts = 160) {
 }
 
 await fsp.mkdir(path.join(minecraftRoot, 'versions', versionId), { recursive: true });
-await fsp.writeFile(path.join(minecraftRoot, 'versions', versionId, `${versionId}.json`), '{}', 'utf8');
+await fsp.writeFile(path.join(minecraftRoot, 'versions', versionId, `${versionId}.json`), `${JSON.stringify(forgeVersionMetadata(), null, 2)}\n`, 'utf8');
 await writeJson(latestPath, {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time',

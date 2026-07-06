@@ -12,6 +12,7 @@ import {
 } from './utils.js';
 import { launcherProofJavaArgs, launcherProofPath } from './launcherProof.js';
 import { minecraftServiceFailureMessage } from './minecraftServiceStatus.js';
+import { findInstalledForgeVersion } from './forgeInstaller.js';
 
 export function defaultMinecraftRoot(platform = process.platform, env = process.env) {
   if (platform === 'win32') {
@@ -790,12 +791,29 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
   const versionCandidates = loaderVersionIdCandidates(minecraft || {});
   let versionId = versionCandidates[0] || '';
   let versionJson = versionId ? path.join(rootDir, 'versions', versionId, `${versionId}.json`) : '';
-  for (const candidate of versionCandidates) {
-    const candidateJson = path.join(rootDir, 'versions', candidate, `${candidate}.json`);
-    if (await pathExists(candidateJson)) {
-      versionId = candidate;
-      versionJson = candidateJson;
-      break;
+  let loaderInstalled = false;
+  const loaderId = primaryModLoader(minecraft || {})?.id || '';
+  if (loaderId.startsWith('forge-') && minecraft?.version && versionId) {
+    const forgeInstall = await findInstalledForgeVersion({
+      rootDir,
+      minecraftVersion: minecraft.version,
+      loaderId,
+      versionId
+    }, { backupInvalid: false });
+    loaderInstalled = Boolean(forgeInstall.installed);
+    if (forgeInstall.versionId) {
+      versionId = forgeInstall.versionId;
+      versionJson = forgeInstall.versionJson || path.join(rootDir, 'versions', versionId, `${versionId}.json`);
+    }
+  } else {
+    for (const candidate of versionCandidates) {
+      const candidateJson = path.join(rootDir, 'versions', candidate, `${candidate}.json`);
+      if (await pathExists(candidateJson)) {
+        versionId = candidate;
+        versionJson = candidateJson;
+        loaderInstalled = true;
+        break;
+      }
     }
   }
   const profileId = profileIdForConfig(config, latest, installed);
@@ -812,12 +830,12 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
     profileName: profileName(config, latest, installed),
     profileExists: Boolean(profile),
     versionId,
-    loaderInstalled: versionJson ? await pathExists(versionJson) : false,
+    loaderInstalled,
     versionJson,
     gameDir: config.instanceDir,
     javaArgs: javaArgsFor({ config, rootDir, gameDir: config.instanceDir }),
     minecraftVersion: minecraft?.version || '',
-    loaderId: primaryModLoader(minecraft || {})?.id || '',
+    loaderId,
     loaderInstallerUrl: loaderInstallerUrl(minecraft || {}),
     accountReuseAvailable: auth.signedIn,
     accountProfileKnown: Boolean(auth.profileKnown),

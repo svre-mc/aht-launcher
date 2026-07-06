@@ -2275,29 +2275,37 @@ function missingForgeLoaderProfiles(profile = null) {
   ));
 }
 
+function forgeLoaderProfiles(profile = null) {
+  return minecraftProfileInstallTargets(profile).filter((item) => (
+    item.versionId
+    && item.loaderId?.startsWith('forge-')
+  ));
+}
+
 function minecraftRootSummary(items = []) {
   return items.map((item) => item.rootDir || 'unknown root').join(', ');
 }
 
 async function installMinecraftProfileLoaders(profile, { config, latest, installed, operationState = null } = {}) {
-  const missing = missingForgeLoaderProfiles(profile);
-  if (!missing.length) return profile;
-  const total = missing.length;
-  for (const [index, target] of missing.entries()) {
+  const targets = forgeLoaderProfiles(profile);
+  if (!targets.length) return profile;
+  const total = targets.length;
+  for (const [index, target] of targets.entries()) {
     if (operationState) {
       operationState.progress = {
-        phase: `Installing Forge (${index + 1}/${total})`,
+        phase: `Checking Forge (${index + 1}/${total})`,
         completed: index,
         total,
         percent: 97
       };
-      appendOperationLine(operationState, `Installing Forge ${target.versionId} for Minecraft Launcher root ${target.rootDir}...`);
+      appendOperationLine(operationState, `Checking Forge ${target.versionId} for Minecraft Launcher root ${target.rootDir}...`);
     }
     const forgeLines = [];
     await installForgeLoader(target, {
       javaPath: config.minecraftLauncher?.javaPath || 'java',
       installerUrl: target.loaderInstallerUrl || latest?.minecraft?.forgeInstallerUrl || latest?.minecraft?.loaderInstallerUrl || '',
-      logger: { log: (line) => forgeLines.push(String(line)) }
+      logger: { log: (line) => forgeLines.push(String(line)) },
+      verifyLibraries: true
     });
     if (operationState) {
       appendOperationLines(operationState, forgeLines);

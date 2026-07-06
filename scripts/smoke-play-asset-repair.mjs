@@ -49,6 +49,16 @@ async function writeJson(file, value) {
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+function forgeVersionMetadata(id = versionId, minecraftVersion = '1.12.2') {
+  return {
+    id,
+    type: 'release',
+    inheritsFrom: minecraftVersion,
+    minecraftArguments: '--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker --versionType Forge',
+    libraries: [{ name: `net.minecraftforge:forge:${minecraftVersion}-14.23.5.2860` }]
+  };
+}
+
 async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -191,7 +201,7 @@ await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [
   source: 'full-client-zip',
   sha256: sha256(managedModContent)
 }]);
-await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), { id: versionId, type: 'release' });
+await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), forgeVersionMetadata());
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
   { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }

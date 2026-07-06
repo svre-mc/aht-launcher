@@ -25,8 +25,31 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-profile-test-'));
 const instanceDir = path.join(root, 'instance');
 const minecraftRoot = path.join(root, '.minecraft');
 const versionId = '1.12.2-forge-14.23.5.2860';
-await fs.mkdir(path.join(minecraftRoot, 'versions', versionId), { recursive: true });
-await fs.writeFile(path.join(minecraftRoot, 'versions', versionId, `${versionId}.json`), '{}');
+function forgeVersionMetadata(id = versionId, minecraftVersion = '1.12.2') {
+  return {
+    id,
+    type: 'release',
+    inheritsFrom: minecraftVersion,
+    minecraftArguments: '--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker --versionType Forge',
+    libraries: [
+      {
+        name: `net.minecraftforge:forge:${minecraftVersion}-14.23.5.2860`,
+        downloads: {
+          artifact: {
+            path: `net/minecraftforge/forge/${minecraftVersion}-14.23.5.2860/forge-${minecraftVersion}-14.23.5.2860.jar`
+          }
+        }
+      }
+    ]
+  };
+}
+
+async function writeForgeVersion(rootDir, id = versionId, minecraftVersion = '1.12.2') {
+  await fs.mkdir(path.join(rootDir, 'versions', id), { recursive: true });
+  await fs.writeFile(path.join(rootDir, 'versions', id, `${id}.json`), JSON.stringify(forgeVersionMetadata(id, minecraftVersion), null, 2));
+}
+
+await writeForgeVersion(minecraftRoot);
 
 const platformRoots = {
   win32: defaultMinecraftRoot('win32', {
@@ -134,8 +157,7 @@ if (removedProfileIds.join(',') !== 'a-hard-time-developer,a-hard-time-dregora')
 const dualProfileRoot = path.join(root, 'dual-profile-root');
 const playerNamedDir = path.join(root, 'AHT', 'A Hard Time');
 const developerNamedDir = path.join(root, 'AHT', 'A Hard Time Developer');
-await fs.mkdir(path.join(dualProfileRoot, 'versions', versionId), { recursive: true });
-await fs.writeFile(path.join(dualProfileRoot, 'versions', versionId, `${versionId}.json`), '{}');
+await writeForgeVersion(dualProfileRoot);
 await fs.writeFile(path.join(dualProfileRoot, 'launcher_profiles.json'), JSON.stringify({
   profiles: {
     'a-hard-time': {
@@ -212,8 +234,7 @@ if (!exactForgeInstall.installed || exactForgeInstall.versionId !== versionId) {
 }
 const altForgeRoot = path.join(root, 'alt-forge-root');
 const altForgeVersionId = '1.12.2-forge1.12.2-14.23.5.2860';
-await fs.mkdir(path.join(altForgeRoot, 'versions', altForgeVersionId), { recursive: true });
-await fs.writeFile(path.join(altForgeRoot, 'versions', altForgeVersionId, `${altForgeVersionId}.json`), '{}');
+await writeForgeVersion(altForgeRoot, altForgeVersionId);
 const altForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: altForgeRoot });
 if (!altForgeInstall.installed || altForgeInstall.versionId !== altForgeVersionId) {
   throw new Error(`Expected alternate Forge profile detection, got ${JSON.stringify(altForgeInstall)}`);
@@ -467,8 +488,7 @@ if (msaOnlyAuth.profileKnown || !msaOnlyAuth.credentialOnly) {
 }
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const curseForgeVersionId = 'forge-14.23.5.2860';
-await fs.mkdir(path.join(curseForgeRoot, 'versions', curseForgeVersionId), { recursive: true });
-await fs.writeFile(path.join(curseForgeRoot, 'versions', curseForgeVersionId, `${curseForgeVersionId}.json`), '{}');
+await writeForgeVersion(curseForgeRoot, curseForgeVersionId);
 await fs.writeFile(path.join(curseForgeRoot, 'launcher_accounts.json'), JSON.stringify({
   activeAccountLocalId: 'active',
   accounts: {
@@ -510,8 +530,7 @@ if (
 }
 
 const syncedMinecraftRoot = path.join(root, 'synced-minecraft-root');
-await fs.mkdir(path.join(syncedMinecraftRoot, 'versions', versionId), { recursive: true });
-await fs.writeFile(path.join(syncedMinecraftRoot, 'versions', versionId, `${versionId}.json`), '{}');
+await writeForgeVersion(syncedMinecraftRoot);
 const syncedConfig = {
   ...curseForgeConfig,
   minecraftLauncher: {
@@ -554,9 +573,105 @@ if (!inspectedMissingProfile || inspectedMissingProfile.loaderInstalled || inspe
   throw new Error(`Expected inspect to include missing synced loader state: ${JSON.stringify(inspectedMissingLoader)}`);
 }
 
+const invalidForgeRoot = path.join(root, 'invalid-forge-version-root');
+const invalidForgeVersionJson = path.join(invalidForgeRoot, 'versions', versionId, `${versionId}.json`);
+await fs.mkdir(path.dirname(invalidForgeVersionJson), { recursive: true });
+await fs.writeFile(invalidForgeVersionJson, '{}', 'utf8');
+const invalidForgeConfig = {
+  ...config,
+  minecraftLauncher: {
+    ...config.minecraftLauncher,
+    rootDir: invalidForgeRoot,
+    syncDefaultRoots: false
+  }
+};
+const invalidForgeState = await ensureMinecraftLauncherProfile({ config: invalidForgeConfig, latest, installed: null });
+if (invalidForgeState.loaderInstalled) {
+  throw new Error(`Incomplete Forge version JSON should not count as installed: ${JSON.stringify(invalidForgeState)}`);
+}
+const invalidForgeEnv = new Map([
+  ['AHT_TEST_HOOKS', process.env.AHT_TEST_HOOKS],
+  ['AHT_TEST_FORGE_INSTALLER_SUCCESS', process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS]
+]);
+try {
+  process.env.AHT_TEST_HOOKS = '1';
+  process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS = '1';
+  const invalidForgeLog = [];
+  const invalidForgeInstall = await installForgeLoader(invalidForgeState, {
+    installerUrl: 'https://example.test/forge-installer.jar',
+    logger: { log: (line) => invalidForgeLog.push(String(line)) },
+    versionWaitMs: 1
+  });
+  if (!invalidForgeInstall.loaderInstalled || invalidForgeInstall.versionId !== versionId) {
+    throw new Error(`Invalid Forge metadata was not repaired by install flow: ${JSON.stringify(invalidForgeInstall)}`);
+  }
+  if (!invalidForgeLog.some((line) => /metadata or libraries were invalid/i.test(line))) {
+    throw new Error(`Invalid Forge metadata repair was not logged: ${invalidForgeLog.join('\n')}`);
+  }
+  const invalidForgeBackups = (await fs.readdir(path.dirname(invalidForgeVersionJson))).filter((name) => name.includes(`${versionId}.json.aht-invalid-`));
+  if (!invalidForgeBackups.length) {
+    throw new Error('Invalid Forge version JSON was not backed up before reinstall.');
+  }
+  const repairedForgeState = await inspectMinecraftLauncherProfile({ config: invalidForgeConfig, latest, installed: null });
+  if (!repairedForgeState.loaderInstalled) {
+    throw new Error(`Repaired Forge metadata did not become launchable: ${JSON.stringify(repairedForgeState)}`);
+  }
+} finally {
+  for (const [name, value] of invalidForgeEnv) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
+}
+
+const missingLibraryRoot = path.join(root, 'missing-forge-library-root');
+await writeForgeVersion(missingLibraryRoot);
+const missingLibraryConfig = {
+  ...config,
+  minecraftLauncher: {
+    ...config.minecraftLauncher,
+    rootDir: missingLibraryRoot,
+    syncDefaultRoots: false
+  }
+};
+const missingLibraryState = await ensureMinecraftLauncherProfile({ config: missingLibraryConfig, latest, installed: null });
+if (!missingLibraryState.loaderInstalled) {
+  throw new Error(`Missing-library fixture should have valid Forge metadata before library verification: ${JSON.stringify(missingLibraryState)}`);
+}
+const missingLibraryEnv = new Map([
+  ['AHT_TEST_HOOKS', process.env.AHT_TEST_HOOKS],
+  ['AHT_TEST_FORGE_INSTALLER_SUCCESS', process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS]
+]);
+try {
+  process.env.AHT_TEST_HOOKS = '1';
+  process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS = '1';
+  const missingLibraryLog = [];
+  const missingLibraryInstall = await installForgeLoader(missingLibraryState, {
+    installerUrl: 'https://example.test/forge-installer.jar',
+    logger: { log: (line) => missingLibraryLog.push(String(line)) },
+    versionWaitMs: 1,
+    verifyLibraries: true
+  });
+  if (!missingLibraryInstall.loaderInstalled || missingLibraryInstall.versionId !== versionId) {
+    throw new Error(`Missing Forge library was not repaired by install flow: ${JSON.stringify(missingLibraryInstall)}`);
+  }
+  if (!missingLibraryLog.some((line) => /missing 1 Forge library file|metadata or libraries were invalid/i.test(line))) {
+    throw new Error(`Missing Forge library repair was not logged: ${missingLibraryLog.join('\n')}`);
+  }
+} finally {
+  for (const [name, value] of missingLibraryEnv) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
+}
+
 const corruptProfileRoot = path.join(root, 'corrupt-profile-root');
-await fs.mkdir(path.join(corruptProfileRoot, 'versions', versionId), { recursive: true });
-await fs.writeFile(path.join(corruptProfileRoot, 'versions', versionId, `${versionId}.json`), '{}', 'utf8');
+await writeForgeVersion(corruptProfileRoot);
 await fs.writeFile(path.join(corruptProfileRoot, 'launcher_profiles.json'), '', 'utf8');
 const corruptProfileConfig = {
   ...config,
