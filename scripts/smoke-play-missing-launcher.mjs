@@ -3,10 +3,13 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-const port = Number(process.argv[2] || 10820);
+const expectMissingCustom = process.argv.includes('--missing-custom');
+const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
+const port = Number(portArg || await availablePortPair(expectMissingCustom ? 10822 : 10820));
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
@@ -31,6 +34,30 @@ const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+
+async function portIsAvailable(portNumber) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.once('listening', () => {
+      probe.close(() => resolve(true));
+    });
+    probe.listen(portNumber, '127.0.0.1');
+  });
+}
+
+async function availablePortPair(preferredPort) {
+  const candidates = [
+    preferredPort,
+    ...Array.from({ length: 80 }, () => 20_000 + Math.floor(Math.random() * 20_000) * 2)
+  ];
+  for (const candidate of candidates) {
+    if (candidate > 0 && candidate < 65_534 && await portIsAvailable(candidate) && await portIsAvailable(candidate + 1)) {
+      return candidate;
+    }
+  }
+  throw new Error('Could not find an available local port pair for the missing-launcher smoke test.');
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -198,7 +225,11 @@ await writeJson(defaultsPath, {
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,
-    autoImportAccount: false
+    autoImportAccount: false,
+    ...(expectMissingCustom ? {
+      openCommand: path.join(root, 'missing-custom-launcher', 'MinecraftLauncher.exe'),
+      openArgs: ['--bad-custom']
+    } : {})
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -303,6 +334,11 @@ try {
   if (!before.launchReady || before.launchBlockedReason || before.integrity?.counts?.corrupted) {
     throw new Error(`Smoke setup should be launch-ready before opening Minecraft Launcher: ${JSON.stringify(before)}`);
   }
+  if (expectMissingCustom) {
+    if (before.setup?.minecraftLauncherOpenState !== 'missing' || before.setup?.minecraftLauncherOpenLabel !== 'Install needed') {
+      throw new Error(`Stale custom launcher config should be rendered as a normal missing Minecraft Launcher state: ${JSON.stringify(before.setup)}`);
+    }
+  }
 
   await evaluate(client, `document.querySelector('#playButton')?.click(); true`);
   const toast = await waitFor(client, `
@@ -329,6 +365,9 @@ try {
   if (/ENOENT|spawn\s+.*not found|event|Error invoking remote method/i.test(`${message}\n${toast.log}`)) {
     throw new Error(`Missing Minecraft Launcher leaked a low-level spawn error: ${JSON.stringify(toast)}`);
   }
+  if (expectMissingCustom && /custom launcher|missing-custom|--bad-custom/i.test(`${message}\n${toast.log}`)) {
+    throw new Error(`Stale custom launcher config leaked to the player-facing missing-launcher flow: ${JSON.stringify(toast)}`);
+  }
   if (toast.copyText !== 'Copy full error details') {
     throw new Error(`Missing Minecraft Launcher toast did not expose clickable diagnostics: ${JSON.stringify(toast)}`);
   }
@@ -353,6 +392,7 @@ try {
     ok: true,
     root,
     packaged: Boolean(smokeExe),
+    expectMissingCustom,
     message,
     capturedUrls: captures.map((entry) => entry.url),
     proofSource: proof.source,

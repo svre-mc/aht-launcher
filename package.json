@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.64",
+  "version": "0.1.65",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -86,7 +86,9 @@
     "dist:regular:macos": "electron-builder --config build/electron-builder.macos.cjs --mac --publish never",
     "pack": "electron-builder --dir",
     "test:launcher-proof": "node scripts/test-launcher-proof.mjs",
-    "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
+    "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs",
+    "test:play-custom-fallback": "node scripts/smoke-play-curseforge-priority.mjs --custom-fallback",
+    "test:play-missing-custom": "node scripts/smoke-play-missing-launcher.mjs --missing-custom"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",

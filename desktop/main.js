@@ -420,27 +420,51 @@ function routeForDiagnostic(route = {}) {
   };
 }
 
+function customMinecraftLauncherRoute(config = {}) {
+  const command = String(config.minecraftLauncher?.openCommand || '').trim();
+  if (!command) {
+    return null;
+  }
+  return {
+    kind: 'custom',
+    label: 'Custom launcher',
+    command,
+    args: Array.isArray(config.minecraftLauncher?.openArgs) ? config.minecraftLauncher.openArgs : [],
+    cwd: config.minecraftLauncher?.rootDir || '',
+    rootDir: config.minecraftLauncher?.rootDir || '',
+    source: 'custom'
+  };
+}
+
+async function minecraftLauncherPlatformRoutes(config = {}, env = process.env) {
+  if (process.platform === 'win32') {
+    return windowsMinecraftLauncherRoutes(config, env);
+  }
+  if (process.platform === 'darwin') {
+    return macMinecraftLauncherRoutes(config, env);
+  }
+  return [];
+}
+
+async function customMinecraftLauncherRouteIsAvailable(route = null) {
+  if (!route?.command) {
+    return false;
+  }
+  return !commandLooksLikePath(route.command) || await pathExists(route.command);
+}
+
 async function plannedMinecraftLauncherRouteDiagnostics(config = null) {
   if (!config) {
     return [];
   }
-  const openCommand = String(config.minecraftLauncher?.openCommand || '').trim();
-  if (openCommand) {
-    return [routeForDiagnostic({
-      kind: 'custom',
-      label: 'Custom launcher',
-      command: openCommand,
-      args: Array.isArray(config.minecraftLauncher?.openArgs) ? config.minecraftLauncher.openArgs : [],
-      cwd: config.minecraftLauncher?.rootDir || '',
-      rootDir: config.minecraftLauncher?.rootDir || ''
-    })];
-  }
   const runtimeConfig = await minecraftLauncherRuntimeConfig(config);
-  if (process.platform === 'win32') {
-    return (await windowsMinecraftLauncherRoutes(runtimeConfig, process.env)).map(routeForDiagnostic);
-  }
-  if (process.platform === 'darwin') {
-    return (await macMinecraftLauncherRoutes(runtimeConfig, process.env)).map(routeForDiagnostic);
+  const routes = await minecraftLauncherPlatformRoutes(runtimeConfig, process.env);
+  const customRoute = customMinecraftLauncherRoute(runtimeConfig);
+  if (routes.length || customRoute) {
+    return [
+      ...routes.map(routeForDiagnostic),
+      ...(customRoute ? [routeForDiagnostic(customRoute)] : [])
+    ];
   }
   return [routeForDiagnostic({
     kind: 'unsupported',
@@ -1256,7 +1280,7 @@ async function minecraftLauncherRuntimeConfig(config = {}) {
   const configuredRoot = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();
   const preparationRoots = await minecraftLauncherPreparationRoots(config);
   let rootDir = configuredRoot;
-  if (process.platform === 'win32' && !String(config.minecraftLauncher?.openCommand || '').trim()) {
+  if (process.platform === 'win32') {
     const curseForgeRoot = await firstExistingDirectory(curseForgeMinecraftRootCandidates());
     rootDir = curseForgeRoot
       || configuredRoot
@@ -2542,12 +2566,13 @@ function setupForRenderer(setup = {}) {
     if (text.startsWith('curseforge')) return 'preferred';
     if (['desktop', 'root', 'app', 'bundle', 'app-name'].includes(text)) return 'launcher';
     if (text === 'store') return 'store-fallback';
+    if (text === 'missing-custom') return 'missing';
     return text;
   };
   const safeOpenState = safeRouteState(setup.minecraftLauncherOpenState);
   const safeOpenLabel = safeOpenState === 'preferred'
     ? 'Preferred launcher'
-    : (safeOpenState === 'store-fallback' ? 'Store fallback' : setup.minecraftLauncherOpenLabel || '');
+    : (safeOpenState === 'store-fallback' ? 'Store fallback' : (safeOpenState === 'missing' ? 'Install needed' : setup.minecraftLauncherOpenLabel || ''));
   return {
     instanceExists: Boolean(setup.instanceExists),
     instanceHasPack: Boolean(setup.instanceHasPack),
@@ -6190,40 +6215,29 @@ function javaRuntimeModeForSetup() {
 }
 
 async function minecraftLauncherOpenStatus(config = {}) {
-  const openCommand = String(config.minecraftLauncher?.openCommand || '').trim();
-  if (openCommand) {
-    const available = !commandLooksLikePath(openCommand) || await pathExists(openCommand);
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+  const routes = await minecraftLauncherPlatformRoutes(launcherConfig, process.env);
+  const customRoute = customMinecraftLauncherRoute(launcherConfig);
+  const customAvailable = await customMinecraftLauncherRouteIsAvailable(customRoute);
+  const availableRoutes = customAvailable ? [...routes, customRoute] : routes;
+  if (availableRoutes.length) {
+    return minecraftLauncherOpenStatusFromRoutes(
+      availableRoutes,
+      process.platform === 'darwin' ? 'Checked on Play' : 'Install needed'
+    );
+  }
+  if (customRoute && !customAvailable) {
     return {
-      available,
-      state: available ? 'custom' : 'missing-custom',
-      label: available ? 'Custom launcher' : 'Custom launcher missing',
-      routeCount: available ? 1 : 0,
-      routeKinds: available ? ['custom'] : [],
-      firstRouteSource: 'custom',
-      routeDegraded: false,
-      hasCurseForgeRoute: false
+      available: false,
+      state: 'missing-custom',
+      label: 'Custom launcher missing',
+      ...minecraftLauncherRouteSummary(routes)
     };
   }
-  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
   if (process.platform === 'win32') {
-    const routes = await windowsMinecraftLauncherRoutes(launcherConfig, process.env);
-    if (routes.length) {
-      return minecraftLauncherOpenStatusFromRoutes(routes);
-    }
-    if (await windowsStoreMinecraftLauncherInstalled(process.env)) {
-      return minecraftLauncherOpenStatusFromRoutes([{
-        kind: 'store',
-        label: 'Store fallback',
-        source: 'windows-store'
-      }]);
-    }
     return minecraftLauncherOpenStatusFromRoutes([]);
   }
   if (process.platform === 'darwin') {
-    const routes = await macMinecraftLauncherRoutes(launcherConfig, process.env);
-    if (routes.length) {
-      return minecraftLauncherOpenStatusFromRoutes(routes, 'Checked on Play');
-    }
     return {
       available: true,
       state: 'check-on-play',
@@ -6250,35 +6264,6 @@ async function openMacApplication(args, cwd, env) {
   return { ok: true, command, args };
 }
 
-async function openMacMinecraftLauncher(config, cwd, env) {
-  const routes = await macMinecraftLauncherRoutes(config, env);
-  let lastError = null;
-  const failures = [];
-  for (const route of routes) {
-    try {
-      const launchCwd = await existingLaunchCwd(route.cwd || cwd);
-      return {
-        ...await openMacApplication(route.args || [], launchCwd, env),
-        kind: route.kind,
-        routeLabel: route.label,
-        attemptedRoutes: routes.map((item) => item.kind),
-        failedRoutes: failures
-      };
-    } catch (error) {
-      lastError = error;
-      failures.push({
-        kind: route.kind,
-        label: route.label || route.kind,
-        message: error.message || String(error)
-      });
-    }
-  }
-  const detail = failures.length
-    ? ` Tried ${failures.map((failure) => `${failure.label}: ${failure.message}`).join(' | ')}`
-    : '';
-  throw new Error(`Minecraft Launcher could not be opened on macOS.${detail || (lastError ? ` ${lastError.message}` : '')}`);
-}
-
 async function openWindowsStoreMinecraftLauncher(cwd, env) {
   const appTarget = `shell:AppsFolder\\${WINDOWS_MINECRAFT_PACKAGE_FAMILY}!Minecraft`;
   const warning = 'Minecraft Launcher was opened through the Microsoft Store fallback. AHT cannot guarantee --workDir through this route; install the desktop Minecraft Launcher if the AHT profile does not appear.';
@@ -6298,6 +6283,42 @@ async function openWindowsStoreMinecraftLauncher(cwd, env) {
       throw new Error(`Minecraft Launcher could not be opened. Explorer failed: ${explorerError.message}. Start failed: ${startError.message}`);
     }
   }
+}
+
+async function openMinecraftLauncherRoute(route, cwd, env) {
+  if (route.kind === 'custom') {
+    return {
+      ...await spawnDetached(route.command, route.args || [], cwd, env, {
+        kind: 'custom',
+        routeLabel: route.label || 'Custom Minecraft Launcher',
+        source: 'custom'
+      }),
+      kind: 'custom'
+    };
+  }
+  if (process.platform === 'win32') {
+    if (route.kind === 'store') {
+      return openWindowsStoreMinecraftLauncher(cwd, env);
+    }
+    return spawnWindowsMinecraftLauncherRoute(route, cwd, env);
+  }
+  if (process.platform === 'darwin') {
+    return openMacApplication(route.args || [], cwd, env);
+  }
+  return spawnDetached(route.command || 'minecraft-launcher', route.args || [], cwd, env, {
+    kind: route.kind || 'launcher',
+    routeLabel: route.label || 'Minecraft Launcher',
+    source: route.source || ''
+  });
+}
+
+async function minecraftLauncherOpenRoutes(config, env) {
+  const routes = await minecraftLauncherPlatformRoutes(config, env);
+  const customRoute = customMinecraftLauncherRoute(config);
+  if (customRoute && await customMinecraftLauncherRouteIsAvailable(customRoute)) {
+    return [...routes, customRoute];
+  }
+  return routes;
 }
 
 async function windowsStoreMinecraftLauncherInstalled(env = process.env) {
@@ -6383,44 +6404,39 @@ async function openMinecraftLauncher(config) {
   const requestedCwd = config.minecraftLauncher?.rootDir || app.getPath('home');
   const cwd = await existingLaunchCwd(requestedCwd);
   const env = minecraftLaunchEnv();
-  if (config.minecraftLauncher?.openCommand) {
-    return { ...await spawnDetached(config.minecraftLauncher.openCommand, config.minecraftLauncher.openArgs || [], cwd, env, { kind: 'custom', routeLabel: 'Custom Minecraft Launcher' }), kind: 'custom' };
+  const routes = await minecraftLauncherOpenRoutes(config, env);
+  const failures = [];
+  for (const route of routes) {
+    try {
+      const launchCwd = await existingLaunchCwd(route.cwd || cwd);
+      const launch = await openMinecraftLauncherRoute(route, launchCwd, env);
+      return {
+        ...launch,
+        kind: route.kind,
+        routeLabel: route.label,
+        attemptedRoutes: routes.map((item) => item.kind),
+        failedRoutes: failures
+      };
+    } catch (error) {
+      failures.push({
+        kind: route.kind,
+        label: route.label || route.kind,
+        message: error.message || String(error)
+      });
+    }
   }
-
+  if (failures.length) {
+    const tried = failures.map((failure) => `${failure.label}: ${failure.message}`).join(' | ');
+    throw new Error(`Minecraft Launcher could not be opened after trying ${failures.length} route${failures.length === 1 ? '' : 's'}. ${tried}`);
+  }
   if (process.platform === 'win32') {
-    const routes = await windowsMinecraftLauncherRoutes(config, env);
-    const failures = [];
-    for (const route of routes) {
-      try {
-        const launch = route.kind === 'store'
-          ? await openWindowsStoreMinecraftLauncher(route.cwd || cwd, env)
-          : await spawnWindowsMinecraftLauncherRoute(route, await existingLaunchCwd(route.cwd || cwd), env);
-        return {
-          ...launch,
-          kind: route.kind,
-          routeLabel: route.label,
-          attemptedRoutes: routes.map((item) => item.kind),
-          failedRoutes: failures
-        };
-      } catch (error) {
-        failures.push({
-          kind: route.kind,
-          label: route.label || route.kind,
-          message: error.message || String(error)
-        });
-      }
-    }
-    if (failures.length) {
-      const tried = failures.map((failure) => `${failure.label}: ${failure.message}`).join(' | ');
-      throw new Error(`Minecraft Launcher could not be opened after trying ${failures.length} route${failures.length === 1 ? '' : 's'}. ${tried}`);
-    }
     return openMinecraftLauncherInstallHelp(
       'Minecraft Launcher is not installed, or Windows app execution is disabled on this PC.'
     );
   }
 
   if (process.platform === 'darwin') {
-    return openMacMinecraftLauncher(config, cwd, env);
+    throw new Error('Minecraft Launcher could not be opened on macOS.');
   }
 
   return spawnDetached('minecraft-launcher', [], cwd, env);

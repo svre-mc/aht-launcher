@@ -21,6 +21,8 @@ const fakeOpenScript = path.join(root, 'fake-minecraft-launcher.cjs');
 const fakeOpenMarker = path.join(root, 'fake-minecraft-launcher-opened.json');
 const fakeLocalAppData = path.join(root, 'localappdata');
 const fakeProgramFiles = path.join(root, 'program-files');
+const fakeProgramData = path.join(root, 'program-data');
+const fakePublic = path.join(root, 'public');
 const fakeAppData = path.join(root, 'appdata');
 const fakeUserProfile = path.join(root, 'profile');
 const fakeHome = path.join(root, 'home');
@@ -143,6 +145,8 @@ await fsp.mkdir(instanceDir, { recursive: true });
 await fsp.mkdir(minecraftRoot, { recursive: true });
 await fsp.mkdir(fakeLocalAppData, { recursive: true });
 await fsp.mkdir(fakeProgramFiles, { recursive: true });
+await fsp.mkdir(fakeProgramData, { recursive: true });
+await fsp.mkdir(fakePublic, { recursive: true });
 await fsp.mkdir(fakeAppData, { recursive: true });
 await fsp.mkdir(fakeUserProfile, { recursive: true });
 await fsp.mkdir(path.join(fakeUserProfile, 'Documents'), { recursive: true });
@@ -210,13 +214,22 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_LOCAL_INSTANCE_DIR: detectedInstanceDir,
     AHT_TEST_OPEN_EXTERNAL_CAPTURE_PATH: externalCapturePath,
     AHT_TEST_SETUP_JAVA_MODE: 'checked-on-play',
+    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
     APPDATA: fakeAppData,
     USERPROFILE: fakeUserProfile,
     HOME: fakeHome,
     ProgramFiles: fakeProgramFiles,
-    'ProgramFiles(x86)': fakeProgramFiles
+    'ProgramFiles(x86)': fakeProgramFiles,
+    ProgramW6432: fakeProgramFiles,
+    ProgramData: fakeProgramData,
+    PROGRAMDATA: fakeProgramData,
+    ALLUSERSPROFILE: fakeProgramData,
+    PUBLIC: fakePublic,
+    OneDrive: path.join(fakeHome, 'OneDrive'),
+    OneDriveConsumer: path.join(fakeHome, 'OneDrive'),
+    OneDriveCommercial: path.join(fakeHome, 'OneDriveBusiness')
   },
   stdio: 'ignore',
   windowsHide: true

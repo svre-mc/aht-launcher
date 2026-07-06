@@ -28,6 +28,7 @@ const documentsPath = 'C:\\Users\\Player\\Documents';
 const defaultRoot = path.win32.join(env.APPDATA, '.minecraft');
 const storeRoot = windowsStoreMinecraftRoot(env);
 const curseForgeRoot = path.win32.join(homePath, 'curseforge', 'minecraft', 'Install');
+const documentsCurseForgeRoot = path.win32.join(documentsPath, 'CurseForge', 'minecraft', 'Install');
 const desktopLauncher = path.win32.join(env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const localDesktopLauncher = path.win32.join(env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe');
 const xboxGamesLauncher = 'D:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe';
@@ -48,6 +49,7 @@ const macHomePath = macEnv.HOME;
 const macDocumentsPath = '/Users/player/Documents';
 const macDefaultRoot = '/Users/player/Library/Application Support/minecraft';
 const macCurseForgeRoot = '/Users/player/curseforge/minecraft/Install';
+const macLibraryCurseForgeRoot = '/Users/player/Library/Application Support/CurseForge/minecraft/Install';
 const macLauncherApp = '/Applications/Minecraft Launcher.app';
 
 function existsSet(paths = []) {
@@ -116,6 +118,17 @@ async function macRoutes(existing, options = {}) {
   const planned = await routes([localDesktopLauncher], { storeInstalled: true });
   assert.deepEqual(planned.map((route) => route.kind), ['desktop', 'store']);
   assert.equal(planned[0].command, localDesktopLauncher);
+}
+
+{
+  const planned = await routes([
+    documentsCurseForgeRoot,
+    localDesktopLauncher
+  ], { storeInstalled: false });
+  assert.deepEqual(planned.map((route) => route.kind), ['curseforge', 'desktop']);
+  assert.equal(planned[0].command, localDesktopLauncher);
+  assert.equal(planned[0].rootDir, documentsCurseForgeRoot);
+  assert.deepEqual(planned[0].args, ['--workDir', documentsCurseForgeRoot]);
 }
 
 {
@@ -323,6 +336,16 @@ assert.equal(windowsStoreMinecraftPackageDir(env), path.win32.join(env.LOCALAPPD
 
 {
   const planned = await macRoutes([
+    macLibraryCurseForgeRoot,
+    macLauncherApp
+  ]);
+  assert.equal(planned[0].kind, 'curseforge');
+  assert.deepEqual(planned[0].args, [macLauncherApp, '--args', '--workDir', macLibraryCurseForgeRoot]);
+  assert.equal(planned[0].cwd, macLibraryCurseForgeRoot);
+}
+
+{
+  const planned = await macRoutes([
     macCurseForgeRoot
   ]);
   assert.equal(planned[0].kind, 'curseforge-bundle');
@@ -345,6 +368,7 @@ console.log(JSON.stringify({
   covered: [
     'curseforge-desktop-store',
     'desktop-store',
+    'documents-curseforge-root',
     'root-owned-executable-ignored',
     'xbox-games-launcher',
     'extra-drive-xbox-games-launcher',
@@ -360,6 +384,7 @@ console.log(JSON.stringify({
     'shortcut-curseforge-app-ignored',
     'missing-launcher',
     'macos-curseforge-app-path',
+    'macos-library-curseforge-root',
     'macos-curseforge-bundle-fallback',
     'macos-custom-app'
   ]

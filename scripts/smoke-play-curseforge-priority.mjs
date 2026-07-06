@@ -3,15 +3,18 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
 const expectFallback = process.argv.includes('--fallback');
 const expectStoreFallback = process.argv.includes('--store-fallback');
 const expectStartFallback = process.argv.includes('--app-alias-start-fallback');
+const expectCustomFallback = process.argv.includes('--custom-fallback');
 const useDesktopMinecraftLauncher = !process.argv.includes('--no-desktop');
 const portArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
-const port = Number(portArg || (expectFallback ? 10976 : expectStoreFallback ? 11076 : 10876));
+const defaultPort = expectFallback ? 10976 : expectStoreFallback ? 11076 : expectCustomFallback ? 11176 : 10876;
+const port = Number(portArg || await availablePortPair(defaultPort));
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
@@ -42,6 +45,30 @@ const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+
+async function portIsAvailable(portNumber) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.once('listening', () => {
+      probe.close(() => resolve(true));
+    });
+    probe.listen(portNumber, '127.0.0.1');
+  });
+}
+
+async function availablePortPair(preferredPort) {
+  const candidates = [
+    preferredPort,
+    ...Array.from({ length: 80 }, () => 20_000 + Math.floor(Math.random() * 20_000) * 2)
+  ];
+  for (const candidate of candidates) {
+    if (candidate > 0 && candidate < 65_534 && await portIsAvailable(candidate) && await portIsAvailable(candidate + 1)) {
+      return candidate;
+    }
+  }
+  throw new Error('Could not find an available local port pair for the Electron smoke test.');
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -234,7 +261,11 @@ await writeJson(defaultsPath, {
     profileName: 'A Hard Time',
     memoryMb: 4096,
     syncDefaultRoots: false,
-    autoImportAccount: false
+    autoImportAccount: false,
+    ...(expectCustomFallback ? {
+      openCommand: path.join(root, 'missing-custom-launcher', 'MinecraftLauncher.exe'),
+      openArgs: ['--bad-custom']
+    } : {})
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -320,7 +351,10 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_MINECRAFT_ASSET_BASE_URL: `${workerEndpoint}/asset-objects/`,
     AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
-    AHT_TEST_SPAWN_DETACHED_FAIL_KINDS: expectFallback ? 'curseforge' : '',
+    AHT_TEST_SPAWN_DETACHED_FAIL_KINDS: [
+      expectFallback ? 'curseforge' : '',
+      expectCustomFallback ? 'custom' : ''
+    ].filter(Boolean).join(','),
     AHT_TEST_SPAWN_DETACHED_FAIL_SOURCES: expectStartFallback ? 'windows-app-alias' : '',
     ELECTRON_ENABLE_LOGGING: '0',
     LOCALAPPDATA: fakeLocalAppData,
@@ -390,6 +424,9 @@ try {
   }
   const spawnCaptures = await readJsonLines(spawnCapturePath);
   const spawnCapture = spawnCaptures.at(-1);
+  if (expectCustomFallback && spawnCaptures.some((capture) => capture.kind === 'custom' || capture.source === 'custom')) {
+    throw new Error(`Play used a custom launcher command before safe Minecraft Launcher routes: ${JSON.stringify(spawnCaptures)}`);
+  }
   if (expectStartFallback) {
     if (spawnCaptures.some((capture) => capture.source === 'windows-app-alias')) {
       throw new Error(`App-alias routes should use Windows start directly instead of spawning the alias first: ${JSON.stringify(spawnCaptures)}`);
@@ -461,6 +498,7 @@ try {
     storeMcRoot,
     expectFallback,
     expectStoreFallback,
+    expectCustomFallback,
     requests: assetRequests,
     spawnCapture
   }, null, 2));
