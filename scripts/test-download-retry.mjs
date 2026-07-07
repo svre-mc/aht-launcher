@@ -135,43 +135,6 @@ try {
   assert(progressEvents.some((event) => event.total === Buffer.byteLength(packBytes) && event.percent === 100), `download did not report final byte progress: ${JSON.stringify(progressEvents)}`);
   assert(progressEvents.every((event) => Number.isFinite(event.speedBytesPerSecond)), `download progress did not include speed: ${JSON.stringify(progressEvents)}`);
   assert(!(await fs.stat(`${dest}.download`).then(() => true).catch(() => false)), 'stale partial download file was not removed after successful retry');
-  const replaceRetryDest = path.join(root, 'replace-retry-pack.zip');
-  const replaceRetryLogs = [];
-  await fs.writeFile(replaceRetryDest, 'old-safe-before-replace-retry', 'utf8');
-  process.env.AHT_TEST_HOOKS = '1';
-  process.env.AHT_TEST_DOWNLOAD_REPLACE_RETRY_FAILURES = '2';
-  await downloadToFile(`http://127.0.0.1:${port}/pack.zip`, replaceRetryDest, {
-    retries: 0,
-    timeoutMs: 5000,
-    replaceRetryDelayMs: 1,
-    logger: { log: (line) => replaceRetryLogs.push(String(line)) }
-  });
-  delete process.env.AHT_TEST_HOOKS;
-  delete process.env.AHT_TEST_DOWNLOAD_REPLACE_RETRY_FAILURES;
-  assert(await fs.readFile(replaceRetryDest, 'utf8') === packBytes, 'download replacement did not succeed after transient Windows rename failures');
-  assert(replaceRetryLogs.some((line) => /Retrying file replacement/i.test(line)), `download replacement retry was not logged: ${replaceRetryLogs.join('\n')}`);
-  assert(!(await fs.readdir(root)).some((name) => name.includes('replace-retry-pack.zip.previous-') || name === 'replace-retry-pack.zip.download'), 'successful replacement left retry backup or temp files behind');
-  const replaceFailureDest = path.join(root, 'replace-failure-pack.zip');
-  await fs.writeFile(replaceFailureDest, 'known-good-before-replace-failure', 'utf8');
-  process.env.AHT_TEST_HOOKS = '1';
-  process.env.AHT_TEST_DOWNLOAD_REPLACE_RETRY_FAILURES = '5';
-  let replaceFailureProtectedExisting = false;
-  try {
-    await downloadToFile(`http://127.0.0.1:${port}/pack.zip`, replaceFailureDest, {
-      retries: 0,
-      timeoutMs: 5000,
-      replaceAttempts: 2,
-      replaceRetryDelayMs: 1
-    });
-  } catch (error) {
-    replaceFailureProtectedExisting = /Download failed after 1 attempt/i.test(error.message || String(error))
-      && await fs.readFile(replaceFailureDest, 'utf8') === 'known-good-before-replace-failure'
-      && !(await fs.readdir(root)).some((name) => name.includes('replace-failure-pack.zip.previous-') || name === 'replace-failure-pack.zip.download');
-  } finally {
-    delete process.env.AHT_TEST_HOOKS;
-    delete process.env.AHT_TEST_DOWNLOAD_REPLACE_RETRY_FAILURES;
-  }
-  assert(replaceFailureProtectedExisting, 'failed download replacement did not restore the previous known-good file cleanly');
   const deniedDest = path.join(root, 'denied-pack.zip');
   await fs.writeFile(deniedDest, 'known-good-before-denied-download', 'utf8');
   await fs.writeFile(`${deniedDest}.download`, 'stale denied partial bytes', 'utf8');

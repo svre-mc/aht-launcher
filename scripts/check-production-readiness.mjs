@@ -12,14 +12,11 @@ const require = createRequire(import.meta.url);
 const args = new Set(process.argv.slice(2));
 const strict = args.has('--strict');
 const jsonOnly = args.has('--json');
-const liveMutatingChecks = args.has('--live-mutate');
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, '..');
 const outputsDir = path.resolve(rootDir, '..', '..', 'outputs');
 const releaseDir = path.join(rootDir, 'release-builds');
-const stateDir = path.join(rootDir, 'work', 'state');
-const latestReportPath = path.join(stateDir, 'production-readiness-latest.json');
 const checks = [];
 const developerOnlyAsarSourcePattern = /^src\/(?:releaseBuilder|clientModpackZip|serverTransfer|githubActions|r2DirectUpload)\.js$/;
 const developerOnlyAsarDependencyPattern = /^node_modules\/(?:@aws-sdk|@smithy|@aws-crypto|ssh2|yazl)(?:\/|$)/;
@@ -113,36 +110,11 @@ function checkPublicPlayerAsar(label, asarPath) {
 function addCheck(name, level, ok, detail = '') {
   checks.push({ name, level, ok: Boolean(ok), detail });
 }
-
-function writeLatestReport(report) {
-  try {
-    fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(latestReportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  } catch (error) {
-    console.error(`Unable to write production readiness report: ${error?.message || error}`);
-  }
-}
-
 function nextRequiredStep(blockers = []) {
   const names = blockers.map((check) => check.name);
   const stalePackFeed = names.includes('live pack release is exact AHT client ZIP');
   const staleLauncherFeed = names.includes('live launcher update feed matches local version')
     || names.includes('live launcher update feed has Windows and macOS downloads');
-  if (names.includes('required source files tracked by git')) {
-    return 'add the required source/smoke files to git before publishing from GitHub, then re-run this check.';
-  }
-  if (names.includes('launcher package version is bumped for changed artifacts')) {
-    return 'bump the launcher package version and rebuild the launcher artifacts before publishing, then re-run this check.';
-  }
-  if (names.includes('publish-relevant source changes committed to git')) {
-    return 'commit the publish-relevant launcher source changes before using GitHub Actions, then re-run this check.';
-  }
-  if (names.includes('GitHub push auth preflight')) {
-    return 'log in to GitHub for this repo with Git Credential Manager or a PAT, then re-run npm run check:github-push-auth.';
-  }
-  if (names.includes('local HEAD is pushed to origin branch')) {
-    return 'push the committed launcher changes to origin/main before using GitHub Actions, then re-run this check.';
-  }
   if (stalePackFeed && staleLauncherFeed) {
     return 'publish an exact AHT client ZIP release and a launcher update for the current package version when ready, then re-run this check.';
   }
@@ -184,154 +156,6 @@ function existsDir(dirPath) {
   } catch {
     return false;
   }
-}
-
-function gitTrackedRelativePaths() {
-  const result = spawnSync('git', ['ls-files'], {
-    cwd: rootDir,
-    encoding: 'utf8',
-    timeout: 10_000
-  });
-  if (result.status !== 0) {
-    return null;
-  }
-  return new Set(String(result.stdout || '').split(/\r?\n/).filter(Boolean).map((item) => item.replace(/\\/g, '/')));
-}
-
-function gitSingleLine(args, timeout = 10_000) {
-  const result = spawnSync('git', args, {
-    cwd: rootDir,
-    encoding: 'utf8',
-    timeout
-  });
-  if (result.status !== 0 || result.error) {
-    return '';
-  }
-  return String(result.stdout || '').trim().split(/\r?\n/)[0]?.trim() || '';
-}
-
-function gitPublishRelevantChanges() {
-  const githubLauncherWorkflowPaths = [
-    '.github/workflows',
-    'build',
-    'config',
-    'desktop',
-    'pack-fixes',
-    'server-lock-mod/build/libs',
-    'src',
-    'scripts/prepare-launcher-update.mjs',
-    'scripts/upload-r2-plan.mjs',
-    'scripts/test-github-workflow-dispatch.mjs',
-    'scripts/test-launcher-update-manifest.mjs',
-    'scripts/validate-launcher-update-manifest.mjs',
-    'package.json',
-    'package-lock.json',
-    'README.md'
-  ];
-  const localReadinessPaths = [
-    'scripts/check-production-readiness.mjs',
-    'scripts/test-platform-build-configs.mjs',
-    'scripts/test-production-readiness-contract.mjs',
-    'scripts/verify-local.mjs',
-    'scripts/verify-installed-player.mjs',
-    'scripts/smoke-error-details-copy.mjs',
-    'scripts/smoke-friends-panel.mjs',
-    'scripts/smoke-play-asset-repair.mjs',
-    'scripts/smoke-play-java-setup.mjs',
-    'scripts/smoke-play-missing-launcher.mjs',
-    'scripts/smoke-play-service-outage.mjs',
-    'scripts/smoke-play-signin-guidance.mjs',
-    'scripts/smoke-repair-missing-managed-manifest.mjs',
-    'scripts/smoke-setup-recovery-actions.mjs',
-    'scripts/test-minecraft-service-status.mjs',
-    'scripts/test-social-client.mjs',
-    'scripts/check-github-push-auth.mjs',
-    'scripts/test-github-push-auth-check.mjs'
-  ];
-  const publishRelevantPaths = [...new Set([...githubLauncherWorkflowPaths, ...localReadinessPaths])];
-  const result = spawnSync('git', ['status', '--porcelain=v1', '--', ...publishRelevantPaths], {
-    cwd: rootDir,
-    encoding: 'utf8',
-    timeout: 10_000
-  });
-  if (result.status !== 0 || result.error) {
-    return null;
-  }
-  return String(result.stdout || '')
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter(Boolean);
-}
-
-function checkGitPublishState() {
-  const changes = gitPublishRelevantChanges();
-  addCheck(
-    'publish-relevant source changes committed to git',
-    'blocker',
-    Boolean(changes && changes.length === 0),
-    changes ? (changes.slice(0, 12).join(', ') || 'clean') : 'git status failed'
-  );
-
-  const branch = gitSingleLine(['branch', '--show-current']);
-  const localHead = gitSingleLine(['rev-parse', 'HEAD']);
-  const remoteLine = branch ? gitSingleLine(['ls-remote', 'origin', `refs/heads/${branch}`], 30_000) : '';
-  const remoteHead = remoteLine.split(/\s+/)[0] || '';
-  const pushed = Boolean(branch && localHead && remoteHead && localHead === remoteHead);
-  addCheck(
-    'local HEAD is pushed to origin branch',
-    'blocker',
-    pushed,
-    branch
-      ? `branch ${branch}, local ${localHead.slice(0, 12) || 'missing'}, origin/${branch} ${remoteHead.slice(0, 12) || 'missing'}`
-      : 'not on a named branch'
-  );
-  if (!pushed && branch && localHead && remoteHead) {
-    const authStatus = githubPushAuthStatus(branch);
-    addCheck(
-      'GitHub push auth preflight',
-      'blocker',
-      authStatus.ok,
-      authStatus.detail
-    );
-  }
-}
-
-function githubPushAuthStatus(branch) {
-  const scriptPath = path.join(rootDir, 'scripts', 'check-github-push-auth.mjs');
-  if (!existsNonEmpty(scriptPath)) {
-    return { ok: false, detail: 'missing scripts/check-github-push-auth.mjs' };
-  }
-  const result = spawnSync(process.execPath, [
-    scriptPath,
-    '--branch',
-    branch,
-    '--timeout-ms',
-    '30000'
-  ], {
-    cwd: rootDir,
-    encoding: 'utf8',
-    timeout: 45_000,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GCM_INTERACTIVE: 'never'
-    }
-  });
-  const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
-  let parsed = null;
-  try {
-    parsed = JSON.parse(result.stdout || '{}');
-  } catch {}
-  if (result.status === 0 && parsed?.ok) {
-    return { ok: true, detail: parsed.output || 'push dry-run ok' };
-  }
-  const reason = parsed?.failure?.reason || (result.error ? result.error.message : '') || (result.signal ? `signal ${result.signal}` : '') || 'push auth failed';
-  const message = parsed?.failure?.message || commandDetail(output, reason);
-  const loginCommand = parsed?.failure?.loginCommands?.[0] || '';
-  return {
-    ok: false,
-    detail: [reason, message, loginCommand].filter(Boolean).join(' | ')
-  };
 }
 
 function collectFiles(relativePaths) {
@@ -405,77 +229,13 @@ function commandDetail(output = '', fallback = '') {
     || fallback;
 }
 
-function npmCliCandidate(commandName, npmExecPath) {
-  const execPath = String(npmExecPath || '').trim();
-  if (!execPath.endsWith('.js')) {
-    return '';
-  }
-  if (commandName === 'npm') {
-    return execPath;
-  }
-  if (commandName === 'npx') {
-    const sibling = path.join(path.dirname(execPath), 'npx-cli.js');
-    return fs.existsSync(sibling) ? sibling : '';
-  }
-  return '';
-}
-
-function bundledCliCandidate(commandName) {
-  if (commandName !== 'npm' && commandName !== 'npx') {
-    return '';
-  }
-  const cliName = commandName === 'npm' ? 'npm-cli.js' : 'npx-cli.js';
-  const candidates = [
-    path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', cliName),
-    path.join(path.dirname(process.execPath), '..', 'node_modules', 'npm', 'bin', cliName),
-    path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', cliName)
-  ];
-  return candidates.find((candidate) => fs.existsSync(candidate)) || '';
-}
-
-function commandSpawnArgs(commandName, commandArgs) {
-  const jsCli = npmCliCandidate(commandName, process.env.npm_execpath)
-    || bundledCliCandidate(commandName);
-  if (jsCli) {
-    return {
-      commandName: process.env.npm_node_execpath || process.execPath,
-      commandArgs: [jsCli, ...commandArgs],
-      shell: false
-    };
-  }
-  return {
-    commandName,
-    commandArgs,
-    shell: process.platform === 'win32'
-  };
-}
-
-function commandEnvironment() {
-  const nodeDir = path.dirname(process.execPath);
-  const currentPath = process.env.PATH || process.env.Path || '';
-  const pathParts = currentPath.split(path.delimiter).filter(Boolean);
-  const hasNodeDir = pathParts.some((entry) => entry.toLowerCase() === nodeDir.toLowerCase());
-  const nextPath = hasNodeDir ? currentPath : `${nodeDir}${path.delimiter}${currentPath}`;
-  return {
-    ...process.env,
-    PATH: nextPath,
-    Path: nextPath
-  };
-}
-
-function spawnCommandSync(commandName, commandArgs, timeoutMs = 30000) {
-  const spawnArgs = commandSpawnArgs(commandName, commandArgs);
-  return spawnSync(spawnArgs.commandName, spawnArgs.commandArgs, {
+function command(name, commandName, commandArgs, timeoutMs = 30000, options = {}) {
+  const result = spawnSync(commandName, commandArgs, {
     cwd: rootDir,
-    env: commandEnvironment(),
     encoding: 'utf8',
     timeout: timeoutMs,
-    shell: spawnArgs.shell
+    shell: process.platform === 'win32'
   });
-}
-
-function command(name, commandName, commandArgs, timeoutMs = 30000, options = {}) {
-  const result = spawnCommandSync(commandName, commandArgs, timeoutMs);
   const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
   const invalidOutput = options.invalidOutput?.(output) || false;
   const ok = result.status === 0 && !result.error && !invalidOutput;
@@ -485,7 +245,12 @@ function command(name, commandName, commandArgs, timeoutMs = 30000, options = {}
 }
 
 function runWrangler(args, timeoutMs = 60000) {
-  const result = spawnCommandSync('npx', ['--yes', 'wrangler', ...args], timeoutMs);
+  const result = spawnSync('npx', ['--yes', 'wrangler', ...args], {
+    cwd: rootDir,
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    shell: process.platform === 'win32'
+  });
   const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
   return {
     ok: result.status === 0 && !result.error && !wranglerOutputNeedsLogin(output),
@@ -721,20 +486,6 @@ function checkRequiredFiles() {
     'src/releaseBuilder.js',
     'src/installer.js',
     'src/minecraftLauncherProfile.js',
-    'src/minecraftServiceStatus.js',
-    'src/socialClient.js',
-    'scripts/smoke-error-details-copy.mjs',
-    'scripts/smoke-friends-panel.mjs',
-    'scripts/smoke-play-asset-repair.mjs',
-    'scripts/smoke-play-java-setup.mjs',
-    'scripts/smoke-play-missing-launcher.mjs',
-    'scripts/smoke-play-service-outage.mjs',
-    'scripts/smoke-play-signin-guidance.mjs',
-    'scripts/smoke-repair-missing-managed-manifest.mjs',
-    'scripts/smoke-setup-recovery-actions.mjs',
-    'scripts/test-minecraft-service-status.mjs',
-    'scripts/test-production-readiness-contract.mjs',
-    'scripts/test-social-client.mjs',
     'cloudflare/curseforge-proxy-worker.js',
     'cloudflare/wrangler.toml',
     'build/icon.ico',
@@ -748,16 +499,6 @@ function checkRequiredFiles() {
   for (const relativePath of files) {
     addCheck(`source file: ${relativePath}`, 'blocker', existsNonEmpty(path.join(rootDir, relativePath)), relativePath);
   }
-  const tracked = gitTrackedRelativePaths();
-  const untrackedRequiredFiles = tracked
-    ? files.filter((relativePath) => !tracked.has(relativePath.replace(/\\/g, '/')))
-    : [];
-  addCheck(
-    'required source files tracked by git',
-    'blocker',
-    Boolean(tracked && untrackedRequiredFiles.length === 0),
-    tracked ? (untrackedRequiredFiles.join(', ') || 'clean') : 'git ls-files failed'
-  );
   const staleRootFiles = ['installer.js', 'main.js', 'clientPackFormat.js'];
   const presentStaleRootFiles = staleRootFiles.filter((file) => fs.existsSync(path.join(rootDir, file)));
   addCheck(
@@ -892,23 +633,6 @@ function checkLiveCloudflareState(authOk) {
     && liveWindowsSha === localWindowsSha
     && liveWindowsSize === localWindowsSize
   );
-  const sameVersionChangedWindowsArtifact = Boolean(
-    launcherFeed.ok
-    && localLauncherVersion
-    && liveLauncherVersion
-    && localLauncherVersion === liveLauncherVersion
-    && localWindowsArtifact
-    && liveWindowsArtifact
-    && (liveWindowsSha !== localWindowsSha || liveWindowsSize !== localWindowsSize)
-  );
-  addCheck(
-    'launcher package version is bumped for changed artifacts',
-    'blocker',
-    !sameVersionChangedWindowsArtifact,
-    sameVersionChangedWindowsArtifact
-      ? `live and local are both ${localLauncherVersion}, but the Windows artifact differs; bump package.json so installed launchers detect the update`
-      : 'clean'
-  );
   addCheck(
     'live launcher Windows download matches local artifact',
     'blocker',
@@ -917,23 +641,14 @@ function checkLiveCloudflareState(authOk) {
       ? `${path.basename(localWindowsArtifact.filePath)} ${localWindowsSha}`
       : `live sha=${liveWindowsSha || 'missing'} size=${liveWindowsSize || 'missing'}, local sha=${localWindowsSha || 'missing'} size=${localWindowsSize || 'missing'}`
   );
-  if (liveMutatingChecks) {
-    const proofBaseUrl = defaults?.launcherProof?.baseUrl || defaults?.sync?.baseUrl || '';
-    const proofStatus = liveLauncherProofStatus(proofBaseUrl);
-    addCheck(
-      'live launcher proof signing works',
-      'blocker',
-      proofStatus.ok,
-      proofStatus.detail
-    );
-  } else {
-    addCheck(
-      'live launcher proof signing check is opt-in',
-      'warn',
-      true,
-      'skipped read-only run; pass --live-mutate to verify Worker registration/proof POST flow'
-    );
-  }
+  const proofBaseUrl = defaults?.launcherProof?.baseUrl || defaults?.sync?.baseUrl || '';
+  const proofStatus = liveLauncherProofStatus(proofBaseUrl);
+  addCheck(
+    'live launcher proof signing works',
+    'blocker',
+    proofStatus.ok,
+    proofStatus.detail
+  );
 }
 
 function checkPlayerDefaults() {
@@ -1173,7 +888,6 @@ function checkPublicSourceHygiene() {
 
 function run() {
   checkRequiredFiles();
-  checkGitPublishState();
   checkPackageConfig();
   checkCloudflareConfig();
   checkPlayerDefaults();
@@ -1191,7 +905,6 @@ function run() {
   const report = {
     ok: blockers.length === 0,
     strict,
-    liveMutatingChecks,
     rootDir,
     outputsDir,
     totals: {
@@ -1202,10 +915,8 @@ function run() {
     blockers,
     warnings,
     checks,
-    reportPath: latestReportPath,
     nextRequiredStep: nextRequiredStep(blockers)
   };
-  writeLatestReport(report);
 
   if (jsonOnly) {
     console.log(JSON.stringify(report, null, 2));

@@ -167,11 +167,6 @@ function positiveInteger(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function nonNegativeInteger(value, fallback) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
-}
-
 function abortSignal(timeoutMs) {
   if (!timeoutMs || !globalThis.AbortSignal?.timeout) {
     return undefined;
@@ -181,42 +176,6 @@ function abortSignal(timeoutMs) {
 
 function retryableHttpStatus(status) {
   return status === 408 || status === 429 || status >= 500;
-}
-
-function retryableFileMoveError(error = {}) {
-  return ['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(error?.code);
-}
-
-function maybeSimulateDownloadReplaceFailure(options = {}) {
-  if (process.env.AHT_TEST_HOOKS !== '1' || !options.simulateFailureEnv) {
-    return;
-  }
-  const remaining = Number(process.env[options.simulateFailureEnv] || 0);
-  if (!Number.isFinite(remaining) || remaining <= 0) {
-    return;
-  }
-  process.env[options.simulateFailureEnv] = String(Math.max(0, remaining - 1));
-  const error = new Error(`Simulated ${options.simulateFailureEnv} file move failure`);
-  error.code = 'EPERM';
-  throw error;
-}
-
-async function renameFileWithRetry(source, dest, options = {}) {
-  const attempts = Math.max(1, positiveInteger(options.replaceAttempts, 10));
-  const retryDelayMs = positiveInteger(options.replaceRetryDelayMs, 80);
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      maybeSimulateDownloadReplaceFailure(options);
-      await fs.rename(source, dest);
-      return;
-    } catch (error) {
-      if (!retryableFileMoveError(error) || attempt >= attempts) {
-        throw error;
-      }
-      options.logger?.log?.(`Retrying file replacement after ${error.code || 'filesystem'} lock (${attempt}/${attempts}): ${source} -> ${dest}`);
-      await sleep(retryDelayMs * attempt);
-    }
-  }
 }
 
 function downloadHeaders(headers = {}, extra = {}) {
@@ -410,40 +369,17 @@ function createByteProgressTransform(total, options = {}) {
   });
 }
 
-async function replaceFileWithDownload(tmp, dest, options = {}) {
-  const backup = `${dest}.previous-${process.pid}-${Date.now()}`;
-  let backedUp = false;
-  await fs.rm(backup, { force: true }).catch(() => {});
-  if (await pathExists(dest)) {
-    await renameFileWithRetry(dest, backup, options);
-    backedUp = true;
-  }
-  try {
-    await renameFileWithRetry(tmp, dest, {
-      ...options,
-      simulateFailureEnv: 'AHT_TEST_DOWNLOAD_REPLACE_RETRY_FAILURES'
-    });
-  } catch (error) {
-    if (backedUp && !(await pathExists(dest)) && await pathExists(backup)) {
-      try {
-        await renameFileWithRetry(backup, dest, options);
-      } catch (rollbackError) {
-        options.logger?.log?.(`Could not restore previous download after replacement failed: ${rollbackError?.message || rollbackError}`);
-      }
-    }
-    throw error;
-  }
-  if (backedUp) {
-    await fs.rm(backup, { force: true }).catch((error) => {
-      options.logger?.log?.(`Could not remove previous download backup ${backup}: ${error?.message || error}`);
-    });
-  }
+async function replaceFileWithDownload(tmp, dest) {
+  await fs.rm(dest, { force: true }).catch((error) => {
+    if (error?.code !== 'ENOENT') throw error;
+  });
+  await fs.rename(tmp, dest);
 }
 
 export async function downloadToFile(source, dest, options = {}) {
   await ensureDir(path.dirname(dest));
   const tmp = `${dest}.download`;
-  const attempts = Math.max(1, nonNegativeInteger(options.retries, 3) + 1);
+  const attempts = Math.max(1, positiveInteger(options.retries, 3) + 1);
   const retryDelayMs = positiveInteger(options.retryDelayMs, 750);
   const timeoutMs = positiveInteger(options.timeoutMs, 15 * 60_000);
   let lastError = null;
@@ -494,7 +430,7 @@ export async function downloadToFile(source, dest, options = {}) {
           createWriteStream(tmp)
         );
       }
-      await replaceFileWithDownload(tmp, dest, options);
+      await replaceFileWithDownload(tmp, dest);
       return;
     } catch (error) {
       lastError = error;

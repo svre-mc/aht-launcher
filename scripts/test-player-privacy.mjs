@@ -141,7 +141,7 @@ const dirtyPrivateConfig = {
   },
   launcherUpdate: { enabled: true, latestUrl: `${workerEndpoint}/launcher/latest.json` },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096 }
+  minecraftLauncher: { enabled: true, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 }
 };
 const stalePlayerConfig = {
   ...dirtyPrivateConfig,
@@ -196,7 +196,7 @@ try {
   if (proof.developerMode || proof.developerClientBypass || proof.configHasDeveloper || proof.configHasServerTransfer || proof.configPath || proof.platformProfileHasInstanceDir || proof.devApiKeys.length || proof.bodyDevMode || proof.bodyDevLocked || !proof.developerTabHidden || !proof.developerTileHidden || proof.devTextVisible) {
     throw new Error(`Player launcher exposed developer/private surface: ${JSON.stringify(proof)}`);
   }
-  const allowedSetupKeys = ['canAutoConfigure', 'instanceExists', 'instanceHasPack', 'javaRuntimeMode', 'latestConfigured', 'minecraftAccountCredentialOnly', 'minecraftAccountProfileKnown', 'minecraftAccountReuseAvailable', 'minecraftLauncherFirstRouteSource', 'minecraftLauncherHasCurseForgeRoute', 'minecraftLauncherOpenAvailable', 'minecraftLauncherOpenLabel', 'minecraftLauncherOpenState', 'minecraftLauncherRouteCount', 'minecraftLauncherRouteDegraded', 'minecraftLauncherRouteKinds'];
+  const allowedSetupKeys = ['canAutoConfigure', 'instanceExists', 'latestConfigured', 'minecraftAccountReuseAvailable'];
   if (JSON.stringify(proof.setupKeys) !== JSON.stringify(allowedSetupKeys)) {
     throw new Error(`Player setup exposed diagnostic keys: ${JSON.stringify(proof)}`);
   }
@@ -205,7 +205,7 @@ try {
   if (leakedSetupText.length) {
     throw new Error(`Player setup exposed private diagnostics: ${JSON.stringify({ leakedSetupText, proof })}`);
   }
-  const allowedMinecraftProfileKeys = ['accountCredentialOnly', 'accountProfileKnown', 'accountReuseAvailable', 'enabled', 'loaderId', 'loaderInstalled', 'minecraftVersion', 'profileExists', 'profileId', 'profileName', 'versionId'];
+  const allowedMinecraftProfileKeys = ['accountReuseAvailable', 'enabled', 'loaderId', 'loaderInstalled', 'minecraftVersion', 'profileExists', 'profileId', 'profileName', 'versionId'];
   if (JSON.stringify(proof.minecraftProfileKeys) !== JSON.stringify(allowedMinecraftProfileKeys)) {
     throw new Error(`Player minecraftProfile exposed diagnostic keys: ${JSON.stringify(proof)}`);
   }

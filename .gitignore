@@ -6,7 +6,6 @@ config/app.defaults.json
 *.log
 *.log.err
 release-builds/
-tmp-publish/
 server-lock-mod/.gradle/
 server-lock-mod/build/*
 !server-lock-mod/build/

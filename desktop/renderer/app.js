@@ -50,7 +50,7 @@ if (!window.aht) {
       minecraftLauncher: {
         enabled: true,
         rootDir: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft",
-        profileId: "a-hard-time-developer",
+        profileId: "a-hard-time-dregora",
         profileName: "A Hard Time"
       },
       playCommand: { command: "", args: [] }
@@ -77,7 +77,7 @@ if (!window.aht) {
       enabled: true,
       rootDir: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft",
       profilesPath: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft\\launcher_profiles.json",
-      profileId: "a-hard-time-developer",
+      profileId: "a-hard-time-dregora",
       profileName: "A Hard Time",
       profileExists: true,
       versionId: "1.12.2-forge-14.23.5.2860",
@@ -142,21 +142,13 @@ if (!window.aht) {
       loaderInstalled: false,
       minecraftVersion: "",
       loaderId: "",
-      accountReuseAvailable: false,
-      accountProfileKnown: false,
-      accountCredentialOnly: false
+      accountReuseAvailable: false
     };
     mockStatus.setup = {
       instanceExists: true,
       latestConfigured: true,
       canAutoConfigure: false,
-      minecraftAccountReuseAvailable: false,
-      minecraftAccountProfileKnown: false,
-      minecraftAccountCredentialOnly: false,
-      minecraftLauncherOpenAvailable: true,
-      minecraftLauncherOpenState: "desktop",
-      minecraftLauncherOpenLabel: "Ready",
-      javaRuntimeMode: "automatic"
+      minecraftAccountReuseAvailable: false
     };
   }
   const mockUpdateLogs = [];
@@ -166,7 +158,6 @@ if (!window.aht) {
     saveSettings: async () => ({}),
     setupRecommend: async () => mockStatus.setup,
     setupApply: async () => mockStatus,
-    setupAction: async () => ({ ok: true, message: "Setup action opened." }),
     testFeed: async () => ({
       ok: true,
       message: "A Hard Time 2.8.1 is available.",
@@ -462,23 +453,6 @@ const els = {
   minecraftProfile: $("#minecraftProfile"),
   installId: $("#installId"),
   playerLabelView: $("#playerLabelView"),
-  profileFriendsButton: $("#profileFriendsButton"),
-  friendsOverlay: $("#friendsOverlay"),
-  friendsCloseButton: $("#friendsCloseButton"),
-  friendsRefreshButton: $("#friendsRefreshButton"),
-  friendsSummary: $("#friendsSummary"),
-  friendsCount: $("#friendsCount"),
-  friendsOnlineCount: $("#friendsOnlineCount"),
-  blockedCount: $("#blockedCount"),
-  friendsStatus: $("#friendsStatus"),
-  friendsList: $("#friendsList"),
-  blockedList: $("#blockedList"),
-  addFriendInput: $("#addFriendInput"),
-  addFriendButton: $("#addFriendButton"),
-  removeFriendInput: $("#removeFriendInput"),
-  removeFriendButton: $("#removeFriendButton"),
-  unblockPlayerInput: $("#unblockPlayerInput"),
-  unblockPlayerButton: $("#unblockPlayerButton"),
   accountOverlay: $("#accountOverlay"),
   accountForm: $("#accountForm"),
   minecraftUsernameInput: $("#minecraftUsernameInput"),
@@ -534,9 +508,6 @@ const els = {
   setupAssistantTitle: $("#setupAssistantTitle"),
   setupAssistantDetail: $("#setupAssistantDetail"),
   settingsAutoSetupButton: $("#settingsAutoSetupButton"),
-  setupOpenMinecraftButton: $("#setupOpenMinecraftButton"),
-  setupDownloadMinecraftButton: $("#setupDownloadMinecraftButton"),
-  setupJavaHelpButton: $("#setupJavaHelpButton"),
   openInstanceButton: $("#openInstanceButton"),
   adminUrlInput: $("#adminUrlInput"),
   adminUserInput: $("#adminUserInput"),
@@ -669,8 +640,6 @@ let developerSecretSaveTimer = null;
 let launcherUpdateAutoStarted = false;
 let lastStatusRefreshAt = 0;
 let updateCompleteHideTimer = null;
-let friendsBusy = false;
-let friendsActionsAvailable = false;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
 
@@ -1022,144 +991,6 @@ async function submitAccount() {
   }
 }
 
-function setFriendsBusy(busy) {
-  friendsBusy = Boolean(busy);
-  if (els.friendsRefreshButton) setUnavailable(els.friendsRefreshButton, friendsBusy);
-  for (const button of [els.addFriendButton, els.removeFriendButton, els.unblockPlayerButton]) {
-    if (button) setUnavailable(button, friendsBusy || !friendsActionsAvailable);
-  }
-}
-
-function setFriendsStatus(message = "", state = "") {
-  if (!els.friendsStatus) return;
-  els.friendsStatus.textContent = message;
-  els.friendsStatus.className = `friends-status ${state}`.trim();
-}
-
-function clearFriendInputs() {
-  for (const input of [els.addFriendInput, els.removeFriendInput, els.unblockPlayerInput]) {
-    if (input) input.value = "";
-  }
-}
-
-function renderPersonRows(container, people = [], options = {}) {
-  if (!container) return;
-  container.innerHTML = "";
-  if (!people.length) {
-    const empty = document.createElement("div");
-    empty.className = "friends-empty";
-    empty.textContent = options.empty || "None";
-    container.appendChild(empty);
-    return;
-  }
-  for (const person of people) {
-    const row = document.createElement("div");
-    row.className = "friend-row";
-    const name = document.createElement("strong");
-    name.textContent = person.username || "Unknown";
-    const state = document.createElement("span");
-    if (options.blocked) {
-      state.className = "friend-state blocked";
-      state.textContent = "Blocked";
-    } else {
-      state.className = `friend-state ${person.online ? "online" : "offline"}`;
-      state.textContent = person.online ? "Online" : "Offline";
-    }
-    row.append(name, state);
-    container.appendChild(row);
-  }
-}
-
-function renderFriendsPanel(state = {}) {
-  friendsActionsAvailable = Boolean(state.actionsAvailable);
-  const counts = state.counts || {};
-  const friends = Array.isArray(state.friends) ? state.friends : [];
-  const blocked = Array.isArray(state.blocked) ? state.blocked : [];
-  const friendsCount = Number(counts.friends) || friends.length;
-  const onlineCount = Number(counts.online) || friends.filter((friend) => friend.online).length;
-  const blockedCount = Number(counts.blocked) || blocked.length;
-  if (els.friendsCount) els.friendsCount.textContent = String(friendsCount);
-  if (els.friendsOnlineCount) els.friendsOnlineCount.textContent = String(onlineCount);
-  if (els.blockedCount) els.blockedCount.textContent = String(blockedCount);
-  if (els.friendsSummary) {
-    els.friendsSummary.textContent = state.available === false
-      ? (state.message || "Friend service is not connected yet.")
-      : `${friendsCount} friend${friendsCount === 1 ? "" : "s"}, ${onlineCount} online.`;
-  }
-  renderPersonRows(els.friendsList, friends, { empty: state.available === false ? "Friend service not connected." : "No friends added yet." });
-  renderPersonRows(els.blockedList, blocked, { blocked: true, empty: state.available === false ? "Friend service not connected." : "No blocked players." });
-  if (state.message) setFriendsStatus(state.message, state.available === false ? "warn" : "");
-  else setFriendsStatus(state.updatedAt ? `Updated ${shortDateTime(state.updatedAt)}` : "", "");
-  setFriendsBusy(friendsBusy);
-}
-
-async function refreshFriendsPanel() {
-  if (!window.aht?.socialList) {
-    renderFriendsPanel({ available: false, message: "Friend service is not available in this launcher build." });
-    return;
-  }
-  setFriendsBusy(true);
-  setFriendsStatus("Loading friends...", "");
-  try {
-    await refresh();
-    renderFriendsPanel(await window.aht.socialList());
-  } catch (error) {
-    const message = cleanErrorMessage(error);
-    renderFriendsPanel({ available: false, message });
-    showToast("Friends unavailable", message, "error");
-  } finally {
-    setFriendsBusy(false);
-  }
-}
-
-function openFriendsPanel() {
-  if (!els.friendsOverlay) return;
-  els.friendsOverlay.hidden = false;
-  renderFriendsPanel({
-    available: true,
-    message: "Loading friends.",
-    counts: { friends: 0, online: 0, blocked: 0 },
-    friends: [],
-    blocked: []
-  });
-  refreshFriendsPanel();
-}
-
-function closeFriendsPanel() {
-  if (els.friendsOverlay) els.friendsOverlay.hidden = true;
-  setFriendsStatus("");
-  clearFriendInputs();
-}
-
-async function runFriendAction(action, input) {
-  if (friendsBusy || !window.aht?.socialAction) return;
-  if (!friendsActionsAvailable) {
-    setFriendsStatus("Friend actions are not connected yet.", "warn");
-    return;
-  }
-  const target = input?.value?.trim() || "";
-  const validation = minecraftUsernameError(target);
-  if (validation) {
-    setFriendsStatus(validation, "bad");
-    return;
-  }
-  setFriendsBusy(true);
-  setFriendsStatus("Updating friends...", "");
-  try {
-    const result = await window.aht.socialAction({ action, target });
-    if (input) input.value = "";
-    if (result?.social) renderFriendsPanel(result.social);
-    else await refreshFriendsPanel();
-    setFriendsStatus("Friends updated.", "ok");
-  } catch (error) {
-    const message = cleanErrorMessage(error);
-    setFriendsStatus(message, "bad");
-    showToast("Friend update failed", message, "error");
-  } finally {
-    setFriendsBusy(false);
-  }
-}
-
 function compactPath(value) {
   if (!value) return "-";
   const original = String(value);
@@ -1176,14 +1007,7 @@ function renderSetupAssistant(status) {
   const hasFeed = Boolean(latestUrl);
   const hasInstance = Boolean(instanceDir);
   const instanceMissing = hasInstance && setup.instanceExists === false;
-  const instanceEmpty = hasInstance && setup.instanceExists === true && setup.instanceHasPack === false;
-  const launcherMissing = setup.minecraftLauncherOpenAvailable === false;
-  const accountReuseAvailable = setup.minecraftAccountReuseAvailable === true;
-  const accountProfileKnown = setup.minecraftAccountProfileKnown === true;
-  const accountProfileUnknown = accountReuseAvailable && !accountProfileKnown;
-  const accountMissing = setup.minecraftAccountReuseAvailable === false;
-  const accountNeedsMinecraftOpen = accountMissing || accountProfileUnknown;
-  const ready = hasFeed && hasInstance && !instanceMissing && !instanceEmpty && !launcherMissing && !accountNeedsMinecraftOpen;
+  const ready = hasFeed && hasInstance && !instanceMissing;
   const canAutoConfigure = Boolean(setup.canAutoConfigure);
 
   let state = "bad";
@@ -1194,22 +1018,6 @@ function renderSetupAssistant(status) {
     state = "ok";
     label = "Setup ready";
     title = "Launcher ready";
-  } else if (launcherMissing) {
-    state = "bad";
-    label = "Minecraft setup";
-    title = "Install Minecraft Launcher";
-  } else if (instanceEmpty) {
-    state = "warn";
-    label = "Install needed";
-    title = "Install A Hard Time";
-  } else if (accountProfileUnknown) {
-    state = "warn";
-    label = "Profile sync";
-    title = "Open Minecraft Launcher";
-  } else if (accountMissing) {
-    state = "warn";
-    label = "Sign-in needed";
-    title = "Microsoft sign-in needed";
   } else if (canAutoConfigure) {
     state = "warn";
     label = "Setup available";
@@ -1231,64 +1039,24 @@ function renderSetupAssistant(status) {
         ? `Detected instance: ${compactPath(setup.detectedInstanceDir)}`
         : `Default instance: ${compactPath(setup.defaultInstanceDir)}`
     : hasInstance
-      ? `Install folder: ${instanceMissing ? "missing" : (instanceEmpty ? "empty" : "ready")}`
+      ? `Install folder: ${instanceMissing ? "missing" : "ready"}`
       : "Install folder: not selected";
-  const launcherLine = showDiagnostics
-    ? `Minecraft Launcher: ${setup.minecraftLauncherOpenLabel || setup.minecraftLauncherOpenState || "unknown"}`
-    : `Minecraft Launcher: ${launcherMissing ? "install needed" : (setup.minecraftLauncherOpenState === "check-on-play" ? "checked on Play" : "ready")}`;
-  const accountLine = launcherMissing
-    ? "Microsoft account: checked after install"
-    : accountProfileUnknown
-      ? "Microsoft account: open Minecraft once"
-      : accountReuseAvailable
-      ? "Microsoft account: saved"
-      : "Microsoft account: sign in";
-  const javaLine = setup.javaRuntimeMode === "automatic"
-    ? "Java 8: automatic"
-    : "Java 8: checked on Play";
-  const detailParts = [feedLine, instanceLine, launcherLine, accountLine, javaLine];
+  const detailParts = [feedLine, instanceLine];
   if (showDiagnostics) {
     detailParts.push(setup.cacheModsDir ? `Cache mods: ${compactPath(setup.cacheModsDir)}` : "Cache mods: not detected");
   }
 
-  els.setupAssistantCard.hidden = false;
   els.setupAssistantCard.className = `setup-assistant-card ${state}`.trim();
   els.setupAssistantState.textContent = label;
   els.setupAssistantTitle.textContent = title;
   els.setupAssistantDetail.textContent = detailParts.join(" | ");
   setUnavailable(els.setupAutoButton, !canAutoConfigure);
   setUnavailable(els.settingsAutoSetupButton, !canAutoConfigure);
-  const showOpenMinecraft = !launcherMissing && (accountNeedsMinecraftOpen || setup.minecraftLauncherOpenState === "check-on-play");
-  const showDownloadMinecraft = launcherMissing;
-  const showJavaHelp = setup.javaRuntimeMode && setup.javaRuntimeMode !== "automatic";
-  if (els.setupOpenMinecraftButton) {
-    els.setupOpenMinecraftButton.hidden = !showOpenMinecraft;
-    setUnavailable(els.setupOpenMinecraftButton, !showOpenMinecraft);
-  }
-  if (els.setupDownloadMinecraftButton) {
-    els.setupDownloadMinecraftButton.hidden = !showDownloadMinecraft;
-    setUnavailable(els.setupDownloadMinecraftButton, !showDownloadMinecraft);
-  }
-  if (els.setupJavaHelpButton) {
-    els.setupJavaHelpButton.hidden = !showJavaHelp;
-    setUnavailable(els.setupJavaHelpButton, !showJavaHelp);
-  }
   const autoTitle = canAutoConfigure
     ? (status.developerMode ? "Apply detected release and instance paths" : "Finish launcher setup")
     : (status.developerMode ? "No local release or instance paths were detected" : "Launcher setup is not available");
   els.setupAutoButton.title = autoTitle;
   els.settingsAutoSetupButton.title = autoTitle;
-  if (els.setupOpenMinecraftButton) {
-    els.setupOpenMinecraftButton.title = accountMissing
-      ? "Open Minecraft Launcher so you can sign in with Microsoft"
-      : "Open Minecraft Launcher";
-  }
-  if (els.setupDownloadMinecraftButton) {
-    els.setupDownloadMinecraftButton.title = "Open the official Minecraft Launcher download page";
-  }
-  if (els.setupJavaHelpButton) {
-    els.setupJavaHelpButton.title = "Open the Java 8 download page";
-  }
 }
 
 function setSettingsFeed(state, label, title, detail) {
@@ -1328,17 +1096,6 @@ function playerSafeErrorMessage(message = "", status = currentStatus) {
     return playerSafeFeedProblem({ ...status, latestError: status?.latestError || value });
   }
   return value;
-}
-
-function launchFailureToastTitle(message = "") {
-  const value = cleanErrorMessage(message);
-  if (/Minecraft Launcher is not installed|Windows app execution is disabled|Java 8 runtime was not found|managed Java 8 runtime|sign in with Microsoft/i.test(value)) {
-    return "Setup needed";
-  }
-  if (/Minecraft services|Mojang\/Microsoft/i.test(value)) {
-    return "Minecraft service unavailable";
-  }
-  return "Launch failed";
 }
 
 function launchBlockedBadge(status = currentStatus) {
@@ -1754,7 +1511,7 @@ function showToast(title, detail = "", type = "info", options = {}) {
     span.textContent = detail;
     body.appendChild(span);
   }
-  const diagnosticEnabled = !options.disableDiagnostics && (type === "error" || options.enableDiagnostics);
+  const diagnosticEnabled = type === "error" && !options.disableDiagnostics;
   if (diagnosticEnabled) {
     toast.classList.add("is-clickable");
     toast.setAttribute("role", "button");
@@ -2910,13 +2667,10 @@ function renderStatus(status) {
   els.installedVersion.textContent = installedVersion || "Not Installed";
   els.latestVersion.textContent = latestVersion;
   els.sideInstalledVersion.textContent = installedLabel;
-  if (els.profileFriendsButton) els.profileFriendsButton.hidden = false;
   if (els.instanceDir) els.instanceDir.textContent = status.config.instanceDir || "-";
   if (status.minecraftProfile?.versionId) {
     const profileState = status.minecraftProfile.loaderInstalled ? "ready" : "loader missing";
-    const accountState = status.minecraftProfile.accountReuseAvailable
-      ? (status.minecraftProfile.accountProfileKnown ? "account saved" : "sign-in check needed")
-      : "sign-in needed";
+    const accountState = status.minecraftProfile.accountReuseAvailable ? "account saved" : "sign-in needed";
     if (els.minecraftProfile) els.minecraftProfile.textContent = `${status.minecraftProfile.profileName || status.minecraftProfile.profileId} (${status.minecraftProfile.versionId}, ${profileState}, ${accountState})`;
   } else {
     if (els.minecraftProfile) els.minecraftProfile.textContent = status.minecraftProfile?.enabled === false ? "Disabled" : "Waiting for pack metadata";
@@ -2976,10 +2730,8 @@ function renderStatus(status) {
     if (logIsEmpty()) setLog("A newer pack version is available.");
   } else if (!developerBypass && (status.integrity?.counts?.corrupted > 0 || status.launchBlockedReason?.startsWith("Repair required"))) {
     setBadge("Repair needed", "warn");
-    els.diffSummary.textContent = status.integrity?.installedManifestError
-      ? "Manifest damaged"
-      : `${status.integrity?.counts?.corrupted || "Files"} corrupted`;
-    if (logIsEmpty()) setLog(playerSafeBlockedReason(status) || "Repair required before playing.");
+    els.diffSummary.textContent = `${status.integrity?.counts?.corrupted || "Files"} corrupted`;
+    if (logIsEmpty()) setLog(playerSafeBlockedReason(status) || "Repair corrupted files before playing.");
   } else if (status.latest) {
     if (status.launchReady) {
       setBadge("Ready", "ok");
@@ -2996,10 +2748,10 @@ function renderStatus(status) {
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
   setUnavailable(els.updateButton, launcherUpdateRequired || Boolean(status.updateBlockedReason) || !status.latest || !status.updateRequired || updateRunning);
-  setUnavailable(els.playButton, updateRunning);
-  setUnavailable(els.scanButton, launcherUpdateRequired || !status.latest || updateRunning);
+  setUnavailable(els.playButton, launcherUpdateRequired || !status.launchReady || updateRunning);
+  setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
   els.updateButton.title = status.updateBlockedReason || (status.updateRequired ? "Update pack" : "No update available.");
-  els.playButton.title = updateRunning ? "Wait for the current install to finish." : "Launch Minecraft";
+  els.playButton.title = status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing.");
   if (shouldShowUpdateProgress(lastUpdateState)) {
     setProgress(true, estimateProgress(lastUpdateState), updateProgressLabel(lastUpdateState));
   } else {
@@ -3165,9 +2917,6 @@ function openUpdateOptions() {
 
 function integrityIssueSummary(scan) {
   const counts = scan?.counts || {};
-  if (scan?.installedManifestError) return "Installed manifest is damaged. Repair will rebuild it from the current release.";
-  if (scan?.managedManifestError) return `${scan.managedManifestError} Repair will rebuild it from the current release.`;
-  if (!counts.managed && scan?.repairInstallFromLatest) return "No installed file manifest was found. Repair will install a clean copy of the latest pack.";
   if (!counts.managed) return "No installed file manifest was found.";
   if (!counts.corrupted) return `${counts.checked || 0} files validated.`;
   const parts = [];
@@ -3201,16 +2950,6 @@ function formatIntegrityScan(scan) {
   return lines.join("\n");
 }
 
-function repairUnavailableDetail(scan, status = currentStatus) {
-  const instanceDir = status?.config?.instanceDir || scan?.instanceDir || "";
-  const folder = instanceDir ? compactPath(instanceDir) : "the selected install folder";
-  const detected = scan?.detectedInstanceDir || status?.setup?.detectedInstanceDir || "";
-  if (detected && (!instanceDir || compactPath(detected) !== compactPath(instanceDir))) {
-    return `AHT files were found at ${compactPath(detected)}, but this launcher is pointed at empty ${folder}. Open Game settings and set Modpack folder to the detected install, or click Update to install a clean copy here.`;
-  }
-  return `No AHT modpack files were found in ${folder}. Click Update to install the latest pack, or open Game settings and point Modpack folder at the existing AHT install.`;
-}
-
 function showRepairPrompt(scan) {
   if (!els.repairPromptOverlay) return;
   const changed = scan?.changed || [];
@@ -3230,13 +2969,6 @@ function showRepairPrompt(scan) {
     row.append(type, document.createTextNode(item.path));
     els.repairPromptList.appendChild(row);
   }
-  if (!items.length) {
-    const row = document.createElement("div");
-    row.textContent = scan?.repairInstallFromLatest
-      ? "Repair will install a clean copy of the latest pack into the selected modpack folder."
-      : "Repair will rebuild the installed file manifest from the current release.";
-    els.repairPromptList.appendChild(row);
-  }
   if (items.length > 12) {
     const row = document.createElement("div");
     row.textContent = `${items.length - 12} more files will be repaired.`;
@@ -3252,15 +2984,15 @@ function closeRepairPrompt() {
 
 async function scanFilesForRepair() {
   if (updatePoll || lastUpdateState?.running) {
-    showToast("Install already running", "Wait for the current install to finish before repairing.", "info");
+    showToast("Install already running", "Wait for the current install to finish before scanning.", "info");
     return;
   }
   window.clearTimeout(scanProgressHideTimer);
   setUnavailable(els.scanButton, true);
   setUnavailable(els.updateButton, true);
   setUnavailable(els.playButton, true);
-  setBadge("Repair check", "warn");
-  setProgress(true, 8, "Checking files");
+  setBadge("Scanning", "warn");
+  setProgress(true, 8, "Scanning files");
   setLog("");
   let scanCompleted = false;
   try {
@@ -3269,32 +3001,12 @@ async function scanFilesForRepair() {
     lastIntegrityScan = scan;
     setLog(formatIntegrityScan(scan));
     const corrupted = scan?.counts?.corrupted || 0;
-    const repairableInstall = Boolean(
-      scan?.repairable
-      || scan?.installDetected
-      || currentStatus?.installed
-      || currentStatus?.setup?.instanceHasPack
-    );
-    if (!scan?.counts?.managed && !repairableInstall) {
-      const unavailableDetail = repairUnavailableDetail(scan);
+    if (!scan?.counts?.managed) {
       els.diffSummary.textContent = "Not installed";
-      setProgress(true, 100, "Repair unavailable");
+      setProgress(true, 100, "Scan unavailable");
       restoreStatusBadge();
       clearScanProgressSoon();
-      setLog(`${formatIntegrityScan(scan)}\n\n${unavailableDetail}`);
-      showToast("Repair unavailable", unavailableDetail, "warn", { durationMs: 7000 });
-    } else if (!scan?.counts?.managed) {
-      els.diffSummary.textContent = "Repair required";
-      setProgress(true, 100, "Repair needed");
-      setBadge("Repair needed", "warn");
-      clearScanProgressSoon();
-      showRepairPrompt(scan);
-    } else if (scan?.installedManifestError) {
-      els.diffSummary.textContent = "Repair required";
-      setProgress(true, 100, "Repair needed");
-      setBadge("Repair needed", "warn");
-      clearScanProgressSoon();
-      showRepairPrompt(scan);
+      showToast("Scan unavailable", "Install the pack before scanning files.", "warn");
     } else if (corrupted) {
       els.diffSummary.textContent = `${corrupted} corrupted`;
       setProgress(true, 100, "Repair needed");
@@ -3303,27 +3015,25 @@ async function scanFilesForRepair() {
       showRepairPrompt(scan);
     } else {
       els.diffSummary.textContent = "Clean";
-      setProgress(true, 100, "Repair check complete");
+      setProgress(true, 100, "Scan complete");
       restoreStatusBadge();
       clearScanProgressSoon();
-      showToast("Repair check complete", integrityIssueSummary(scan), "success");
+      showToast("Scan complete", integrityIssueSummary(scan), "success");
     }
   } catch (error) {
     const message = cleanErrorMessage(error);
-    setProgress(true, 100, "Repair check failed");
-    setBadge("Repair failed", "bad");
+    setProgress(true, 100, "Scan failed");
+    setBadge("Scan failed", "bad");
     clearScanProgressSoon(2200);
     setLog(message);
-    showToast("Repair failed", message, "error");
+    showToast("Scan failed", message, "error");
   } finally {
     setUnavailable(els.scanButton, false);
     if (currentStatus) {
       const updateRunning = Boolean(lastUpdateState?.running);
-      const repairNeeded = (lastIntegrityScan?.counts?.corrupted || 0) > 0
-        || Boolean(lastIntegrityScan?.installedManifestError)
-        || (lastIntegrityScan?.counts?.managed === 0 && Boolean(currentStatus.installed || lastIntegrityScan?.repairable));
+      const repairNeeded = (lastIntegrityScan?.counts?.corrupted || 0) > 0 || (lastIntegrityScan?.counts?.managed === 0 && Boolean(currentStatus.installed));
       setUnavailable(els.updateButton, Boolean(currentStatus.updateBlockedReason) || !currentStatus.latest || !currentStatus.updateRequired || updateRunning);
-      setUnavailable(els.playButton, updateRunning);
+      setUnavailable(els.playButton, !currentStatus.launchReady || updateRunning || repairNeeded);
     }
     if (scanCompleted) {
       const scanLog = currentLogText();
@@ -3356,40 +3066,13 @@ async function applyRecommendedSetup() {
   }
 }
 
-async function runSetupAction(action, button, title) {
-  if (button && isUnavailable(button)) return;
-  if (button) setUnavailable(button, true);
-  try {
-    const result = await window.aht.setupAction(action);
-    showToast(title, result?.message || "Setup action opened.", "success");
-    await refresh();
-  } catch (error) {
-    const message = cleanErrorMessage(error);
-    showToast(`${title} failed`, message, "error");
-  } finally {
-    if (currentStatus) renderSetupAssistant(currentStatus);
-  }
-}
-
 els.tabs.forEach((tab) => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
 els.gameTiles.forEach((tile) => tile.addEventListener("click", () => activateTab(tile.dataset.tab)));
 els.setupSettingsButton.addEventListener("click", () => activateTab("settings"));
 els.setupAutoButton.addEventListener("click", applyRecommendedSetup);
 els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
-if (els.setupOpenMinecraftButton) {
-  els.setupOpenMinecraftButton.addEventListener("click", () => runSetupAction("open-minecraft-launcher", els.setupOpenMinecraftButton, "Minecraft Launcher"));
-}
-if (els.setupDownloadMinecraftButton) {
-  els.setupDownloadMinecraftButton.addEventListener("click", () => runSetupAction("download-minecraft-launcher", els.setupDownloadMinecraftButton, "Minecraft download"));
-}
-if (els.setupJavaHelpButton) {
-  els.setupJavaHelpButton.addEventListener("click", () => runSetupAction("open-java-help", els.setupJavaHelpButton, "Java 8 help"));
-}
 els.downloadsButton.addEventListener("click", openDownloads);
 els.downloadsCloseButton.addEventListener("click", closeDownloads);
-if (els.profileFriendsButton) {
-  els.profileFriendsButton.addEventListener("click", openFriendsPanel);
-}
 if (els.launcherUpdateNowButton) {
   els.launcherUpdateNowButton.addEventListener("click", () => {
     if (lastLauncherUpdateState?.lastResult?.restartRequired) {
@@ -3405,7 +3088,6 @@ els.downloadsOverlay.addEventListener("click", (event) => {
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.downloadsOverlay.hidden) closeDownloads();
   if (event.key === "Escape" && els.repairPromptOverlay && !els.repairPromptOverlay.hidden) closeRepairPrompt();
-  if (event.key === "Escape" && els.friendsOverlay && !els.friendsOverlay.hidden) closeFriendsPanel();
   if (event.key === "Escape" && els.updateOptionsOverlay && !els.updateOptionsOverlay.hidden) closeUpdateOptions();
 });
 els.updateButton.addEventListener("click", () => {
@@ -3421,22 +3103,16 @@ els.playButton.addEventListener("click", () => {
     window.aht.play()
       .then((result) => {
         const launcherMode = Boolean(result?.minecraftProfile);
-        const signInNeeded = launcherMode && result.minecraftProfile?.accountReuseAvailable === false;
-        const signInCheckNeeded = launcherMode && result.minecraftProfile?.accountReuseAvailable === true && result.minecraftProfile?.accountProfileKnown === false;
-        const launchWarning = String(result?.warning || "").trim();
         showToast(
           launcherMode ? "Minecraft Launcher opened" : "Minecraft Launcher opened",
-          launchWarning || (signInNeeded
-            ? "Sign in with Microsoft inside Minecraft Launcher, then click Play on the A Hard Time profile."
-            : (signInCheckNeeded ? "If Minecraft Launcher asks, finish Microsoft sign-in, then click Play on the A Hard Time profile." : (launcherMode ? "The A Hard Time profile is selected. Click Play inside Minecraft Launcher." : "Click Play inside Minecraft Launcher."))),
-          launchWarning ? "warn" : "success"
+          launcherMode ? "The A Hard Time profile is selected. Click Play inside Minecraft Launcher." : "Click Play inside Minecraft Launcher.",
+          "success"
         );
       })
       .catch((error) => {
         const message = playerSafeErrorMessage(error);
         setLog(message);
-        const title = launchFailureToastTitle(message);
-        showToast(title, message, title === "Launch failed" ? "error" : "warn", { context: "play-start", enableDiagnostics: true });
+        showToast("Launch failed", message, "error");
         refresh()
           .then(() => setLog(message))
           .catch(() => {});
@@ -3469,26 +3145,6 @@ if (els.repairPromptRepairButton) {
     closeRepairPrompt();
     startUpdate(true);
   });
-}
-if (els.friendsCloseButton) {
-  els.friendsCloseButton.addEventListener("click", closeFriendsPanel);
-}
-if (els.friendsRefreshButton) {
-  els.friendsRefreshButton.addEventListener("click", refreshFriendsPanel);
-}
-if (els.friendsOverlay) {
-  els.friendsOverlay.addEventListener("click", (event) => {
-    if (event.target === els.friendsOverlay) closeFriendsPanel();
-  });
-}
-if (els.addFriendButton) {
-  els.addFriendButton.addEventListener("click", () => runFriendAction("add_friend", els.addFriendInput));
-}
-if (els.removeFriendButton) {
-  els.removeFriendButton.addEventListener("click", () => runFriendAction("remove_friend", els.removeFriendInput));
-}
-if (els.unblockPlayerButton) {
-  els.unblockPlayerButton.addEventListener("click", () => runFriendAction("unblock_player", els.unblockPlayerInput));
 }
 if (els.updateOptionsBackButton) {
   els.updateOptionsBackButton.addEventListener("click", closeUpdateOptions);

@@ -196,7 +196,9 @@ await writeJson(defaultsPath, {
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 4096,
-    autoImportAccount: false
+    autoImportAccount: false,
+    openCommand: process.execPath,
+    openArgs: ['-e', '']
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });

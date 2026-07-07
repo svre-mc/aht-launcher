@@ -11,11 +11,6 @@
     "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
     "playerLabel": ""
   },
-  "social": {
-    "enabled": true,
-    "feedUrl": "",
-    "actionUrl": ""
-  },
   "launcherUpdate": {
     "enabled": true,
     "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json"
@@ -28,7 +23,7 @@
   },
   "minecraftLauncher": {
     "enabled": true,
-    "profileId": "a-hard-time",
+    "profileId": "a-hard-time-dregora",
     "profileName": "A Hard Time",
     "memoryMb": 4096
   }

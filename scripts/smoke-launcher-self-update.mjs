@@ -58,20 +58,6 @@ async function writeJson(file, value) {
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-async function waitForPendingStatus(status, label, attempts = 80) {
-  let last = null;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      last = JSON.parse(await fsp.readFile(pendingUpdatePath, 'utf8'));
-      if (last?.status === status) return last;
-    } catch (error) {
-      last = error.message;
-    }
-    await sleep(250);
-  }
-  throw new Error(`Timed out waiting for pending launcher update ${label}: ${JSON.stringify(last)}`);
-}
-
 function contentTypeFor(key) {
   if (key.endsWith('.json')) return 'application/json; charset=utf-8';
   if (key.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
@@ -167,7 +153,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: 'SmokeUser' },
   developer: { adminBaseUrl: workerEndpoint, defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
   launcherUpdate: { enabled: true, latestUrl: `${workerEndpoint}/launcher/latest.json` },
-  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096 },
+  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
   playCommand: { command: '', args: [], cwd: path.join(root, 'instance') }
 });
 await writeJson(path.join(userData, 'identity.json'), {
@@ -282,12 +268,10 @@ try {
     state: await window.aht.getLauncherUpdateState(),
     hasRestartApi: typeof window.aht.restartLauncherUpdate === 'function'
   }))()`);
-  if (!clickProof.log.includes('Starting launcher update helper')
-    && !clickProof.log.includes('Installing launcher update.')
-    && !clickProof.log.includes('Test mode verified the restart helper')) {
+  if (!clickProof.log.includes('Installing launcher update.') && !clickProof.log.includes('Test mode verified the restart helper')) {
     throw new Error(`Install and Restart button click did not start install flow: ${JSON.stringify(clickProof)}`);
   }
-  const installingPending = await waitForPendingStatus('installing', 'installing state');
+  const installingPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
   if (installingPending.status !== 'installing' || installingPending.version !== '9.9.9' || !installingPending.installingStartedAt) {
     throw new Error(`Pending launcher update was not marked installing before quit: ${JSON.stringify(installingPending)}`);
   }
@@ -326,9 +310,6 @@ try {
     if (payload.expectedVersion !== proof.status.launcherUpdate.latestVersion) {
       throw new Error(`Helper payload has wrong expected version: ${JSON.stringify(payload)}`);
     }
-    if (payload.testHelperStartOnly !== true) {
-      throw new Error(`Helper payload did not carry the test start-only flag: ${JSON.stringify(payload)}`);
-    }
     if (!payload.targetExe || !payload.oldPid || !payload.pendingFailurePath || !payload.installerArgs?.includes('/S') || !payload.installerArgs?.some((arg) => String(arg).startsWith('/D='))) {
       throw new Error(`Helper payload is missing restart details: ${JSON.stringify(payload)}`);
     }
@@ -357,9 +338,6 @@ try {
     const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
     if (payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app') || !payload.pendingFailurePath) {
       throw new Error(`macOS helper payload is missing update details: ${JSON.stringify(payload)}`);
-    }
-    if (payload.testHelperStartOnly !== true) {
-      throw new Error(`macOS helper payload did not carry the test start-only flag: ${JSON.stringify(payload)}`);
     }
     const helperLog = fs.readFileSync(launched.logPath, 'utf8');
     if (!helperLog.includes('Test mode helper startup confirmed.')) {

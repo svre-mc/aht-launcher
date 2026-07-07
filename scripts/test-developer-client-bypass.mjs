@@ -246,8 +246,8 @@ try {
   if (!notInstalledProof.updateRequired || notInstalledProof.launchReady || !/Install the pack before playing/i.test(notInstalledProof.launchBlockedReason || '')) {
     throw new Error(`Developer not-installed modpack status should require Update before Play: ${JSON.stringify(notInstalledProof)}`);
   }
-  if (notInstalledProof.updateDisabled || notInstalledProof.playDisabled) {
-    throw new Error(`Developer not-installed modpack should enable Update and keep Play clickable so the backend can report the install requirement: ${JSON.stringify(notInstalledProof)}`);
+  if (notInstalledProof.updateDisabled || !notInstalledProof.playDisabled) {
+    throw new Error(`Developer not-installed modpack should enable Update and keep Play disabled: ${JSON.stringify(notInstalledProof)}`);
   }
 
   console.log(JSON.stringify({

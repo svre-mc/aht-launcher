@@ -505,8 +505,6 @@ body.dev-mode .game-copy strong {
 }
 
 .profile-card {
-  appearance: none;
-  -webkit-appearance: none;
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr);
   align-items: center;
@@ -515,11 +513,7 @@ body.dev-mode .game-copy strong {
   padding: 8px 10px;
   border: 1px solid rgba(244, 240, 230, 0.12);
   background: rgba(4, 6, 7, 0.22);
-  color: inherit;
-  font: inherit;
-  text-align: left;
   box-shadow: var(--bevel);
-  cursor: pointer;
   transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
 }
 
@@ -527,11 +521,6 @@ body.dev-mode .game-copy strong {
   border-color: rgba(244, 240, 230, 0.22);
   background: rgba(4, 6, 7, 0.3);
   box-shadow: var(--bevel), 0 12px 30px rgba(0, 0, 0, 0.24);
-}
-
-.profile-card:focus-visible {
-  outline: 2px solid rgba(135, 184, 216, 0.64);
-  outline-offset: 4px;
 }
 
 .profile-avatar {
@@ -1592,14 +1581,6 @@ input:focus-visible {
 
 .setup-assistant-card .button {
   justify-self: end;
-}
-
-.setup-assistant-card .setup-actions {
-  gap: 8px;
-}
-
-.setup-assistant-card .setup-actions .button {
-  justify-self: auto;
 }
 
 .form-grid {
@@ -2674,7 +2655,6 @@ body.dev-mode .button.strong.is-disabled {
 
 .repair-prompt-dialog,
 .account-dialog,
-.friends-dialog,
 .launcher-update-dialog {
   position: relative;
   display: grid;
@@ -2694,7 +2674,6 @@ body.dev-mode .button.strong.is-disabled {
 
 .repair-prompt-dialog::before,
 .account-dialog::before,
-.friends-dialog::before,
 .launcher-update-dialog::before {
   content: "";
   position: absolute;
@@ -2706,7 +2685,6 @@ body.dev-mode .button.strong.is-disabled {
 
 .repair-prompt-dialog::after,
 .account-dialog::after,
-.friends-dialog::after,
 .launcher-update-dialog::after {
   content: "";
   position: absolute;
@@ -2720,208 +2698,6 @@ body.dev-mode .button.strong.is-disabled {
 
 .repair-prompt-dialog {
   width: min(520px, calc(100vw - 56px));
-}
-
-.friends-overlay {
-  z-index: 38;
-  background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(7px);
-}
-
-.friends-dialog {
-  width: min(760px, calc(100vw - 56px));
-  max-height: min(720px, calc(100vh - 56px));
-  overflow: auto;
-}
-
-.friends-header {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.friends-header h2 {
-  margin: 0;
-  font-size: 26px;
-  line-height: 1.05;
-}
-
-.friends-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.friends-counts {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  border: 1px solid var(--line);
-  background:
-    linear-gradient(180deg, rgba(244, 240, 230, 0.045), rgba(244, 240, 230, 0.012)),
-    rgba(4, 6, 7, 0.46);
-  box-shadow: var(--bevel);
-}
-
-.friends-counts div {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  padding: 12px;
-  border-right: 1px solid rgba(207, 218, 220, 0.13);
-}
-
-.friends-counts div:last-child {
-  border-right: 0;
-}
-
-.friends-counts span {
-  color: var(--text);
-  font-size: 22px;
-  font-weight: 900;
-}
-
-.friends-counts small {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.friends-status {
-  min-height: 18px;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.friends-status.ok {
-  color: var(--green);
-}
-
-.friends-status.warn {
-  color: var(--amber);
-}
-
-.friends-status.bad {
-  color: var(--red);
-}
-
-.friends-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
-}
-
-.friends-panel {
-  display: grid;
-  gap: 9px;
-  min-width: 0;
-}
-
-.friends-panel h3 {
-  margin: 0;
-  color: #dce1dc;
-  font-size: 15px;
-}
-
-.friends-list {
-  display: grid;
-  gap: 7px;
-  min-height: 170px;
-  max-height: min(34vh, 260px);
-  overflow: auto;
-  border: 1px solid var(--line);
-  background:
-    linear-gradient(180deg, rgba(244, 240, 230, 0.035), transparent),
-    rgba(4, 6, 7, 0.52);
-  padding: 10px;
-  box-shadow: var(--bevel);
-}
-
-.friend-row,
-.friends-empty {
-  min-width: 0;
-  border: 1px solid rgba(207, 218, 220, 0.1);
-  background: rgba(244, 240, 230, 0.028);
-  padding: 9px 10px;
-}
-
-.friend-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-}
-
-.friend-row strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-  font-size: 14px;
-}
-
-.friend-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.friend-state::before {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: currentColor;
-  box-shadow: 0 0 9px currentColor;
-}
-
-.friend-state.online {
-  color: var(--green);
-}
-
-.friend-state.offline {
-  color: var(--quiet);
-}
-
-.friend-state.blocked {
-  color: var(--red);
-}
-
-.friends-empty {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.friends-actions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.friends-actions label {
-  min-width: 0;
-}
-
-.inline-action {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.inline-action input {
-  min-width: 0;
-}
-
-.inline-action .button {
-  min-width: 82px;
 }
 
 .repair-prompt-list {
@@ -3228,8 +3004,8 @@ body.dev-mode .toast {
     grid-template-columns: 1fr;
   }
 
-  .setup-actions {
-    justify-content: flex-start;
+  .setup-assistant-card .button {
+    justify-self: start;
   }
 
   .launch-actions {

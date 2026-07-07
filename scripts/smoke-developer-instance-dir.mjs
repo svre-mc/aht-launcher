@@ -16,14 +16,10 @@ const expectedDeveloperDir = process.platform === 'win32'
   : process.platform === 'darwin'
     ? path.join(userData, 'A Hard Time', 'Developer Instance')
     : path.join(userData, 'A Hard Time Developer');
-const smokeExe = process.env.AHT_SMOKE_EXE || '';
-const electronBin = smokeExe || (process.platform === 'win32'
+const electronBin = process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
-  : path.resolve('node_modules', '.bin', 'electron'));
-const electronArgs = smokeExe
-  ? ['--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
-  : ['.', '--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
-const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+  : path.resolve('node_modules', '.bin', 'electron');
+const electronArgs = ['.', '--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,20 +120,13 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   curseforge: { proxyBaseUrl: '', apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: '', playerLabel: 'DeveloperSmoke' },
   developer: { adminBaseUrl: '', defaultOutDir: path.join(root, 'release-builder'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
-  minecraftLauncher: { enabled: true, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096 },
+  minecraftLauncher: { enabled: true, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
   playCommand: { command: '', args: [], cwd: oldPlayerDir }
 });
 
 const child = spawn(electronBin, electronArgs, {
-  cwd: electronCwd,
-  env: {
-    ...process.env,
-    ELECTRON_ENABLE_LOGGING: '0',
-    AHT_ALLOW_DEVELOPER: '1',
-    AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
-    AHT_DEVELOPER_USERNAME: 'admin',
-    AHT_DEVELOPER_PASSWORD: 'test-dev-password'
-  },
+  cwd: process.cwd(),
+  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
   stdio: 'ignore',
   windowsHide: true
 });

@@ -9,7 +9,6 @@ import {
   readJsonFile,
   writeJsonFile
 } from './utils.js';
-import { minecraftServiceFailureMessage } from './minecraftServiceStatus.js';
 
 export function forgeLoaderVersion(loaderId = '') {
   return String(loaderId).startsWith('forge-') ? String(loaderId).slice('forge-'.length) : '';
@@ -98,127 +97,20 @@ function forgeVersionScore(name = '', plan = {}) {
   return 100;
 }
 
-function forgeVersionJsonBackupPath(file = '') {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  return `${file}.aht-invalid-${stamp}.bak`;
-}
-
-async function backupInvalidForgeVersionJson(file = '') {
-  try {
-    if (await pathExists(file)) {
-      await fs.copyFile(file, forgeVersionJsonBackupPath(file));
-    }
-  } catch {
-    // Backup is best-effort; Forge reinstall should still be allowed to continue.
-  }
-}
-
-function validForgeVersionJson(value = null, versionId = '', plan = {}) {
-  if (!value || typeof value !== 'object') return false;
-  const id = String(value.id || '').trim();
-  const inheritsFrom = String(value.inheritsFrom || '').trim();
-  const minecraftArguments = String(value.minecraftArguments || '').trim();
-  const libraries = Array.isArray(value.libraries) ? value.libraries : [];
-  const validIds = forgeVersionCandidates(plan).map((candidate) => candidate.toLowerCase());
-  if (!id || (versionId && id.toLowerCase() !== String(versionId).toLowerCase() && !validIds.includes(id.toLowerCase()))) {
-    return false;
-  }
-  if (plan.minecraftVersion && inheritsFrom !== plan.minecraftVersion) {
-    return false;
-  }
-  if (!minecraftArguments.includes('net.minecraftforge.fml.common.launcher.FMLTweaker')) {
-    return false;
-  }
-  return libraries.length > 0 && libraries.some((item) => String(item?.name || '').startsWith('net.minecraftforge:forge:'));
-}
-
-function forgeLibraryArtifacts(versionJson = null) {
-  const libraries = Array.isArray(versionJson?.libraries) ? versionJson.libraries : [];
-  return libraries
-    .map((item) => ({
-      name: String(item?.name || '').trim(),
-      path: String(item?.downloads?.artifact?.path || '').trim()
-    }))
-    .filter((item) => item.name && item.path);
-}
-
-async function missingForgeLibraryArtifacts(versionJson = null, plan = {}) {
-  const missing = [];
-  for (const item of forgeLibraryArtifacts(versionJson)) {
-    const file = path.join(plan.rootDir || '', 'libraries', item.path);
-    if (!(await pathExists(file))) {
-      missing.push({ ...item, file });
-    }
-  }
-  return missing;
-}
-
-async function inspectForgeVersionJson(jsonPath = '', versionId = '', plan = {}, options = {}) {
-  if (!(await pathExists(jsonPath))) {
-    return { installed: false, invalid: false, versionId, versionJson: jsonPath };
-  }
-  let parsed = null;
-  try {
-    parsed = await readJsonFile(jsonPath);
-  } catch (error) {
-    if (options.backupInvalid !== false) {
-      await backupInvalidForgeVersionJson(jsonPath);
-    }
-    return {
-      installed: false,
-      invalid: true,
-      versionId,
-      versionJson: jsonPath,
-      reason: error.message || String(error)
-    };
-  }
-  if (!validForgeVersionJson(parsed, versionId, plan)) {
-    if (options.backupInvalid !== false) {
-      await backupInvalidForgeVersionJson(jsonPath);
-    }
-    return {
-      installed: false,
-      invalid: true,
-      versionId,
-      versionJson: jsonPath,
-      reason: 'incomplete Forge launcher version metadata'
-    };
-  }
-  if (options.verifyLibraries) {
-    const missingLibraries = await missingForgeLibraryArtifacts(parsed, plan);
-    if (missingLibraries.length) {
-      return {
-        installed: false,
-        invalid: true,
-        versionId,
-        versionJson: jsonPath,
-        reason: `missing ${missingLibraries.length} Forge library file${missingLibraries.length === 1 ? '' : 's'}`,
-        missingLibraries
-      };
-    }
-  }
-  return { installed: true, invalid: false, versionId, versionJson: jsonPath };
-}
-
-export async function findInstalledForgeVersion(plan = {}, options = {}) {
+export async function findInstalledForgeVersion(plan = {}) {
   const versionsDir = path.join(plan.rootDir || '', 'versions');
   const candidates = forgeVersionCandidates(plan);
-  const invalidVersions = [];
   for (const candidate of candidates) {
     const jsonPath = path.join(versionsDir, candidate, `${candidate}.json`);
-    const inspected = await inspectForgeVersionJson(jsonPath, candidate, plan, options);
-    if (inspected.installed) {
-      return { installed: true, versionId: candidate, versionJson: jsonPath, invalidVersions };
-    }
-    if (inspected.invalid) {
-      invalidVersions.push(inspected);
+    if (await pathExists(jsonPath)) {
+      return { installed: true, versionId: candidate, versionJson: jsonPath };
     }
   }
   let entries = [];
   try {
     entries = await fs.readdir(versionsDir, { withFileTypes: true });
   } catch {
-    return { installed: false, versionId: plan.versionId || '', versionJson: '', invalidVersions };
+    return { installed: false, versionId: plan.versionId || '', versionJson: '' };
   }
   const matches = [];
   for (const entry of entries) {
@@ -226,24 +118,21 @@ export async function findInstalledForgeVersion(plan = {}, options = {}) {
     const score = forgeVersionScore(entry.name, plan);
     if (score >= 100) continue;
     const jsonPath = path.join(versionsDir, entry.name, `${entry.name}.json`);
-    const inspected = await inspectForgeVersionJson(jsonPath, entry.name, plan, options);
-    if (inspected.installed) {
+    if (await pathExists(jsonPath)) {
       matches.push({ score, versionId: entry.name, versionJson: jsonPath });
-    } else if (inspected.invalid) {
-      invalidVersions.push(inspected);
     }
   }
   matches.sort((left, right) => left.score - right.score || left.versionId.localeCompare(right.versionId));
   const best = matches[0];
-  return best ? { installed: true, versionId: best.versionId, versionJson: best.versionJson, invalidVersions } : { installed: false, versionId: plan.versionId || '', versionJson: '', invalidVersions };
+  return best ? { installed: true, versionId: best.versionId, versionJson: best.versionJson } : { installed: false, versionId: plan.versionId || '', versionJson: '' };
 }
 
-async function waitForInstalledForgeVersion(plan = {}, timeoutMs = 15000, options = {}) {
+async function waitForInstalledForgeVersion(plan = {}, timeoutMs = 15000) {
   const started = Date.now();
-  let result = await findInstalledForgeVersion(plan, options);
+  let result = await findInstalledForgeVersion(plan);
   while (!result.installed && Date.now() - started < timeoutMs) {
     await sleep(500);
-    result = await findInstalledForgeVersion(plan, options);
+    result = await findInstalledForgeVersion(plan);
   }
   return result;
 }
@@ -327,28 +216,22 @@ function certificateFailureMessage(error = null) {
   return /PKIX|certification path|unable to find valid certification path|Failed to validate certificates/i.test(text);
 }
 
-function javaRuntimeLaunchFailureMessage(error = null) {
-  const text = `${error?.message || error || ''}`;
-  return error?.code === 'ENOENT'
-    || /ENOENT|not found|spawn .* ENOENT|Java 8 runtime was not found/i.test(text)
-    || /(?:could not open|no such file or directory|open).*?(?:java-runtime-[a-z0-9-]+|jre-legacy|[\\/]runtime[\\/].*(?:java-runtime|jre|jdk)|Microsoft\.4297127D64EC6_8wekyb3d8bbwe).*?(?:javaw?|jvm)\.cfg/i.test(text);
-}
-
-function managedJavaRetryReason(error = null) {
-  if (certificateFailureMessage(error)) {
-    return 'failed HTTPS certificate validation';
-  }
-  if (javaRuntimeLaunchFailureMessage(error)) {
-    return 'was missing or could not start cleanly';
-  }
-  return '';
-}
-
 export function javaSetupHelpMessage(platform = process.platform) {
   const runtime = platform === 'win32'
     ? 'Eclipse Temurin JDK 8 (HotSpot) x64'
     : 'Java 8 / JDK 8';
-  return `Install ${runtime}, restart AHT Launcher, then try again.`;
+  return `Install ${runtime}, restart AHT Launcher, then click Update again.`;
+}
+
+function minecraftServiceFailureMessage(error = null) {
+  const text = `${error?.message || error || ''}`;
+  const compact = text.replace(/\s+/g, ' ');
+  const officialServicePattern = /REQUEST_FAILED|Unable to prepare assets for download|launcher\.mojang\.com|piston-meta\.mojang\.com|resources\.download\.minecraft\.net|libraries\.minecraft\.net|api\.minecraftservices\.com|sessionserver\.mojang\.com|authserver\.mojang\.com|maven\.minecraftforge\.net|maven\.forgecdn\.net|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network timeout/i;
+  const launcherRuntimePattern = /could not open .*java-runtime-(?:gamma|beta|delta|epsilon|alpha).*javaw?\.cfg/i;
+  if (!officialServicePattern.test(compact) && !launcherRuntimePattern.test(compact)) {
+    return '';
+  }
+  return 'Minecraft services or the Minecraft Launcher runtime are currently unavailable. Wait for Mojang/Microsoft services to recover, reopen Minecraft Launcher, then try AHT Launcher again.';
 }
 
 export function friendlyForgeJavaErrorMessage(error = null, javaPath = 'java', platform = process.platform) {
@@ -410,36 +293,6 @@ async function ensureManagedJava8Runtime(plan = {}, options = {}) {
   return javaPath;
 }
 
-function forgeVersionJsonForPlan(plan = {}, versionId = plan.versionId || '') {
-  const forgeVersion = forgeLoaderVersion(plan.loaderId);
-  const artifactPath = `net/minecraftforge/forge/${plan.minecraftVersion}-${forgeVersion}/forge-${plan.minecraftVersion}-${forgeVersion}.jar`;
-  return {
-    id: versionId,
-    type: 'release',
-    inheritsFrom: plan.minecraftVersion,
-    minecraftArguments: '--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker --versionType Forge',
-    libraries: [
-      {
-        name: `net.minecraftforge:forge:${plan.minecraftVersion}-${forgeVersion}`,
-        downloads: {
-          artifact: {
-            path: artifactPath
-          }
-        }
-      }
-    ]
-  };
-}
-
-async function writeForgeLibraryFixturesForTest(plan = {}, versionJson = null) {
-  if (process.env.AHT_TEST_HOOKS !== '1') return;
-  for (const item of forgeLibraryArtifacts(versionJson)) {
-    const file = path.join(plan.rootDir || '', 'libraries', item.path);
-    await ensureDir(path.dirname(file));
-    await fs.writeFile(file, `aht test forge library ${item.name}\n`, 'utf8');
-  }
-}
-
 async function resolveForgeInstallerJavaPath(profile = {}, plan = {}, options = {}) {
   const resolved = await resolveJavaPath(profile, options);
   if (resolved === 'java' || isLegacyJavaPath(resolved) || !(await isJava8Candidate(resolved))) {
@@ -452,8 +305,6 @@ async function resolveForgeInstallerJavaPath(profile = {}, plan = {}, options = 
 async function runForgeInstallerProcess(plan, options = {}, javaPath = plan.javaPath) {
   plan.javaPath = javaPath;
   options.logger?.log?.(`Running ${plan.javaPath} ${plan.args.map((arg) => arg.includes(' ') ? `"${arg}"` : arg).join(' ')}`);
-  const testRun = await maybeRunForgeInstallerProcessForTest(plan, options, javaPath);
-  if (testRun) return testRun;
   return runProcess(plan.javaPath, plan.args, {
     cwd: plan.rootDir,
     logger: options.logger
@@ -708,12 +559,12 @@ async function maybeInstallForgeLoaderForTest(plan = {}) {
   const versionDir = path.join(plan.rootDir, 'versions', versionId);
   const versionJson = path.join(versionDir, `${versionId}.json`);
   await ensureDir(versionDir);
-  const metadata = forgeVersionJsonForPlan(plan, versionId);
   await writeJsonFile(versionJson, {
-    ...metadata,
+    id: versionId,
+    type: 'release',
+    inheritsFrom: plan.minecraftVersion,
     ahtTestForgeInstaller: true
   });
-  await writeForgeLibraryFixturesForTest(plan, metadata);
   return {
     ok: true,
     skipped: false,
@@ -725,65 +576,9 @@ async function maybeInstallForgeLoaderForTest(plan = {}) {
     versionJson
   };
 }
-
-async function writeForgeVersionForTest(plan = {}) {
-  const versionId = plan.versionId || `${plan.minecraftVersion}-forge-${forgeLoaderVersion(plan.loaderId)}`;
-  const versionDir = path.join(plan.rootDir, 'versions', versionId);
-  const versionJson = path.join(versionDir, `${versionId}.json`);
-  await ensureDir(versionDir);
-  const metadata = forgeVersionJsonForPlan(plan, versionId);
-  await writeJsonFile(versionJson, {
-    ...metadata,
-    ahtTestForgeInstaller: true
-  });
-  await writeForgeLibraryFixturesForTest(plan, metadata);
-  return { versionId, versionJson };
-}
-
-async function maybeRunForgeInstallerProcessForTest(plan = {}, options = {}, javaPath = plan.javaPath) {
-  if (process.env.AHT_TEST_HOOKS !== '1') {
-    return null;
-  }
-  const cacheDir = defaultJavaCacheDir(plan, options);
-  if (
-    process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAIL_ONCE === '1'
-    && process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAILED !== '1'
-    && !isManagedAhtJavaPath(javaPath, cacheDir)
-  ) {
-    process.env.AHT_TEST_FORGE_JAVA_RUNTIME_FAILED = '1';
-    const brokenCfg = path.join(path.dirname(path.dirname(javaPath)), 'lib', 'amd64', 'jvm.cfg');
-    throw new Error(`Forge installer exited with code 1: Error: could not open ${brokenCfg}`);
-  }
-  if (process.env.AHT_TEST_FORGE_INSTALLER_RUN_SUCCESS !== '1') {
-    return null;
-  }
-  const { versionId, versionJson } = await writeForgeVersionForTest(plan);
-  return {
-    code: 0,
-    output: `AHT test Forge installer process wrote ${versionId} using ${javaPath}.\nVersion JSON: ${versionJson}`
-  };
-}
 export async function installForgeLoader(profile, options = {}) {
   const plan = buildForgeInstallPlan(profile, options);
-  if (profile.versionJson) {
-    const existing = await inspectForgeVersionJson(profile.versionJson, profile.versionId, plan, {
-      backupInvalid: true,
-      verifyLibraries: Boolean(options.verifyLibraries)
-    });
-    if (existing.installed) {
-      return {
-        ok: true,
-        skipped: true,
-        reason: `${profile.versionId} is already installed.`,
-        plan
-      };
-    }
-    if (existing.invalid) {
-      const reason = existing.reason ? ` (${existing.reason})` : '';
-      options.logger?.log?.(`Forge ${profile.versionId} metadata or libraries were invalid${reason}; reinstalling before launch.`);
-    }
-  }
-  if (profile.loaderInstalled && !profile.versionJson) {
+  if (profile.loaderInstalled && await pathExists(profile.versionJson)) {
     return {
       ok: true,
       skipped: true,
@@ -809,12 +604,11 @@ export async function installForgeLoader(profile, options = {}) {
     result = await runForgeInstallerProcess(plan, options, plan.javaPath);
   } catch (error) {
     const cacheDir = defaultJavaCacheDir(plan, options);
-    const retryReason = managedJavaRetryReason(error);
-    if (!retryReason || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
+    if (!certificateFailureMessage(error) || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
       const friendly = friendlyForgeJavaErrorMessage(error, plan.javaPath);
       throw new Error(friendly || error.message || String(error));
     }
-    options.logger?.log?.(`Forge installer Java ${retryReason}. Retrying with AHT managed Java 8 runtime...`);
+    options.logger?.log?.('Forge installer Java failed HTTPS certificate validation. Retrying with current Java 8 runtime...');
     let managedJava = '';
     try {
       managedJava = await ensureManagedJava8Runtime(plan, { ...options, forceDownloadJava: true });
@@ -824,10 +618,7 @@ export async function installForgeLoader(profile, options = {}) {
       throw new Error(friendly || managedJavaDownloadFailureMessage(retryError));
     }
   }
-  const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs ?? DEFAULT_FORGE_VERSION_WAIT_MS, {
-    backupInvalid: true,
-    verifyLibraries: Boolean(options.verifyLibraries)
-  });
+  const installed = await waitForInstalledForgeVersion(plan, options.versionWaitMs ?? DEFAULT_FORGE_VERSION_WAIT_MS);
   if (!installed.installed) {
     const tail = outputTail(result.output);
     const friendly = friendlyForgeJavaErrorMessage(tail, plan.javaPath);

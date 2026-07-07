@@ -19,16 +19,6 @@ const minecraftRoot = path.join(root, '.minecraft');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const defaultsPath = tempDefaults;
 const screenshotDir = path.join(root, 'screenshots');
-const socialActions = [];
-const socialState = {
-  username: 'LayoutUser_1',
-  updatedAt: '2026-07-01T12:00:00.000Z',
-  friends: [
-    { username: 'FriendOnline', online: true },
-    { username: 'FriendOffline', online: false }
-  ],
-  blockedPlayers: ['BlockedOne']
-};
 const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
@@ -136,21 +126,6 @@ async function click(client, selector) {
   await sleep(400);
 }
 
-async function fillAndClick(client, inputSelector, value, buttonSelector) {
-  await evaluate(client, `
-    (() => {
-      const input = document.querySelector(${JSON.stringify(inputSelector)});
-      if (input) {
-        input.value = ${JSON.stringify(value)};
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      document.querySelector(${JSON.stringify(buttonSelector)})?.click();
-      return true;
-    })()
-  `);
-  await sleep(500);
-}
-
 async function assertLayout(client, label) {
   const report = await evaluate(client, `
     (() => {
@@ -239,50 +214,11 @@ await writeJson(defaultsPath, {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
-  social: { enabled: true, feedUrl: `${workerEndpoint}/social/{username}.json`, actionUrl: `${workerEndpoint}/api/social/{action}/{target}` },
-  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096 }
+  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 }
 });
 
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
-  if (url.pathname.startsWith('/social/') && url.pathname.endsWith('.json')) {
-    socialState.username = decodeURIComponent(path.basename(url.pathname, '.json')) || socialState.username;
-    response.statusCode = 200;
-    response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify(socialState));
-    return;
-  }
-  if (url.pathname.startsWith('/api/social/') && request.method === 'POST') {
-    const [, , , rawAction, rawTarget] = url.pathname.split('/');
-    const action = decodeURIComponent(rawAction || '');
-    const target = decodeURIComponent(rawTarget || '');
-    let body = '';
-    request.on('data', (chunk) => { body += String(chunk); });
-    request.on('end', () => {
-      const payload = JSON.parse(body || '{}');
-      socialActions.push({ action, target, payload });
-      if (action === 'add_friend' && target) {
-        socialState.friends = [
-          ...socialState.friends.filter((friend) => friend.username.toLowerCase() !== target.toLowerCase()),
-          { username: target, online: false }
-        ];
-      } else if (action === 'remove_friend' && target) {
-        socialState.friends = socialState.friends.filter((friend) => friend.username.toLowerCase() !== target.toLowerCase());
-      } else if (action === 'unblock_player' && target) {
-        socialState.blockedPlayers = socialState.blockedPlayers.filter((name) => name.toLowerCase() !== target.toLowerCase());
-      } else {
-        response.statusCode = 400;
-        response.setHeader('Content-Type', 'application/json; charset=utf-8');
-        response.end(JSON.stringify({ error: 'Unsupported social action in smoke.' }));
-        return;
-      }
-      socialState.updatedAt = new Date().toISOString();
-      response.statusCode = 200;
-      response.setHeader('Content-Type', 'application/json; charset=utf-8');
-      response.end(JSON.stringify({ social: socialState }));
-    });
-    return;
-  }
   if (url.pathname === '/latest.json') {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -408,63 +344,15 @@ try {
     throw new Error(`Sidebar AHT thumbnails must use the transparent bill asset: ${JSON.stringify(sidebarArtProof)}`);
   }
   const identityProof = await waitFor(client, `
-    (async () => {
-      const status = await window.aht.getStatus();
-      if (typeof renderStatus === 'function') renderStatus(status);
-      const proof = {
-        username: status.identity?.minecraftUsername || '',
-        overlayHidden: document.querySelector('#accountOverlay')?.hidden,
-        playerLabel: document.querySelector('#playerLabelView')?.textContent || '',
-        profileHidden: document.querySelector('#profileFriendsButton')?.hidden
-      };
-      return proof.username && proof.playerLabel === proof.username && proof.profileHidden === false ? proof : false;
-    })()
+    window.aht.getStatus().then((status) => status.identity?.minecraftUsername ? {
+      username: status.identity.minecraftUsername,
+      overlayHidden: document.querySelector('#accountOverlay')?.hidden,
+      playerLabel: document.querySelector('#playerLabelView')?.textContent || ''
+    } : false)
   `, 'layout account identity');
-  if (!identityProof.username || identityProof.overlayHidden !== true || identityProof.playerLabel !== identityProof.username || identityProof.profileHidden !== false) {
+  if (!identityProof.username || identityProof.overlayHidden !== true || identityProof.playerLabel !== identityProof.username) {
     throw new Error(`Saved or synced identity was not reflected in the player UI: ${JSON.stringify(identityProof)}`);
   }
-  await click(client, '#profileFriendsButton');
-  const friendsPanelProof = await waitFor(client, `
-    (() => {
-      const overlay = document.querySelector('#friendsOverlay');
-      const text = overlay?.innerText || '';
-      if (!overlay || overlay.hidden || !text.includes('FriendOnline') || !text.includes('BlockedOne')) return false;
-      return {
-        hidden: overlay.hidden,
-        friends: document.querySelector('#friendsCount')?.textContent?.trim(),
-        online: document.querySelector('#friendsOnlineCount')?.textContent?.trim(),
-        blocked: document.querySelector('#blockedCount')?.textContent?.trim(),
-        hasBlockButton: Boolean(document.querySelector('#blockPlayerButton')),
-        hasAdd: Boolean(document.querySelector('#addFriendButton')),
-        hasRemove: Boolean(document.querySelector('#removeFriendButton')),
-        hasUnblock: Boolean(document.querySelector('#unblockPlayerButton')),
-        text
-      };
-    })()
-  `, 'friends panel data');
-  if (
-    friendsPanelProof.friends !== '2'
-    || friendsPanelProof.online !== '1'
-    || friendsPanelProof.blocked !== '1'
-    || friendsPanelProof.hasBlockButton
-    || !friendsPanelProof.hasAdd
-    || !friendsPanelProof.hasRemove
-    || !friendsPanelProof.hasUnblock
-  ) {
-    throw new Error(`Friends panel did not expose the expected launcher-safe controls: ${JSON.stringify(friendsPanelProof)}`);
-  }
-  await fillAndClick(client, '#addFriendInput', 'NewFriend_1', '#addFriendButton');
-  await waitFor(client, "document.querySelector('#friendsList')?.innerText.includes('NewFriend_1')", 'add friend action');
-  await fillAndClick(client, '#removeFriendInput', 'FriendOffline', '#removeFriendButton');
-  await waitFor(client, "!document.querySelector('#friendsList')?.innerText.includes('FriendOffline')", 'remove friend action');
-  await fillAndClick(client, '#unblockPlayerInput', 'BlockedOne', '#unblockPlayerButton');
-  await waitFor(client, "!document.querySelector('#blockedList')?.innerText.includes('BlockedOne')", 'unblock player action');
-  const socialActionProof = await evaluate(client, JSON.stringify(socialActions));
-  const actionNames = socialActionProof.map((entry) => entry.action).join(',');
-  if (actionNames !== 'add_friend,remove_friend,unblock_player' || socialActionProof.some((entry) => entry.payload.username !== identityProof.username)) {
-    throw new Error(`Friends actions did not call the server contract correctly: ${JSON.stringify(socialActionProof)}`);
-  }
-  await click(client, '#friendsCloseButton');
   await waitFor(client, "document.querySelector('#updateLogGrid')?.hidden === false", 'layout update logs');
 
   const sidebarProgressProof = await evaluate(client, `

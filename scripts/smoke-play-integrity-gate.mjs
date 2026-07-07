@@ -15,12 +15,7 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
-const spawnCapturePath = path.join(root, 'spawn-detached.jsonl');
-const fakeProgramFiles = path.join(root, 'program-files');
-const fakeLocalAppData = path.join(root, 'localappdata');
-const fakeAppData = path.join(root, 'appdata');
-const fakeUserProfile = path.join(root, 'profile');
-const fakeMinecraftLauncher = path.join(fakeProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe');
+const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -37,12 +32,6 @@ function sleep(ms) {
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-}
-
-async function readJsonLines(file) {
-  if (!fs.existsSync(file)) return [];
-  const text = await fsp.readFile(file, 'utf8');
-  return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 function sha256(value) {
@@ -145,8 +134,7 @@ const latest = {
 
 const expectedContent = 'managed=true\n';
 const corruptContent = 'managed=false\n';
-await fsp.mkdir(path.dirname(fakeMinecraftLauncher), { recursive: true });
-await fsp.writeFile(fakeMinecraftLauncher, 'official Minecraft Launcher placeholder\n', 'utf8');
+const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
   latestUrl: `${workerEndpoint}/latest.json`,
@@ -166,23 +154,23 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   minecraftLauncher: {
     enabled: true,
     rootDir: mcRoot,
-    profileId: 'a-hard-time',
+    profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
     memoryMb: 4096,
-    syncDefaultRoots: false
+    openCommand: process.execPath,
+    openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'smoke-install' });
-const installedManifest = {
+await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: latest.packId,
   name: latest.name,
   version: latest.version,
   minecraft: latest.minecraft,
   manifestFileCount: 0,
   overrideFileCount: 1
-};
-await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), installedManifest);
+});
 await writeJson(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), [{
   relativePath: 'config/aht-integrity-test.cfg',
   source: 'overrides',
@@ -199,14 +187,6 @@ await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), co
 await writeJson(
   path.join(mcRoot, 'versions', '1.12.2-forge-14.23.5.2860', '1.12.2-forge-14.23.5.2860.json'),
   { id: '1.12.2-forge-14.23.5.2860', type: 'release' }
-);
-await writeJson(
-  path.join(mcRoot, 'versions', '1.12.2', '1.12.2.json'),
-  { id: '1.12.2', assetIndex: { id: '1.12', url: `${workerEndpoint}/assets/1.12.json` } }
-);
-await writeJson(
-  path.join(mcRoot, 'assets', 'indexes', '1.12.json'),
-  { objects: {} }
 );
 
 const registeredUsers = new Map();
@@ -287,21 +267,7 @@ await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
-  env: {
-    ...process.env,
-    ELECTRON_ENABLE_LOGGING: '0',
-    AHT_APP_DEFAULTS: defaultsPath,
-    AHT_TEST_HOOKS: '1',
-    AHT_TEST_SPAWN_DETACHED_CAPTURE_PATH: spawnCapturePath,
-    AHT_DISABLE_COMMON_MINECRAFT_LAUNCHER_DRIVES: '1',
-    ProgramFiles: fakeProgramFiles,
-    'ProgramFiles(x86)': fakeProgramFiles,
-    ProgramW6432: fakeProgramFiles,
-    LOCALAPPDATA: fakeLocalAppData,
-    APPDATA: fakeAppData,
-    USERPROFILE: fakeUserProfile,
-    HOME: fakeUserProfile
-  },
+  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', AHT_APP_DEFAULTS: defaultsPath },
   stdio: 'ignore',
   windowsHide: true
 });
@@ -325,37 +291,32 @@ try {
     window.aht.getStatus().then((status) => status.latest?.version === '2.8.2' ? status : false)
   `, 'release feed');
   if (!before.launchReady) {
-    throw new Error(`Pre-scan status should start launch-ready before explicit integrity scan: ${JSON.stringify(before)}`);
+    throw new Error(`Pre-play status should be launch-ready before the forced integrity scan: ${JSON.stringify(before)}`);
   }
 
-  const scanResult = await evaluate(client, `
-    window.aht.scanFiles()
+  const playResult = await evaluate(client, `
+    window.aht.play()
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
   `);
-  if (!scanResult.ok || scanResult.result?.counts?.corrupted !== 1 || scanResult.result?.changed?.[0]?.path !== 'mods/aht-integrity-test.jar') {
-    throw new Error(`Explicit scan did not surface the corrupted mod file: ${JSON.stringify(scanResult)}`);
+  if (playResult.ok || !/Repair required.*mod file issue/i.test(playResult.message || '')) {
+    throw new Error(`Play IPC failure path did not surface the corrupted mod file: ${JSON.stringify(playResult)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
   if (after.launchReady || !/Repair required.*mod file issue/i.test(after.launchBlockedReason || '')) {
-    throw new Error(`Status did not block after explicit integrity scan: ${JSON.stringify(after)}`);
+    throw new Error(`Status did not stay blocked after play integrity scan: ${JSON.stringify(after)}`);
+  }
+  if (after.integrity?.counts?.corrupted !== 1 || after.integrity?.changed?.[0]?.path !== 'mods/aht-integrity-test.jar') {
+    throw new Error(`Integrity state did not record the corrupted file: ${JSON.stringify(after.integrity)}`);
   }
 
   const persistedIntegrity = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'integrity.json'), 'utf8'));
-  if (persistedIntegrity.source !== 'scan' || persistedIntegrity.counts?.corrupted !== 1) {
-    throw new Error(`Explicit scan integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
+  if (persistedIntegrity.source !== 'play-check' || persistedIntegrity.counts?.corrupted !== 1) {
+    throw new Error(`Play check integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
   }
 
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
-  const cleanScanResult = await evaluate(client, `
-    window.aht.scanFiles()
-      .then((result) => ({ ok: true, result }))
-      .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
-  `);
-  if (!cleanScanResult.ok || cleanScanResult.result?.counts?.corrupted !== 0) {
-    throw new Error(`Explicit clean scan did not clear the repair gate: ${JSON.stringify(cleanScanResult)}`);
-  }
-  await fsp.rm(spawnCapturePath, { force: true });
+  await fsp.rm(fakeLauncherMarker, { force: true });
   const cleanPlayResult = await evaluate(client, `
     window.aht.play()
       .then((result) => ({ ok: true, result }))
@@ -364,20 +325,17 @@ try {
   if (!cleanPlayResult.ok || !cleanPlayResult.result?.ok) {
     throw new Error(`Clean install did not open Minecraft Launcher: ${JSON.stringify(cleanPlayResult)}`);
   }
-  let spawnCaptures = [];
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    spawnCaptures = await readJsonLines(spawnCapturePath);
-    if (spawnCaptures.length) break;
+  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
     await sleep(250);
   }
-  if (!spawnCaptures.length) {
+  if (!fs.existsSync(fakeLauncherMarker)) {
     throw new Error('Clean Play returned success, but the Minecraft Launcher command was not spawned.');
   }
-  const launcherMarker = spawnCaptures.at(-1);
+  const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
   if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
   }
-  if ((launcherMarker.env?.DISABLE_RTSS_LAYER || launcherMarker.disableRtss) !== '1' || (launcherMarker.env?.DISABLE_VULKAN_OBS_CAPTURE || launcherMarker.disableObs) !== '1') {
+  if (launcherMarker.disableRtss !== '1' || launcherMarker.disableObs !== '1') {
     throw new Error(`Minecraft Launcher environment hardening was not applied: ${JSON.stringify(launcherMarker)}`);
   }
   const cleanStatus = await evaluate(client, 'window.aht.getStatus()');
@@ -392,89 +350,10 @@ try {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
   }
 
-  const installedManifestPath = path.join(instanceDir, '.aht-launcher', 'installed.json');
-  await fsp.writeFile(installedManifestPath, '[', 'utf8');
-  const damagedInstalledStatus = await evaluate(client, 'window.aht.getStatus()');
-  if (!/Repair required.*installed manifest is damaged/i.test(damagedInstalledStatus.launchBlockedReason || '') || !damagedInstalledStatus.integrity?.installedManifestError || /Unexpected end of JSON/i.test(damagedInstalledStatus.latestError || '')) {
-    throw new Error(`Damaged installed manifest did not become a repair-required status: ${JSON.stringify({
-      latestError: damagedInstalledStatus.latestError,
-      launchBlockedReason: damagedInstalledStatus.launchBlockedReason,
-      integrity: damagedInstalledStatus.integrity
-    })}`);
-  }
-  const damagedInstalledPlay = await evaluate(client, `
-    window.aht.play()
-      .then((result) => ({ ok: true, result }))
-      .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
-  `);
-  if (damagedInstalledPlay.ok || !/Repair required.*installed manifest is damaged/i.test(damagedInstalledPlay.message || '') || /Unexpected end of JSON/i.test(damagedInstalledPlay.message || '')) {
-    throw new Error(`Damaged installed manifest Play should request Repair without raw JSON errors: ${JSON.stringify(damagedInstalledPlay)}`);
-  }
-  await evaluate(client, `
-    document.querySelector('#repairPromptOverlay').hidden = true;
-    document.querySelectorAll('.toast').forEach((toast) => toast.remove());
-    document.querySelector('#scanButton').click();
-    true
-  `);
-  const damagedInstalledRepairPrompt = await waitFor(client, `
-    (() => {
-      const prompt = document.querySelector('#repairPromptOverlay');
-      const summary = document.querySelector('#repairPromptSummary')?.textContent || '';
-      const diff = document.querySelector('#diffSummary')?.textContent || '';
-      const log = document.querySelector('#log')?.textContent || '';
-      return prompt && !prompt.hidden && /Installed manifest is damaged/i.test(summary)
-        ? { summary, diff, log }
-        : false;
-    })()
-  `, 'repair prompt for damaged installed manifest');
-  if (/Unexpected end of JSON|Repair unavailable|Install the pack before repairing/i.test(`${damagedInstalledRepairPrompt.summary}\n${damagedInstalledRepairPrompt.diff}\n${damagedInstalledRepairPrompt.log}`)) {
-    throw new Error(`Damaged installed manifest prompt leaked raw/unavailable wording: ${JSON.stringify(damagedInstalledRepairPrompt)}`);
-  }
-  await writeJson(installedManifestPath, installedManifest);
-  await evaluate(client, `document.querySelector('#repairPromptOverlay').hidden = true; true`);
-
-  await fsp.rm(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), { force: true });
-  await evaluate(client, `
-    document.querySelector('#scanButton').click();
-    true
-  `);
-  let missingManifestRepairPrompt;
-  try {
-    missingManifestRepairPrompt = await waitFor(client, `
-      (() => {
-        const prompt = document.querySelector('#repairPromptOverlay');
-        const summary = document.querySelector('#repairPromptSummary')?.textContent || '';
-        return prompt && !prompt.hidden && /manifest/i.test(summary)
-          ? { summary }
-          : false;
-      })()
-    `, 'repair prompt for missing managed manifest');
-  } catch (error) {
-    const debug = await evaluate(client, `
-      (async () => {
-        const scan = await window.aht.scanFiles().catch((scanError) => ({ error: String(scanError?.message || scanError) }));
-        return {
-          scan,
-          status: await window.aht.getStatus().catch((statusError) => ({ error: String(statusError?.message || statusError) })),
-          scanButton: {
-            className: document.querySelector('#scanButton')?.className || '',
-            ariaDisabled: document.querySelector('#scanButton')?.getAttribute('aria-disabled') || '',
-            tabIndex: document.querySelector('#scanButton')?.getAttribute('tabindex') || ''
-          },
-          promptHidden: document.querySelector('#repairPromptOverlay')?.hidden,
-          progress: document.querySelector('#sidebarProgressLabel')?.textContent || '',
-          summary: document.querySelector('#repairPromptSummary')?.textContent || '',
-          log: document.querySelector('#log')?.textContent || ''
-        };
-      })()
-    `);
-    throw new Error(`${error.message}: ${JSON.stringify(debug)}`);
-  }
-
   console.log(JSON.stringify({
     ok: true,
     root,
-    blockedScanResult: scanResult,
+    blockedPlayResult: playResult,
     cleanPlayResult,
     blockedReason: after.launchBlockedReason,
     cleanLaunchCommand: cleanPlayResult.result.command,
@@ -484,8 +363,7 @@ try {
       corrupted: persistedIntegrity.counts.corrupted,
       changedPath: persistedIntegrity.changed[0]?.path,
       cleanCorrupted: cleanStatus.integrity.counts.corrupted
-    },
-    missingManifestRepairPrompt
+    }
   }, null, 2));
 } finally {
   if (client) {
