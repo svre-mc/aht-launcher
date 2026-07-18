@@ -20,6 +20,7 @@ const fakeR2Root = path.join(root, 'r2');
 const bucket = 'ahtlauncher';
 const uploadLog = path.join(root, 'upload-log.jsonl');
 const packZip = path.join(root, 'A Hard Time Dregora-2.8.2.zip');
+const ptbPackZip = path.join(root, 'A Hard Time PTB-2.9.0-ptb.9-client.zip');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -197,6 +198,23 @@ zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2)));
 zip.addFile('overrides/config/aht-test.cfg', Buffer.from('updated=true\n'));
 zip.writeZip(packZip);
 
+const ptbZip = new AdmZip();
+ptbZip.addFile('aht-client-pack.json', Buffer.from(JSON.stringify({
+  schemaVersion: 1,
+  format: 'aht-full-client-zip',
+  packId: 'a-hard-time-ptb',
+  name: 'A Hard Time PTB',
+  version: '2.9.0-ptb.9',
+  minecraft: manifest.minecraft,
+  includedRoots: ['config', 'mods'],
+  missingRoots: [],
+  settingsFiles: [],
+  fileCount: 2
+}, null, 2)));
+ptbZip.addFile('config/aht-ptb-test.cfg', Buffer.from('ptb=true\n'));
+ptbZip.addFile('mods/aht-ptb-test.jar', Buffer.from('fake ptb jar'));
+ptbZip.writeZip(ptbPackZip);
+
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time Dregora',
@@ -207,6 +225,14 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
   instanceDir,
   latestUrl: `${workerEndpoint}/latest.json`,
+  packs: {
+    ptb: {
+      packId: 'a-hard-time-ptb',
+      name: 'A Hard Time PTB',
+      latestUrl: `${workerEndpoint}/ptb/latest.json`,
+      instanceDir: path.join(root, 'ptb-instance')
+    }
+  },
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: 'SmokeUser' },
   developer: { adminBaseUrl: workerEndpoint, defaultOutDir: outDir, defaultCacheModsDir: '', r2Bucket: bucket },
@@ -362,6 +388,47 @@ try {
   if (upload.verification?.latest?.version !== '2.8.2') {
     throw new Error(`Remote verification failed: ${JSON.stringify(upload.verification)}`);
   }
+  const stableRemoteLatestPath = path.join(fakeR2Root, bucket, 'latest.json');
+  const stableRemoteLatestBeforePtb = await fsp.readFile(stableRemoteLatestPath);
+  const ptbBuilt = await evaluate(client, `window.aht.devBuildRelease({
+    packZip: ${JSON.stringify(ptbPackZip)},
+    outDir: ${JSON.stringify(outDir)},
+    baseUrl: ${JSON.stringify(`${workerEndpoint}/ptb/`)},
+    releaseTarget: 'ptb',
+    cacheModsDir: ''
+  })`);
+  if (ptbBuilt.latest.packId !== 'a-hard-time-ptb' || ptbBuilt.latest.channel !== 'ptb' || ptbBuilt.latest.version !== '2.9.0-ptb.9') {
+    throw new Error(`PTB release build used the wrong identity: ${JSON.stringify(ptbBuilt.latest)}`);
+  }
+  const ptbValidation = await evaluate(client, `window.aht.devValidateRelease({
+    outDir: ${JSON.stringify(outDir)},
+    publicLatestUrl: ${JSON.stringify(`${workerEndpoint}/ptb/latest.json`)},
+    releaseTarget: 'ptb'
+  })`);
+  if (!ptbValidation.ok || ptbValidation.releaseTarget !== 'ptb') {
+    throw new Error(`PTB release validation failed: ${JSON.stringify(ptbValidation)}`);
+  }
+  const ptbUpload = await evaluate(client, `window.aht.devSyncR2({
+    outDir: ${JSON.stringify(outDir)},
+    bucket: ${JSON.stringify(bucket)},
+    publicLatestUrl: ${JSON.stringify(`${workerEndpoint}/ptb/latest.json`)},
+    releaseTarget: 'ptb'
+  })`);
+  const ptbUploaded = ptbUpload.uploaded.map((item) => item.path);
+  if (ptbUploaded.at(-1) !== 'ptb/latest.json' || ptbUploaded.some((key) => !key.startsWith('ptb/'))) {
+    throw new Error(`PTB upload escaped its R2 prefix or did not publish its feed last: ${JSON.stringify(ptbUploaded)}`);
+  }
+  if (ptbUpload.verification?.latest?.packId !== 'a-hard-time-ptb' || ptbUpload.verification?.latest?.version !== '2.9.0-ptb.9') {
+    throw new Error(`PTB remote verification failed: ${JSON.stringify(ptbUpload.verification)}`);
+  }
+  const stableRemoteLatestAfterPtb = await fsp.readFile(stableRemoteLatestPath);
+  if (!stableRemoteLatestBeforePtb.equals(stableRemoteLatestAfterPtb)) {
+    throw new Error('Publishing PTB changed the remote stable latest.json.');
+  }
+  const ptbRemoteLatest = JSON.parse(await fsp.readFile(path.join(fakeR2Root, bucket, 'ptb', 'latest.json'), 'utf8'));
+  if (ptbRemoteLatest.packId !== 'a-hard-time-ptb' || ptbRemoteLatest.channel !== 'ptb') {
+    throw new Error(`Remote PTB feed has the wrong identity: ${JSON.stringify(ptbRemoteLatest)}`);
+  }
   const statusBeforeUpdate = await evaluate(client, `window.aht.getStatus()`);
   const updateVisible = statusBeforeUpdate.updateRequired
     || (statusBeforeUpdate.developerClientBypass && statusBeforeUpdate.latest?.version !== statusBeforeUpdate.installed?.version);
@@ -393,7 +460,10 @@ try {
     },
     release: validation.latest,
     uploadedLast: uploaded.at(-1),
+    ptbRelease: ptbValidation.latest,
+    ptbUploadedLast: ptbUploaded.at(-1),
     uploadOrderLast: uploadOrder.at(-1),
+    stableRemoteManifestUnchangedAfterPtb: stableRemoteLatestBeforePtb.equals(stableRemoteLatestAfterPtb),
     verification: upload.verification,
     statusBeforeUpdate: {
       updateRequired: statusBeforeUpdate.updateRequired,

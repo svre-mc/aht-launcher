@@ -9,7 +9,7 @@ const renderer = fs.readFileSync('desktop/renderer/app.js', 'utf8').replace(/\r\
 const installer = fs.readFileSync('src/installer.js', 'utf8').replace(/\r\n/g, '\n');
 
 assert(main.includes('function createOperationState'), 'main process is missing operation state helper.');
-assert(main.includes("updateState = createOperationState(forceRepair ? 'repair' : 'install'"), 'runUpdate must mark updateState running before slow setup work.');
+assert(main.includes("updateState = {\n    ...createOperationState(forceRepair ? 'repair' : 'install'") && main.indexOf('updateState = {\n    ...createOperationState') < main.indexOf('config = configForPack(await loadConfig(), target.id);'), 'runUpdate must mark target-aware updateState running before slow setup work.');
 assert(main.includes("updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };"), 'runUpdate must verify installed files before writing terminal success.');
 assert(main.includes('const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall, {') && main.includes('weightedOperationPercent(progress.percent, 98, 1)'), 'runUpdate must scan the repaired install with visible verification progress before saving integrity state.');
 assert(main.includes("await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');"), 'runUpdate must save the real post-install integrity result.');

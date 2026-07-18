@@ -22,7 +22,17 @@ import { installForgeLoader } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
 import { writeLauncherProof } from '../src/launcherProof.js';
+import { fetchSocialState, sendSocialAction } from '../src/socialClient.js';
+import { legalConsentStatus, recordLegalConsent } from '../src/legalConsent.js';
 import { selectLauncherArtifact, validateLauncherUpdateManifest } from '../src/launcherUpdateManifest.js';
+import {
+  assertReleaseMatchesTarget,
+  normalizeReleaseTarget,
+  releaseTarget,
+  releaseTargetFeedUrl,
+  releaseTargetObjectKey,
+  releaseTargetOutDir
+} from '../src/releaseTargets.js';
 
 import {
   ensureDir,
@@ -99,6 +109,7 @@ let releaseBuilderModulePromise = null;
 let clientModpackZipModulePromise = null;
 let serverTransferModulePromise = null;
 let githubActionsModulePromise = null;
+let githubModpackReleaseModulePromise = null;
 let r2DirectUploadModulePromise = null;
 
 function developerModuleRelativePath(appRelativePath = '') {
@@ -161,6 +172,11 @@ function loadGithubActionsModule() {
   return githubActionsModulePromise;
 }
 
+function loadGithubModpackReleaseModule() {
+  githubModpackReleaseModulePromise ||= importDeveloperModule('../src/githubModpackRelease.js');
+  return githubModpackReleaseModulePromise;
+}
+
 function loadR2DirectUploadModule() {
   r2DirectUploadModulePromise ||= importDeveloperModule('../src/r2DirectUpload.js');
   return r2DirectUploadModulePromise;
@@ -170,6 +186,7 @@ let updateState = { running: false, lines: [], lastResult: null, error: null, pr
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let serverTransferState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let uploadState = { running: false, total: 0, completed: 0, current: '', lines: [], lastResult: null, error: null, verification: null };
+let launcherDeployState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let adminToken = '';
 let developerSession = null;
 const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
@@ -335,6 +352,7 @@ async function buildErrorDiagnosticReport(payload = {}) {
     operations: {
       update: operationForDiagnostic(updateState),
       launcherUpdate: operationForDiagnostic(launcherUpdateState),
+      launcherDeploy: operationForDiagnostic(launcherDeployState),
       upload: operationForDiagnostic(uploadState),
       serverTransfer: operationForDiagnostic(serverTransferState)
     }
@@ -520,6 +538,10 @@ function configPath() {
 
 function identityPath() {
   return path.join(app.getPath('userData'), 'identity.json');
+}
+
+function legalConsentPath() {
+  return path.join(app.getPath('userData'), 'legal-consent.json');
 }
 
 function developerSecretsPath() {
@@ -765,8 +787,12 @@ function oldUserDataInstanceDir() {
   return path.join(app.getPath('userData'), 'instances', 'RLCraft Dregora');
 }
 
+function defaultClientModpackDir() {
+  return path.join(app.getPath('home'), 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora');
+}
+
 function defaultCacheModsDir() {
-  return path.join(app.getPath('home'), 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora', 'mods');
+  return path.join(defaultClientModpackDir(), 'mods');
 }
 
 function defaultReleaseOutDir() {
@@ -801,6 +827,14 @@ function defaultConfig() {
     packId: 'a-hard-time-dregora',
     instanceDir,
     latestUrl: '',
+    packs: {
+      ptb: {
+        packId: 'a-hard-time-ptb',
+        name: 'A Hard Time PTB',
+        latestUrl: '',
+        instanceDir: defaultPtbInstanceDir()
+      }
+    },
     curseforge: {
       proxyBaseUrl: '',
       apiKeyEnv: 'CURSEFORGE_API_KEY'
@@ -815,6 +849,8 @@ function defaultConfig() {
       adminBaseUrl: '',
       defaultOutDir: defaultReleaseOutDir(),
       defaultCacheModsDir: defaultCacheModsDir(),
+      clientModpackDir: defaultClientModpackDir(),
+      ptbClientModpackDir: defaultClientModpackDir(),
       r2Bucket: 'ahtlauncher',
       r2AccountId: '',
       githubRepo: LAUNCHER_WORKFLOW_DEFAULTS.repo,
@@ -830,6 +866,12 @@ function defaultConfig() {
       required: false,
       baseUrl: '',
       keyId: 'aht-launcher-proof-v1'
+    },
+    social: {
+      enabled: true,
+      baseUrl: '',
+      stateUrl: 'api/social',
+      actionUrl: 'api/social/actions'
     },
     serverTransfer: {
       sourceDir: process.env.AHT_SERVER_TRANSFER_SOURCE_DIR || '',
@@ -875,8 +917,41 @@ function defaultDeveloperInstanceDir() {
   platformKey(process.platform);
 }
 
+function defaultPtbInstanceDir() {
+  if (process.platform === 'win32') {
+    return path.join(ahtInstallRoot(), releaseTarget('ptb').instanceFolderName);
+  }
+  if (process.platform === 'darwin') {
+    return path.join(app.getPath('appData'), 'A Hard Time', 'PTB Instance');
+  }
+  platformKey(process.platform);
+}
+
 function defaultInstanceDir() {
   return isDeveloperMode() ? defaultDeveloperInstanceDir() : defaultPlayerInstanceDir();
+}
+
+function configForPack(baseConfig, packValue = 'stable') {
+  const target = releaseTarget(packValue);
+  if (target.id === 'stable') return baseConfig;
+  const packSettings = baseConfig.packs?.[target.id] || {};
+  const instanceDir = String(packSettings.instanceDir || '').trim() || defaultPtbInstanceDir();
+  const latestUrl = String(packSettings.latestUrl || '').trim() || releaseTargetFeedUrl(baseConfig.latestUrl, target.id);
+  return {
+    ...baseConfig,
+    packId: target.packId,
+    instanceDir,
+    latestUrl,
+    minecraftLauncher: {
+      ...baseConfig.minecraftLauncher,
+      profileId: target.profileId,
+      profileName: target.profileName
+    },
+    playCommand: {
+      ...baseConfig.playCommand,
+      cwd: instanceDir
+    }
+  };
 }
 
 function isPlayerDefaultInstanceDir(value = '') {
@@ -980,9 +1055,15 @@ function mergeConfig(defaults, stored) {
     ...stored,
     curseforge: { ...defaults.curseforge, ...stored.curseforge },
     sync: { ...defaults.sync, ...stored.sync },
+    packs: {
+      ...defaults.packs,
+      ...stored.packs,
+      ptb: { ...defaults.packs?.ptb, ...stored.packs?.ptb }
+    },
     developer: { ...defaults.developer, ...stored.developer },
     launcherUpdate: { ...defaults.launcherUpdate, ...stored.launcherUpdate },
     launcherProof: { ...defaults.launcherProof, ...stored.launcherProof },
+    social: { ...defaults.social, ...stored.social },
     serverTransfer: { ...defaults.serverTransfer, ...stored.serverTransfer },
     minecraftLauncher: { ...defaults.minecraftLauncher, ...stored.minecraftLauncher },
     playCommand: { ...defaults.playCommand, ...stored.playCommand }
@@ -1086,6 +1167,14 @@ async function loadConfig() {
     config.minecraftLauncher.memoryMb = 4096;
     changed = true;
   }
+  if (isDeveloperMode()) {
+    for (const key of ['sourceDir', 'host', 'username', 'remoteDir']) {
+      if (!String(stored.serverTransfer?.[key] || '').trim() && String(defaults.serverTransfer?.[key] || '').trim()) {
+        config.serverTransfer[key] = defaults.serverTransfer[key];
+        changed = true;
+      }
+    }
+  }
   if (!isDeveloperMode()) {
     for (const key of ['enabled', 'required', 'baseUrl', 'keyId']) {
       const value = defaults.launcherProof?.[key];
@@ -1094,10 +1183,25 @@ async function loadConfig() {
         changed = true;
       }
     }
+    for (const key of ['enabled', 'baseUrl', 'stateUrl', 'actionUrl']) {
+      const value = defaults.social?.[key];
+      if (value !== undefined && config.social?.[key] !== value) {
+        config.social = { ...config.social, [key]: value };
+        changed = true;
+      }
+    }
   }
   if (!Object.prototype.hasOwnProperty.call(stored.developer || {}, 'defaultCacheModsDir') && defaults.developer?.defaultCacheModsDir) {
     config.developer.defaultCacheModsDir = defaults.developer.defaultCacheModsDir;
     changed = true;
+  }
+  if (isDeveloperMode()) {
+    for (const key of ['clientModpackDir', 'ptbClientModpackDir']) {
+      if (!String(stored.developer?.[key] || '').trim() && String(defaults.developer?.[key] || '').trim()) {
+        config.developer[key] = defaults.developer[key];
+        changed = true;
+      }
+    }
   }
   if (!String(stored.developer?.defaultOutDir || '').trim()) {
     config.developer.defaultOutDir = resolveReleaseOutDir(config.developer?.defaultOutDir);
@@ -1117,9 +1221,15 @@ async function saveConfig(nextConfig) {
     ...nextConfig,
     curseforge: { ...current.curseforge, ...nextConfig.curseforge },
     sync: { ...current.sync, ...nextConfig.sync },
+    packs: {
+      ...current.packs,
+      ...nextConfig.packs,
+      ptb: { ...current.packs?.ptb, ...nextConfig.packs?.ptb }
+    },
     developer: { ...current.developer, ...nextConfig.developer },
     launcherUpdate: { ...current.launcherUpdate, ...nextConfig.launcherUpdate },
     launcherProof: { ...current.launcherProof, ...nextConfig.launcherProof },
+    social: { ...current.social, ...nextConfig.social },
     serverTransfer: { ...current.serverTransfer, ...nextConfig.serverTransfer },
     minecraftLauncher: { ...current.minecraftLauncher, ...nextConfig.minecraftLauncher },
     playCommand: { ...current.playCommand, ...nextConfig.playCommand }
@@ -1174,8 +1284,45 @@ async function refreshMinecraftLauncherProfile(config) {
   return { profileUpdated: true, minecraftProfile };
 }
 
-async function saveSettings(configPatch) {
-  const config = await saveConfig(configPatch);
+async function saveSettings(configPatch, packValue = 'stable') {
+  const target = releaseTarget(packValue);
+  let baseConfig = null;
+  if (target.id === 'stable') {
+    baseConfig = await saveConfig(configPatch);
+  } else {
+    const current = await loadConfig();
+    const {
+      packId: _packId,
+      instanceDir,
+      latestUrl,
+      packs: _packs,
+      minecraftLauncher = {},
+      playCommand = {},
+      ...sharedPatch
+    } = configPatch || {};
+    const {
+      profileId: _profileId,
+      profileName: _profileName,
+      ...sharedMinecraftLauncher
+    } = minecraftLauncher;
+    const { cwd: _cwd, ...sharedPlayCommand } = playCommand;
+    const currentPack = current.packs?.[target.id] || {};
+    const nextPack = {
+      ...currentPack,
+      packId: target.packId,
+      name: target.name
+    };
+    if (String(instanceDir || '').trim()) nextPack.instanceDir = String(instanceDir).trim();
+    if (String(latestUrl || '').trim()) nextPack.latestUrl = String(latestUrl).trim();
+    baseConfig = await saveConfig({
+      ...sharedPatch,
+      minecraftLauncher: sharedMinecraftLauncher,
+      playCommand: sharedPlayCommand,
+      packs: { ...current.packs, [target.id]: nextPack }
+    });
+    await ensureDir(nextPack.instanceDir || defaultPtbInstanceDir());
+  }
+  const config = configForPack(baseConfig, target.id);
   const safeConfig = rendererStatusConfig(config);
   try {
     return {
@@ -1359,6 +1506,49 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
       authToken: launcherProofAuthToken()
     });
   }
+}
+
+async function socialRequestContext() {
+  const config = await loadConfig();
+  const identity = await identityPayload(config);
+  let latest = null;
+  let installed = null;
+  try {
+    latest = await readLatest(config);
+  } catch {}
+  try {
+    installed = await readInstalledPack(config);
+  } catch {}
+  const proof = await writeRegisteredLauncherProof({ config, identity, latest, installed });
+  if (!proof?.trusted || !proof?.token) {
+    throw new Error('A valid AHT Launcher session is required before friends can load.');
+  }
+  return { config, identity, latest, installed, proofToken: proof.token };
+}
+
+async function launcherLegalStatus() {
+  const testBypass = process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_REQUIRE_LEGAL !== '1';
+  return legalConsentStatus({
+    appRoot,
+    consentPath: legalConsentPath(),
+    identity: await loadIdentity(),
+    developerMode: isDeveloperMode() || testBypass
+  });
+}
+
+async function acceptLauncherLegal(payload = {}) {
+  const record = await recordLegalConsent({
+    appRoot,
+    consentPath: legalConsentPath(),
+    termsVersion: payload.termsVersion,
+    privacyVersion: payload.privacyVersion,
+    affirmed: payload.affirmed === true,
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    identity: await loadIdentity()
+  });
+  return { ok: true, acceptedAt: record.acceptedAt };
 }
 
 async function identityPayload(config = null) {
@@ -1878,8 +2068,10 @@ function evaluateLaunchState(config, latest, latestError, installed, minecraftPr
   return { playConfigured, launchReady: true, launchMode: 'minecraftLauncher', launchBlockedReason: '' };
 }
 
-async function testReleaseFeed(configPatch = null) {
-  const config = configPatch ? mergeConfig(await loadConfig(), configPatch) : await loadConfig();
+async function testReleaseFeed(configPatch = null, packValue = 'stable') {
+  const target = releaseTarget(packValue);
+  const current = configForPack(await loadConfig(), target.id);
+  const config = configPatch ? mergeConfig(current, configPatch) : current;
   const latestUrl = String(config.latestUrl || '').trim();
   if (!latestUrl) {
     throw new Error('Latest URL is required before the launcher can check for updates.');
@@ -2051,8 +2243,10 @@ function minecraftLaunchResultForRenderer(result = {}) {
   };
 }
 
-async function getStatus(configOverride = null) {
-  const config = configOverride || await loadConfig();
+async function getStatus(configOverride = null, packValue = 'stable') {
+  const target = releaseTarget(packValue);
+  const baseConfig = configOverride || await loadConfig();
+  const config = configForPack(baseConfig, target.id);
   const identity = await identityPayload(config);
   let latest = null;
   let latestError = null;
@@ -2108,6 +2302,9 @@ async function getStatus(configOverride = null) {
     };
   }
   return {
+    activePack: target.sidebarKey,
+    releaseTarget: target.id,
+    releaseName: target.name,
     developerMode: isDeveloperMode(),
     developerClientBypass,
     appVersion: app.getVersion(),
@@ -2156,11 +2353,16 @@ async function runUpdate(forceRepair = false, options = {}) {
     appendOperationLine(updateState, `${forceRepair ? 'Repair' : 'Update'} request ignored because an install is already running.`);
     return updateState;
   }
-  updateState = createOperationState(forceRepair ? 'repair' : 'install', forceRepair ? 'Preparing repair' : 'Preparing update');
+  const target = releaseTarget(options.packKey || 'stable');
+  updateState = {
+    ...createOperationState(forceRepair ? 'repair' : 'install', forceRepair ? 'Preparing repair' : 'Preparing update'),
+    releaseTarget: target.id,
+    packKey: target.sidebarKey
+  };
   let config = null;
   let identity = null;
   try {
-    config = await loadConfig();
+    config = configForPack(await loadConfig(), target.id);
     identity = await identityPayload(config);
     if (!config.latestUrl) {
       throw new Error('latestUrl is not configured');
@@ -2439,7 +2641,7 @@ function Write-PendingFailure([string]$message) {
 }
 try {
   Write-UpdateLog ('Waiting for old launcher PID ' + $payload.oldPid)
-  if ($env:AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY -eq '1') {
+  if ($payload.testStartOnly -eq $true -or $env:AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY -eq '1') {
     Write-UpdateLog 'Test mode helper startup confirmed.'
     exit 0
   }
@@ -2550,6 +2752,7 @@ async function writeWindowsLauncherUpdateHelper({ filePath, artifact, latestVers
     logPath,
     bootstrapLogPath,
     pendingFailurePath: launcherUpdatePendingFailurePath(),
+    testStartOnly: process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY === '1',
     createdAt: new Date().toISOString()
   });
   await fs.writeFile(scriptPath, launcherUpdateHelperScript(payloadPath), 'utf8');
@@ -2620,8 +2823,9 @@ target_app=${shellSingleQuote(payload.targetApp)}
 fallback_app=${shellSingleQuote(payload.fallbackApp)}
 old_pid=${Number(payload.oldPid) || 0}
 log_path=${shellSingleQuote(payload.logPath)}
-pending_failure_path=${shellSingleQuote(payload.pendingFailurePath)}
-work_dir=${shellSingleQuote(payload.workDir)}
+  pending_failure_path=${shellSingleQuote(payload.pendingFailurePath)}
+  work_dir=${shellSingleQuote(payload.workDir)}
+  test_start_only=${payload.testStartOnly ? '1' : '0'}
 write_log() {
   parent_dir=$(dirname "$log_path")
   mkdir -p "$parent_dir" 2>/dev/null || true
@@ -2636,7 +2840,7 @@ fail_update() {
   exit 1
 }
 write_log "Waiting for old launcher PID $old_pid"
-if [ "\${AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY:-}" = "1" ]; then
+if [ "$test_start_only" = "1" ] || [ "\${AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY:-}" = "1" ]; then
   write_log "Test mode helper startup confirmed."
   exit 0
 fi
@@ -2729,6 +2933,7 @@ async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadD
     logPath,
     pendingFailurePath: launcherUpdatePendingFailurePath(),
     workDir: path.join(helperDir, 'macos-extract'),
+    testStartOnly: process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY === '1',
     createdAt: new Date().toISOString()
   };
   await writeJsonFile(payloadPath, payload);
@@ -2985,11 +3190,31 @@ function serverTransferOptions(config = {}, payload = {}, password = '') {
   };
 }
 
+async function persistServerTransferSettings(payload = {}) {
+  assertDeveloperAuthenticated();
+  const config = await loadConfig();
+  const options = serverTransferOptions(config, payload);
+  const saved = await saveConfig({
+    serverTransfer: {
+      sourceDir: options.sourceDir,
+      host: options.host,
+      port: options.port,
+      username: options.username,
+      remoteDir: options.remoteDir,
+      excludeDirs: options.excludeDirs,
+      includeDirs: options.includeDirs,
+      includeRootFiles: options.includeRootFiles,
+      concurrency: options.concurrency
+    }
+  });
+  return saved.serverTransfer;
+}
+
 async function planServerTransfer(payload = {}) {
   assertDeveloperAuthenticated();
   const { collectServerTransferFiles } = await loadServerTransferModule();
-  const config = await loadConfig();
-  const options = serverTransferOptions(config, payload);
+  const persisted = await persistServerTransferSettings(payload);
+  const options = serverTransferOptions({ serverTransfer: persisted });
   return collectServerTransferFiles(options.sourceDir, {
     excludeDirs: options.excludeDirs,
     includeDirs: options.includeDirs,
@@ -3006,8 +3231,8 @@ async function syncServerFiles(payload = {}) {
     await saveDeveloperSecrets({ serverSshPassword: payload.password });
   }
   const secrets = await loadDeveloperSecrets();
-  const config = await loadConfig();
-  const options = serverTransferOptions(config, payload, payload.password || secrets.serverSshPassword || '');
+  const persisted = await persistServerTransferSettings(payload);
+  const options = serverTransferOptions({ serverTransfer: persisted }, {}, payload.password || secrets.serverSshPassword || '');
   const { uploadServerFiles } = await loadServerTransferModule();
   serverTransferState = {
     running: true,
@@ -3581,6 +3806,13 @@ function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '', cac
   return {
     packId: config.packId || 'a-hard-time-dregora',
     latestUrl,
+    packs: {
+      ptb: {
+        packId: releaseTarget('ptb').packId,
+        name: releaseTarget('ptb').name,
+        latestUrl: releaseTargetFeedUrl(latestUrl, 'ptb')
+      }
+    },
     curseforge: {
       proxyBaseUrl: cacheOnly ? '' : (workerBase ? new URL('cf/', workerBase).toString() : ''),
       apiKeyEnv: 'CURSEFORGE_API_KEY'
@@ -4083,7 +4315,10 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
       }
     }
     if (descriptor.downloadKey) {
-      downloads[descriptor.downloadKey] = entry;
+      downloads[descriptor.downloadKey] = {
+        ...entry,
+        url: new URL(`launcher/download/${descriptor.downloadKey}`, rootUrl).toString()
+      };
     }
     uploads.push({ rel, file, label: descriptor.label, size: stat.size });
   }
@@ -4103,7 +4338,8 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
   };
   const validation = validateLauncherUpdateManifest(manifest, {
     latestUrl: launcherLatestUrlFromInput(publicLatestUrl || config.launcherUpdate?.latestUrl || config.latestUrl || ''),
-    allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
+    allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1',
+    requireTrackedDownloads: true
   });
   if (!validation.ok) {
     throw new Error(`Launcher update manifest is invalid: ${validation.errors.join('; ')}`);
@@ -4229,6 +4465,121 @@ async function dispatchLauncherWorkflow(payload = {}) {
   };
 }
 
+function assertPublicLauncherWorkflow(workflow = {}) {
+  const expected = LAUNCHER_WORKFLOW_DEFAULTS;
+  if (workflow.repo !== expected.repo
+      || workflow.ref !== expected.branch
+      || workflow.workflow !== expected.workflow) {
+    throw new Error(`Launcher deploy is locked to ${expected.repo}:${expected.branch} using ${expected.workflow}.`);
+  }
+}
+
+function publicLauncherWorkflow() {
+  return {
+    repo: LAUNCHER_WORKFLOW_DEFAULTS.repo,
+    ref: LAUNCHER_WORKFLOW_DEFAULTS.branch,
+    workflow: LAUNCHER_WORKFLOW_DEFAULTS.workflow
+  };
+}
+
+async function waitForPublishedLauncherVersion(config, version) {
+  const latestUrl = launcherLatestUrlForConfig(config);
+  if (!latestUrl) throw new Error('Public launcher update feed is not configured.');
+  const deadline = Date.now() + 3 * 60 * 1000;
+  let lastError = '';
+  while (Date.now() < deadline) {
+    try {
+      const latest = await fetchRemoteJson(latestUrl);
+      const validation = validateLauncherUpdateManifest(latest, {
+        latestUrl,
+        requireTrackedDownloads: true,
+        allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
+      });
+      if (!validation.ok) {
+        lastError = validation.errors.join('; ');
+      } else if (latest.version === version) {
+        return { latestUrl, latest };
+      } else {
+        lastError = `feed is ${latest.version || 'unknown'}, expected ${version}`;
+      }
+    } catch (error) {
+      lastError = error.message || String(error);
+    }
+    await sleep(3_000);
+  }
+  throw new Error(`GitHub finished, but the public launcher feed did not reach ${version}: ${lastError || 'verification timed out'}`);
+}
+
+async function runLauncherDeploy(payload = {}) {
+  try {
+    const config = await loadConfig();
+    const workflow = publicLauncherWorkflow();
+    assertPublicLauncherWorkflow(workflow);
+    const { token, source } = await resolveGithubToken(payload);
+    const {
+      readGithubPackageVersion,
+      triggerLauncherReleaseWorkflow,
+      waitForGithubWorkflowRun
+    } = await loadGithubActionsModule();
+    launcherDeployState.progress = { phase: 'Reading GitHub version', percent: 5 };
+    const version = await readGithubPackageVersion({ repo: workflow.repo, ref: workflow.ref, token });
+    appendOperationLine(launcherDeployState, `Deploying public AHT Launcher ${version} from ${workflow.repo}:${workflow.ref}.`);
+    appendOperationLine(launcherDeployState, 'Developer launcher artifacts are excluded by the public-player workflow.');
+    launcherDeployState.progress = { phase: 'Starting GitHub Actions', percent: 10 };
+    const dispatched = await triggerLauncherReleaseWorkflow({
+      ...workflow,
+      token,
+      publishToR2: true,
+      waitForRunMs: 30_000,
+      pollIntervalMs: 2_000
+    });
+    if (!dispatched.run?.id) {
+      throw new Error(`GitHub accepted the deploy, but its workflow run could not be identified. Check ${dispatched.actionsUrl}`);
+    }
+    appendOperationLine(launcherDeployState, `GitHub run: ${dispatched.run.htmlUrl || dispatched.run.id}`);
+    launcherDeployState.progress = { phase: 'Building Windows and macOS', percent: 25 };
+    const completedRun = await waitForGithubWorkflowRun({
+      repo: workflow.repo,
+      runId: dispatched.run.id,
+      token,
+      waitForCompletionMs: 45 * 60 * 1000,
+      pollIntervalMs: 5_000,
+      onProgress(run) {
+        const phase = run?.status === 'queued' ? 'Waiting for GitHub runner' : 'Building and publishing launchers';
+        launcherDeployState.progress = { phase, percent: run?.status === 'queued' ? 20 : 60 };
+      }
+    });
+    launcherDeployState.progress = { phase: 'Verifying public update feed', percent: 90 };
+    const verification = await waitForPublishedLauncherVersion(config, version);
+    const result = {
+      ok: true,
+      version,
+      repo: workflow.repo,
+      ref: workflow.ref,
+      workflow: workflow.workflow,
+      tokenSource: source,
+      run: completedRun,
+      releaseUrl: `https://github.com/${workflow.repo}/releases/tag/launcher-v${version}`,
+      latestUrl: verification.latestUrl,
+      publicArtifacts: ['Windows 10/11 installer', 'macOS Apple Silicon DMG', 'macOS Intel DMG'],
+      developerArtifactsUploaded: false
+    };
+    appendOperationLine(launcherDeployState, `Verified launcher/latest.json at ${version}.`);
+    completeOperationState(launcherDeployState, result, 'Published and verified');
+  } catch (error) {
+    appendOperationLine(launcherDeployState, error.message || String(error));
+    failOperationState(launcherDeployState, error, 'Deploy failed');
+  }
+}
+
+function startLauncherDeploy(payload = {}) {
+  assertDeveloperAuthenticated();
+  if (launcherDeployState.running) throw new Error('Launcher deploy is already running.');
+  launcherDeployState = createOperationState('public-launcher-deploy', 'Preparing public deploy');
+  void runLauncherDeploy(payload);
+  return launcherDeployState;
+}
+
 async function verifyRemoteLauncherUpdate({ publicLatestUrl, localManifest }) {
   const latestUrl = launcherLatestUrlFromInput(publicLatestUrl);
   if (!latestUrl) {
@@ -4330,12 +4681,14 @@ async function syncLauncherUpdate(payload = {}) {
 
 async function syncR2(payload = {}) {
   const { publicLatestUrl = '' } = payload;
+  const target = releaseTarget(payload.releaseTarget || 'stable');
   assertDeveloperAuthenticated();
   if (uploadState.running) {
     throw new Error('R2 upload is already running');
   }
   const config = await loadConfig();
-  const outDir = resolveReleaseOutDir(payload.outDir || config.developer?.defaultOutDir);
+  const baseOutDir = resolveReleaseOutDir(payload.outDir || config.developer?.defaultOutDir);
+  const outDir = releaseTargetOutDir(baseOutDir, target.id);
   const bucket = String(payload.bucket || config.developer?.r2Bucket || 'ahtlauncher').trim();
   if (!bucket) {
     throw new Error('R2 bucket is required');
@@ -4352,6 +4705,7 @@ async function syncR2(payload = {}) {
   }
   const localLatestPath = path.join(outDir, 'latest.json');
   const localLatest = await readJsonFile(localLatestPath);
+  assertReleaseMatchesTarget(localLatest, target.id);
   const files = (await listFiles(outDir)).sort((a, b) => {
     const left = path.relative(outDir, a).replaceAll(path.sep, '/');
     const right = path.relative(outDir, b).replaceAll(path.sep, '/');
@@ -4382,6 +4736,8 @@ async function syncR2(payload = {}) {
   const uploaded = [];
   let uploadedBytes = 0;
   uploadState = {
+    releaseTarget: target.id,
+    packKey: target.sidebarKey,
     running: true,
     total: files.length,
     completed: 0,
@@ -4397,8 +4753,8 @@ async function syncR2(payload = {}) {
       method: fastUpload ? 'direct-multipart' : 'wrangler'
     },
     lines: [
-      `Uploading ${files.length} files to remote R2 bucket ${bucket}`,
-      'latest.json will upload last so players only see the update after artifacts are ready.',
+      `Uploading ${files.length} ${target.name} files to remote R2 bucket ${bucket}`,
+      `${releaseTargetObjectKey('latest.json', target.id)} will upload last so only ${target.name} players see the update after artifacts are ready.`,
       fastUpload
         ? 'Fast direct R2 upload enabled: multipart upload with byte progress.'
         : `Fast direct R2 upload disabled; missing ${missingFastUpload.join(', ')}. Falling back to Wrangler.`
@@ -4410,7 +4766,8 @@ async function syncR2(payload = {}) {
   try {
     for (const file of files) {
       const rel = path.relative(outDir, file).replaceAll(path.sep, '/');
-      uploadState.current = rel;
+      const objectKey = releaseTargetObjectKey(rel, target.id);
+      uploadState.current = objectKey;
       const stat = fileStats.get(file) || await fs.stat(file);
       const startedAt = Date.now();
       let lastLoggedPercent = -1;
@@ -4422,28 +4779,28 @@ async function syncR2(payload = {}) {
         total: totalBytes || files.length,
         percent: totalBytes ? Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)) : Math.round((uploaded.length / files.length) * 100),
         unit: totalBytes ? 'bytes' : 'files',
-        currentFile: rel,
+        currentFile: objectKey,
         currentPercent: 0,
         method: fastUpload ? 'direct-multipart' : 'wrangler'
       };
-      appendOperationLine(uploadState, `Uploading ${rel} (${formatBytes(stat.size)})`);
+      appendOperationLine(uploadState, `Uploading ${objectKey} (${formatBytes(stat.size)})`);
       if (fastUpload) {
-        appendOperationLine(uploadState, `Checking remote ${rel}`);
+        appendOperationLine(uploadState, `Checking remote ${objectKey}`);
         trimUploadLines();
         const sha256 = await releaseObjectSha256({ rel, file, localLatest });
         const remote = await r2Direct.headR2ObjectDirect({
           ...directCredentials,
           bucket,
-          key: rel
+          key: objectKey
         });
         if (remoteReleaseObjectMatches({ rel, remote, stat, sha256 })) {
-          uploaded.push({ path: rel, output: `skipped ${rel}; remote object already matches`, method: 'direct-skip', skipped: true, size: stat.size });
-          appendOperationLine(uploadState, `Skipped ${rel}; remote already matches.`);
+          uploaded.push({ path: objectKey, localPath: rel, output: `skipped ${objectKey}; remote object already matches`, method: 'direct-skip', skipped: true, size: stat.size });
+          appendOperationLine(uploadState, `Skipped ${objectKey}; remote already matches.`);
         } else {
           const result = await r2Direct.uploadR2ObjectDirect({
             ...directCredentials,
             bucket,
-            key: rel,
+            key: objectKey,
             file,
             contentType: contentType(file),
             sha256,
@@ -4460,7 +4817,7 @@ async function syncR2(payload = {}) {
                 total: totalBytes,
                 percent: totalPercent,
                 unit: 'bytes',
-                currentFile: rel,
+                currentFile: objectKey,
                 currentPercent: progress.percent || 0,
                 speedBytesPerSecond: progress.speedBytesPerSecond || 0,
                 method: 'direct-multipart'
@@ -4468,12 +4825,12 @@ async function syncR2(payload = {}) {
               const pct = Number(progress.percent || 0);
               if (pct >= lastLoggedPercent + 10 || pct === 100) {
                 lastLoggedPercent = pct;
-                appendOperationLine(uploadState, `${rel}: ${pct}% (${formatBytes(currentLoaded)}/${formatBytes(stat.size)} at ${formatBytes(progress.speedBytesPerSecond || 0)}/s)`);
+                appendOperationLine(uploadState, `${objectKey}: ${pct}% (${formatBytes(currentLoaded)}/${formatBytes(stat.size)} at ${formatBytes(progress.speedBytesPerSecond || 0)}/s)`);
                 trimUploadLines();
               }
             }
           });
-          uploaded.push({ path: rel, output: `uploaded ${rel}`, method: result.method, size: result.size });
+          uploaded.push({ path: objectKey, localPath: rel, output: `uploaded ${objectKey}`, method: result.method, size: result.size });
         }
       } else {
         if (rel.endsWith('.zip')) {
@@ -4483,7 +4840,7 @@ async function syncR2(payload = {}) {
           'r2',
           'object',
           'put',
-          `${bucket}/${rel}`,
+          `${bucket}/${objectKey}`,
           `--file=${file}`,
           `--content-type=${contentType(file)}`,
           '--remote'
@@ -4497,7 +4854,7 @@ async function syncR2(payload = {}) {
             }
           }
         });
-        uploaded.push({ path: rel, output: output.trim(), method: 'wrangler', size: stat.size });
+        uploaded.push({ path: objectKey, localPath: rel, output: output.trim(), method: 'wrangler', size: stat.size });
       }
       uploadedBytes += stat.size;
       uploadState.currentBytes = stat.size;
@@ -4509,13 +4866,13 @@ async function syncR2(payload = {}) {
         total: totalBytes || files.length,
         percent: totalBytes ? Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)) : Math.round((uploaded.length / files.length) * 100),
         unit: totalBytes ? 'bytes' : 'files',
-        currentFile: rel,
+        currentFile: objectKey,
         currentPercent: 100,
         speedBytesPerSecond: Math.round(stat.size / Math.max(0.001, (Date.now() - startedAt) / 1000)),
         method: fastUpload ? 'direct-multipart' : 'wrangler'
       };
       const latestUpload = uploaded.at(-1);
-      appendOperationLine(uploadState, latestUpload?.skipped ? `Remote current ${rel}` : `Uploaded ${rel}`);
+      appendOperationLine(uploadState, latestUpload?.skipped ? `Remote current ${objectKey}` : `Uploaded ${objectKey}`);
       trimUploadLines();
     }
     const verification = await verifyRemoteRelease({ publicLatestUrl, localLatest });
@@ -4756,6 +5113,7 @@ async function inspectPackZipFile(packZip) {
     }
     const version = String(metadata.version || '');
     return {
+      packId: metadata.packId || '',
       name: metadata.name || 'A Hard Time',
       version,
       fileName: path.basename(packZip),
@@ -4772,6 +5130,7 @@ async function inspectPackZipFile(packZip) {
   }
   const version = String(manifest.version || '');
   return {
+    packId: manifest.name ? String(manifest.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : '',
     name: manifest.name || '',
     version,
     fileName: path.basename(packZip),
@@ -5407,11 +5766,22 @@ function focusMainWindow() {
 }
 
 ipcMain.handle('diagnostics:copyErrorReport', async (_event, payload = {}) => copyErrorDiagnosticReport(payload));
-ipcMain.handle('status:get', async () => getStatus());
-ipcMain.handle('settings:save', async (_event, config) => saveSettings(config));
-ipcMain.handle('settings:testFeed', async (_event, config) => testReleaseFeed(config));
+ipcMain.handle('status:get', async (_event, payload = {}) => getStatus(null, payload?.packKey || payload || 'stable'));
+ipcMain.handle('settings:save', async (_event, payload = {}) => {
+  if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'config')) {
+    return saveSettings(payload.config || {}, payload.packKey || 'stable');
+  }
+  return saveSettings(payload || {}, 'stable');
+});
+ipcMain.handle('settings:testFeed', async (_event, payload = {}) => {
+  if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'config')) {
+    return testReleaseFeed(payload.config || {}, payload.packKey || 'stable');
+  }
+  return testReleaseFeed(payload || {}, 'stable');
+});
 ipcMain.handle('update:start', diagnosticIpc('update:start', async (_event, payload = {}) => runUpdate(Boolean(payload.forceRepair), {
-  replaceGameSettings: Boolean(payload.replaceGameSettings)
+  replaceGameSettings: Boolean(payload.replaceGameSettings),
+  packKey: payload.packKey || 'stable'
 })));
 ipcMain.handle('update:state', async () => updateState);
 ipcMain.handle('launcher:updateStart', diagnosticIpc('launcher:updateStart', async () => runLauncherUpdate()));
@@ -5421,23 +5791,41 @@ ipcMain.handle('launcher:updateState', async () => {
   return launcherUpdateState;
 });
 ipcMain.handle('account:register', async (_event, username) => registerMinecraftUsername(username));
-ipcMain.handle('changes:scan', async () => {
-  const config = await loadConfig();
+ipcMain.handle('legal:status', diagnosticIpc('legal:status', async () => launcherLegalStatus()));
+ipcMain.handle('legal:accept', diagnosticIpc('legal:accept', async (_event, payload = {}) => acceptLauncherLegal(payload)));
+ipcMain.handle('app:exit', async () => {
+  app.quit();
+  return { ok: true };
+});
+ipcMain.handle('social:list', diagnosticIpc('social:list', async () => {
+  const context = await socialRequestContext();
+  return fetchSocialState(context);
+}));
+ipcMain.handle('social:action', diagnosticIpc('social:action', async (_event, payload = {}) => {
+  const context = await socialRequestContext();
+  return sendSocialAction({
+    ...context,
+    action: payload.action,
+    target: payload.target
+  });
+}));
+ipcMain.handle('changes:scan', async (_event, payload = {}) => {
+  const config = configForPack(await loadConfig(), payload?.packKey || payload || 'stable');
   if (developerClientBypassAllowed()) {
     return developerBypassLocalChangesState(config, 'developer-scan-bypass');
   }
   return scanLocalChanges(config.instanceDir);
 });
-ipcMain.handle('files:scan', async () => {
-  const config = await loadConfig();
+ipcMain.handle('files:scan', async (_event, payload = {}) => {
+  const config = configForPack(await loadConfig(), payload?.packKey || payload || 'stable');
   if (developerClientBypassAllowed()) {
     return developerBypassIntegrityState(config, 'developer-scan-bypass');
   }
   const integrity = await scanCurrentManagedIntegrity(config);
   return writeIntegrityState(config, integrity, 'scan');
 });
-ipcMain.handle('changes:sync', async () => {
-  const config = await loadConfig();
+ipcMain.handle('changes:sync', async (_event, payload = {}) => {
+  const config = configForPack(await loadConfig(), payload?.packKey || payload || 'stable');
   const identity = await identityPayload(config);
   const changes = developerClientBypassAllowed()
     ? developerBypassLocalChangesState(config, 'developer-sync-bypass')
@@ -5448,8 +5836,9 @@ ipcMain.handle('changes:sync', async () => {
     changes
   });
 });
-ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
-  const config = await loadConfig();
+ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload = {}) => {
+  const target = releaseTarget(payload?.packKey || payload || 'stable');
+  const config = configForPack(await loadConfig(), target.id);
   const developerClientBypass = developerClientBypassAllowed();
 
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
@@ -5458,7 +5847,7 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async () => {
     try {
       installed = await readJsonFile(installedPath);
     } catch (error) {
-      throw new Error(`Installed manifest is damaged. Click Update to reinstall A Hard Time. ${error.message || error}`);
+      throw new Error(`Installed manifest is damaged. Click Update to reinstall ${target.name}. ${error.message || error}`);
     }
   }
   let latest = null;
@@ -5556,35 +5945,45 @@ ipcMain.handle('setup:recommend', async () => setupForRenderer(await setupRecomm
 ipcMain.handle('setup:apply', async () => applyRecommendedSetup());
 ipcMain.handle('dev:buildClientZip', diagnosticIpc('dev:buildClientZip', async (_event, payload = {}) => {
   assertDeveloperAuthenticated();
+  const target = releaseTarget(payload.releaseTarget || 'stable');
   const { createClientModpackZip } = await loadClientModpackZipModule();
   const config = await loadConfig();
-  const outDir = path.join(resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir), 'client-zips');
+  const baseOutDir = resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir);
+  const outDir = path.join(releaseTargetOutDir(baseOutDir, target.id), 'client-zips');
+  const version = String(payload.version || '').trim();
   const result = await createClientModpackZip({
-    sourceDir: payload.sourceDir || config.developer?.clientModpackDir || '',
+    sourceDir: payload.sourceDir || (target.id === 'ptb' ? config.developer?.ptbClientModpackDir : config.developer?.clientModpackDir) || '',
     outDir,
-    version: payload.version || '',
-    name: payload.name || 'A Hard Time',
-    packId: payload.packId || config.packId || 'a-hard-time-dregora',
+    version,
+    name: target.name,
+    packId: target.packId,
     minecraft: payload.minecraft || config.minecraftLauncher?.minecraft || {},
     includeFiles: false
   });
-  return result;
+  return { ...result, version, releaseTarget: target.id };
 }));
 ipcMain.handle('dev:buildRelease', diagnosticIpc('dev:buildRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
+  const target = releaseTarget(payload?.releaseTarget || 'stable');
   const inspected = await inspectPackZipFile(payload?.packZip || '');
   assertFullClientReleaseAllowed(inspected, payload?.allowLegacyCurseForge === true);
+  if (inspected.fullClientZip && inspected.packId !== target.packId) {
+    throw new Error(`${target.name} publication requires a ${target.packId} client ZIP; selected ZIP contains ${inspected.packId || 'no packId'}.`);
+  }
   const { buildRelease } = await loadReleaseBuilderModule();
   const config = await loadConfig();
-  const outDir = resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir);
+  const baseOutDir = resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir);
+  const outDir = releaseTargetOutDir(baseOutDir, target.id);
   await ensureDir(outDir);
-  return buildRelease({
+  const result = await buildRelease({
     packZip: payload.packZip,
     outDir,
     baseUrl: payload.baseUrl,
-    channel: payload.channel || 'stable',
+    channel: target.channel,
     cacheModsDir: payload.cacheModsDir || ''
   });
+  assertReleaseMatchesTarget(result.latest, target.id);
+  return { ...result, releaseTarget: target.id };
 }));
 ipcMain.handle('dev:inspectPackZip', diagnosticIpc('dev:inspectPackZip', async (_event, packZip) => {
   assertDeveloperAuthenticated();
@@ -5592,11 +5991,24 @@ ipcMain.handle('dev:inspectPackZip', diagnosticIpc('dev:inspectPackZip', async (
 }));
 ipcMain.handle('dev:validateRelease', diagnosticIpc('dev:validateRelease', async (_event, payload) => {
   assertDeveloperAuthenticated();
+  const target = releaseTarget(payload?.releaseTarget || 'stable');
   const config = await loadConfig();
-  return validateRelease({
+  const baseOutDir = resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir);
+  const result = await validateRelease({
     ...payload,
-    outDir: resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir)
+    outDir: releaseTargetOutDir(baseOutDir, target.id)
   });
+  if (result.latest) {
+    try {
+      assertReleaseMatchesTarget(result.latest, target.id);
+    } catch (error) {
+      const item = { label: 'release target mismatch', detail: error.message };
+      result.checks.push({ level: 'error', ...item });
+      result.errors.push(item);
+      result.ok = false;
+    }
+  }
+  return { ...result, releaseTarget: target.id };
 }));
 ipcMain.handle('dev:cloudLogin', async (_event, payload) => cloudLogin(payload));
 ipcMain.handle('dev:cloudSetupBuckets', async (_event, payload) => cloudSetupBuckets(payload));
@@ -5605,11 +6017,38 @@ ipcMain.handle('dev:cloudDeployWorker', async (_event, payload) => cloudDeployWo
 ipcMain.handle('dev:cloudPreflight', async (_event, payload) => cloudPreflight(payload));
 ipcMain.handle('dev:writePlayerDefaults', async (_event, payload) => writePlayerDefaults(payload));
 ipcMain.handle('dev:syncR2', diagnosticIpc('dev:syncR2', async (_event, payload) => syncR2(payload)));
+ipcMain.handle('dev:publishModpackGithub', diagnosticIpc('dev:publishModpackGithub', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const target = releaseTarget(payload.releaseTarget || 'stable');
+  const config = await loadConfig();
+  const baseOutDir = resolveReleaseOutDir(payload.outDir || config.developer?.defaultOutDir);
+  const outDir = releaseTargetOutDir(baseOutDir, target.id);
+  const { token, source } = await resolveGithubToken(payload);
+  const { publishModpackGithubRelease } = await loadGithubModpackReleaseModule();
+  const testGithubEndpoints = process.env.AHT_TEST_HOOKS === '1'
+    ? {
+        apiBase: process.env.AHT_TEST_GITHUB_API_BASE || undefined,
+        uploadsBase: process.env.AHT_TEST_GITHUB_UPLOADS_BASE || undefined
+      }
+    : {};
+  const result = await publishModpackGithubRelease({
+    repo: payload.githubRepo || config.developer?.githubRepo || LAUNCHER_WORKFLOW_DEFAULTS.repo,
+    ref: payload.githubBranch || config.developer?.githubBranch || LAUNCHER_WORKFLOW_DEFAULTS.branch,
+    token,
+    outDir,
+    releaseTarget: target.id,
+    ...testGithubEndpoints
+  });
+  return { ...result, tokenSource: source };
+}));
 ipcMain.handle('dev:findLauncherBuilds', async () => findLauncherBuilds());
 ipcMain.handle('dev:syncLauncherUpdate', diagnosticIpc('dev:syncLauncherUpdate', async (_event, payload) => syncLauncherUpdate(payload)));
 ipcMain.handle('dev:checkLauncherWorkflow', async (_event, payload) => checkLauncherWorkflow(payload));
 ipcMain.handle('dev:dispatchLauncherWorkflow', diagnosticIpc('dev:dispatchLauncherWorkflow', async (_event, payload) => dispatchLauncherWorkflow(payload)));
+ipcMain.handle('dev:deployLauncher', diagnosticIpc('dev:deployLauncher', async (_event, payload) => startLauncherDeploy(payload)));
+ipcMain.handle('dev:launcherDeployState', async () => launcherDeployState);
 ipcMain.handle('dev:uploadState', async () => uploadState);
+ipcMain.handle('dev:saveServerTransfer', diagnosticIpc('dev:saveServerTransfer', async (_event, payload) => persistServerTransferSettings(payload)));
 ipcMain.handle('dev:planServerTransfer', async (_event, payload) => planServerTransfer(payload));
 ipcMain.handle('dev:syncServerFiles', async (_event, payload) => syncServerFiles(payload));
 ipcMain.handle('dev:serverTransferState', async () => serverTransferState);
@@ -5656,6 +6095,17 @@ ipcMain.handle('dev:login', async (_event, { username, password }) => {
 });
 ipcMain.handle('dev:summary', async () => adminFetch(await loadConfig(), 'admin/summary'));
 ipcMain.handle('dev:events', async (_event, limit = 50) => adminFetch(await loadConfig(), `admin/events?limit=${limit}`));
+ipcMain.handle('dev:launcherDownloads', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const limit = Math.max(1, Math.min(Number(payload.limit || 250), 250));
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (payload.cursor) params.set('cursor', String(payload.cursor));
+  return adminFetch(await loadConfig(), `admin/launcher-downloads?${params.toString()}`);
+});
+ipcMain.handle('dev:playerIpv4Groups', async () => {
+  assertDeveloperAuthenticated();
+  return adminFetch(await loadConfig(), 'admin/player-ipv4-groups');
+});
 ipcMain.handle('dev:updateLogs', async (_event, limit = 20) => adminFetch(await loadConfig(), `admin/update-logs?limit=${limit}`));
 ipcMain.handle('dev:publishUpdateLog', diagnosticIpc('dev:publishUpdateLog', async (_event, payload) => {
   assertDeveloperAuthenticated();

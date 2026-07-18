@@ -13,6 +13,7 @@ const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
 const outDir = path.join(root, 'release');
 const clientDir = path.join(root, 'client-pack');
+const ptbClientDir = path.join(root, 'ptb-client-pack');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -117,6 +118,7 @@ async function waitFor(client, expression, label, attempts = 160) {
 
 for (const dir of ['config', 'fancymenu_data', 'mods', 'resourcepacks', 'resources', 'scripts', 'structures']) {
   await fsp.mkdir(path.join(clientDir, dir), { recursive: true });
+  await fsp.mkdir(path.join(ptbClientDir, dir), { recursive: true });
 }
 await writeFile(path.join(clientDir, 'config', 'aht-client.cfg'), 'client=true\n');
 await writeFile(path.join(clientDir, 'fancymenu_data', 'layout.txt'), 'menu\n');
@@ -127,6 +129,10 @@ await writeFile(path.join(clientDir, 'scripts', 'aht.zs'), 'print("aht");\n');
 await writeFile(path.join(clientDir, 'structures', 'aht.nbt'), Buffer.from('fake structure'));
 await writeFile(path.join(clientDir, 'options.txt'), 'player-options\n');
 await writeFile(path.join(clientDir, 'optionsof.txt'), 'player-optifine-options\n');
+await writeFile(path.join(ptbClientDir, 'config', 'aht-ptb-client.cfg'), 'ptb=true\n');
+await writeFile(path.join(ptbClientDir, 'mods', 'aht-ptb-required.jar'), Buffer.from('fake ptb jar'));
+await writeFile(path.join(ptbClientDir, 'options.txt'), 'ptb-player-options\n');
+await writeFile(path.join(ptbClientDir, 'optionsof.txt'), 'ptb-player-optifine-options\n');
 
 await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
@@ -134,7 +140,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   latestUrl: '',
   curseforge: { proxyBaseUrl: '', apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: '', playerLabel: 'SmokeUser' },
-  developer: { adminBaseUrl: '', defaultOutDir: outDir, defaultCacheModsDir: '', clientModpackDir: clientDir, r2Bucket: 'ahtlauncher' },
+  developer: { adminBaseUrl: '', defaultOutDir: outDir, defaultCacheModsDir: '', clientModpackDir: clientDir, ptbClientModpackDir: ptbClientDir, r2Bucket: 'ahtlauncher' },
   minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -238,13 +244,115 @@ try {
   if (metadata.name !== 'A Hard Time') throw new Error(`Generated pack name mismatch: ${metadata.name}`);
   if (metadata.version !== '2.8.88') throw new Error(`Generated version mismatch: ${metadata.version}`);
 
+  const ptbProof = await evaluate(client, `
+    (async () => {
+      const stableZip = document.querySelector('#packZipInput')?.value || '';
+      const setValue = (selector, value) => {
+        const input = document.querySelector(selector);
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      document.querySelector('[data-dev-target="ptbModpackTools"]').click();
+      setValue('#ptbClientModpackDirInput', ${JSON.stringify(ptbClientDir)});
+      setValue('#ptbClientZipVersionInput', '2.9.0-ptb.8');
+      document.querySelector('#buildPtbClientZipButton').click();
+      const snapshot = () => ({
+        stableZip,
+        stableZipAfter: document.querySelector('#packZipInput')?.value || '',
+        ptbZip: document.querySelector('#ptbPackZipInput')?.value || '',
+        ptbZipInputType: document.querySelector('#ptbPackZipInput')?.type || '',
+        actionButtonIds: [...document.querySelectorAll('#ptbModpackTools .dev-actions button')].map((button) => button.id),
+        sourceValue: document.querySelector('#ptbClientModpackDirInput')?.value || '',
+        versionValue: document.querySelector('#ptbClientZipVersionInput')?.value || '',
+        browseButtonPresent: Boolean(document.querySelector('#pickPtbClientModpackDirButton')),
+        extraFeedPresent: Boolean(document.querySelector('#ptbPlayerFeedUrlInput')),
+        activePanelHidden: document.querySelector('#ptbModpackTools')?.hidden,
+        otherVisiblePanels: [...document.querySelectorAll('[data-dev-panel]')]
+          .filter((panel) => panel.id !== 'ptbModpackTools' && panel.hidden === false)
+          .map((panel) => panel.id),
+        state: document.querySelector('#ptbReleaseCheckState')?.textContent || '',
+        title: document.querySelector('#ptbReleaseCheckTitle')?.textContent || '',
+        detail: document.querySelector('#ptbReleaseCheckDetail')?.textContent || ''
+      });
+      const started = Date.now();
+      let last = snapshot();
+      while (Date.now() - started < 60000) {
+        last = snapshot();
+        if (last.ptbZip) return last;
+        if (/zip failed|source unavailable/i.test(last.state + ' ' + last.title)) {
+          throw new Error('PTB ZIP UI failed: ' + JSON.stringify(last));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      throw new Error('Timed out waiting for PTB ZIP: ' + JSON.stringify(last));
+    })()
+  `);
+  if (
+    !ptbProof.ptbZip
+    || ptbProof.ptbZipInputType !== 'hidden'
+    || JSON.stringify(ptbProof.actionButtonIds) !== JSON.stringify(['buildPtbClientZipButton'])
+    || path.resolve(ptbProof.sourceValue) !== path.resolve(ptbClientDir)
+    || ptbProof.versionValue !== '2.9.0-ptb.8'
+    || !ptbProof.browseButtonPresent
+    || ptbProof.extraFeedPresent
+    || ptbProof.activePanelHidden
+    || ptbProof.otherVisiblePanels.length
+    || ptbProof.stableZipAfter !== ptbProof.stableZip
+  ) {
+    throw new Error(`PTB must be a separate panel and must not replace the stable ZIP selection: ${JSON.stringify(ptbProof)}`);
+  }
+  const ptbZip = new AdmZip(ptbProof.ptbZip);
+  const ptbMetadataEntry = ptbZip.getEntry('aht-client-pack.json');
+  if (!ptbMetadataEntry) throw new Error('Generated PTB ZIP is missing aht-client-pack.json');
+  const ptbMetadata = JSON.parse(ptbMetadataEntry.getData().toString('utf8'));
+  if (ptbMetadata.packId !== 'a-hard-time-ptb') throw new Error(`Generated PTB pack id mismatch: ${ptbMetadata.packId}`);
+  if (ptbMetadata.name !== 'A Hard Time PTB') throw new Error(`Generated PTB pack name mismatch: ${ptbMetadata.name}`);
+  if (ptbMetadata.version !== '2.9.0-ptb.8') throw new Error(`Generated PTB version mismatch: ${ptbMetadata.version}`);
+  if (!ptbZip.getEntry('mods/aht-ptb-required.jar')) throw new Error('Generated PTB ZIP did not use the PTB source folder.');
+  if (ptbZip.getEntry('mods/aht-required.jar')) throw new Error('Generated PTB ZIP leaked the stable source folder.');
+  const savedDeveloperConfig = JSON.parse(await fsp.readFile(path.join(userData, 'launcher.config.json'), 'utf8'));
+  if (path.resolve(savedDeveloperConfig.developer?.ptbClientModpackDir || '') !== path.resolve(ptbClientDir)) {
+    throw new Error(`Saving developer settings erased the PTB source folder: ${JSON.stringify(savedDeveloperConfig.developer)}`);
+  }
+  const mismatchProof = await evaluate(client, `(async () => {
+    const errors = {};
+    try {
+      await window.aht.devBuildRelease({
+        packZip: ${JSON.stringify(proof.zipPath)},
+        outDir: ${JSON.stringify(outDir)},
+        baseUrl: 'https://launcher.test/ptb/',
+        releaseTarget: 'ptb'
+      });
+    } catch (error) {
+      errors.stableAsPtb = String(error?.message || error);
+    }
+    try {
+      await window.aht.devBuildRelease({
+        packZip: ${JSON.stringify(ptbProof.ptbZip)},
+        outDir: ${JSON.stringify(outDir)},
+        baseUrl: 'https://launcher.test/',
+        releaseTarget: 'stable'
+      });
+    } catch (error) {
+      errors.ptbAsStable = String(error?.message || error);
+    }
+    return errors;
+  })()`);
+  if (!/a-hard-time-ptb/i.test(mismatchProof.stableAsPtb || '') || !/a-hard-time-dregora/i.test(mismatchProof.ptbAsStable || '')) {
+    throw new Error(`Cross-channel ZIP selection was not rejected: ${JSON.stringify(mismatchProof)}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
     zipPath: proof.zipPath,
     packId: metadata.packId,
     fileCount: metadata.fileCount,
-    releasePackZip: proof.releasePackZip
+    releasePackZip: proof.releasePackZip,
+    ptbZipPath: ptbProof.ptbZip,
+    ptbPackId: ptbMetadata.packId,
+    stableZipUnchanged: ptbProof.stableZipAfter === ptbProof.stableZip,
+    crossChannelSelectionBlocked: Boolean(mismatchProof.stableAsPtb && mismatchProof.ptbAsStable)
   }, null, 2));
 } finally {
   if (client) {

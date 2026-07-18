@@ -310,7 +310,7 @@ try {
     if (payload.expectedVersion !== proof.status.launcherUpdate.latestVersion) {
       throw new Error(`Helper payload has wrong expected version: ${JSON.stringify(payload)}`);
     }
-    if (!payload.targetExe || !payload.oldPid || !payload.pendingFailurePath || !payload.installerArgs?.includes('/S') || !payload.installerArgs?.some((arg) => String(arg).startsWith('/D='))) {
+    if (!payload.targetExe || !payload.oldPid || !payload.pendingFailurePath || payload.testStartOnly !== true || !payload.installerArgs?.includes('/S') || !payload.installerArgs?.some((arg) => String(arg).startsWith('/D='))) {
       throw new Error(`Helper payload is missing restart details: ${JSON.stringify(payload)}`);
     }
     const helperLog = fs.readFileSync(launched.logPath, 'utf8');
@@ -336,7 +336,7 @@ try {
       }
     }
     const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
-    if (payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app') || !payload.pendingFailurePath) {
+    if (payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app') || !payload.pendingFailurePath || payload.testStartOnly !== true) {
       throw new Error(`macOS helper payload is missing update details: ${JSON.stringify(payload)}`);
     }
     const helperLog = fs.readFileSync(launched.logPath, 'utf8');

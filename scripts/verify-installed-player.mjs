@@ -7,6 +7,8 @@ const checks = [
   ['test:player-defaults'],
   ['test:player-privacy'],
   ['test:player-layout'],
+  ['test:friends-panel'],
+  ['test:legal-panel'],
   ['test:settings-profile'],
   ['test:account-duplicate'],
   ['test:account-switch'],

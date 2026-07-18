@@ -26,6 +26,13 @@ const launcherUpdateManifestTest = fs.readFileSync(new URL('../scripts/test-laun
 const launcherUpdateManifestValidator = fs.readFileSync(new URL('../scripts/validate-launcher-update-manifest.mjs', import.meta.url), 'utf8');
 const launcherUpdateManifestSource = fs.readFileSync(new URL('../src/launcherUpdateManifest.js', import.meta.url), 'utf8');
 const workerTelemetryTest = fs.readFileSync(new URL('../scripts/test-worker-telemetry.mjs', import.meta.url), 'utf8');
+const socialClientSource = fs.readFileSync(new URL('../src/socialClient.js', import.meta.url), 'utf8');
+const workerSource = fs.readFileSync(new URL('../cloudflare/curseforge-proxy-worker.js', import.meta.url), 'utf8');
+const friendsPanelSmoke = fs.readFileSync(new URL('../scripts/smoke-friends-panel.mjs', import.meta.url), 'utf8');
+const legalConsentSource = fs.readFileSync(new URL('../src/legalConsent.js', import.meta.url), 'utf8');
+const legalPanelSmoke = fs.readFileSync(new URL('../scripts/smoke-legal-consent-panel.mjs', import.meta.url), 'utf8');
+const termsText = fs.readFileSync(new URL('../legal/TERMS_OF_SERVICE.txt', import.meta.url), 'utf8');
+const privacyText = fs.readFileSync(new URL('../legal/PRIVACY_POLICY.txt', import.meta.url), 'utf8');
 const packageScripts = packageJson.scripts || {};
 const playerDefaultsStart = desktopMain.indexOf('function playerDefaultsForCloud');
 const playerDefaultsEnd = desktopMain.indexOf('function playerDefaultsTargets');
@@ -84,6 +91,11 @@ function pngColorType(relativePath) {
   return bytes[25];
 }
 
+function pngDimensions(relativePath) {
+  const bytes = fs.readFileSync(new URL(`../${relativePath}`, import.meta.url));
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
 function icoLayers(relativePath) {
   const bytes = fs.readFileSync(new URL(`../${relativePath}`, import.meta.url));
   const count = bytes.readUInt16LE(4);
@@ -117,6 +129,18 @@ assert(!windowsInstallerInclude.includes('"--developer"'), 'Public Windows insta
 assert(preloadScript.includes("selectFolder: (defaultPath = '') => ipcRenderer.invoke('dialog:folder', defaultPath)"), 'Folder picker preload API must accept a starting folder path.');
 assert(preloadScript.includes('function developerApiAllowed()') && preloadScript.includes("new URLSearchParams(window.location.search || '').get('mode') === 'developer'"), 'Preload developer APIs must be gated by the main-controlled developer window mode.');
 assert(preloadScript.includes('const developerApi = {') && preloadScript.includes('if (developerApiAllowed())'), 'Preload must keep developer IPC methods out of the default player API.');
+assert(preloadScript.includes("devLauncherDownloads: (payload) => ipcRenderer.invoke('dev:launcherDownloads'") && preloadScript.includes("devPlayerIpv4Groups: () => ipcRenderer.invoke('dev:playerIpv4Groups'"), 'Developer preload must expose permanent launcher-download history and IPv4 grouping only through developer IPC.');
+assert(workerSource.includes("const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/'") && workerSource.includes("const ACCOUNT_IPV4_PREFIX = 'accounts/ipv4/'") && workerSource.includes("'/admin/launcher-downloads'") && workerSource.includes("'/admin/player-ipv4-groups'"), 'Worker must keep launcher downloads and username-to-IPv4 associations in dedicated append-only histories.');
+assert(rendererApp.includes('while (true)') && rendererApp.includes('devLauncherDownloads({ limit: 250, cursor })') && rendererApp.includes('Download history pagination returned a repeated cursor'), 'Developer Player Data must page through the complete launcher download history safely.');
+assert(rendererCss.includes('max-height: min(68vh, 760px)') && rendererCss.includes('overflow-y: scroll'), 'Developer launcher download history must remain fully scrollable.');
+assert(preloadScript.includes("devSaveServerTransfer: (payload) => ipcRenderer.invoke('dev:saveServerTransfer'"), 'Server folder settings must have a dedicated persistence IPC.');
+assert(desktopMain.includes('async function persistServerTransferSettings') && rendererApp.includes('await saveServerTransferSettings();') && rendererApp.includes('await planServerTransfer();'), 'Selecting a server folder must persist it and immediately produce an upload plan.');
+assert(installerSource.includes("'config/jei/bookmarks.ini'") && installerSource.includes('isPlayerUpdatePreservedRelPath') && installerSource.includes('preserveUpdateState'), 'JEI bookmarks must be player-owned after the first install and preserved by updates and repairs.');
+assert(rendererHtml.includes('Deploy Latest Launcher') && preloadScript.includes("devDeployLauncher: (payload) => ipcRenderer.invoke('dev:deployLauncher'"), 'Developer launcher must expose a one-click public launcher deploy control.');
+assert(desktopMain.includes('function publicLauncherWorkflow()') && desktopMain.includes("repo: LAUNCHER_WORKFLOW_DEFAULTS.repo") && desktopMain.includes("ref: LAUNCHER_WORKFLOW_DEFAULTS.branch") && desktopMain.includes("workflow: LAUNCHER_WORKFLOW_DEFAULTS.workflow"), 'One-click launcher deployment must ignore stale UI targets and stay locked to the public repository, main branch, and player workflow.');
+assert(!rendererApp.slice(rendererApp.indexOf('async function publishLauncherUpdate()'), rendererApp.indexOf('function serverTransferPayload()')).includes('githubRepo:'), 'One-click launcher deployment must not accept a repository override from the renderer.');
+assert(desktopMain.includes('function assertPublicLauncherWorkflow') && desktopMain.includes('developerArtifactsUploaded: false') && desktopMain.includes('waitForPublishedLauncherVersion'), 'Launcher deploy must lock to the public workflow and verify the live update feed without developer artifacts.');
+assert(!/release_assets=\([^\n]*(?:developer|dev-launcher)/i.test(releaseWorkflow), 'Public GitHub Release workflow must never include a developer launcher asset.');
 assert(desktopMain.includes("ipcMain.handle('dialog:folder', async (_event, defaultPath = '')") && desktopMain.includes('options.defaultPath = startingPath'), 'Native folder picker must pass the supplied starting path to Electron defaultPath.');
 assert(desktopMain.includes("process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_DIALOG_ECHO_DEFAULT_PATH === '1'"), 'Dialog test hook must require the explicit AHT_TEST_HOOKS gate.');
 assert(desktopMain.includes('function configureTestRemoteDebugPort()') && desktopMain.includes("process.env.AHT_TEST_HOOKS !== '1'") && desktopMain.includes('AHT_TEST_REMOTE_DEBUG_PORT'), 'Packaged smoke remote-debug hook must be gated by AHT_TEST_HOOKS and an explicit port env var.');
@@ -154,6 +178,7 @@ assert(rendererApp.includes('Ready to Install') && rendererApp.includes('Install
 assert(desktopMain.includes('pending-launcher-update.json') && desktopMain.includes('pending-launcher-update.failed') && desktopMain.includes('shouldExitForPendingLauncherInstall') && desktopMain.includes('launcher-update-install-pending-exit'), 'Launcher self-update must persist handoff state, recover helper failures, and close old copies that reopen while the installer is running.');
 assert(!desktopMain.includes('keepOpenUntil') && !desktopMain.includes("mainWindow.on('close', (event)") && !desktopMain.includes('event.preventDefault();\n      focusMainWindow();'), 'Normal play/update operations must not trap the launcher window open with a timed close guard.');
 assert(desktopMain.includes('waitForLauncherUpdateHelperStart') && desktopMain.includes('Launcher update helper did not start') && desktopMain.includes('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'), 'Launcher restart must verify the handoff helper starts before quitting.');
+assert(desktopMain.includes('testStartOnly: process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY') && desktopMain.includes('$payload.testStartOnly -eq $true') && desktopMain.includes("test_start_only=${payload.testStartOnly ? '1' : '0'}"), 'Detached Windows and macOS update helpers must receive test-only startup mode through their payload instead of relying only on inherited environment variables.');
 assert(desktopMain.includes('function windowsLauncherInstallerArgs') && desktopMain.includes('`/D=${targetDir}`'), 'Windows launcher self-update must install into the current launcher directory.');
 assert(smokeLauncherSelfUpdate.includes('launcher-update-install-pending-exit') && smokeLauncherSelfUpdate.includes('reopened old launcher did not exit during pending install'), 'Launcher self-update smoke must prove reopened old copies exit during an installing handoff.');
 assert(!desktopMain.includes('/usr/bin/open "$zip_path"'), 'macOS self-update helper must not open the update ZIP on failure.');
@@ -191,10 +216,17 @@ assert(rendererHtml.includes('class="game-thumb alt bill-art"'), 'AHT 3.0 tile m
 assert(rendererHtml.includes('class="game-thumb download-thumb aht-art"'), 'Downloads tile must keep the full cover art.');
 assert(rendererCss.includes('assets/aht-cover.png'), 'Full cover art CSS must stay available for modpack tiles.');
 assert(rendererCss.includes('assets/aht-bill-transparent.png'), 'Transparent bill art CSS must stay available for app/profile marks.');
+assert(rendererCss.includes('assets/launcher-background.png'), 'Launcher background CSS must use the dedicated high-resolution background asset.');
+assert(rendererCss.includes('body:not(.dev-mode) .workspace'), 'Player background must be owned by the regular launcher workspace.');
+assert(!rendererCss.includes('.hero-panel::before') && !rendererCss.includes('.hero-panel::after') && !rendererCss.includes('.hero-art::after'), 'Player background must not be covered by decorative hero overlays.');
+assert(rendererHtml.includes('id="scanButton"') && rendererHtml.includes('icon-wrench') && rendererHtml.includes('Repair') && !rendererHtml.includes('Scan files'), 'Player quick action must be labeled Repair, not Scan files.');
 assert(rendererCss.includes('.feature-art.aht-art::after') && !rendererCss.includes('\n.aht-art::after'), 'AHT cover-art title overlay must only apply to large update-log art, not sidebar thumbnails.');
 assert(rendererCss.includes('.feature-art.aht-art::before') && !rendererCss.includes('\n.aht-art::before'), 'AHT cover-art lighting overlay must only apply to large update-log art, not sidebar thumbnails.');
 assert(fs.existsSync(new URL('../desktop/renderer/assets/aht-cover.png', import.meta.url)), 'Full cover art asset must exist.');
 assert(fs.existsSync(new URL('../desktop/renderer/assets/aht-bill-transparent.png', import.meta.url)), 'Transparent bill art asset must exist.');
+assert(fs.existsSync(new URL('../desktop/renderer/assets/launcher-background.png', import.meta.url)), 'Launcher background asset must exist.');
+const launcherBackgroundSize = pngDimensions('desktop/renderer/assets/launcher-background.png');
+assert(launcherBackgroundSize.width === 2240 && launcherBackgroundSize.height === 1520, `Launcher background must be pre-cropped to 2x the default launcher ratio, got ${launcherBackgroundSize.width}x${launcherBackgroundSize.height}.`);
 assert(pngColorType('build/icon.png') === 6, 'Windows app icon PNG must preserve alpha transparency.');
 assert(pngColorType('build/icon-mac.png') === 6, 'macOS app icon PNG must preserve alpha transparency.');
 assert(pngColorType('desktop/renderer/assets/aht-bill-transparent.png') === 6, 'Transparent bill art must be an alpha PNG.');
@@ -218,7 +250,7 @@ assert(!packageJson.build?.files?.includes('config/**/*'), 'Legacy package build
 assert(!packageJson.build?.files?.includes('cloudflare/**/*'), 'Legacy package build config must not package Cloudflare Worker source.');
 assert(!packageJson.build?.files?.some((item) => String(item).startsWith('server-lock-mod/')), 'Legacy package build config must not package server-lock-mod artifacts.');
 assert(!packageJson.build?.asarUnpack?.some((item) => String(item).startsWith('server-lock-mod/')), 'Legacy package build config must not unpack server-lock-mod artifacts.');
-assert(developerOnlySourceFiles.length === 5, 'Regular player package developer-only source files must be declared.');
+assert(developerOnlySourceFiles.length === 6, 'Regular player package developer-only source files must be declared.');
 for (const relativePath of developerOnlySourceFiles) {
   const exclusion = `!${relativePath}`;
   assert(configs.windows.files?.includes(exclusion), `Windows regular player package must exclude ${relativePath}.`);
@@ -248,8 +280,33 @@ for (const stalePath of ['../installer.js', '../main.js', '../clientPackFormat.j
 assert(packageScripts['verify:local'] === 'node scripts/verify-local.mjs', 'verify:local must use scripts/verify-local.mjs.');
 assert(packageScripts['verify:installed-player'] === 'node scripts/verify-installed-player.mjs', 'verify:installed-player must run the installed player launcher smoke suite.');
 assert(packageScripts['test:player-update-play'] === 'node scripts/smoke-player-update-play-flow.mjs', 'Regular player update/play smoke must stay wired as an npm script.');
+assert(packageScripts['test:social-client'] === 'node scripts/test-social-client.mjs', 'Authenticated social client contract test must stay wired.');
+assert(packageScripts['test:social-worker'] === 'node scripts/test-worker-social.mjs', 'Worker social bridge contract test must stay wired.');
+assert(packageScripts['test:friends-panel'] === 'node scripts/smoke-friends-panel.mjs', 'Friends panel Electron smoke must stay wired.');
+assert(packageScripts['test:legal-consent'] === 'node scripts/test-legal-consent.mjs' && packageScripts['test:legal-panel'] === 'node scripts/smoke-legal-consent-panel.mjs', 'Legal consent contract and Electron panel smokes must stay wired.');
 assert(verifyLocalScript.includes("['test:player-update-play']"), 'verify:local must run the fresh-player update/play smoke.');
 assert(verifyLocalScript.includes("['test:download-retry']"), 'verify:local must run the retrying download smoke.');
+assert(verifyLocalScript.includes("['test:social-client']") && verifyLocalScript.includes("['test:social-worker']") && verifyLocalScript.includes("['test:friends-panel']"), 'verify:local must cover the social client, Worker bridge, and rendered panel.');
+assert(verifyLocalScript.includes("['test:legal-consent']") && verifyLocalScript.includes("['test:legal-panel']"), 'verify:local must cover versioned consent storage and rendered clickwrap.');
+assert(rendererHtml.includes('id="profileFriendsButton"') && rendererHtml.includes('aria-controls="friendsOverlay"'), 'Top-right player profile must be a keyboard-accessible friends dialog trigger.');
+assert(rendererHtml.includes('id="friendsCount"') && rendererHtml.includes('id="friendsOnlineCount"') && rendererHtml.includes('id="blockedCount"'), 'Friends panel must show friend, online, and blocked counts.');
+assert(rendererApp.includes('runFriendAction("add_friend")') && rendererApp.includes('"remove_friend", "Unadd"') && rendererApp.includes('"unblock_player", "Unblock"'), 'Renderer must expose Add, Unadd, and Unblock actions.');
+assert(!rendererApp.includes('runFriendAction("block') && !rendererHtml.includes('id="blockPlayerButton"'), 'Launcher must never expose a block-player action.');
+assert(preloadScript.includes("ipcRenderer.invoke('social:list')") && preloadScript.includes("ipcRenderer.invoke('social:action'"), 'Preload must expose social IPC without exposing credentials.');
+assert(desktopMain.includes("ipcMain.handle('social:list'") && desktopMain.includes("ipcMain.handle('social:action'") && desktopMain.includes('writeRegisteredLauncherProof'), 'Main process must authenticate social reads and actions with a registered launcher proof.');
+assert(socialClientSource.includes("new Set(['add_friend', 'remove_friend', 'unblock_player'])") && !socialClientSource.includes("'block_player'"), 'Social client action allowlist must exclude blocking.');
+assert(workerSource.includes("new Set(['add_friend', 'remove_friend', 'unblock_player'])") && workerSource.includes("'/server/social/sync'") && workerSource.includes("'/api/social/actions'"), 'Worker must enforce the social action allowlist and signed server sync route.');
+assert(friendsPanelSmoke.includes("actionNames !== 'add_friend,remove_friend,unblock_player'") && friendsPanelSmoke.includes("Object.keys(entry).sort().join(',') !== 'action,target'"), 'Friends panel smoke must prove all allowed actions and prevent renderer identity payloads.');
+assert(configs.windows.nsis?.license === 'legal/TERMS_OF_SERVICE.txt', 'Windows assisted installer must present the AHT Terms before installation.');
+assert(configs.macos.dmg?.license === 'legal/TERMS_OF_SERVICE.txt', 'macOS DMG must present the AHT Terms before installation.');
+assert(commonBuilder.regularPlayerConfig({ productName: 'x', output: 'x', target: 'x' }).files.includes('legal/**/*'), 'Regular player packages must include the legal documents used by runtime consent.');
+assert(rendererHtml.includes('id="legalOverlay"') && rendererHtml.includes('id="legalAcceptCheckbox"') && rendererHtml.includes('id="legalAcceptButton"'), 'Player UI must contain explicit versioned clickwrap controls.');
+assert(preloadScript.includes("ipcRenderer.invoke('legal:status')") && preloadScript.includes("ipcRenderer.invoke('legal:accept'"), 'Preload must expose legal status and acceptance IPC.');
+assert(desktopMain.includes("ipcMain.handle('legal:status'") && desktopMain.includes("ipcMain.handle('legal:accept'"), 'Main process must own legal document loading and consent persistence.');
+assert(legalConsentSource.includes("TERMS_VERSION = '2026-07-14.1'") && legalConsentSource.includes('termsSha256') && legalConsentSource.includes('privacySha256'), 'Consent records must be versioned and bound to exact document hashes.');
+assert(legalPanelSmoke.includes("AHT_TEST_REQUIRE_LEGAL: '1'") && legalPanelSmoke.includes("acceptDisabled"), 'Legal panel smoke must prove the unchecked acceptance gate.');
+assert(termsText.includes('not a government fine') && termsText.includes('non-waivable right to defend a claim'), 'Terms must qualify contractual remedies and preserve non-waivable defenses.');
+assert(privacyText.includes('IP address') && privacyText.includes('blocked players') && privacyText.includes('does not sell personal information'), 'Privacy Policy must disclose launcher/server/web data and no-sale practice.');
 assert(!rendererHtml.includes('legacy CurseForge export ZIP'), 'Release Builder UI must not advertise legacy CurseForge ZIPs for normal player releases.');
 assert(!rendererApp.includes('legacy CurseForge ZIP first'), 'Release Builder publish lock must require an exact AHT client ZIP.');
 assert(!workerTelemetryTest.includes('CurseForge-style installs'), 'Worker telemetry update-log fixture must describe exact AHT client ZIP installs, not the legacy CurseForge flow.');
@@ -322,6 +379,7 @@ for (const developerOnlyImport of [
   "../src/clientModpackZip.js",
   "../src/serverTransfer.js",
   "../src/githubActions.js",
+  "../src/githubModpackRelease.js",
   "../src/r2DirectUpload.js"
 ]) {
   assert(!desktopMain.includes(`from '${developerOnlyImport}'`) && !desktopMain.includes(`from \"${developerOnlyImport}\"`), `${developerOnlyImport} must not be imported at main-process startup.`);
@@ -331,6 +389,7 @@ assert(desktopMain.includes("function loadReleaseBuilderModule()") && desktopMai
 assert(desktopMain.includes("function loadClientModpackZipModule()") && desktopMain.includes("importDeveloperModule('../src/clientModpackZip.js')"), 'Exact client ZIP helpers must be lazy-loaded for developer actions.');
 assert(desktopMain.includes("function loadR2DirectUploadModule()") && desktopMain.includes("importDeveloperModule('../src/r2DirectUpload.js')"), 'Direct R2 upload must be lazy-loaded for developer actions.');
 assert(desktopMain.includes("function loadGithubActionsModule()") && desktopMain.includes("importDeveloperModule('../src/githubActions.js')"), 'GitHub workflow helpers must be lazy-loaded for developer actions.');
+assert(desktopMain.includes("function loadGithubModpackReleaseModule()") && desktopMain.includes("importDeveloperModule('../src/githubModpackRelease.js')"), 'GitHub modpack release helpers must be lazy-loaded for developer actions.');
 assert(desktopMain.includes("function loadServerTransferModule()") && desktopMain.includes("importDeveloperModule('../src/serverTransfer.js')"), 'Server transfer helpers must be lazy-loaded for developer actions.');
 assert(desktopMain.includes("import fsSync from 'node:fs';"), 'Launcher mode detection must import fsSync.');
 assert(desktopMain.includes("app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'))"), 'Developer mode must use separate local app data.');

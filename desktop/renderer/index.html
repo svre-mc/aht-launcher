@@ -19,11 +19,18 @@
       </div>
 
       <div class="game-list">
-        <button id="gameTileButton" class="game-tile active" type="button" data-tab="player">
+        <button id="gameTileButton" class="game-tile active" type="button" data-tab="player" data-pack="aht">
           <span class="game-thumb bill-art"><span>AHT</span></span>
           <span class="game-copy">
             <strong id="sidePackTitle">AHT</strong>
             <small><span class="sidebar-version-dot" aria-hidden="true"></span><span id="sideInstalledVersion">Not Installed</span></small>
+          </span>
+        </button>
+        <button id="ptbTileButton" class="game-tile" type="button" data-tab="player" data-pack="ptb">
+          <span class="game-thumb bill-art"><span>PTB</span></span>
+          <span class="game-copy">
+            <strong>PTB</strong>
+            <small><span class="sidebar-version-dot" aria-hidden="true"></span><span id="ptbSideInstalledVersion">Public test build</span></small>
           </span>
         </button>
         <button class="game-tile coming-soon" type="button" disabled aria-disabled="true" tabindex="-1">
@@ -64,13 +71,13 @@
           <button id="developerTab" class="tab nav-item" data-tab="developer" hidden>Developer</button>
         </nav>
 
-        <div class="profile-card">
+        <button id="profileFriendsButton" class="profile-card" type="button" aria-haspopup="dialog" aria-controls="friendsOverlay" aria-label="Open friends" hidden>
           <div class="profile-avatar bill-art"><span>AHT</span></div>
           <div class="profile-copy">
             <strong id="playerLabelView">Player</strong>
             <span id="syncStatus"><span class="online-dot"></span>Sync -</span>
           </div>
-        </div>
+        </button>
       </header>
 
       <section id="setupNotice" class="setup-notice" hidden>
@@ -88,7 +95,7 @@
         <section class="hero-panel">
           <div class="hero-art">
             <div class="hero-copy">
-              <h1>A Hard Time</h1>
+              <h1 id="playerPackTitle">A Hard Time</h1>
               <div id="versionLine" class="subline">Loading</div>
             </div>
             <div id="statusBadge" class="status-pill">Checking</div>
@@ -98,7 +105,7 @@
         </section>
 
         <section class="quick-actions">
-          <button id="scanButton" class="ghost-button"><span class="button-icon icon-scan" aria-hidden="true"></span>Scan files</button>
+          <button id="scanButton" class="ghost-button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
           <button class="ghost-button tab" data-tab="settings"><span class="button-icon icon-settings" aria-hidden="true"></span>Game settings</button>
         </section>
 
@@ -201,6 +208,7 @@
           <nav class="dev-tabs" aria-label="Developer sections">
             <button class="dev-tab active" type="button" data-dev-target="releaseTools">Release Builder</button>
             <button class="dev-tab" type="button" data-dev-target="modpackZipTools">Modpack ZIP</button>
+            <button class="dev-tab" type="button" data-dev-target="ptbModpackTools">PTB Modpack</button>
             <button class="dev-tab" type="button" data-dev-target="launcherUpdateTools">Launcher Updates</button>
             <button class="dev-tab" type="button" data-dev-target="serverUploadTools">Server Upload</button>
             <button class="dev-tab" type="button" data-dev-target="updateLogTools">Update Logs</button>
@@ -208,10 +216,10 @@
           </nav>
 
           <section class="dev-strip" aria-label="Dashboard totals">
-            <div><span>Installs</span><button id="installCount" class="metric-value" type="button" data-event-filter="installs">-</button></div>
-            <div><span>Repairs</span><button id="repairCount" class="metric-value" type="button" data-event-filter="repairs">-</button></div>
-            <div><span>Change Reports</span><button id="changeCount" class="metric-value" type="button" data-event-filter="changes">-</button></div>
-            <div><span>Unique IPs</span><button id="ipCount" class="metric-value" type="button" data-event-filter="ips">-</button></div>
+            <div><span>Launcher Downloads</span><button id="downloadCount" class="metric-value" type="button" data-event-filter="all">-</button></div>
+            <div><span>Unique IPv4</span><button id="uniqueIpv4Count" class="metric-value" type="button" data-event-filter="ips">-</button></div>
+            <div><span>Shared IPv4</span><button id="sharedIpv4Count" class="metric-value" type="button" data-event-filter="shared">-</button></div>
+            <div><span>IPv4 Unavailable</span><button id="ipv4UnavailableCount" class="metric-value" type="button" data-event-filter="unavailable">-</button></div>
           </section>
 
           <section id="releaseTools" class="dev-section" data-dev-panel>
@@ -236,7 +244,6 @@
               <div class="dev-fields">
                 <label class="span-2">Player Feed URL <input id="playerFeedUrlInput" type="url" placeholder="https://your-worker.workers.dev/latest.json"></label>
                 <label class="span-2">Fallback Cache Mods Folder <span class="browse"><input id="cacheModsInput" type="text"><button id="pickCacheModsButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
-                <label>Channel <input id="channelInput" type="text" value="stable"></label>
                 <label>R2 Bucket <input id="bucketInput" type="text"></label>
                 <label>R2 Account ID <input id="r2AccountIdInput" type="text" autocomplete="off" placeholder="Cloudflare account ID"></label>
                 <label>R2 Access Key ID <input id="r2AccessKeyIdInput" type="password" autocomplete="off"></label>
@@ -248,7 +255,7 @@
                 <span id="releaseCheckState">Ready</span>
                 <strong id="releaseCheckTitle">Choose a ZIP</strong>
               </div>
-              <p id="releaseCheckDetail">Pick an exact AHT client ZIP from Modpack ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.</p>
+              <p id="releaseCheckDetail">Pick an exact AHT client ZIP from Modpack ZIP, then publish it to the stable R2 feed and stable GitHub release track.</p>
             </div>
             <div id="releaseUploadProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="releaseUploadProgressLabel">Preparing upload</span><span id="releaseUploadProgressCount">0%</span></div>
@@ -275,12 +282,36 @@
               <p>Creates a clean AHT ZIP from config, fancymenu_data, mods, resourcepacks, resources, scripts, structures, options.txt, and optionsof.txt.</p>
             </div>
           </section>
+          <section id="ptbModpackTools" class="dev-section" data-dev-panel hidden>
+            <div class="dev-section-head">
+              <h2>PTB Modpack</h2>
+              <div class="dev-actions">
+                <button id="buildPtbClientZipButton" class="button primary compact" type="button"><span class="button-icon icon-save" aria-hidden="true"></span>Create ZIP</button>
+              </div>
+            </div>
+            <div class="dev-fields">
+              <label class="span-2">PTB Client Modpack Folder <span class="browse"><input id="ptbClientModpackDirInput" type="text" placeholder="Select the PTB client modpack folder"><button id="pickPtbClientModpackDirButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label>Pack Version <input id="ptbClientZipVersionInput" type="text" placeholder="2.8.52-ptb.1"></label>
+            </div>
+            <input id="ptbPackZipInput" type="hidden">
+            <div id="ptbReleaseCheckCard" class="release-check-card warn">
+              <div>
+                <span id="ptbReleaseCheckState">PTB ready</span>
+                <strong id="ptbReleaseCheckTitle">Ready to create and upload</strong>
+              </div>
+              <p id="ptbReleaseCheckDetail">Uses the configured RLCraft Dregora client and publishes only to the isolated PTB feed. Stable AHT is not modified.</p>
+            </div>
+            <div id="ptbReleaseUploadProgress" class="progress-wrap release-upload-progress" hidden>
+              <div class="progress-meta"><span id="ptbReleaseUploadProgressLabel">Preparing PTB upload</span><span id="ptbReleaseUploadProgressCount">0%</span></div>
+              <div class="progress-track"><div id="ptbReleaseUploadProgressBar" class="progress-bar"></div></div>
+            </div>
+          </section>
           <section id="launcherUpdateTools" class="dev-section" data-dev-panel hidden>
             <div class="dev-section-head">
               <h2>Launcher Updates</h2>
               <div class="dev-actions">
                 <button id="scanLauncherBuildsButton" class="button compact"><span class="button-icon icon-scan" aria-hidden="true"></span>Check GitHub</button>
-                <button id="publishLauncherUpdateButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Run GitHub Build</button>
+                <button id="publishLauncherUpdateButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Deploy Latest Launcher</button>
               </div>
             </div>
             <div class="dev-fields">
@@ -295,6 +326,10 @@
                 <strong>GitHub Actions ready</strong>
               </div>
               <p>Run the GitHub release workflow. Actions builds Windows and macOS, publishes GitHub Releases, uploads R2, then players update from launcher/latest.json.</p>
+            </div>
+            <div id="launcherDeployProgress" class="progress-wrap release-upload-progress" hidden>
+              <div class="progress-meta"><span id="launcherDeployProgressLabel">Preparing public deploy</span><span id="launcherDeployProgressCount">0%</span></div>
+              <div class="progress-track"><div id="launcherDeployProgressBar" class="progress-bar"></div></div>
             </div>
           </section>
 
@@ -358,23 +393,23 @@
           <section id="playerDataTools" class="dev-data-grid" data-dev-panel hidden>
             <section class="dev-section">
               <div class="dev-section-head">
-                <h2>Recent Events</h2>
+                <h2>Launcher Download History</h2>
                 <div class="dev-actions">
-                  <span id="eventFilterLabel" class="quiet-label">All events</span>
-                  <button id="loadDashboardButton" class="button compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Load Data</button>
+                  <span id="eventFilterLabel" class="quiet-label">All downloads</span>
+                  <button id="loadDashboardButton" class="button compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Reload History</button>
                 </div>
               </div>
               <div class="event-table-head">
-                <span>Time</span><span>Type</span><span>Player</span><span>IP</span><span>Platform</span><span>Version</span><span>Summary</span>
+                <span>Time</span><span>Download</span><span>Player(s)</span><span>IPv4</span><span>Platform</span><span>Version</span><span>File</span>
               </div>
               <div id="eventsList" class="events data-events">
-                <div class="empty-state">Log in and load data to view recent installs, repairs, and local-change reports.</div>
+                <div class="empty-state">Log in and load the append-only launcher download history.</div>
               </div>
             </section>
 
             <section class="dev-section">
               <div class="dev-section-head">
-                <h2>Selected Event</h2>
+                <h2>Selected Download</h2>
                 <span class="quiet-label">Raw data</span>
               </div>
               <div id="eventDetails" class="event-detail" hidden>
@@ -440,6 +475,38 @@
       </div>
     </section>
   </div>
+  <div id="friendsOverlay" class="overlay friends-overlay" hidden>
+    <section class="friends-dialog" role="dialog" aria-modal="true" aria-labelledby="friendsTitle">
+      <header class="friends-header">
+        <div>
+          <p class="eyebrow">Player Network</p>
+          <h2 id="friendsTitle">Friends</h2>
+          <span id="friendsSummary" class="account-copy">Loading friends.</span>
+        </div>
+        <div class="friends-header-actions">
+          <button id="friendsRefreshButton" class="button compact" type="button">Refresh</button>
+          <button id="friendsCloseButton" class="modal-icon-button" type="button" aria-label="Close friends"><span class="button-icon icon-close" aria-hidden="true"></span></button>
+        </div>
+      </header>
+      <div class="friends-counts">
+        <div><span id="friendsCount">0</span><small>Friends</small></div>
+        <div><span id="friendsOnlineCount">0</span><small>Online</small></div>
+        <div><span id="blockedCount">0</span><small>Blocked</small></div>
+      </div>
+      <div id="friendsStatus" class="friends-status" aria-live="polite"></div>
+      <div class="friends-grid">
+        <section class="friends-panel">
+          <h3>Friends</h3>
+          <div id="friendsList" class="friends-list"></div>
+        </section>
+        <section class="friends-panel">
+          <h3>Blocked Players</h3>
+          <div id="blockedList" class="friends-list"></div>
+        </section>
+      </div>
+      <label class="friends-add">Add Friend <span class="inline-action"><input id="addFriendInput" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Minecraft username"><button id="addFriendButton" class="button compact" type="button">Add</button></span></label>
+    </section>
+  </div>
   <div id="updateOptionsOverlay" class="overlay repair-prompt-overlay" hidden>
     <section class="repair-prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="updateOptionsTitle">
       <div>
@@ -465,6 +532,29 @@
       <div id="accountError" class="account-error" aria-live="polite"></div>
       <button id="accountCreateButton" class="button primary compact" type="submit"><span class="button-icon icon-login" aria-hidden="true"></span>Continue</button>
     </form>
+  </div>
+  <div id="legalOverlay" class="overlay legal-overlay" hidden>
+    <section class="legal-dialog" role="dialog" aria-modal="true" aria-labelledby="legalTitle">
+      <header class="legal-header">
+        <div>
+          <p class="eyebrow">SIIS Enterprise LLC</p>
+          <h2 id="legalTitle">Terms &amp; Privacy</h2>
+          <span id="legalIntro" class="account-copy">Review the current agreement before continuing.</span>
+        </div>
+        <span id="legalVersion" class="legal-version"></span>
+      </header>
+      <div class="legal-tabs" role="tablist" aria-label="Legal documents">
+        <button id="legalTermsTab" class="legal-tab is-active" type="button" role="tab" aria-selected="true" data-legal-document="terms">Terms of Service</button>
+        <button id="legalPrivacyTab" class="legal-tab" type="button" role="tab" aria-selected="false" data-legal-document="privacy">Privacy Policy</button>
+      </div>
+      <pre id="legalDocumentText" class="legal-document" tabindex="0"></pre>
+      <label class="legal-consent-check"><input id="legalAcceptCheckbox" type="checkbox"><span>I am the age of majority where I live, or I am the parent/legal guardian accepting for a user age 13 or older. I have read and agree to the Terms of Service and acknowledge the Privacy Policy.</span></label>
+      <div id="legalError" class="account-error" aria-live="polite"></div>
+      <div class="legal-actions">
+        <button id="legalExitButton" class="button compact" type="button">Exit</button>
+        <button id="legalAcceptButton" class="button primary compact" type="button" disabled>I Agree</button>
+      </div>
+    </section>
   </div>
   <div id="launcherUpdateOverlay" class="overlay launcher-update-overlay" hidden>
     <section class="launcher-update-dialog" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle">

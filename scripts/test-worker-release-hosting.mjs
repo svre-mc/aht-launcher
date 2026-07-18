@@ -3,6 +3,8 @@ import worker from '../cloudflare/curseforge-proxy-worker.js';
 const encoder = new TextEncoder();
 const store = new Map([
   ['latest.json', { value: JSON.stringify({ name: 'AHT', version: '2.8.1' }), contentType: 'application/json; charset=utf-8' }],
+  ['ptb/latest.json', { value: JSON.stringify({ name: 'AHT PTB', version: '2.9.0-ptb.1' }), contentType: 'application/json; charset=utf-8' }],
+  ['ptb/packs/aht-ptb.zip', { value: new Uint8Array([21, 22, 23]), contentType: '' }],
   ['launcher/latest.json', { value: JSON.stringify({ product: 'aht-launcher', version: '0.1.1' }), contentType: 'application/json; charset=utf-8' }],
   ['launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe', { value: new Uint8Array([7, 8, 9]), contentType: '' }],
   ['cache/files/test.jar', { value: new Uint8Array([1, 2, 3]), contentType: '' }],
@@ -81,6 +83,18 @@ results.push(await check('release prefix alias', new Request('https://worker.tes
   contentType: 'application/json; charset=utf-8',
   cacheControl: 'public, max-age=60, must-revalidate',
   length: '32'
+}));
+results.push(await check('ptb latest', new Request('https://worker.test/ptb/latest.json'), {
+  status: 200,
+  contentType: 'application/json; charset=utf-8',
+  cacheControl: 'public, max-age=60, must-revalidate',
+  body: '{"name":"AHT PTB","version":"2.9.0-ptb.1"}'
+}));
+results.push(await check('ptb pack', new Request('https://worker.test/ptb/packs/aht-ptb.zip'), {
+  status: 200,
+  contentType: 'application/zip',
+  cacheControl: 'public, max-age=31536000, immutable',
+  length: '3'
 }));
 results.push(await check('cache jar', new Request('https://worker.test/cache/files/test.jar'), {
   status: 200,

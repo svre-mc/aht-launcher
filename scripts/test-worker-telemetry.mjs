@@ -10,19 +10,50 @@ const env = {
     async put(key, value) {
       objects.set(key, value);
     },
-    async list({ prefix }) {
+    async list({ prefix, limit = 1000, cursor = '' }) {
+      const matches = [...objects.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .sort((left, right) => left.localeCompare(right));
+      const start = Number(cursor || 0);
+      const page = matches.slice(start, start + limit);
+      const next = start + page.length;
       return {
-        objects: [...objects.keys()]
-          .filter((key) => key.startsWith(prefix))
-          .map((key) => ({ key }))
+        objects: page.map((key) => ({ key })),
+        truncated: next < matches.length,
+        cursor: next < matches.length ? String(next) : undefined
       };
     },
     async get(key) {
       const value = objects.get(key);
-      return value ? { async json() { return JSON.parse(value); } } : null;
+      if (value === undefined) return null;
+      const bytes = new TextEncoder().encode(value);
+      return {
+        size: bytes.length,
+        body: bytes,
+        httpMetadata: { contentType: key.endsWith('.json') ? 'application/json' : 'application/octet-stream' },
+        async json() { return JSON.parse(value); }
+      };
+    },
+    async head(key) {
+      const value = objects.get(key);
+      return value === undefined ? null : { size: new TextEncoder().encode(value).length, httpMetadata: {} };
     }
   }
 };
+
+objects.set('launcher/latest.json', JSON.stringify({
+  schemaVersion: 1,
+  product: 'aht-launcher',
+  version: '9.9.9',
+  downloads: {
+    'windows-x64': { label: 'Windows 10/11', fileName: 'AHT-Windows.exe', path: 'launcher/files/win32-x64/AHT-Windows.exe' },
+    'macos-arm64': { label: 'macOS Apple Silicon', fileName: 'AHT-arm64.dmg', path: 'launcher/files/darwin-arm64/AHT-arm64.dmg' },
+    'macos-x64': { label: 'macOS Intel', fileName: 'AHT-x64.dmg', path: 'launcher/files/darwin-x64/AHT-x64.dmg' }
+  }
+}));
+objects.set('launcher/files/win32-x64/AHT-Windows.exe', 'windows installer');
+objects.set('launcher/files/darwin-arm64/AHT-arm64.dmg', 'mac arm installer');
+objects.set('launcher/files/darwin-x64/AHT-x64.dmg', 'mac intel installer');
 
 async function jsonRequest(path, options = {}) {
   const response = await worker.fetch(new Request(`https://worker.test${path}`, options), env, {
@@ -33,6 +64,38 @@ async function jsonRequest(path, options = {}) {
     throw new Error(`${path} failed: ${response.status} ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+async function trackedDownload(path, headers = {}) {
+  const response = await worker.fetch(new Request(`https://worker.test${path}`, { headers }), env, {});
+  if (response.status !== 302) {
+    throw new Error(`${path} did not redirect to an installer: ${response.status} ${await response.text()}`);
+  }
+  return response.headers.get('Location') || '';
+}
+
+const windowsDownload = await trackedDownload('/launcher/download/windows-x64', {
+  'CF-Connecting-IP': '203.0.113.42',
+  'User-Agent': 'AHT website test'
+});
+await trackedDownload('/launcher/download/macos-arm64', {
+  'CF-Connecting-IP': '2001:db8::10',
+  'CF-Pseudo-IPv4': '240.10.20.30',
+  'User-Agent': 'AHT website test'
+});
+await trackedDownload('/launcher/download/macos-x64', {
+  'CF-Connecting-IP': '2001:db8::20',
+  'User-Agent': 'AHT website test'
+});
+if (!windowsDownload.endsWith('/launcher/files/win32-x64/AHT-Windows.exe')) {
+  throw new Error(`Tracked Windows download redirected to the wrong file: ${windowsDownload}`);
+}
+const downloadCountBeforeDirectUpdate = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
+const directUpdate = await worker.fetch(new Request('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe'), env, {});
+if (!directUpdate.ok) throw new Error(`Direct launcher update artifact failed: ${directUpdate.status}`);
+const downloadCountAfterDirectUpdate = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
+if (downloadCountAfterDirectUpdate !== downloadCountBeforeDirectUpdate) {
+  throw new Error('Launcher self-update artifact requests must not be counted as installer downloads.');
 }
 
 await jsonRequest('/api/events', {
@@ -119,6 +182,19 @@ if (registration.username !== 'TestRig' || repeatRegistration.username !== 'test
 if (duplicateResponse.status !== 409 || !/not available/i.test(duplicateBody.error || '')) {
   throw new Error(`Expected duplicate username rejection, got ${duplicateResponse.status} ${JSON.stringify(duplicateBody)}`);
 }
+
+for (const [username, installId] of [['SharedOne', 'shared-install-one'], ['SharedTwo', 'shared-install-two']]) {
+  await jsonRequest('/api/users/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.99' },
+    body: JSON.stringify({ username, installId, platform: 'win32', arch: 'x64', packId: 'a-hard-time-dregora' })
+  });
+}
+await jsonRequest('/api/users/register', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.88' },
+  body: JSON.stringify({ username: 'SharedOne', installId: 'shared-install-one', platform: 'win32', arch: 'x64', packId: 'a-hard-time-dregora' })
+});
 
 await jsonRequest('/api/users/register', {
   method: 'POST',
@@ -258,12 +334,56 @@ if (unauthDeveloperProofResponse.status !== 401) {
   throw new Error(`Expected unauthenticated developer proof rejection, got ${unauthDeveloperProofResponse.status}`);
 }
 
+const unauthDeveloperClientAliasResponse = await worker.fetch(new Request('https://packs.example.com/api/launcher-proof', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    minecraftUsername: 'TestRig',
+    installId: 'install-b',
+    developerClient: true
+  })
+}), env, {});
+if (unauthDeveloperClientAliasResponse.status !== 401) {
+  throw new Error(`Expected unauthenticated developerClient alias rejection, got ${unauthDeveloperClientAliasResponse.status}`);
+}
+
+const unauthDeveloperChannelAliasResponse = await worker.fetch(new Request('https://packs.example.com/api/launcher-proof', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    minecraftUsername: 'TestRig',
+    installId: 'install-b',
+    launcherChannel: 'developer'
+  })
+}), env, {});
+if (unauthDeveloperChannelAliasResponse.status !== 401) {
+  throw new Error(`Expected unauthenticated developer channel alias rejection, got ${unauthDeveloperChannelAliasResponse.status}`);
+}
+
 const login = await jsonRequest('/admin/login', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ username: 'admin', password: 'secret' })
 });
 const auth = { Authorization: `Bearer ${login.token}` };
+const firstDownloadPage = await jsonRequest('/admin/launcher-downloads?limit=1', { headers: auth });
+if (firstDownloadPage.downloads.length !== 1 || !firstDownloadPage.hasMore || !firstDownloadPage.cursor) {
+  throw new Error(`Launcher download pagination failed: ${JSON.stringify(firstDownloadPage)}`);
+}
+const secondDownloadPage = await jsonRequest(`/admin/launcher-downloads?limit=2&cursor=${encodeURIComponent(firstDownloadPage.cursor)}`, { headers: auth });
+const allDownloadRecords = [...firstDownloadPage.downloads, ...secondDownloadPage.downloads];
+if (allDownloadRecords.length !== 3 || allDownloadRecords.some((item) => String(item.ipv4 || '').includes(':'))) {
+  throw new Error(`Launcher download history must contain only IPv4 display values: ${JSON.stringify(allDownloadRecords)}`);
+}
+const ipv6OnlyDownload = allDownloadRecords.find((item) => item.platformKey === 'macos-x64');
+if (!ipv6OnlyDownload || ipv6OnlyDownload.ipv4 || ipv6OnlyDownload.ipv4Source !== 'ipv6-only') {
+  throw new Error(`IPv6-only visitors must be marked unavailable instead of exposing or inventing an IPv4: ${JSON.stringify(ipv6OnlyDownload)}`);
+}
+const playerIpv4Groups = await jsonRequest('/admin/player-ipv4-groups', { headers: auth });
+const sharedIpv4 = playerIpv4Groups.sharedGroups.find((group) => group.ipv4 === '203.0.113.99');
+if (!sharedIpv4 || sharedIpv4.playerCount !== 2 || sharedIpv4.players.join(',') !== 'SharedOne,SharedTwo') {
+  throw new Error(`Exact shared-IPv4 player grouping failed: ${JSON.stringify(playerIpv4Groups)}`);
+}
 const developerLauncherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...auth },
@@ -329,4 +449,4 @@ if (!changeEvent?.ip || changeEvent.event.changes.counts.changed !== 2 || change
   throw new Error(`Local change event lost detail: ${JSON.stringify(changeEvent)}`);
 }
 
-console.log(JSON.stringify({ registration, launcherProof: { source: launcherProof.source, trusted: launcherProof.trusted, tokenParts: launcherProof.token.split('.').length }, developerLauncherProof: { bypass: developerLauncherProof.payload.modIntegrityBypass, channel: developerLauncherProof.payload.launcherChannel }, publishedLog, publicLogs, summary, events }, null, 2));
+console.log(JSON.stringify({ registration, launcherDownloads: allDownloadRecords, playerIpv4Groups, launcherProof: { source: launcherProof.source, trusted: launcherProof.trusted, tokenParts: launcherProof.token.split('.').length }, developerLauncherProof: { bypass: developerLauncherProof.payload.modIntegrityBypass, channel: developerLauncherProof.payload.launcherChannel }, publishedLog, publicLogs, summary, events }, null, 2));

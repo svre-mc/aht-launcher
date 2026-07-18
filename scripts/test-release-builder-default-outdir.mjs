@@ -10,9 +10,10 @@ const checks = [
   ['resolveReleaseOutDir helper exists', /function resolveReleaseOutDir\(value = ''\)/],
   ['default config uses internal release folder', /defaultOutDir:\s*defaultReleaseOutDir\(\)/],
   ['merged configs normalize blank output folder', /merged\.developer\.defaultOutDir = resolveReleaseOutDir\(merged\.developer\?\.defaultOutDir\);/],
-  ['build release normalizes payload output folder', /const outDir = resolveReleaseOutDir\(payload\?\.outDir \|\| config\.developer\?\.defaultOutDir\);/],
-  ['R2 sync normalizes payload output folder', /const outDir = resolveReleaseOutDir\(payload\.outDir \|\| config\.developer\?\.defaultOutDir\);/],
-  ['validate release normalizes payload output folder', /outDir: resolveReleaseOutDir\(payload\?\.outDir \|\| config\.developer\?\.defaultOutDir\)/]
+  ['build release normalizes payload output folder', /const baseOutDir = resolveReleaseOutDir\(payload\?\.outDir \|\| config\.developer\?\.defaultOutDir\);\s*const outDir = releaseTargetOutDir\(baseOutDir, target\.id\);/],
+  ['R2 sync normalizes payload output folder', /const baseOutDir = resolveReleaseOutDir\(payload\.outDir \|\| config\.developer\?\.defaultOutDir\);\s*const outDir = releaseTargetOutDir\(baseOutDir, target\.id\);/],
+  ['validate release normalizes payload output folder', /const baseOutDir = resolveReleaseOutDir\(payload\?\.outDir \|\| config\.developer\?\.defaultOutDir\);\s*const result = await validateRelease\(\{\s*\.\.\.payload,\s*outDir: releaseTargetOutDir\(baseOutDir, target\.id\)/],
+  ['release outputs are separated by fixed target', /function releaseTargetOutDir|releaseTargetOutDir\(baseOutDir, target\.id\)/]
 ];
 
 const missing = checks

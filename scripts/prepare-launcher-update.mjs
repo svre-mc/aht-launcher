@@ -214,9 +214,9 @@ export async function prepareLauncherUpdate(options = {}) {
   uploads.push(macX64Installer.upload);
 
   const downloads = {
-    'windows-x64': { ...windows.entry },
-    'macos-arm64': { ...macArmInstaller.entry },
-    'macos-x64': { ...macX64Installer.entry }
+    'windows-x64': { ...windows.entry, url: new URL('launcher/download/windows-x64', rootUrl).toString() },
+    'macos-arm64': { ...macArmInstaller.entry, url: new URL('launcher/download/macos-arm64', rootUrl).toString() },
+    'macos-x64': { ...macX64Installer.entry, url: new URL('launcher/download/macos-x64', rootUrl).toString() }
   };
 
   const manifest = {

@@ -49,6 +49,14 @@ function hasLauncherFileUrl(urlText = '', expectedRootUrl = '', options = {}) {
   return true;
 }
 
+function hasTrackedLauncherDownloadUrl(urlText = '', downloadKey = '', expectedRootUrl = '', options = {}) {
+  if (!isAllowedArtifactUrl(urlText, options)) return false;
+  const url = new URL(urlText);
+  if (url.pathname !== `/launcher/download/${downloadKey}`) return false;
+  if (expectedRootUrl && !urlText.startsWith(expectedRootUrl)) return false;
+  return true;
+}
+
 function escapeRegExp(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -74,10 +82,22 @@ function validateCommonEntry(errors, entry, key, expectedRootUrl = '', expectedV
   if (entry.fileName && entry.path && path.posix.basename(String(entry.path).replaceAll('\\', '/')) !== entry.fileName) {
     errors.push(`${key} path basename must match fileName`);
   }
-  if (!hasLauncherFileUrl(entry.url || '', expectedRootUrl, options)) {
+  const downloadKey = key.startsWith('downloads.') ? key.slice('downloads.'.length) : '';
+  const directFileUrl = hasLauncherFileUrl(entry.url || '', expectedRootUrl, options);
+  const trackedDownloadUrl = downloadKey
+    ? hasTrackedLauncherDownloadUrl(entry.url || '', downloadKey, expectedRootUrl, options)
+    : false;
+  if (downloadKey) {
+    if (!directFileUrl && !trackedDownloadUrl) {
+      errors.push(`${key} url must point at launcher/download/${downloadKey} or launcher/files/`);
+    }
+    if (options.requireTrackedDownloads && !trackedDownloadUrl) {
+      errors.push(`${key} url must use launcher/download/${downloadKey}`);
+    }
+  } else if (!directFileUrl) {
     errors.push(`${key} url must point at launcher/files/`);
   }
-  if (entry.fileName && isAllowedArtifactUrl(entry.url || '', options) && path.posix.basename(new URL(entry.url).pathname) !== entry.fileName) {
+  if (entry.fileName && directFileUrl && path.posix.basename(new URL(entry.url).pathname) !== entry.fileName) {
     errors.push(`${key} url basename must match fileName`);
   }
   if (!/^[a-f0-9]{64}$/i.test(String(entry.sha256 || ''))) {

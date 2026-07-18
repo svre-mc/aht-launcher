@@ -1,12 +1,34 @@
 const CURSEFORGE_BASE = 'https://api.curseforge.com/v1';
-const RELEASE_PATHS = new Set(['latest.json', 'release-report.json', 'launcher/latest.json']);
-const RELEASE_PREFIXES = ['packs/', 'cache/', 'server/', 'launcher/files/', 'update-media/'];
+const RELEASE_PATHS = new Set([
+  'latest.json',
+  'release-report.json',
+  'ptb/latest.json',
+  'ptb/release-report.json',
+  'launcher/latest.json'
+]);
+const RELEASE_PREFIXES = [
+  'packs/',
+  'cache/',
+  'server/',
+  'ptb/packs/',
+  'ptb/cache/',
+  'ptb/server/',
+  'launcher/files/',
+  'update-media/'
+];
+const LAUNCHER_SOCIAL_ACTIONS = new Set(['add_friend', 'remove_friend', 'unblock_player']);
+const SOCIAL_ACTION_PREFIX = 'social/actions/';
+const SOCIAL_STATE_PREFIX = 'social/state/';
+const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64']);
+const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
+const ACCOUNT_USERNAME_PREFIX = 'accounts/usernames/';
+const ACCOUNT_IPV4_PREFIX = 'accounts/ipv4/';
 
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-AHT-Server-Timestamp, X-AHT-Server-Signature',
     'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified',
     'Cache-Control': 'private, max-age=60'
   };
@@ -16,8 +38,64 @@ function json(value, status = 200, origin = '*') {
   return Response.json(value, { status, headers: corsHeaders(origin) });
 }
 
+function privateJson(value, status = 200, origin = '*') {
+  return Response.json(value, {
+    status,
+    headers: { ...corsHeaders(origin), 'Cache-Control': 'private, no-store' }
+  });
+}
+
 function releaseBucket(env) {
   return env.AHT_RELEASES || env.AHT_DATA || null;
+}
+
+function ipv4FromHeader(value = '') {
+  for (const rawPart of String(value || '').split(',')) {
+    let candidate = rawPart.trim();
+    if (candidate.toLowerCase().startsWith('::ffff:')) candidate = candidate.slice(7);
+    const match = candidate.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!match) continue;
+    const octets = match.slice(1).map(Number);
+    if (octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)) {
+      return octets.join('.');
+    }
+  }
+  return '';
+}
+
+function requestIpv4(request) {
+  const connecting = request.headers.get('CF-Connecting-IP') || '';
+  const connectingV6 = request.headers.get('CF-Connecting-IPv6') || '';
+  const pseudo = request.headers.get('CF-Pseudo-IPv4') || '';
+  const forwarded = request.headers.get('X-Forwarded-For') || '';
+  const connectingIpv4 = ipv4FromHeader(connecting);
+  if (connectingIpv4) {
+    return {
+      ipv4: connectingIpv4,
+      source: connectingV6 ? 'cloudflare-pseudo' : 'cloudflare-connecting-ip',
+      available: true,
+      pseudo: Boolean(connectingV6)
+    };
+  }
+  const pseudoIpv4 = ipv4FromHeader(pseudo);
+  if (pseudoIpv4) {
+    return { ipv4: pseudoIpv4, source: 'cloudflare-pseudo', available: true, pseudo: true };
+  }
+  const forwardedIpv4 = ipv4FromHeader(forwarded);
+  if (forwardedIpv4) {
+    return { ipv4: forwardedIpv4, source: 'forwarded-for', available: true, pseudo: false };
+  }
+  return {
+    ipv4: '',
+    source: connecting.includes(':') || connectingV6 ? 'ipv6-only' : 'unavailable',
+    available: false,
+    pseudo: false
+  };
+}
+
+function launcherDownloadKey(receivedAt = new Date().toISOString(), id = crypto.randomUUID()) {
+  const reverseTime = String(Number.MAX_SAFE_INTEGER - Date.parse(receivedAt)).padStart(16, '0');
+  return `${LAUNCHER_DOWNLOAD_PREFIX}${reverseTime}-${id}.json`;
 }
 
 function isReleaseCandidatePath(pathname) {
@@ -59,7 +137,7 @@ function contentTypeForKey(key) {
 }
 
 function cacheControlForKey(key) {
-  if (key === 'latest.json' || key === 'release-report.json' || key === 'launcher/latest.json') {
+  if (key.endsWith('latest.json') || key.endsWith('release-report.json')) {
     return 'public, max-age=60, must-revalidate';
   }
   return 'public, max-age=31536000, immutable';
@@ -173,6 +251,77 @@ async function serveReleaseObject(request, env, origin) {
   return new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
 }
 
+async function readLauncherManifest(env) {
+  const bucket = releaseBucket(env);
+  if (!bucket) throw new Error('AHT_RELEASES R2 binding is not configured');
+  const object = await bucket.get('launcher/latest.json');
+  if (!object) throw new Error('Launcher update manifest is not available');
+  return object.json();
+}
+
+async function recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact) {
+  if (!env.AHT_DATA) return null;
+  const receivedAt = new Date().toISOString();
+  const downloadId = crypto.randomUUID();
+  const ip = requestIpv4(request);
+  const record = {
+    schemaVersion: 1,
+    type: 'launcher_installer_download',
+    downloadId,
+    receivedAt,
+    launcherVersion: cleanString(manifest?.version || '', 80),
+    platformKey,
+    platformLabel: cleanString(artifact?.label || platformKey, 120),
+    fileName: cleanString(artifact?.fileName || '', 260),
+    ipv4: ip.ipv4,
+    ip: ip.ipv4,
+    ipv4Source: ip.source,
+    ipv4Available: ip.available,
+    pseudoIpv4: ip.pseudo,
+    country: request.cf?.country || '',
+    userAgent: cleanString(request.headers.get('User-Agent') || '', 600),
+    referrer: cleanString(request.headers.get('Referer') || '', 600),
+    cfRay: cleanString(request.headers.get('CF-Ray') || '', 120)
+  };
+  const key = launcherDownloadKey(receivedAt, downloadId);
+  await env.AHT_DATA.put(key, JSON.stringify(record), {
+    httpMetadata: { contentType: 'application/json' }
+  });
+  return { key, record };
+}
+
+async function launcherInstallerDownload(request, env, origin, platformKey, context = null) {
+  if (!LAUNCHER_DOWNLOAD_KEYS.has(platformKey)) {
+    return json({ error: 'Unknown launcher download platform' }, 404, origin);
+  }
+  const manifest = await readLauncherManifest(env);
+  const artifact = manifest?.downloads?.[platformKey];
+  const key = safeReleaseKey(`/${artifact?.path || ''}`);
+  if (!artifact || !key || !key.startsWith('launcher/files/')) {
+    return json({ error: `Launcher installer is not available for ${platformKey}` }, 404, origin);
+  }
+  const bucket = releaseBucket(env);
+  const exists = typeof bucket.head === 'function' ? await bucket.head(key) : await bucket.get(key);
+  if (!exists) return releaseNotFound(key, origin);
+
+  if (request.method === 'GET') {
+    const write = recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact)
+      .catch((error) => console.error('launcher download telemetry failed', error));
+    if (context?.waitUntil) context.waitUntil(write);
+    else await write;
+  }
+
+  const location = new URL(`/${key}`, request.url).toString();
+  return new Response(null, {
+    status: 302,
+    headers: {
+      ...corsHeaders(origin),
+      'Cache-Control': 'private, no-store',
+      Location: location
+    }
+  });
+}
+
 async function sha256Hex(value) {
   const data = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest('SHA-256', data);
@@ -278,6 +427,31 @@ function minecraftUsernameKey(username) {
   return `accounts/usernames/${username.toLowerCase()}.json`;
 }
 
+function accountIpv4Key(ipv4, username) {
+  return `${ACCOUNT_IPV4_PREFIX}${ipv4}/${username.toLowerCase()}.json`;
+}
+
+async function indexAccountIpv4(env, record) {
+  const ipv4 = ipv4FromHeader(record.ipv4 || record.ip || '');
+  const username = normalizeMinecraftUsername(record.username);
+  if (!ipv4 || !username) return;
+  const key = accountIpv4Key(ipv4, username);
+  const existing = await env.AHT_DATA.get(key);
+  const previous = existing ? await existing.json().catch(() => null) : null;
+  await env.AHT_DATA.put(key, JSON.stringify({
+    ipv4,
+    username,
+    normalizedUsername: username.toLowerCase(),
+    ipv4Source: record.ipv4Source || previous?.ipv4Source || 'legacy',
+    pseudoIpv4: Boolean(record.pseudoIpv4 || previous?.pseudoIpv4),
+    firstSeenAt: previous?.firstSeenAt || record.createdAt || record.updatedAt || new Date().toISOString(),
+    lastSeenAt: record.updatedAt || new Date().toISOString(),
+    installIds: [...new Set([...(previous?.installIds || []), record.installId].filter(Boolean))].slice(-20)
+  }), {
+    httpMetadata: { contentType: 'application/json' }
+  });
+}
+
 async function registerUser(request, env, origin) {
   if (!env.AHT_DATA) {
     return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
@@ -305,6 +479,7 @@ async function registerUser(request, env, origin) {
   }
 
   const now = new Date().toISOString();
+  const clientIp = requestIpv4(request);
   const previousInstallIds = Array.isArray(existingRecord?.previousInstallIds) ? existingRecord.previousInstallIds : [];
   const record = {
     username,
@@ -319,13 +494,17 @@ async function registerUser(request, env, origin) {
     recoveredAt: recovered ? now : existingRecord?.recoveredAt || '',
     recoveryReason: recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
     previousInstallIds: recovered ? [...new Set([...previousInstallIds, existingRecord.installId].filter(Boolean))].slice(-10) : previousInstallIds,
-    ip: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || '',
+    ipv4: clientIp.ipv4,
+    ip: clientIp.ipv4,
+    ipv4Source: clientIp.source,
+    pseudoIpv4: clientIp.pseudo,
     userAgent: request.headers.get('User-Agent') || '',
     country: request.cf?.country || ''
   };
   await env.AHT_DATA.put(key, JSON.stringify(record), {
     httpMetadata: { contentType: 'application/json' }
   });
+  await indexAccountIpv4(env, record);
   return json({ ok: true, username, key, recovered }, 200, origin);
 }
 
@@ -369,9 +548,15 @@ async function createLauncherProof(request, env, origin) {
   if (!/^[A-Za-z0-9_]{3,16}$/.test(minecraftUsername)) {
     return json({ error: 'Minecraft username is required' }, 400, origin);
   }
-  const developerClientBypass = Boolean(body.developerClientBypass || body.modIntegrityBypass);
-  const developerAuthorized = developerClientBypass ? await verifyToken(request, env) : false;
-  if (developerClientBypass && !developerAuthorized) {
+  const requestedLauncherChannel = cleanString(body.launcherChannel || 'player', 32).toLowerCase();
+  const developerModeRequested = Boolean(
+    body.developerClient
+    || body.developerClientBypass
+    || body.modIntegrityBypass
+    || requestedLauncherChannel === 'developer'
+  );
+  const developerAuthorized = developerModeRequested ? await verifyToken(request, env) : false;
+  if (developerModeRequested && !developerAuthorized) {
     return json({ error: 'Developer launcher proof requires developer authentication.' }, 401, origin);
   }
   if (env.AHT_DATA) {
@@ -398,10 +583,10 @@ async function createLauncherProof(request, env, origin) {
     appVersion: cleanString(body.appVersion, 40),
     platform: cleanString(body.platform, 32),
     arch: cleanString(body.arch, 32),
-    launcherChannel: developerAuthorized ? 'developer' : cleanString(body.launcherChannel || 'player', 32),
-    developerClient: developerAuthorized || Boolean(body.developerClient),
-    developerClientBypass: developerAuthorized && developerClientBypass,
-    modIntegrityBypass: developerAuthorized && developerClientBypass,
+    launcherChannel: developerAuthorized ? 'developer' : 'player',
+    developerClient: developerAuthorized,
+    developerClientBypass: developerAuthorized,
+    modIntegrityBypass: developerAuthorized,
     instanceDirHash: cleanString(body.instanceDirHash, 80),
     minecraft: body.minecraft && typeof body.minecraft === 'object' ? body.minecraft : null
   };
@@ -413,6 +598,271 @@ async function createLauncherProof(request, env, origin) {
     ...(await launcherProofToken(payload, env))
   }, 200, origin);
 }
+
+function socialStateKey(username) {
+  return `${SOCIAL_STATE_PREFIX}${normalizeMinecraftUsername(username).toLowerCase()}.json`;
+}
+
+function socialActionKey(id) {
+  return `${SOCIAL_ACTION_PREFIX}${id}.json`;
+}
+
+function secureStringEqual(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+function parsedTime(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value < 100000000000 ? value * 1000 : value;
+  }
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && String(value || '').trim()) {
+    return numeric < 100000000000 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function verifyLauncherProofRequest(request, env) {
+  const authorization = request.headers.get('Authorization') || '';
+  const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts.some((part) => !part)) {
+    return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET
+    || env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD;
+  if (!secret) return { ok: false, status: 503, error: 'Launcher proof service is not configured.' };
+  const expected = await hmac(`${parts[0]}.${parts[1]}`, secret);
+  if (!secureStringEqual(parts[2], expected)) {
+    return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  let header;
+  let payload;
+  try {
+    header = decodeBase64UrlJson(parts[0]);
+    payload = decodeBase64UrlJson(parts[1]);
+  } catch {
+    return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  if (String(header?.alg || '').toUpperCase() !== 'HS256'
+      || payload?.protocol !== 'aht-launcher-proof-v1') {
+    return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  const now = Date.now();
+  const issuedAt = parsedTime(payload.issuedAt);
+  const expiresAt = parsedTime(payload.expiresAt);
+  const username = normalizeMinecraftUsername(payload.minecraftUsername || payload.username);
+  const installId = cleanString(payload.installId, 120);
+  const expectedPackId = cleanString(env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora', 80);
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || !installId
+      || cleanString(payload.packId, 80) !== expectedPackId
+      || !expiresAt || expiresAt <= now || issuedAt > now + 120000) {
+    return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  if (env.AHT_DATA) {
+    const registration = await env.AHT_DATA.get(minecraftUsernameKey(username));
+    const record = registration ? await registration.json().catch(() => null) : null;
+    if (!record || record.installId !== installId) {
+      return { ok: false, status: 403, error: 'This Minecraft username is not registered to this launcher install.' };
+    }
+  }
+  return { ok: true, payload: { ...payload, minecraftUsername: username, installId } };
+}
+
+async function readRawBody(request, maxBytes = 1024 * 1024) {
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > maxBytes) {
+    throw new Error('Request body is too large');
+  }
+  return text;
+}
+
+async function verifyServerSocialRequest(request, env, bodyText) {
+  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET
+    || env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD;
+  if (!secret) return false;
+  const timestamp = request.headers.get('X-AHT-Server-Timestamp') || '';
+  const signature = request.headers.get('X-AHT-Server-Signature') || '';
+  const timestampMs = Number(timestamp);
+  if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > 90000 || !signature) {
+    return false;
+  }
+  const url = new URL(request.url);
+  const target = `${url.pathname}${url.search}`;
+  const bodyHash = await sha256Hex(bodyText);
+  const signingInput = `${request.method.toUpperCase()}\n${target}\n${timestamp}\n${bodyHash}`;
+  const expected = await hmac(signingInput, secret);
+  return secureStringEqual(signature, expected);
+}
+
+function normalizeSocialRows(value, includeOnline = false) {
+  const rows = [];
+  const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const raw = typeof item === 'string' ? item : item?.username || item?.name;
+    const username = normalizeMinecraftUsername(raw);
+    const key = username.toLowerCase();
+    if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || seen.has(key)) continue;
+    seen.add(key);
+    rows.push(includeOnline ? { username, online: Boolean(item?.online) } : { username });
+  }
+  rows.sort((left, right) => includeOnline
+    ? Number(right.online) - Number(left.online) || left.username.localeCompare(right.username)
+    : left.username.localeCompare(right.username));
+  return rows.slice(0, 1000);
+}
+
+function normalizeServerSocialSnapshot(value) {
+  const username = normalizeMinecraftUsername(value?.username);
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) return null;
+  const friends = normalizeSocialRows(value?.friends, true);
+  const blockedPlayers = normalizeSocialRows(value?.blockedPlayers || value?.blocked, false);
+  const requests = normalizeSocialRows(value?.requests, true);
+  return {
+    schemaVersion: 1,
+    username,
+    updatedAt: cleanString(value?.updatedAt || new Date().toISOString(), 80),
+    counts: {
+      friends: friends.length,
+      online: friends.filter((friend) => friend.online).length,
+      blocked: blockedPlayers.length
+    },
+    friends,
+    blockedPlayers,
+    requests
+  };
+}
+
+async function readSocialState(env, username) {
+  if (!env.AHT_DATA) return null;
+  const object = await env.AHT_DATA.get(socialStateKey(username));
+  return object ? object.json().catch(() => null) : null;
+}
+
+async function launcherSocialState(request, env, origin) {
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  const verified = await verifyLauncherProofRequest(request, env);
+  if (!verified.ok) return privateJson({ error: verified.error }, verified.status, origin);
+  const username = verified.payload.minecraftUsername;
+  const state = await readSocialState(env, username);
+  if (!state) {
+    return privateJson({
+      available: true,
+      actionsAvailable: true,
+      username,
+      updatedAt: '',
+      counts: { friends: 0, online: 0, blocked: 0 },
+      friends: [],
+      blockedPlayers: [],
+      requests: [],
+      message: 'Friends are syncing from the AHT server.'
+    }, 200, origin);
+  }
+  return privateJson({ ...state, available: true, actionsAvailable: true }, 200, origin);
+}
+
+async function queueLauncherSocialAction(request, env, origin) {
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  const verified = await verifyLauncherProofRequest(request, env);
+  if (!verified.ok) return privateJson({ error: verified.error }, verified.status, origin);
+  const body = await readBody(request);
+  const action = cleanString(body.action, 32).toLowerCase();
+  const target = normalizeMinecraftUsername(body.target);
+  const actor = verified.payload.minecraftUsername;
+  if (!LAUNCHER_SOCIAL_ACTIONS.has(action)) {
+    return privateJson({ error: 'That social action is unavailable from the launcher.' }, 400, origin);
+  }
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(target)) {
+    return privateJson({ error: 'Enter a valid Minecraft username.' }, 400, origin);
+  }
+  if (target.toLowerCase() === actor.toLowerCase()) {
+    return privateJson({ error: 'Choose another player.' }, 400, origin);
+  }
+  const id = crypto.randomUUID();
+  const record = {
+    schemaVersion: 1,
+    id,
+    actor,
+    action,
+    target,
+    createdAt: new Date().toISOString(),
+    installIdHash: await sha256Hex(verified.payload.installId)
+  };
+  await env.AHT_DATA.put(socialActionKey(id), JSON.stringify(record), {
+    httpMetadata: { contentType: 'application/json' }
+  });
+  const current = await readSocialState(env, actor);
+  const label = action === 'add_friend' ? 'Friend request queued.'
+    : action === 'remove_friend' ? 'Friend removal queued.' : 'Unblock queued.';
+  return privateJson({
+    ok: true,
+    queued: true,
+    actionId: id,
+    message: label,
+    social: current ? { ...current, available: true, actionsAvailable: true } : null
+  }, 202, origin);
+}
+
+async function pendingSocialActions(env, limit = 50) {
+  const listed = await env.AHT_DATA.list({ prefix: SOCIAL_ACTION_PREFIX, limit: Math.max(1, limit) });
+  const keys = (listed.objects || []).map((item) => item.key).sort().slice(0, limit);
+  const actions = [];
+  for (const key of keys) {
+    const object = await env.AHT_DATA.get(key);
+    const action = object ? await object.json().catch(() => null) : null;
+    if (action?.id && LAUNCHER_SOCIAL_ACTIONS.has(action.action)) actions.push(action);
+  }
+  return actions;
+}
+
+async function synchronizeServerSocial(request, env, origin) {
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  const bodyText = await readRawBody(request);
+  if (!(await verifyServerSocialRequest(request, env, bodyText))) {
+    return privateJson({ error: 'Server social authentication failed.' }, 401, origin);
+  }
+  let body = {};
+  try {
+    body = bodyText ? JSON.parse(bodyText) : {};
+  } catch {
+    return privateJson({ error: 'Invalid server social payload.' }, 400, origin);
+  }
+  const snapshots = Array.isArray(body.snapshots) ? body.snapshots.slice(0, 250) : [];
+  let storedSnapshots = 0;
+  for (const candidate of snapshots) {
+    const snapshot = normalizeServerSocialSnapshot(candidate);
+    if (!snapshot) continue;
+    await env.AHT_DATA.put(socialStateKey(snapshot.username), JSON.stringify(snapshot), {
+      httpMetadata: { contentType: 'application/json' }
+    });
+    storedSnapshots += 1;
+  }
+  const acknowledgements = Array.isArray(body.acknowledgements)
+    ? body.acknowledgements.slice(0, 250) : [];
+  let acknowledged = 0;
+  for (const acknowledgement of acknowledgements) {
+    const id = cleanString(acknowledgement?.id, 120);
+    if (!/^[A-Za-z0-9-]{16,120}$/.test(id)) continue;
+    await env.AHT_DATA.delete(socialActionKey(id));
+    acknowledged += 1;
+  }
+  return privateJson({
+    ok: true,
+    storedSnapshots,
+    acknowledged,
+    actions: await pendingSocialActions(env, 50),
+    serverTime: new Date().toISOString()
+  }, 200, origin);
+}
+
 async function listUpdateLogs(env, request, origin, requireAuth = false) {
   if (!env.AHT_DATA) {
     return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
@@ -493,10 +943,14 @@ async function writeEvent(request, env, origin) {
   const body = await readBody(request);
   const receivedAt = new Date().toISOString();
   const day = receivedAt.slice(0, 10);
+  const clientIp = requestIpv4(request);
   const record = {
     ...body,
     receivedAt,
-    ip: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || '',
+    ipv4: clientIp.ipv4,
+    ip: clientIp.ipv4,
+    ipv4Source: clientIp.source,
+    pseudoIpv4: clientIp.pseudo,
     userAgent: request.headers.get('User-Agent') || '',
     country: request.cf?.country || ''
   };
@@ -542,6 +996,102 @@ async function listEvents(env, request, origin) {
   return json({ events }, 200, origin);
 }
 
+async function readR2JsonObjects(env, objects = []) {
+  const records = await Promise.all(objects.map(async (object) => {
+    const item = await env.AHT_DATA.get(object.key);
+    if (!item) return null;
+    return item.json().catch(() => null);
+  }));
+  return records.filter(Boolean);
+}
+
+async function listLauncherDownloads(env, request, origin) {
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+  }
+  if (!(await verifyToken(request, env))) {
+    return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  const url = new URL(request.url);
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
+  const cursor = cleanString(url.searchParams.get('cursor') || '', 1000);
+  const options = { prefix: LAUNCHER_DOWNLOAD_PREFIX, limit };
+  if (cursor) options.cursor = cursor;
+  const listed = await env.AHT_DATA.list(options);
+  const downloads = (await readR2JsonObjects(env, listed.objects || []))
+    .filter((item) => item.type === 'launcher_installer_download')
+    .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')));
+  return privateJson({
+    downloads,
+    cursor: listed.truncated ? listed.cursor || '' : '',
+    hasMore: Boolean(listed.truncated),
+    appendOnly: true
+  }, 200, origin);
+}
+
+async function listAllR2Json(env, prefix) {
+  const records = [];
+  let cursor = '';
+  const seenCursors = new Set();
+  do {
+    const options = { prefix, limit: 1000 };
+    if (cursor) options.cursor = cursor;
+    const listed = await env.AHT_DATA.list(options);
+    records.push(...await readR2JsonObjects(env, listed.objects || []));
+    if (!listed.truncated) break;
+    const nextCursor = String(listed.cursor || '');
+    if (!nextCursor || seenCursors.has(nextCursor)) break;
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (true);
+  return records;
+}
+
+async function listPlayerIpv4Groups(env, request, origin) {
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+  }
+  if (!(await verifyToken(request, env))) {
+    return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  const indexedAccounts = await listAllR2Json(env, ACCOUNT_IPV4_PREFIX);
+  const legacyAccounts = await listAllR2Json(env, ACCOUNT_USERNAME_PREFIX);
+  const accounts = [...indexedAccounts, ...legacyAccounts];
+  const groups = new Map();
+  for (const account of accounts) {
+    const ipv4 = ipv4FromHeader(account.ipv4 || account.ip || '');
+    const username = cleanString(account.username || '', 16);
+    if (!ipv4 || !username) continue;
+    if (!groups.has(ipv4)) {
+      groups.set(ipv4, {
+        ipv4,
+        ipv4Source: account.ipv4Source || 'legacy',
+        pseudoIpv4: Boolean(account.pseudoIpv4),
+        players: [],
+        lastSeenAt: ''
+      });
+    }
+    const group = groups.get(ipv4);
+    if (!group.players.includes(username)) group.players.push(username);
+    const seenAt = String(account.lastSeenAt || account.updatedAt || account.createdAt || '');
+    if (seenAt > group.lastSeenAt) group.lastSeenAt = seenAt;
+  }
+  const result = [...groups.values()]
+    .map((group) => ({
+      ...group,
+      players: group.players.sort((left, right) => left.localeCompare(right)),
+      playerCount: group.players.length,
+      shared: group.players.length > 1
+    }))
+    .sort((left, right) => right.playerCount - left.playerCount || right.lastSeenAt.localeCompare(left.lastSeenAt));
+  return privateJson({
+    groups: result,
+    sharedGroups: result.filter((group) => group.shared),
+    uniqueIpv4: result.length,
+    sharedIpv4: result.filter((group) => group.shared).length
+  }, 200, origin);
+}
+
 async function summary(env, request, origin) {
   if (!env.AHT_DATA) {
     return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
@@ -569,7 +1119,7 @@ async function summary(env, request, origin) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, context) {
     const origin = request.headers.get('Origin') || '*';
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
@@ -583,6 +1133,10 @@ export default {
           return releaseResponse;
         }
       }
+      if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname.startsWith('/launcher/download/')) {
+        const platformKey = cleanString(url.pathname.slice('/launcher/download/'.length), 80);
+        return await launcherInstallerDownload(request, env, origin, platformKey, context);
+      }
       if (request.method === 'GET' && url.pathname.startsWith('/cf/mods/')) {
         return await proxyCurseForge(url.pathname.slice('/cf'.length), env, origin);
       }
@@ -594,6 +1148,15 @@ export default {
       }
       if (request.method === 'POST' && url.pathname === '/api/launcher-proof') {
         return await createLauncherProof(request, env, origin);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/social') {
+        return await launcherSocialState(request, env, origin);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/social/actions') {
+        return await queueLauncherSocialAction(request, env, origin);
+      }
+      if (request.method === 'POST' && url.pathname === '/server/social/sync') {
+        return await synchronizeServerSocial(request, env, origin);
       }
       if (request.method === 'GET' && url.pathname === '/api/update-logs') {
         return await listUpdateLogs(env, request, origin, false);
@@ -610,6 +1173,12 @@ export default {
       if (request.method === 'GET' && url.pathname === '/admin/events') {
         return await listEvents(env, request, origin);
       }
+      if (request.method === 'GET' && url.pathname === '/admin/launcher-downloads') {
+        return await listLauncherDownloads(env, request, origin);
+      }
+      if (request.method === 'GET' && url.pathname === '/admin/player-ipv4-groups') {
+        return await listPlayerIpv4Groups(env, request, origin);
+      }
       if (request.method === 'GET' && url.pathname === '/admin/summary') {
         return await summary(env, request, origin);
       }
@@ -618,20 +1187,28 @@ export default {
         endpoints: [
           '/latest.json',
           '/packs/{packZip}',
+          '/ptb/latest.json',
+          '/ptb/packs/{packZip}',
           '/cache/mod-cache.json',
           '/cache/files/{sha256}.jar',
           '/server/{serverArtifact}',
           '/launcher/latest.json',
           '/launcher/files/{launcherArtifact}',
+          '/launcher/download/{windows-x64|macos-arm64|macos-x64}',
           '/cf/mods/{projectId}/files/{fileId}',
           '/cf/mods/{projectId}/files/{fileId}/download-url',
           '/api/events',
           '/api/users/register',
           '/api/launcher-proof',
+          '/api/social',
+          '/api/social/actions',
+          '/server/social/sync',
           '/api/update-logs',
           '/admin/login',
           '/admin/summary',
           '/admin/events',
+          '/admin/launcher-downloads',
+          '/admin/player-ipv4-groups',
           '/admin/update-logs'
         ]
       }, 200, origin);

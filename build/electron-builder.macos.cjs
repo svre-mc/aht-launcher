@@ -41,6 +41,7 @@ module.exports = {
     artifactName: 'AHT-Launcher-macOS-${arch}-${version}.${ext}'
   },
   dmg: {
-    title: 'A Hard Time Launcher'
+    title: 'A Hard Time Launcher',
+    license: 'legal/TERMS_OF_SERVICE.txt'
   }
 };

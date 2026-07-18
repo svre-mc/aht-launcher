@@ -1,0 +1,160 @@
+A HARD TIME TERMS OF SERVICE AND END USER LICENSE AGREEMENT
+
+Effective Date: July 14, 2026
+Terms Version: 2026-07-14.1
+
+PLEASE READ THIS AGREEMENT CAREFULLY. IT IS A LEGALLY BINDING CONTRACT BETWEEN YOU AND SIIS ENTERPRISE LLC. BY CHECKING THE ACCEPTANCE BOX AND SELECTING "I AGREE," INSTALLING OR USING THE A HARD TIME LAUNCHER, ACCESSING AN A HARD TIME SERVER, OR USING ANY A HARD TIME SERVICE AFTER THESE TERMS ARE PRESENTED TO YOU, YOU CONFIRM THAT YOU HAVE READ, UNDERSTAND, AND AGREE TO THESE TERMS AND THE PRIVACY POLICY. IF YOU DO NOT AGREE, SELECT "EXIT," DO NOT INSTALL OR USE THE LAUNCHER, AND DO NOT ACCESS THE SERVICES.
+
+1. COMPANY AND SCOPE
+
+These Terms of Service and End User License Agreement (the "Terms") are between you and SIIS Enterprise LLC, a United States company ("SIIS," "Company," "we," "us," or "our"). These Terms govern the A Hard Time launcher, official A Hard Time game servers, websites, APIs, update services, community features, original AHT modifications, original assets, documentation, and related services (collectively, the "Services").
+
+The Services are an independent community project. Minecraft is owned by Microsoft and Mojang. Forge, CurseForge, third-party modifications, libraries, and other third-party materials remain the property of their respective owners and are governed by their own licenses. SIIS does not claim ownership of third-party content and does not grant rights that it does not own.
+
+2. ELIGIBILITY AND AUTHORITY
+
+You must be at least 13 years old to use the Services. If you are under the age of majority where you live, your parent or legal guardian must review and accept these Terms for you and supervise your use. The Services are not directed to children under 13. If you use the Services for an organization, you represent that you have authority to bind that organization, and "you" includes that organization.
+
+You represent that you are legally able to enter this agreement and are not prohibited from receiving the Services under applicable law. You must provide accurate information when the launcher or server requests a Minecraft username or other account information.
+
+3. ELECTRONIC ACCEPTANCE AND RECORDS
+
+Your affirmative selection of the acceptance checkbox and "I Agree" button is your electronic signature and unambiguous manifestation of assent. You consent to receive these Terms, the Privacy Policy, update notices, and related records electronically. We may retain a local or server-side record of the Terms version, acceptance time, launcher version, and technical identifiers reasonably needed to prove consent. You may keep a copy of these Terms from the launcher installation files or the Terms & Policies page on the official A Hard Time website.
+
+4. LIMITED LICENSE
+
+Subject to continued compliance with these Terms, SIIS grants you a limited, personal, revocable, non-exclusive, non-transferable, non-sublicensable license to install and use the launcher and SIIS-owned client components solely to access and play the Services for personal, non-commercial entertainment. This is a license, not a sale. No ownership interest is transferred to you.
+
+Except where applicable law expressly gives you a right that cannot be waived, you may not use the Services outside this license. Any rights not expressly granted are reserved by SIIS and the applicable third-party owners.
+
+5. ACCOUNTS, USERNAMES, AND SECURITY
+
+You are responsible for your Microsoft, Minecraft, Discord, and device accounts and for activity conducted through them. SIIS does not ask for, receive, or store your Microsoft account password through the A Hard Time launcher. Microsoft or the official Minecraft Launcher may require you to authenticate directly with Microsoft.
+
+Do not share launcher proof tokens, server access credentials, private keys, administrative credentials, or access-control secrets. Notify us through the official A Hard Time support channel if you believe your access has been compromised. We may require reauthentication, invalidate tokens, or restrict access to protect users and the Services.
+
+6. SIIS INTELLECTUAL PROPERTY
+
+As between you and SIIS, SIIS owns or licenses all right, title, and interest in its original A Hard Time materials, including original source code and object code, custom AHT modifications, launcher code, original server-side systems, original artwork and media, written documentation, selection and arrangement of original content, branding, logos, and non-public operational materials (collectively, "Protected AHT Components"). Copyright protection attaches only to protectable original expression. Names, ideas, game mechanics, facts, public-domain material, and third-party content are not claimed beyond the rights applicable law actually provides.
+
+Your access to a compiled client file does not grant access to source code, ownership, redistribution rights, or permission to prepare derivative works. Copyright notices, license notices, authorship information, integrity checks, access-control markers, and attribution must not be removed or altered.
+
+7. PROTECTED AHT COMPONENT RESTRICTIONS
+
+Without prior written authorization from SIIS, and except only to the limited extent a non-waivable law expressly permits, you must not:
+
+(a) copy, publish, upload, mirror, sell, rent, sublicense, redistribute, leak, transmit, or make any Protected AHT Component available to another person or service;
+
+(b) extract, decompile, disassemble, reverse engineer, translate, adapt, port, remake, repack, or prepare a derivative work from a Protected AHT Component;
+
+(c) use Protected AHT code, assets, audiovisual material, documentation, branding, or substantially similar protected expression in another launcher, modpack, server, modification, product, or service;
+
+(d) use the launcher or Protected AHT Components for commercial hosting, paid redistribution, unauthorized monetization, competing services, model training, dataset creation, security circumvention, or development of a substitute product;
+
+(e) bypass, disable, forge, replay, interfere with, or evade launcher proof, server challenges, integrity validation, update requirements, authentication, anti-cheat, anti-abuse, rate limits, or other technical protection measures;
+
+(f) obtain or attempt to obtain non-public server code, private configurations, signing secrets, credentials, internal APIs, player records, or administrative tools without written authorization; or
+
+(g) direct, encourage, finance, assist, or knowingly benefit from another person's violation of this section.
+
+An independently created work that does not copy SIIS code, assets, documentation, confidential information, or other protectable expression is not prohibited merely because it uses an unprotectable idea or game mechanic. Nothing in these Terms limits rights that cannot lawfully be restricted.
+
+8. SERVER AND COMMUNITY RULES
+
+You must follow posted server rules and reasonable moderator instructions. You may not cheat; exploit bugs; duplicate items; automate play without permission; evade bans; impersonate others; harass, threaten, stalk, or dox anyone; distribute malware; interfere with servers or networks; gain unauthorized access; manipulate downloads or statistics; submit fraudulent reports; or use the Services for unlawful conduct.
+
+You may not use alternate accounts, modified clients, proxies, VPNs, hardware identifiers, or other methods to evade an enforcement action. The presence of a VPN or modified system alone is not automatically a violation, but using one to conceal abuse or bypass controls is prohibited.
+
+Friends, blocking, presence, reporting, and moderation features must be used honestly. You may not use them to harass, enumerate private relationships, scrape player data, or evade another player's block.
+
+9. UPDATES, REPAIRS, AND TECHNICAL CHANGES
+
+The launcher may require updates before play, validate managed mod files, repair corrupted or unauthorized managed files, install required runtime components, create Minecraft Launcher profiles, and replace managed pack files during an update. User-owned files and configurable settings are handled as described in the launcher and Privacy Policy. Back up personal worlds, screenshots, and other files before major changes.
+
+We may add, modify, suspend, or discontinue content or features; change technical requirements; reset test environments; or require a clean installation when reasonably necessary for security, compatibility, integrity, or service operation. We do not promise that every device, third-party launcher, modification, operating-system customization, or network configuration will remain compatible.
+
+10. USER CONTENT AND FEEDBACK
+
+You retain ownership of original content you submit, where applicable. By submitting content to public or community portions of the Services, you grant SIIS a worldwide, non-exclusive, royalty-free license to host, store, reproduce, display, and distribute that content only as reasonably necessary to operate, moderate, promote, and improve the Services. You represent that you have the rights needed to grant this license.
+
+If you voluntarily provide ideas, suggestions, or feedback, you grant SIIS a perpetual, irrevocable, worldwide, royalty-free right to use and implement that feedback without compensation or attribution. This does not transfer ownership of unrelated content you own.
+
+11. VIRTUAL ITEMS, ACCESS, AND PURCHASES
+
+Unless a separate written purchase agreement states otherwise, ranks, permissions, cosmetics, virtual items, in-game currency, access benefits, and similar features are limited, revocable licenses with no cash value and no property interest. They may not be sold, transferred, exchanged for money, or used for gambling. Purchases, refunds, chargebacks, taxes, and recurring payments, if any, are governed by the checkout terms presented at purchase and applicable law.
+
+We may modify or remove virtual features for balancing, security, legal, or operational reasons. Nothing in this section eliminates refund or consumer rights that applicable law makes non-waivable.
+
+12. MONITORING AND ENFORCEMENT
+
+To operate and protect the Services, SIIS may use automated and human review of launcher events, managed-mod integrity, server logs, commands, gameplay events, reports, launcher proof, IP addresses, device and platform information, and other data described in the Privacy Policy. We do not promise to monitor every interaction.
+
+We may warn, mute, restrict, suspend, or terminate access; invalidate launcher proof; remove content; preserve evidence; or report conduct to service providers or authorities when reasonably necessary. Enforcement decisions may consider context, severity, history, security risk, and available evidence.
+
+13. THIRD-PARTY SERVICES AND SOFTWARE
+
+The Services depend on third parties such as Microsoft, Mojang, Minecraft, Forge, Cloudflare, GitHub, Discord, internet providers, hosting providers, and third-party mod authors. Their terms and privacy practices govern their services. SIIS is not responsible for third-party outages, account decisions, software, content, or changes. Use of third-party components remains subject to their licenses.
+
+14. PRIVACY
+
+The A Hard Time Privacy Policy is incorporated into these Terms. It explains the information we collect, why we use it, when it is disclosed, retention, security, and privacy choices. If these Terms conflict with the Privacy Policy about handling personal information, the Privacy Policy controls for that issue.
+
+15. SUSPENSION AND TERMINATION
+
+You may stop using the Services at any time and uninstall the launcher. SIIS may suspend or terminate this license or your access if you materially breach these Terms, create security or legal risk, repeatedly disrupt the community, or if continued service is no longer commercially or technically reasonable.
+
+Upon termination, the license in Section 4 ends and you must stop using and delete SIIS-owned components, except for copies automatically retained in ordinary backups that remain inaccessible and are later deleted in the normal course. Sections concerning ownership, restrictions, remedies, disclaimers, liability, indemnity, disputes, and interpretation survive termination.
+
+16. COPYRIGHT REPORTS
+
+If you believe content in the Services infringes your copyright, submit a written notice through the official A Hard Time support channel and clearly request escalation to SIIS Enterprise LLC's legal contact. The notice should identify the copyrighted work, identify the allegedly infringing material and its location, provide your contact information, include a good-faith statement and an accuracy/authority statement, and include your physical or electronic signature. We may request delivery to SIIS's registered office or designated agent where required by law.
+
+Knowingly making material misrepresentations in an infringement notice or counter-notice may create liability. SIIS may remove material and may terminate repeat infringers where appropriate.
+
+17. DISCLAIMER OF WARRANTIES
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE SERVICES ARE PROVIDED "AS IS" AND "AS AVAILABLE." SIIS DISCLAIMS ALL EXPRESS, IMPLIED, AND STATUTORY WARRANTIES, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, QUIET ENJOYMENT, AND WARRANTIES ARISING FROM COURSE OF DEALING OR USAGE OF TRADE. SIIS DOES NOT WARRANT THAT THE SERVICES WILL BE UNINTERRUPTED, ERROR-FREE, SECURE, COMPATIBLE WITH EVERY DEVICE, OR FREE OF DATA LOSS OR HARMFUL COMPONENTS.
+
+SOME JURISDICTIONS DO NOT ALLOW CERTAIN DISCLAIMERS. IN THOSE JURISDICTIONS, THIS SECTION APPLIES ONLY TO THE EXTENT PERMITTED.
+
+18. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, SIIS AND ITS OWNERS, OFFICERS, EMPLOYEES, CONTRACTORS, LICENSORS, AND SERVICE PROVIDERS WILL NOT BE LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR PUNITIVE DAMAGES; LOST PROFITS OR REVENUE; LOSS OF DATA, GOODWILL, OR USE; BUSINESS INTERRUPTION; OR THE COST OF SUBSTITUTE SERVICES, EVEN IF ADVISED OF THE POSSIBILITY.
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, SIIS'S TOTAL AGGREGATE LIABILITY ARISING FROM OR RELATED TO THE SERVICES OR THESE TERMS WILL NOT EXCEED THE GREATER OF (A) THE AMOUNT YOU PAID DIRECTLY TO SIIS FOR THE SERVICES DURING THE SIX MONTHS BEFORE THE EVENT GIVING RISE TO LIABILITY OR (B) FIFTY U.S. DOLLARS (USD $50).
+
+These limits do not apply where prohibited by law, and do not exclude liability that cannot lawfully be limited, including liability for SIIS's fraud, willful misconduct, or gross negligence where applicable law so provides.
+
+19. INDEMNIFICATION
+
+To the extent permitted by law, you will defend, indemnify, and hold harmless SIIS and its owners, officers, employees, and contractors from third-party claims, damages, judgments, losses, liabilities, costs, and reasonable attorneys' fees arising from your unlawful conduct, your content, your material breach of these Terms, or your infringement or misappropriation of another person's rights. SIIS may control the defense of a covered claim, and you will reasonably cooperate. This section does not require indemnification for SIIS's own unlawful conduct.
+
+20. REMEDIES FOR MISUSE OF PROTECTED AHT COMPONENTS
+
+Unauthorized copying, extraction, disclosure, distribution, commercial use, circumvention, or creation of derivative works from Protected AHT Components may cause harm that is difficult to measure and may support immediate injunctive or equitable relief, in addition to damages and other remedies available under contract, copyright, trade-secret, trademark, anti-circumvention, computer-access, and other applicable law.
+
+For a knowing and material breach of Section 7 involving unauthorized extraction, disclosure, distribution, sale, or use of a Protected AHT Component in another product or service, you and SIIS acknowledge that actual investigation, containment, remediation, lost-opportunity, and enforcement costs may be difficult to calculate when these Terms are accepted. To the extent permitted by applicable law, and only if a court determines that the amount is a reasonable estimate of compensable harm and not a penalty, SIIS may elect to seek liquidated damages of up to ten thousand U.S. dollars (USD $10,000) for each proven incident. If that remedy is unavailable or unenforceable, SIIS may seek actual damages or any statutory remedy available by law. SIIS may not receive duplicative recovery for the same injury.
+
+The USD $10,000 provision is a contractual liquidated-damages term, not a government fine and not an automatic judgment. Liability and the amount of any award remain subject to applicable law, admissible evidence, available defenses, and decision by a court with jurisdiction. Nothing in these Terms eliminates a person's non-waivable right to defend a claim, assert a compulsory counterclaim, report unlawful conduct, or participate in a government investigation.
+
+21. DISPUTE NOTICE, GOVERNING LAW, AND VENUE
+
+Before filing a non-emergency claim, the complaining party must give the other party a written description of the dispute and requested relief and allow 30 days for a good-faith informal resolution. This requirement does not prevent either party from seeking urgent temporary or injunctive relief, preserving a claim before a limitations period expires, reporting unlawful activity, or using small-claims procedures where eligible.
+
+These Terms are governed by the laws of the State of California and applicable United States federal law, without regard to conflict-of-law rules, except to the extent the law where you live provides non-waivable protections. Subject to those protections, the parties consent to exclusive jurisdiction and venue in the state and federal courts serving San Bernardino County, California. Each party retains all defenses and claims that cannot lawfully be waived.
+
+22. CHANGES TO THESE TERMS
+
+SIIS may update these Terms to reflect changes in the Services, law, security, or business practices. Material changes will be presented through the launcher or another conspicuous notice. When re-consent is required, you must affirmatively accept the new version before continuing to use the launcher. The version and effective date at the top identify the controlling agreement. Changes do not retroactively alter a dispute that arose before the new version unless both parties agree or law requires it.
+
+23. GENERAL TERMS
+
+These Terms, the Privacy Policy, and any purchase-specific terms presented to you are the entire agreement concerning the Services and replace prior agreements on that subject. A failure to enforce a provision is not a waiver. You may not assign these Terms without SIIS's written consent; SIIS may assign them as part of a merger, reorganization, financing, sale of assets, or transfer of the Services.
+
+If a provision is found invalid or unenforceable, it will be enforced to the maximum lawful extent or narrowed as necessary, and the remaining provisions remain effective. Headings are for convenience. "Including" means "including without limitation." No agency, partnership, employment, fiduciary, or franchise relationship is created.
+
+24. CONTACT AND LEGAL NOTICES
+
+Questions, privacy requests, and initial dispute notices may be submitted through the official A Hard Time Discord support channel linked at https://ahardtime.net/. Clearly identify the request as "Legal" or "Privacy" and request escalation to SIIS Enterprise LLC. Formal legal notices may also be delivered to SIIS Enterprise LLC at its registered office on file with the California Secretary of State. Do not include passwords, authentication tokens, private keys, or unnecessary sensitive information in a request.
+
+BY ACCEPTING, YOU CONFIRM THAT YOU HAVE READ THESE TERMS, HAD THE OPPORTUNITY TO KEEP A COPY, AND AGREE TO BE BOUND BY THEM.

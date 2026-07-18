@@ -189,6 +189,37 @@ if (!window.aht) {
       mockStatus.identity.minecraftUsername = username;
       return { ok: true, username };
     },
+    legalStatus: async () => ({
+      required: false,
+      accepted: true,
+      reason: "accepted",
+      termsVersion: "2026-07-14.1",
+      privacyVersion: "2026-07-14.1",
+      termsText: "A HARD TIME TERMS OF SERVICE",
+      privacyText: "A HARD TIME PRIVACY POLICY"
+    }),
+    legalAccept: async () => ({ ok: true, acceptedAt: new Date().toISOString() }),
+    appExit: async () => ({ ok: true }),
+    socialList: async () => ({
+      available: true,
+      actionsAvailable: true,
+      username: mockStatus.identity.minecraftUsername || "Preview",
+      updatedAt: new Date().toISOString(),
+      counts: { friends: 2, online: 1, blocked: 1 },
+      friends: [
+        { username: "OnlineFriend", online: true, status: "Online" },
+        { username: "OfflineFriend", online: false, status: "Offline" }
+      ],
+      blocked: [{ username: "BlockedPlayer" }],
+      requests: []
+    }),
+    socialAction: async ({ action, target } = {}) => ({
+      ok: true,
+      queued: true,
+      action,
+      target,
+      message: `${action || "Friend action"} queued for ${target || "player"}.`
+    }),
     scanChanges: async () => ({
       counts: { changed: 2, missing: 0, added: 1 },
       changed: [{ path: "mods/example.jar" }],
@@ -318,6 +349,19 @@ if (!window.aht) {
       releaseUrl: "https://github.com/svre-mc/aht-launcher/releases/tag/launcher-v0.1.3",
       run: { id: 124, status: "queued", htmlUrl: "https://github.com/svre-mc/aht-launcher/actions/runs/124" }
     }),
+    devDeployLauncher: async () => ({ running: true, progress: { phase: "Preparing public deploy", percent: 0 }, lines: [] }),
+    devLauncherDeployState: async () => ({
+      running: false,
+      progress: { phase: "Published and verified", percent: 100 },
+      lines: ["Verified launcher/latest.json at 0.1.75."],
+      lastResult: {
+        version: "0.1.75",
+        releaseUrl: "https://github.com/svre-mc/aht-launcher/releases/tag/launcher-v0.1.75",
+        latestUrl: "https://packs.example.com/launcher/latest.json",
+        developerArtifactsUploaded: false
+      },
+      error: null
+    }),
     devSyncLauncherUpdate: async () => ({
       uploaded: [{ path: "launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.3.exe" }, { path: "launcher/latest.json" }],
       verification: { publicLatestUrl: "https://packs.example.com/launcher/latest.json", latest: { version: "0.1.3" } }
@@ -330,6 +374,7 @@ if (!window.aht) {
       includeDirs: ["mods", "scripts", "config", "ForgeEssentials"],
       includeRootFiles: true
     }),
+    devSaveServerTransfer: async (payload) => ({ ...payload, password: undefined }),
     devSyncServerFiles: async () => ({
       ok: true,
       uploaded: 128,
@@ -399,6 +444,30 @@ if (!window.aht) {
           }
         }
       ]
+    }),
+    devLauncherDownloads: async () => ({
+      downloads: [
+        {
+          type: "launcher_installer_download",
+          downloadId: "download-a",
+          receivedAt: "2026-07-17T18:20:12Z",
+          ipv4: "203.0.113.42",
+          ipv4Source: "cloudflare-connecting-ip",
+          platformKey: "windows-x64",
+          platformLabel: "Windows 10/11",
+          launcherVersion: "0.1.75",
+          fileName: "AHT-Launcher-Windows-10-11-0.1.75.exe"
+        }
+      ],
+      cursor: "",
+      hasMore: false,
+      appendOnly: true
+    }),
+    devPlayerIpv4Groups: async () => ({
+      groups: [{ ipv4: "203.0.113.42", players: ["auSavant", "TestRig"], playerCount: 2, shared: true }],
+      sharedGroups: [{ ipv4: "203.0.113.42", players: ["auSavant", "TestRig"], playerCount: 2, shared: true }],
+      uniqueIpv4: 1,
+      sharedIpv4: 1
     })
   };
   if (!bootDeveloperMode) {
@@ -447,12 +516,38 @@ const els = {
   installedVersion: $("#installedVersion"),
   latestVersion: $("#latestVersion"),
   sideInstalledVersion: $("#sideInstalledVersion"),
+  ptbSideInstalledVersion: $("#ptbSideInstalledVersion"),
   sidePackTitle: $("#sidePackTitle"),
+  playerPackTitle: $("#playerPackTitle"),
   developerTileTitle: $("#developerTileTitle"),
   instanceDir: $("#instanceDir"),
   minecraftProfile: $("#minecraftProfile"),
   installId: $("#installId"),
   playerLabelView: $("#playerLabelView"),
+  legalOverlay: $("#legalOverlay"),
+  legalTitle: $("#legalTitle"),
+  legalIntro: $("#legalIntro"),
+  legalVersion: $("#legalVersion"),
+  legalTermsTab: $("#legalTermsTab"),
+  legalPrivacyTab: $("#legalPrivacyTab"),
+  legalDocumentText: $("#legalDocumentText"),
+  legalAcceptCheckbox: $("#legalAcceptCheckbox"),
+  legalAcceptButton: $("#legalAcceptButton"),
+  legalExitButton: $("#legalExitButton"),
+  legalError: $("#legalError"),
+  profileFriendsButton: $("#profileFriendsButton"),
+  friendsOverlay: $("#friendsOverlay"),
+  friendsCloseButton: $("#friendsCloseButton"),
+  friendsRefreshButton: $("#friendsRefreshButton"),
+  friendsSummary: $("#friendsSummary"),
+  friendsCount: $("#friendsCount"),
+  friendsOnlineCount: $("#friendsOnlineCount"),
+  blockedCount: $("#blockedCount"),
+  friendsStatus: $("#friendsStatus"),
+  friendsList: $("#friendsList"),
+  blockedList: $("#blockedList"),
+  addFriendInput: $("#addFriendInput"),
+  addFriendButton: $("#addFriendButton"),
   accountOverlay: $("#accountOverlay"),
   accountForm: $("#accountForm"),
   minecraftUsernameInput: $("#minecraftUsernameInput"),
@@ -533,8 +628,20 @@ const els = {
   pickClientModpackDirButton: $("#pickClientModpackDirButton"),
   buildClientZipButton: $("#buildClientZipButton"),
   clientZipStatus: $("#clientZipStatus"),
+  ptbClientModpackDirInput: $("#ptbClientModpackDirInput"),
+  ptbClientZipVersionInput: $("#ptbClientZipVersionInput"),
+  ptbPackZipInput: $("#ptbPackZipInput"),
+  pickPtbClientModpackDirButton: $("#pickPtbClientModpackDirButton"),
+  buildPtbClientZipButton: $("#buildPtbClientZipButton"),
+  ptbReleaseCheckCard: $("#ptbReleaseCheckCard"),
+  ptbReleaseCheckState: $("#ptbReleaseCheckState"),
+  ptbReleaseCheckTitle: $("#ptbReleaseCheckTitle"),
+  ptbReleaseCheckDetail: $("#ptbReleaseCheckDetail"),
+  ptbReleaseUploadProgress: $("#ptbReleaseUploadProgress"),
+  ptbReleaseUploadProgressLabel: $("#ptbReleaseUploadProgressLabel"),
+  ptbReleaseUploadProgressCount: $("#ptbReleaseUploadProgressCount"),
+  ptbReleaseUploadProgressBar: $("#ptbReleaseUploadProgressBar"),
   baseUrlInput: $("#baseUrlInput"),
-  channelInput: $("#channelInput"),
   bucketInput: $("#bucketInput"),
   r2AccountIdInput: $("#r2AccountIdInput"),
   r2AccessKeyIdInput: $("#r2AccessKeyIdInput"),
@@ -560,6 +667,10 @@ const els = {
   githubWorkflowInput: $("#githubWorkflowInput"),
   githubTokenInput: $("#githubTokenInput"),
   launcherUpdateStatus: $("#launcherUpdateStatus"),
+  launcherDeployProgress: $("#launcherDeployProgress"),
+  launcherDeployProgressLabel: $("#launcherDeployProgressLabel"),
+  launcherDeployProgressCount: $("#launcherDeployProgressCount"),
+  launcherDeployProgressBar: $("#launcherDeployProgressBar"),
   serverSourceInput: $("#serverSourceInput"),
   pickServerSourceButton: $("#pickServerSourceButton"),
   serverHostInput: $("#serverHostInput"),
@@ -609,10 +720,10 @@ const els = {
   eventDetailMeta: $("#eventDetailMeta"),
   eventDetailChanges: $("#eventDetailChanges"),
   devLog: $("#devLog"),
-  installCount: $("#installCount"),
-  repairCount: $("#repairCount"),
-  changeCount: $("#changeCount"),
-  ipCount: $("#ipCount"),
+  downloadCount: $("#downloadCount"),
+  uniqueIpv4Count: $("#uniqueIpv4Count"),
+  sharedIpv4Count: $("#sharedIpv4Count"),
+  ipv4UnavailableCount: $("#ipv4UnavailableCount"),
   metricButtons: [...document.querySelectorAll(".metric-value[data-event-filter]")],
   eventFilterLabel: $("#eventFilterLabel"),
   eventsList: $("#eventsList"),
@@ -622,6 +733,7 @@ const els = {
 let currentStatus = null;
 let updatePoll = null;
 let launcherUpdatePoll = null;
+let launcherDeployPoll = null;
 let serverTransferPoll = null;
 let lastUpdateState = null;
 let lastLauncherUpdateState = null;
@@ -630,16 +742,28 @@ let lastIntegrityScan = null;
 let scanProgressHideTimer = null;
 let activeUpdateKind = "";
 let activeTabName = "player";
-let releaseValidation = null;
+let activeSidebarPack = "aht";
+const packStatusCache = new Map();
+const releaseValidationByTarget = new Map();
 let developerAuthenticated = false;
 let allDashboardEvents = [];
 let activeEventFilter = "all";
+let playerIpv4Groups = [];
+let playerDataLoaded = false;
+let playerDataLoading = false;
 let uploadPoll = null;
 let releaseBusy = false;
 let developerSecretSaveTimer = null;
 let launcherUpdateAutoStarted = false;
 let lastStatusRefreshAt = 0;
 let updateCompleteHideTimer = null;
+let friendsBusy = false;
+let friendsLoading = false;
+let friendsActionsAvailable = false;
+let friendsRefreshTimer = null;
+let friendsRequestId = 0;
+const friendsActionRefreshTimers = new Set();
+let currentLegalState = null;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
 
@@ -991,6 +1115,256 @@ async function submitAccount() {
   }
 }
 
+function showLegalDocument(kind = "terms") {
+  if (!currentLegalState || !els.legalDocumentText) return;
+  const privacy = kind === "privacy";
+  els.legalDocumentText.textContent = privacy ? currentLegalState.privacyText : currentLegalState.termsText;
+  els.legalDocumentText.scrollTop = 0;
+  for (const tab of [els.legalTermsTab, els.legalPrivacyTab]) {
+    if (!tab) continue;
+    const selected = tab.dataset.legalDocument === (privacy ? "privacy" : "terms");
+    tab.classList.toggle("is-active", selected);
+    tab.setAttribute("aria-selected", String(selected));
+  }
+}
+
+async function loadLegalGate() {
+  if (!els.legalOverlay || typeof window.aht?.legalStatus !== "function") return;
+  try {
+    currentLegalState = await window.aht.legalStatus();
+    if (!currentLegalState?.required) {
+      els.legalOverlay.hidden = true;
+      return;
+    }
+    els.legalTitle.textContent = currentLegalState.reason === "updated" ? "Terms have changed" : "Review Terms & Privacy";
+    els.legalIntro.textContent = currentLegalState.reason === "updated"
+      ? "You must review and accept the current agreement before continuing."
+      : "Review and accept the agreement before using A Hard Time Launcher.";
+    els.legalVersion.textContent = `Terms ${currentLegalState.termsVersion} | Privacy ${currentLegalState.privacyVersion}`;
+    els.legalAcceptCheckbox.checked = false;
+    els.legalAcceptCheckbox.disabled = false;
+    els.legalAcceptButton.disabled = true;
+    setUnavailable(els.legalAcceptButton, true);
+    els.legalError.textContent = "";
+    showLegalDocument("terms");
+    els.legalOverlay.hidden = false;
+    window.setTimeout(() => els.legalDocumentText?.focus(), 0);
+  } catch (error) {
+    currentLegalState = null;
+    els.legalTitle.textContent = "Terms unavailable";
+    els.legalIntro.textContent = "The legal documents could not be loaded. Restart the launcher or reinstall it.";
+    els.legalVersion.textContent = "";
+    els.legalDocumentText.textContent = cleanErrorMessage(error);
+    els.legalAcceptCheckbox.checked = false;
+    els.legalAcceptCheckbox.disabled = true;
+    els.legalAcceptButton.disabled = true;
+    setUnavailable(els.legalAcceptButton, true);
+    els.legalOverlay.hidden = false;
+  }
+}
+
+async function acceptLegalTerms() {
+  if (!currentLegalState || !els.legalAcceptCheckbox?.checked) return;
+  els.legalAcceptButton.disabled = true;
+  setUnavailable(els.legalAcceptButton, true);
+  els.legalAcceptCheckbox.disabled = true;
+  els.legalError.textContent = "";
+  try {
+    await window.aht.legalAccept({
+      termsVersion: currentLegalState.termsVersion,
+      privacyVersion: currentLegalState.privacyVersion,
+      affirmed: true
+    });
+    els.legalOverlay.hidden = true;
+    showToast("Terms accepted", "Your acceptance was saved on this device.", "success");
+    if (currentStatus) renderAccountGate(currentStatus);
+  } catch (error) {
+    els.legalError.textContent = cleanErrorMessage(error);
+    els.legalAcceptCheckbox.disabled = false;
+    els.legalAcceptButton.disabled = !els.legalAcceptCheckbox.checked;
+    setUnavailable(els.legalAcceptButton, !els.legalAcceptCheckbox.checked);
+  }
+}
+
+function setFriendsStatus(message = "", state = "") {
+  if (!els.friendsStatus) return;
+  els.friendsStatus.textContent = message;
+  els.friendsStatus.className = `friends-status ${state}`.trim();
+}
+
+function setFriendsBusy(busy) {
+  friendsBusy = Boolean(busy);
+  setUnavailable(els.addFriendButton, friendsBusy || !friendsActionsAvailable);
+  if (els.addFriendInput) els.addFriendInput.disabled = friendsBusy || !friendsActionsAvailable;
+  for (const button of els.friendsOverlay?.querySelectorAll("[data-social-action]") || []) {
+    setUnavailable(button, friendsBusy || button.dataset.actionsAvailable !== "true");
+  }
+}
+
+function friendListEmpty(message) {
+  const empty = document.createElement("div");
+  empty.className = "friends-empty";
+  empty.textContent = message;
+  return empty;
+}
+
+function friendRow(person, action, label, actionsAvailable, state = "offline") {
+  const row = document.createElement("div");
+  row.className = "friend-row";
+
+  const name = document.createElement("strong");
+  name.textContent = person.username;
+
+  const presence = document.createElement("span");
+  presence.className = `friend-state ${state}`;
+  presence.textContent = state === "blocked" ? "Blocked" : (person.online ? "Online" : "Offline");
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button compact friend-row-action";
+  button.textContent = label;
+  button.dataset.socialAction = action;
+  button.dataset.actionsAvailable = String(Boolean(actionsAvailable));
+  setUnavailable(button, friendsBusy || !actionsAvailable);
+  button.addEventListener("click", () => {
+    if (!isUnavailable(button)) runFriendAction(action, person.username);
+  });
+
+  row.append(name, presence, button);
+  return row;
+}
+
+function renderFriendsPanel(social) {
+  const state = social || {};
+  const friends = Array.isArray(state.friends) ? state.friends : [];
+  const blocked = Array.isArray(state.blocked) ? state.blocked : [];
+  const requests = Array.isArray(state.requests) ? state.requests : [];
+  const actionsAvailable = Boolean(state.available && state.actionsAvailable);
+  friendsActionsAvailable = actionsAvailable;
+  const counts = state.counts || {};
+
+  els.friendsCount.textContent = String(Number.isFinite(Number(counts.friends)) ? Number(counts.friends) : friends.length);
+  els.friendsOnlineCount.textContent = String(Number.isFinite(Number(counts.online)) ? Number(counts.online) : friends.filter((friend) => friend.online).length);
+  els.blockedCount.textContent = String(Number.isFinite(Number(counts.blocked)) ? Number(counts.blocked) : blocked.length);
+  els.friendsSummary.textContent = state.available
+    ? `${state.username || accountUsername()}${requests.length ? ` | ${requests.length} pending request${requests.length === 1 ? "" : "s"} in game` : ""}`
+    : "Friend service unavailable";
+
+  els.friendsList.replaceChildren();
+  if (!friends.length) {
+    els.friendsList.appendChild(friendListEmpty(state.available ? "No friends yet." : "Friends could not be loaded."));
+  } else {
+    for (const friend of friends) {
+      els.friendsList.appendChild(friendRow(friend, "remove_friend", "Unadd", actionsAvailable, friend.online ? "online" : "offline"));
+    }
+  }
+
+  els.blockedList.replaceChildren();
+  if (!blocked.length) {
+    els.blockedList.appendChild(friendListEmpty(state.available ? "No blocked players." : "Blocked players could not be loaded."));
+  } else {
+    for (const player of blocked) {
+      els.blockedList.appendChild(friendRow(player, "unblock_player", "Unblock", actionsAvailable, "blocked"));
+    }
+  }
+
+  setUnavailable(els.addFriendButton, friendsBusy || !actionsAvailable);
+  if (els.addFriendInput) els.addFriendInput.disabled = friendsBusy || !actionsAvailable;
+  if (state.message) setFriendsStatus(state.message, state.available ? "warn" : "bad");
+  else setFriendsStatus(state.available ? "Friend list is current." : "Friend service is not connected yet.", state.available ? "ok" : "bad");
+}
+
+async function refreshFriendsPanel({ quiet = false } = {}) {
+  if (friendsLoading || typeof window.aht?.socialList !== "function") return;
+  friendsLoading = true;
+  const requestId = ++friendsRequestId;
+  setUnavailable(els.friendsRefreshButton, true);
+  if (!quiet) setFriendsStatus("Loading friends...", "warn");
+  try {
+    const social = await window.aht.socialList();
+    if (requestId !== friendsRequestId || els.friendsOverlay.hidden) return;
+    renderFriendsPanel(social);
+  } catch (error) {
+    if (requestId !== friendsRequestId || els.friendsOverlay.hidden) return;
+    renderFriendsPanel({
+      available: false,
+      actionsAvailable: false,
+      username: accountUsername(),
+      friends: [],
+      blocked: [],
+      requests: [],
+      counts: { friends: 0, online: 0, blocked: 0 },
+      message: cleanErrorMessage(error)
+    });
+  } finally {
+    friendsLoading = false;
+    setUnavailable(els.friendsRefreshButton, false);
+  }
+}
+
+function queueFriendsRefresh(delayMs) {
+  const timer = window.setTimeout(() => {
+    friendsActionRefreshTimers.delete(timer);
+    if (els.friendsOverlay && !els.friendsOverlay.hidden) refreshFriendsPanel({ quiet: true });
+  }, delayMs);
+  friendsActionRefreshTimers.add(timer);
+}
+
+async function runFriendAction(action, targetOverride = "") {
+  if (friendsBusy || !friendsActionsAvailable || typeof window.aht?.socialAction !== "function") return;
+  const target = String(targetOverride || els.addFriendInput?.value || "").trim();
+  const validation = minecraftUsernameError(target);
+  if (validation) {
+    setFriendsStatus(validation, "bad");
+    if (!targetOverride) els.addFriendInput?.focus();
+    return;
+  }
+  setFriendsBusy(true);
+  setFriendsStatus("Sending action to the AHT server...", "warn");
+  try {
+    const result = await window.aht.socialAction({ action, target });
+    if (action === "add_friend" && els.addFriendInput) els.addFriendInput.value = "";
+    if (result?.social) renderFriendsPanel(result.social);
+    setFriendsStatus(result?.message || "Friend action queued.", "ok");
+    queueFriendsRefresh(2500);
+    queueFriendsRefresh(7500);
+  } catch (error) {
+    setFriendsStatus(cleanErrorMessage(error), "bad");
+  } finally {
+    setFriendsBusy(false);
+  }
+}
+
+function openFriendsPanel() {
+  if (!els.friendsOverlay) return;
+  els.friendsOverlay.hidden = false;
+  renderFriendsPanel({
+    available: false,
+    actionsAvailable: false,
+    username: accountUsername(),
+    friends: [],
+    blocked: [],
+    requests: [],
+    counts: { friends: 0, online: 0, blocked: 0 },
+    message: "Loading friends..."
+  });
+  refreshFriendsPanel();
+  clearInterval(friendsRefreshTimer);
+  friendsRefreshTimer = window.setInterval(() => refreshFriendsPanel({ quiet: true }), 15000);
+  window.setTimeout(() => els.friendsCloseButton?.focus(), 0);
+}
+
+function closeFriendsPanel() {
+  if (!els.friendsOverlay) return;
+  els.friendsOverlay.hidden = true;
+  friendsRequestId += 1;
+  clearInterval(friendsRefreshTimer);
+  friendsRefreshTimer = null;
+  for (const timer of friendsActionRefreshTimers) clearTimeout(timer);
+  friendsActionRefreshTimers.clear();
+  els.profileFriendsButton?.focus();
+}
+
 function compactPath(value) {
   if (!value) return "-";
   const original = String(value);
@@ -1114,11 +1488,39 @@ function setLaunchStatusBadge(status = currentStatus) {
   setBadge(badge.text, badge.state);
 }
 
-function setReleaseCheck(state, label, title, detail) {
-  els.releaseCheckCard.className = `release-check-card ${state}`.trim();
-  els.releaseCheckState.textContent = label;
-  els.releaseCheckTitle.textContent = title;
-  els.releaseCheckDetail.textContent = detail;
+function releaseUi(target = "stable") {
+  if (target === "ptb") {
+    return {
+      card: els.ptbReleaseCheckCard,
+      state: els.ptbReleaseCheckState,
+      title: els.ptbReleaseCheckTitle,
+      detail: els.ptbReleaseCheckDetail,
+      progress: els.ptbReleaseUploadProgress,
+      progressLabel: els.ptbReleaseUploadProgressLabel,
+      progressCount: els.ptbReleaseUploadProgressCount,
+      progressBar: els.ptbReleaseUploadProgressBar
+    };
+  }
+  return {
+    card: els.releaseCheckCard,
+    state: els.releaseCheckState,
+    title: els.releaseCheckTitle,
+    detail: els.releaseCheckDetail,
+    progress: els.releaseUploadProgress,
+    progressLabel: els.releaseUploadProgressLabel,
+    progressCount: els.releaseUploadProgressCount,
+    progressBar: els.releaseUploadProgressBar,
+    publishButton: els.publishReleaseButton
+  };
+}
+
+function setReleaseCheck(state, label, title, detail, target = "stable") {
+  const ui = releaseUi(target);
+  if (!ui.card) return;
+  ui.card.className = `release-check-card ${state}`.trim();
+  ui.state.textContent = label;
+  ui.title.textContent = title;
+  ui.detail.textContent = detail;
 }
 
 function setUpdateLogStatus(state, label, title, detail) {
@@ -1153,8 +1555,8 @@ function setServerTransferStatus(state, label, title, detail) {
   if (p) p.textContent = detail;
 }
 
-function releaseKey() {
-  return developerOutDir();
+function releaseKey(target = "stable") {
+  return `${developerOutDir()}::${target}`;
 }
 
 function inputValue(input, fallback = "") {
@@ -1226,12 +1628,28 @@ function playerFeedUrl() {
   return normalizePlayerFeedUrl(inputValue(els.playerFeedUrlInput, currentStatus?.config?.latestUrl || ""));
 }
 
+function ptbPlayerFeedUrl() {
+  const stableFeed = playerFeedUrl();
+  if (!/^https?:\/\//i.test(stableFeed)) return "";
+  try {
+    const stableUrl = new URL(stableFeed);
+    if (/\/ptb\/latest\.json$/i.test(stableUrl.pathname)) return stableUrl.toString();
+    return new URL("ptb/latest.json", new URL(".", stableUrl)).toString();
+  } catch {
+    return "";
+  }
+}
+
+function releaseFeedUrl(target = "stable") {
+  return target === "ptb" ? ptbPlayerFeedUrl() : playerFeedUrl();
+}
+
 function developerBaseUrl() {
   return currentStatus?.config?.developer?.adminBaseUrl || currentStatus?.config?.sync?.baseUrl || "";
 }
 
-function selectedPackZip() {
-  return els.packZipInput.value.trim();
+function selectedPackZip(target = "stable") {
+  return inputValue(target === "ptb" ? els.ptbPackZipInput : els.packZipInput, "");
 }
 
 function releaseBucketName() {
@@ -1297,10 +1715,10 @@ function queueDeveloperSecretSave() {
   }, 600);
 }
 
-function publishBlockReason() {
+function publishBlockReason(target = "stable") {
   if (!developerAuthenticated) return "Developer login is required before publishing releases.";
-  if (!selectedPackZip()) return "Choose an exact AHT client ZIP from Modpack ZIP first.";
-  if (!/^https?:\/\//i.test(playerFeedUrl())) {
+  if (!selectedPackZip(target)) return target === "ptb" ? "Choose or create an exact PTB client ZIP first." : "Choose an exact AHT client ZIP from Modpack ZIP first.";
+  if (!/^https?:\/\//i.test(releaseFeedUrl(target))) {
     return setupCloudBlockReason();
   }
   return "";
@@ -1330,7 +1748,7 @@ function cacheOnlyValidationBlockReason(validation) {
 }
 
 function updateReleaseUploadState() {
-  const reason = publishBlockReason();
+  const reason = publishBlockReason("stable");
   const setupReason = setupCloudBlockReason();
   const defaultsReason = !developerAuthenticated
     ? "Developer login is required before writing player defaults."
@@ -1338,23 +1756,28 @@ function updateReleaseUploadState() {
       ? "Enter the public Player Feed URL first."
       : "";
   setUnavailable(els.publishReleaseButton, releaseBusy || Boolean(reason));
+  const ptbCreateReason = developerAuthenticated ? "" : "Developer login is required before creating PTB releases.";
+  setUnavailable(els.buildPtbClientZipButton, releaseBusy || Boolean(ptbCreateReason));
   setUnavailable(els.setupCloudButton, releaseBusy || Boolean(setupReason));
   setUnavailable(els.writeDefaultsButton, releaseBusy || Boolean(defaultsReason));
   if (els.setupCloudButton) {
     els.setupCloudButton.title = setupReason || "Create buckets, set Worker secrets, and deploy the Worker";
   }
   if (els.publishReleaseButton) {
-    els.publishReleaseButton.title = reason || "Build, validate, upload, and verify the update";
+    els.publishReleaseButton.title = reason || "Publish stable AHT to its R2 and GitHub release tracks";
+  }
+  if (els.buildPtbClientZipButton) {
+    els.buildPtbClientZipButton.title = ptbCreateReason || "Create and upload a ZIP to the isolated PTB release track";
   }
   if (els.writeDefaultsButton) {
     els.writeDefaultsButton.title = defaultsReason || "Write app.defaults.json for fresh player installs";
   }
 }
 
-function invalidateReleaseValidation(label = "Ready", detail = "Pick an exact AHT client ZIP from Modpack ZIP, then publish it. The app builds, validates, uploads to R2, and verifies the player feed.") {
-  releaseValidation = null;
-  setReleaseUploadProgress(null, true);
-  setReleaseCheck("warn", label, selectedPackZip() ? "Publish update" : "Choose a ZIP", detail);
+function invalidateReleaseValidation(label = "Ready", detail = "Pick an exact client ZIP, then publish it to its isolated R2 and GitHub release tracks.", target = "stable") {
+  releaseValidationByTarget.delete(target);
+  setReleaseUploadProgress(null, true, target);
+  setReleaseCheck("warn", label, selectedPackZip(target) ? (target === "ptb" ? "Publish PTB" : "Publish update") : "Choose a ZIP", detail, target);
   updateReleaseUploadState();
 }
 
@@ -1397,12 +1820,13 @@ function setProgressElements(wrap, labelEl, countEl, barEl, progress = null, hid
   }
 }
 
-function setReleaseUploadProgress(progress = null, hidden = false) {
+function setReleaseUploadProgress(progress = null, hidden = false, target = "stable") {
+  const ui = releaseUi(target);
   setProgressElements(
-    els.releaseUploadProgress,
-    els.releaseUploadProgressLabel,
-    els.releaseUploadProgressCount,
-    els.releaseUploadProgressBar,
+    ui.progress,
+    ui.progressLabel,
+    ui.progressCount,
+    ui.progressBar,
     progress,
     hidden
   );
@@ -1419,14 +1843,26 @@ function setServerTransferProgress(progress = null, hidden = false) {
   );
 }
 
+function setLauncherDeployProgress(progress = null, hidden = false) {
+  setProgressElements(
+    els.launcherDeployProgress,
+    els.launcherDeployProgressLabel,
+    els.launcherDeployProgressCount,
+    els.launcherDeployProgressBar,
+    progress,
+    hidden
+  );
+}
+
 function renderUploadState(state) {
   if (!state) return;
+  const target = state.releaseTarget === "ptb" ? "ptb" : "stable";
   const total = state.total || 0;
   const completed = state.completed || 0;
   const progress = state.progress || null;
   const percent = progress?.percent ?? (total ? Math.round((completed / total) * 100) : 0);
   if (state.running) {
-    setReleaseUploadProgress(progress || { percent, phase: state.current || "Uploading" });
+    setReleaseUploadProgress(progress || { percent, phase: state.current || "Uploading" }, false, target);
     const hasByteProgress = (progress?.unit === "bytes" || progress?.method === "direct-multipart") && progress?.total;
     const byteDetail = hasByteProgress
       ? `${formatBytes(progress.completed || 0)}/${formatBytes(progress.total)}${progress.speedBytesPerSecond ? ` at ${formatBytes(progress.speedBytesPerSecond)}/s` : ""}`
@@ -1435,17 +1871,18 @@ function renderUploadState(state) {
       "warn",
       "Uploading release",
       `${percent}% uploaded`,
-      state.current ? `Current: ${state.current}. ${byteDetail}` : "Starting remote R2 upload."
+      state.current ? `Current: ${state.current}. ${byteDetail}` : "Starting remote R2 upload.",
+      target
     );
   } else if (state.error) {
-    setReleaseUploadProgress(progress || { percent }, false);
-    setReleaseCheck("bad", "Upload failed", `${completed}/${total} files uploaded`, state.error);
+    setReleaseUploadProgress(progress || { percent }, false, target);
+    setReleaseCheck("bad", "Upload failed", `${completed}/${total} files uploaded`, state.error, target);
   } else if (state.lastResult) {
-    setReleaseUploadProgress({ percent: 100, phase: "Upload complete" });
+    setReleaseUploadProgress({ percent: 100, phase: "Upload complete" }, false, target);
     const verified = state.verification?.publicLatestUrl || state.lastResult?.verification?.publicLatestUrl || "";
-    setReleaseCheck("ok", "Upload complete", `${completed}/${total} files uploaded`, verified ? `Player feed verified: ${verified}` : "Release artifacts are in remote R2.");
+    setReleaseCheck("ok", "Upload complete", `${completed}/${total} files uploaded`, verified ? `Player feed verified: ${verified}` : "Release artifacts are in remote R2.", target);
   } else {
-    setReleaseUploadProgress(null, true);
+    setReleaseUploadProgress(null, true, target);
   }
   if (Array.isArray(state.lines) && state.lines.length) {
     setTextContentBounded(els.devLog, state.lines.join("\n"), DEV_LOG_TEXT_LIMIT);
@@ -1466,12 +1903,12 @@ function startUploadPolling() {
   }, 1000);
 }
 
-async function buildReleaseFromSelectedZip(reason = "Building release") {
-  const packZip = selectedPackZip();
+async function buildReleaseFromSelectedZip(reason = "Building release", target = "stable") {
+  const packZip = selectedPackZip(target);
   if (!packZip) {
     return null;
   }
-  setReleaseCheck("warn", reason, "Preparing selected ZIP", packZip);
+  setReleaseCheck("warn", reason, "Preparing selected ZIP", packZip, target);
   const inspected = await window.aht.devInspectPackZip(packZip);
   if (inspected.versionMismatch) {
     throw new Error(`ZIP filename says ${inspected.versionHint}, but release metadata says ${inspected.version}. Fix the ZIP version before upload.`);
@@ -1482,18 +1919,19 @@ async function buildReleaseFromSelectedZip(reason = "Building release") {
   const result = await window.aht.devBuildRelease({
     packZip,
     outDir: developerOutDir(),
-    baseUrl: workerBaseFromFeedUrl(playerFeedUrl()) || developerBaseUrl(),
-    channel: els.channelInput.value.trim() || "stable",
+    baseUrl: workerBaseFromFeedUrl(releaseFeedUrl(target)) || developerBaseUrl(),
+    releaseTarget: target,
     cacheModsDir: els.cacheModsInput.value.trim()
   });
-  releaseValidation = null;
+  releaseValidationByTarget.delete(target);
   const cacheCount = result.report?.cacheSummary?.matchedManifestFiles ?? 0;
   const exactZip = inspected.fullClientZip || result.latest?.installMode === "full-client-zip";
   setReleaseCheck(
     "warn",
     "Release built",
     `${inspected.name || result.report?.name || "Pack"} ${inspected.version || result.report?.version || ""}`.trim(),
-    exactZip ? `${inspected.fileCount || result.latest?.clientZip?.fileCount || 0} exact client files. Running validation next.` : `${cacheCount} cache entries matched. Running validation next.`
+    exactZip ? `${inspected.fileCount || result.latest?.clientZip?.fileCount || 0} exact client files. Running validation next.` : `${cacheCount} cache entries matched. Running validation next.`,
+    target
   );
   setDevLog(result.report);
   return result;
@@ -1946,6 +2384,9 @@ function shortDateTime(value) {
 }
 
 function eventTypeLabel(type = "") {
+  if (type === "launcher_download") return "Installer";
+  if (type === "unique_ipv4") return "Unique IPv4";
+  if (type === "shared_ipv4") return "Shared IPv4";
   return String(type || "-").replaceAll("_", " ");
 }
 
@@ -1955,22 +2396,12 @@ function eventTitle(item) {
 }
 
 function eventVersion(item) {
-  return item.event?.version || item.event?.installed?.version || "-";
-}
-
-function changeCounts(item) {
-  const counts = item.event?.changes?.counts;
-  if (!counts) return "";
-  const changed = counts.changed ?? 0;
-  const missing = counts.missing ?? 0;
-  const added = counts.added ?? 0;
-  return `${changed} changed, ${missing} missing, ${added} added`;
+  return item.launcherVersion || item.event?.version || "-";
 }
 
 function eventMeta(item) {
   const parts = [];
   if (item.playerLabel) parts.push(item.playerLabel);
-  if (item.installId) parts.push(shortId(item.installId));
   if (item.ip) parts.push(item.ip);
   if (item.platform) parts.push(item.platform);
   return parts.join(" | ") || "-";
@@ -1978,31 +2409,41 @@ function eventMeta(item) {
 
 function eventSummary(item) {
   const type = item.event?.type || "-";
-  if (type === "unique_ip") {
-    return item.event?.summary || "Unique IP";
-  }
-  if (type === "local_changes") {
-    return changeCounts(item) || "Local file report";
-  }
-  if (type === "install_completed" || type === "repair_completed") {
-    const modCount = item.event?.manifestFileCount;
-    const overrideCount = item.event?.overrideFileCount;
-    if (Number.isFinite(modCount) || Number.isFinite(overrideCount)) {
-      return `${modCount ?? 0} mods, ${overrideCount ?? 0} overrides`;
-    }
-  }
-  if (type.endsWith("_failed")) {
-    return item.event?.error || "Failed";
-  }
-  return eventVersion(item);
+  if (type === "unique_ipv4" || type === "shared_ipv4") return item.event?.summary || "-";
+  return item.fileName || item.event?.summary || "-";
 }
 
 function eventFilterTitle(filter) {
-  if (filter === "installs") return "Installs";
-  if (filter === "repairs") return "Repairs";
-  if (filter === "changes") return "Change reports";
-  if (filter === "ips") return "Unique IPs";
-  return "All events";
+  if (filter === "ips") return "Unique IPv4";
+  if (filter === "shared") return "Shared IPv4 players";
+  if (filter === "unavailable") return "IPv4 unavailable";
+  return "All downloads";
+}
+
+function groupForIpv4(ipv4) {
+  return playerIpv4Groups.find((group) => group.ipv4 === ipv4) || null;
+}
+
+function dashboardDownload(item) {
+  const ip = String(item.ipv4 || item.ip || "").trim();
+  const playerGroup = groupForIpv4(ip);
+  const players = Array.isArray(playerGroup?.players) ? playerGroup.players : [];
+  return {
+    ...item,
+    receivedAt: item.receivedAt || "",
+    ip,
+    playerLabel: players.length ? players.join(", ") : "Unregistered",
+    platform: item.platformLabel || item.platformKey || "-",
+    launcherVersion: item.launcherVersion || "-",
+    fileName: item.fileName || "-",
+    event: {
+      type: "launcher_download",
+      summary: item.fileName || "-",
+      players,
+      ipv4Source: item.ipv4Source || (ip ? "legacy" : "unavailable"),
+      pseudoIpv4: Boolean(item.pseudoIpv4)
+    }
+  };
 }
 
 function buildUniqueIpRows(events) {
@@ -2015,19 +2456,13 @@ function buildUniqueIpRows(events) {
         ip,
         events: [],
         players: new Set(),
-        platforms: new Set(),
-        installs: 0,
-        repairs: 0,
-        changes: 0
+        platforms: new Set()
       });
     }
     const group = groups.get(ip);
     group.events.push(item);
     if (item.playerLabel) group.players.add(item.playerLabel);
     if (item.platform) group.platforms.add(item.platform);
-    if (item.event?.type === "install_completed") group.installs += 1;
-    if (item.event?.type === "repair_completed") group.repairs += 1;
-    if (item.event?.type === "local_changes") group.changes += 1;
   }
   return [...groups.values()].map((group) => {
     const sorted = [...group.events].sort((a, b) => String(b.receivedAt || "").localeCompare(String(a.receivedAt || "")));
@@ -2036,17 +2471,14 @@ function buildUniqueIpRows(events) {
     return {
       receivedAt: sorted[0]?.receivedAt || "",
       ip: group.ip,
-      playerLabel: players.length ? players.join(", ") : `${group.events.length} event${group.events.length === 1 ? "" : "s"}`,
-      installId: "",
+      playerLabel: players.length ? players.join(", ") : "Unregistered",
       platform: platforms.join(", ") || "-",
-      arch: "",
+      launcherVersion: [...new Set(group.events.map((entry) => eventVersion(entry)))].join(", "),
+      fileName: `${group.events.length} download${group.events.length === 1 ? "" : "s"}`,
       event: {
-        type: "unique_ip",
-        summary: `${group.events.length} events, ${group.installs} installs, ${group.repairs} repairs, ${group.changes} change reports`,
+        type: "unique_ipv4",
+        summary: `${group.events.length} launcher download${group.events.length === 1 ? "" : "s"}`,
         eventCount: group.events.length,
-        installs: group.installs,
-        repairs: group.repairs,
-        changeReports: group.changes,
         players,
         platforms,
         events: sorted
@@ -2055,19 +2487,38 @@ function buildUniqueIpRows(events) {
   }).sort((a, b) => String(b.receivedAt || "").localeCompare(String(a.receivedAt || "")));
 }
 
+function buildSharedIpv4Rows() {
+  return playerIpv4Groups
+    .filter((group) => group.shared || Number(group.playerCount || 0) > 1)
+    .map((group) => {
+      const downloads = allDashboardEvents.filter((item) => item.ip === group.ipv4);
+      return {
+        receivedAt: group.lastSeenAt || downloads[0]?.receivedAt || "",
+        ip: group.ipv4,
+        playerLabel: (group.players || []).join(", "),
+        platform: [...new Set(downloads.map((entry) => entry.platform).filter(Boolean))].join(", ") || "-",
+        launcherVersion: [...new Set(downloads.map((entry) => eventVersion(entry)).filter(Boolean))].join(", ") || "-",
+        fileName: `${downloads.length} download${downloads.length === 1 ? "" : "s"}`,
+        event: {
+          type: "shared_ipv4",
+          summary: `${group.playerCount || group.players?.length || 0} registered players share this IPv4`,
+          players: group.players || [],
+          ipv4Source: group.ipv4Source || "legacy",
+          pseudoIpv4: Boolean(group.pseudoIpv4),
+          events: downloads
+        }
+      };
+    })
+    .sort((left, right) => (right.event.players.length - left.event.players.length)
+      || String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
+}
+
 function dashboardItemsForFilter(filter) {
-  if (filter === "installs") {
-    return allDashboardEvents.filter((item) => item.event?.type === "install_completed");
-  }
-  if (filter === "repairs") {
-    return allDashboardEvents.filter((item) => item.event?.type === "repair_completed");
-  }
-  if (filter === "changes") {
-    return allDashboardEvents.filter((item) => item.event?.type === "local_changes");
-  }
   if (filter === "ips") {
     return buildUniqueIpRows(allDashboardEvents);
   }
+  if (filter === "shared") return buildSharedIpv4Rows();
+  if (filter === "unavailable") return allDashboardEvents.filter((item) => !item.ip);
   return allDashboardEvents;
 }
 
@@ -2085,11 +2536,12 @@ function renderDashboardEvents(filter = activeEventFilter) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = allDashboardEvents.length
-      ? `No ${eventFilterTitle(filter).toLowerCase()} found for the selected day.`
-      : "Load data to view recent installs, repairs, change reports, and unique IPs.";
+      ? `No ${eventFilterTitle(filter).toLowerCase()} found.`
+      : "Load the permanent launcher download history.";
     els.eventsList.appendChild(empty);
     return;
   }
+  const rows = document.createDocumentFragment();
   for (const [index, event] of items.entries()) {
     const row = document.createElement("button");
     row.className = index === 0 ? "event active" : "event";
@@ -2103,7 +2555,7 @@ function renderDashboardEvents(filter = activeEventFilter) {
     const summaryCell = document.createElement("span");
     time.textContent = shortDateTime(event.receivedAt);
     type.textContent = eventTypeLabel(event.event?.type);
-    player.textContent = event.playerLabel || shortId(event.installId);
+    player.textContent = event.playerLabel || "Unregistered";
     ip.textContent = event.ip || "-";
     platform.textContent = event.platform || "-";
     version.textContent = eventVersion(event);
@@ -2115,8 +2567,9 @@ function renderDashboardEvents(filter = activeEventFilter) {
       renderEventDetails(event);
     });
     row.append(time, type, player, ip, platform, version, summaryCell);
-    els.eventsList.appendChild(row);
+    rows.appendChild(row);
   }
+  els.eventsList.appendChild(rows);
   renderEventDetails(items[0]);
 }
 
@@ -2127,12 +2580,12 @@ function renderEventDetails(item) {
   els.eventDetailTime.textContent = shortDateTime(item.receivedAt);
   els.eventDetailMeta.innerHTML = "";
   const meta = [
-    ["Player", item.playerLabel || "-"],
-    ["IP", item.ip || "-"],
-    ["Install ID", item.installId || "-"],
-    ["Platform", `${item.platform || "-"} ${item.arch || ""}`.trim()],
-    ["Version", eventVersion(item)],
-    ["Summary", eventSummary(item)]
+    ["Registered player(s)", item.playerLabel || "Unregistered"],
+    ["IPv4", item.ip || "Unavailable"],
+    ["IPv4 source", item.event?.ipv4Source || "-"],
+    ["Platform", item.platform || "-"],
+    ["Launcher version", eventVersion(item)],
+    ["File", item.fileName || eventSummary(item)]
   ];
   for (const [label, value] of meta) {
     const card = document.createElement("div");
@@ -2145,25 +2598,21 @@ function renderEventDetails(item) {
     els.eventDetailMeta.appendChild(card);
   }
   els.eventDetailChanges.innerHTML = "";
-  const groups = [
-    ["Changed", item.event?.changes?.changed || []],
-    ["Added", item.event?.changes?.added || []],
-    ["Missing", item.event?.changes?.missing || []]
-  ].filter(([, entries]) => entries.length);
-  for (const [label, entries] of groups) {
+  const relatedDownloads = Array.isArray(item.event?.events) ? item.event.events : [];
+  if (relatedDownloads.length) {
     const group = document.createElement("section");
     const title = document.createElement("h3");
     const list = document.createElement("ul");
-    title.textContent = label;
-    for (const entry of entries.slice(0, 8)) {
+    title.textContent = "Related downloads";
+    for (const entry of relatedDownloads.slice(0, 25)) {
       const itemNode = document.createElement("li");
-      itemNode.textContent = entry.path || String(entry);
+      itemNode.textContent = `${shortDateTime(entry.receivedAt)} | ${entry.fileName || eventSummary(entry)}`;
       itemNode.title = itemNode.textContent;
       list.appendChild(itemNode);
     }
-    if (entries.length > 8) {
+    if (relatedDownloads.length > 25) {
       const more = document.createElement("li");
-      more.textContent = `+${entries.length - 8} more`;
+      more.textContent = `+${relatedDownloads.length - 25} more`;
       more.className = "muted-path";
       list.appendChild(more);
     }
@@ -2172,23 +2621,63 @@ function renderEventDetails(item) {
   }
   const lines = [
     `${eventTitle(item)} | ${shortDateTime(item.receivedAt)}`,
-    `Player: ${item.playerLabel || "-"}`,
-    `Install ID: ${item.installId || "-"}`,
-    `IP: ${item.ip || "-"}`,
-    `Platform: ${item.platform || "-"} ${item.arch || ""}`.trim(),
-    `Version: ${eventVersion(item)}`
+    `Registered player(s): ${item.playerLabel || "Unregistered"}`,
+    `IPv4: ${item.ip || "Unavailable"}`,
+    `IPv4 source: ${item.event?.ipv4Source || "-"}`,
+    `Platform: ${item.platform || "-"}`,
+    `Launcher version: ${eventVersion(item)}`,
+    `File: ${item.fileName || eventSummary(item)}`
   ];
-  if (item.event?.changes?.counts) {
-    lines.push(`Changes: ${changeCounts(item)}`);
-    const changed = item.event.changes.changed || [];
-    const added = item.event.changes.added || [];
-    const missing = item.event.changes.missing || [];
-    if (changed.length) lines.push(`Changed:\n${changed.map((entry) => `  - ${entry.path}`).join("\n")}`);
-    if (added.length) lines.push(`Added:\n${added.map((entry) => `  - ${entry.path}`).join("\n")}`);
-    if (missing.length) lines.push(`Missing:\n${missing.map((entry) => `  - ${entry.path}`).join("\n")}`);
-  }
   lines.push("", JSON.stringify(item, null, 2));
   setTextContentBounded(els.devLog, lines.join("\n"), DEV_LOG_TEXT_LIMIT);
+}
+
+async function loadPlayerDownloadHistory() {
+  if (playerDataLoading) return;
+  playerDataLoading = true;
+  setUnavailable(els.loadDashboardButton, true);
+  const originalMarkup = els.loadDashboardButton.innerHTML;
+  try {
+    const groupResult = await window.aht.devPlayerIpv4Groups();
+    playerIpv4Groups = Array.isArray(groupResult?.groups) ? groupResult.groups : [];
+
+    const downloads = [];
+    const seenCursors = new Set();
+    let cursor = "";
+    do {
+      const page = await window.aht.devLauncherDownloads({ limit: 250, cursor });
+      if (Array.isArray(page?.downloads)) downloads.push(...page.downloads);
+      els.loadDashboardButton.textContent = `Loading ${downloads.length}`;
+      const nextCursor = page?.hasMore ? String(page.cursor || "") : "";
+      if (!nextCursor) break;
+      if (seenCursors.has(nextCursor)) throw new Error("Download history pagination returned a repeated cursor.");
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    } while (true);
+
+    allDashboardEvents = downloads
+      .map(dashboardDownload)
+      .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
+    const uniqueIpv4 = new Set(allDashboardEvents.map((item) => item.ip).filter(Boolean));
+    const sharedIpv4 = playerIpv4Groups.filter((group) => group.shared || Number(group.playerCount || 0) > 1);
+    const unavailable = allDashboardEvents.filter((item) => !item.ip);
+    els.downloadCount.textContent = String(allDashboardEvents.length);
+    els.uniqueIpv4Count.textContent = String(uniqueIpv4.size);
+    els.sharedIpv4Count.textContent = String(sharedIpv4.length);
+    els.ipv4UnavailableCount.textContent = String(unavailable.length);
+    playerDataLoaded = true;
+    renderDashboardEvents(activeEventFilter);
+    showToast("Download history loaded", `${allDashboardEvents.length} permanent launcher downloads loaded.`, "success");
+  } catch (error) {
+    const message = cleanErrorMessage(error);
+    setDevLog(message);
+    showToast("Download history failed", message, "error");
+  } finally {
+    playerDataLoading = false;
+    els.loadDashboardButton.innerHTML = originalMarkup;
+    setUnavailable(els.loadDashboardButton, false);
+  }
 }
 
 function renderDeveloperUpdateLogs(logs = []) {
@@ -2351,35 +2840,68 @@ async function scanLauncherBuilds() {
   }
 }
 
+function renderLauncherDeployState(state) {
+  if (!state) return;
+  setLauncherDeployProgress(state.progress, false);
+  if (Array.isArray(state.lines) && state.lines.length) setDevLog(state.lines.join("\n"));
+  if (state.running) {
+    setLauncherUpdateStatus("warn", "Deploying public launcher", state.progress?.phase || "GitHub Actions running", "Windows and macOS player builds are publishing to GitHub Releases and R2. The developer launcher is never uploaded.");
+    return;
+  }
+  if (state.error) {
+    setLauncherUpdateStatus("bad", "Deploy failed", "Public launcher was not fully published", state.error);
+    return;
+  }
+  if (state.lastResult) {
+    const result = state.lastResult;
+    setLauncherUpdateStatus("ok", "Published and verified", `AHT Launcher ${result.version}`, `GitHub Release and ${result.latestUrl} are live. Developer artifacts uploaded: no.`);
+    setDevLog(result);
+  }
+}
+
+async function pollLauncherDeploy() {
+  const state = await window.aht.devLauncherDeployState();
+  renderLauncherDeployState(state);
+  if (!state.running) {
+    if (launcherDeployPoll) clearInterval(launcherDeployPoll);
+    launcherDeployPoll = null;
+    setUnavailable(els.publishLauncherUpdateButton, false);
+    if (state.error) showToast("Launcher deploy failed", state.error, "error");
+    else if (state.lastResult) showToast("Launcher published", `AHT Launcher ${state.lastResult.version} is live.`, "success");
+  }
+  return state;
+}
+
 async function publishLauncherUpdate() {
-  if (isUnavailable(els.publishLauncherUpdateButton)) return;
+  if (isUnavailable(els.publishLauncherUpdateButton) || launcherDeployPoll) return;
   setUnavailable(els.publishLauncherUpdateButton, true);
   try {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings());
     const payload = {
-      githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
-      githubBranch: inputValue(els.githubBranchInput, "main"),
-      githubWorkflow: inputValue(els.githubWorkflowInput, "build-macos.yml"),
       githubToken: inputValue(els.githubTokenInput, ""),
       publishToR2: true
     };
-    setLauncherUpdateStatus("warn", "Starting GitHub", "Reading version from GitHub", "GitHub Actions will build every launcher and publish the update to R2.");
-    const result = await window.aht.devDispatchLauncherWorkflow(payload);
-    setDevLog(result);
-    const runDetail = result.run?.htmlUrl
-      ? `Run started: ${result.run.htmlUrl}`
-      : `Workflow dispatched. Watch: ${result.actionsUrl}`;
-    const version = result.version || result.packageVersion || "";
-    setLauncherUpdateStatus("ok", "GitHub started", version ? `AHT Launcher ${version}` : "AHT Launcher", `${runDetail} GitHub will publish to R2 and update launcher/latest.json when it finishes.`);
-    showToast("Launcher workflow started", result.run?.htmlUrl || result.actionsUrl, "success");
+    setLauncherUpdateStatus("warn", "Preparing deploy", "Reading latest GitHub launcher version", "Only public Windows and macOS player-launcher artifacts will be released.");
+    setLauncherDeployProgress({ phase: "Preparing public deploy", percent: 0 });
+    const state = await window.aht.devDeployLauncher(payload);
+    renderLauncherDeployState(state);
+    launcherDeployPoll = setInterval(() => {
+      pollLauncherDeploy().catch((error) => {
+        if (launcherDeployPoll) clearInterval(launcherDeployPoll);
+        launcherDeployPoll = null;
+        setUnavailable(els.publishLauncherUpdateButton, false);
+        showToast("Launcher deploy status failed", cleanErrorMessage(error), "error");
+      });
+    }, 2_000);
+    await pollLauncherDeploy();
   } catch (error) {
     const message = cleanErrorMessage(error);
-    setLauncherUpdateStatus("bad", "GitHub failed", "Launcher workflow was not started", message);
+    setLauncherUpdateStatus("bad", "Deploy failed", "Launcher deploy did not start", message);
     setDevLog(message);
-    showToast("Launcher workflow failed", message, "error");
-  } finally {
+    setLauncherDeployProgress({ phase: "Deploy failed", percent: 100 });
     setUnavailable(els.publishLauncherUpdateButton, false);
+    showToast("Launcher deploy failed", message, "error");
   }
 }
 
@@ -2397,12 +2919,24 @@ function serverTransferPayload() {
   };
 }
 
+function serverTransferSettingsPayload() {
+  const { password: _password, ...settings } = serverTransferPayload();
+  return settings;
+}
+
+async function saveServerTransferSettings() {
+  const saved = await window.aht.devSaveServerTransfer(serverTransferSettingsPayload());
+  if (currentStatus?.config) {
+    currentStatus.config.serverTransfer = { ...(currentStatus.config.serverTransfer || {}), ...saved };
+  }
+  return saved;
+}
+
 async function planServerTransfer() {
   setUnavailable(els.planServerTransferButton, true);
   setServerTransferStatus("warn", "Planning", "Scanning local server folder", "Root files plus mods, scripts, config, and ForgeEssentials will be included.");
   try {
     await saveDeveloperSecrets();
-    await window.aht.saveSettings(serializeSettings());
     const result = await window.aht.devPlanServerTransfer(serverTransferPayload());
     const excluded = result.excludedDirs?.length ? ` Excluded: ${result.excludedDirs.join(", ")}.` : "";
     setServerTransferStatus("ok", "Plan ready", `${result.fileCount || 0} files`, `${Math.round((result.totalBytes || 0) / 1024 / 1024)} MB will upload. Scope: root files, mods, scripts, config, ForgeEssentials.${excluded}`);
@@ -2466,7 +3000,6 @@ async function uploadServerFiles() {
   setUnavailable(els.planServerTransferButton, true);
   try {
     await saveDeveloperSecrets();
-    await window.aht.saveSettings(serializeSettings());
     setServerTransferStatus("warn", "Starting upload", "Connecting to server", "This is local SFTP only. No Cloudflare is used.");
     setServerTransferProgress({ phase: "Connecting", percent: 0 });
     setTextContentBounded(els.serverTransferLog, "Starting server file upload...\nScope: root files, mods, scripts, config, ForgeEssentials.\nDregoraRL is excluded.", LOG_TEXT_LIMIT);
@@ -2496,6 +3029,9 @@ function activateDeveloperSection(targetId) {
   els.devPanels.forEach((panel) => {
     panel.hidden = panel.id !== targetId;
   });
+  if (targetId === "playerDataTools" && developerAuthenticated && !playerDataLoaded) {
+    void loadPlayerDownloadHistory();
+  }
 }
 
 function serializeSettings() {
@@ -2546,6 +3082,7 @@ function serializeSettings() {
       defaultOutDir: inputValue(els.outDirInput, existingDeveloper.defaultOutDir || ""),
       defaultCacheModsDir: els.cacheModsInput?.value.trim() || "",
       clientModpackDir: els.clientModpackDirInput?.value.trim() || "",
+      ptbClientModpackDir: inputValue(els.ptbClientModpackDirInput, existingDeveloper.ptbClientModpackDir || existingDeveloper.clientModpackDir || ""),
       r2Bucket: inputValue(els.bucketInput, existingDeveloper.r2Bucket || "ahtlauncher"),
       r2AccountId: inputValue(els.r2AccountIdInput, existingDeveloper.r2AccountId || ""),
       cacheOnlyMode: cacheOnlyMode(),
@@ -2587,7 +3124,9 @@ function fillSettings(status) {
   setInputValue(els.outDirInput, config.developer?.defaultOutDir || "");
   setInputValue(els.cacheModsInput, config.developer?.defaultCacheModsDir || "");
   setInputValue(els.clientModpackDirInput, config.developer?.clientModpackDir || config.developer?.defaultCacheModsDir?.replace(/[\\/]mods$/i, "") || "");
+  setInputValue(els.ptbClientModpackDirInput, config.developer?.ptbClientModpackDir || config.developer?.clientModpackDir || config.developer?.defaultCacheModsDir?.replace(/[\\/]mods$/i, "") || "");
   if (els.clientZipVersionInput && !els.clientZipVersionInput.value) setInputValue(els.clientZipVersionInput, status.latest?.version || status.installed?.version || "");
+  if (els.ptbClientZipVersionInput && !els.ptbClientZipVersionInput.value) setInputValue(els.ptbClientZipVersionInput, status.latest?.version || status.installed?.version || "");
   setInputValue(els.bucketInput, config.developer?.r2Bucket || "ahtlauncher");
   const savedR2AccountId = config.developer?.r2AccountId || status.developerSecrets?.r2AccountId || "";
   if (els.r2AccountIdInput && document.activeElement !== els.r2AccountIdInput && (savedR2AccountId || !els.r2AccountIdInput.value)) {
@@ -2649,6 +3188,9 @@ function fillSettings(status) {
 
 function renderStatus(status) {
   currentStatus = status;
+  const statusPack = status.activePack || activeSidebarPack || "aht";
+  activeSidebarPack = statusPack;
+  packStatusCache.set(statusPack, status);
   developerAuthenticated = Boolean(status.developerAuthenticated);
   applyDeveloperGate(status);
   const latestVersion = status.latest?.version || "-";
@@ -2666,7 +3208,12 @@ function renderStatus(status) {
   if (els.launcherVersionLabel) els.launcherVersionLabel.textContent = launcherVersion;
   els.installedVersion.textContent = installedVersion || "Not Installed";
   els.latestVersion.textContent = latestVersion;
-  els.sideInstalledVersion.textContent = installedLabel;
+  if (statusPack === "ptb") {
+    if (els.ptbSideInstalledVersion) els.ptbSideInstalledVersion.textContent = installedLabel;
+  } else {
+    els.sideInstalledVersion.textContent = installedLabel;
+  }
+  if (els.playerPackTitle) els.playerPackTitle.textContent = status.releaseName || (statusPack === "ptb" ? "A Hard Time PTB" : "A Hard Time");
   if (els.instanceDir) els.instanceDir.textContent = status.config.instanceDir || "-";
   if (status.minecraftProfile?.versionId) {
     const profileState = status.minecraftProfile.loaderInstalled ? "ready" : "loader missing";
@@ -2677,6 +3224,7 @@ function renderStatus(status) {
   }
   if (els.installId) els.installId.textContent = shortId(status.identity.installId);
   els.playerLabelView.textContent = accountUsername(status) || "Player";
+  if (els.profileFriendsButton) els.profileFriendsButton.hidden = !accountUsername(status);
   setSyncLine(status.config.sync?.enabled === false ? "Sync off" : "Sync on");
   els.developerTab.hidden = !status.developerMode;
   els.developerTileButton.hidden = !status.developerMode;
@@ -2762,8 +3310,8 @@ function renderStatus(status) {
   renderDownloads();
 }
 
-async function refresh() {
-  renderStatus(await window.aht.getStatus());
+async function refresh(packKey = activeSidebarPack) {
+  renderStatus(await window.aht.getStatus(packKey));
   lastStatusRefreshAt = Date.now();
 }
 
@@ -2779,7 +3327,11 @@ async function refreshQuietly() {
 function activateTab(name) {
   activeTabName = name;
   els.tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === name));
-  els.gameTiles.forEach((tile) => tile.classList.toggle("active", tile.dataset.tab === name));
+  els.gameTiles.forEach((tile) => {
+    const sameTab = tile.dataset.tab === name;
+    const samePack = !tile.dataset.pack || tile.dataset.pack === activeSidebarPack;
+    tile.classList.toggle("active", sameTab && samePack);
+  });
   els.views.forEach((view) => view.classList.toggle("active", view.id === name));
   syncSetupNotice();
 }
@@ -2875,7 +3427,7 @@ async function startUpdate(forceRepair, options = {}) {
   setLog("");
   renderDownloads(lastUpdateState);
   showToast(forceRepair ? "Repair started" : "Update started", "Progress is shown in the sidebar.", "info");
-  window.aht.startUpdate({ forceRepair, replaceGameSettings: Boolean(options.replaceGameSettings) }).catch((error) => {
+  window.aht.startUpdate({ forceRepair, replaceGameSettings: Boolean(options.replaceGameSettings), packKey: activeSidebarPack }).catch((error) => {
     const message = cleanErrorMessage(error);
     lastUpdateState = ensureTerminalUpdateTimestamp({
       ...(lastUpdateState || {}),
@@ -2996,7 +3548,7 @@ async function scanFilesForRepair() {
   setLog("");
   let scanCompleted = false;
   try {
-    const scan = await window.aht.scanFiles();
+    const scan = await window.aht.scanFiles(activeSidebarPack);
     scanCompleted = true;
     lastIntegrityScan = scan;
     setLog(formatIntegrityScan(scan));
@@ -3067,12 +3619,59 @@ async function applyRecommendedSetup() {
 }
 
 els.tabs.forEach((tab) => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
-els.gameTiles.forEach((tile) => tile.addEventListener("click", () => activateTab(tile.dataset.tab)));
+els.gameTiles.forEach((tile) => tile.addEventListener("click", async () => {
+  const nextPack = tile.dataset.pack || activeSidebarPack;
+  if (nextPack !== activeSidebarPack && (updatePoll || lastUpdateState?.running)) {
+    showToast("Update in progress", "Finish the current pack operation before switching packs.", "info");
+    return;
+  }
+  activeSidebarPack = nextPack;
+  activateTab(tile.dataset.tab);
+  setBadge("Checking", "warn");
+  try {
+    await refresh(nextPack);
+  } catch (error) {
+    showToast("Pack status failed", cleanErrorMessage(error), "error");
+  }
+}));
 els.setupSettingsButton.addEventListener("click", () => activateTab("settings"));
 els.setupAutoButton.addEventListener("click", applyRecommendedSetup);
 els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
 els.downloadsButton.addEventListener("click", openDownloads);
 els.downloadsCloseButton.addEventListener("click", closeDownloads);
+if (els.profileFriendsButton) els.profileFriendsButton.addEventListener("click", openFriendsPanel);
+for (const tab of [els.legalTermsTab, els.legalPrivacyTab]) {
+  if (tab) tab.addEventListener("click", () => showLegalDocument(tab.dataset.legalDocument));
+}
+if (els.legalAcceptCheckbox) {
+  els.legalAcceptCheckbox.addEventListener("change", () => {
+    els.legalAcceptButton.disabled = !els.legalAcceptCheckbox.checked;
+    setUnavailable(els.legalAcceptButton, !els.legalAcceptCheckbox.checked);
+    if (els.legalError.textContent) els.legalError.textContent = "";
+  });
+}
+if (els.legalAcceptButton) els.legalAcceptButton.addEventListener("click", acceptLegalTerms);
+if (els.legalExitButton) els.legalExitButton.addEventListener("click", () => window.aht.appExit());
+if (els.friendsCloseButton) els.friendsCloseButton.addEventListener("click", closeFriendsPanel);
+if (els.friendsRefreshButton) els.friendsRefreshButton.addEventListener("click", () => refreshFriendsPanel());
+if (els.friendsOverlay) {
+  els.friendsOverlay.addEventListener("click", (event) => {
+    if (event.target === els.friendsOverlay) closeFriendsPanel();
+  });
+}
+if (els.addFriendButton) {
+  els.addFriendButton.addEventListener("click", () => {
+    if (!isUnavailable(els.addFriendButton)) runFriendAction("add_friend");
+  });
+}
+if (els.addFriendInput) {
+  els.addFriendInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runFriendAction("add_friend");
+    }
+  });
+}
 if (els.launcherUpdateNowButton) {
   els.launcherUpdateNowButton.addEventListener("click", () => {
     if (lastLauncherUpdateState?.lastResult?.restartRequired) {
@@ -3087,6 +3686,7 @@ els.downloadsOverlay.addEventListener("click", (event) => {
 });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.downloadsOverlay.hidden) closeDownloads();
+  if (event.key === "Escape" && els.friendsOverlay && !els.friendsOverlay.hidden) closeFriendsPanel();
   if (event.key === "Escape" && els.repairPromptOverlay && !els.repairPromptOverlay.hidden) closeRepairPrompt();
   if (event.key === "Escape" && els.updateOptionsOverlay && !els.updateOptionsOverlay.hidden) closeUpdateOptions();
 });
@@ -3100,7 +3700,7 @@ if (els.downloadsUpdateIconButton) {
 }
 els.playButton.addEventListener("click", () => {
   if (!isUnavailable(els.playButton)) {
-    window.aht.play()
+    window.aht.play(activeSidebarPack)
       .then((result) => {
         const launcherMode = Boolean(result?.minecraftProfile);
         showToast(
@@ -3186,7 +3786,7 @@ els.testFeedButton.addEventListener("click", async () => {
   setUnavailable(els.testFeedButton, true);
   setSettingsFeed("warn", "Checking feed", "Contacting latest.json", "Validating the current Settings values.");
   try {
-    const result = await window.aht.testFeed(serializeSettings());
+    const result = await window.aht.testFeed(serializeSettings(), activeSidebarPack);
     const fullClientZip = Boolean(result.latest?.fullClientZip || result.latest?.installMode === "full-client-zip");
     const modCount = result.latest?.curseforgeFileCount;
     const detail = currentStatus?.developerMode
@@ -3210,7 +3810,7 @@ els.testFeedButton.addEventListener("click", async () => {
 els.saveSettingsButton.addEventListener("click", async () => {
   try {
     await saveDeveloperSecrets({ quiet: false });
-    const result = await window.aht.saveSettings(serializeSettings());
+    const result = await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     await refresh();
     if (result?.profileUpdated) {
       showToast("Settings saved", "Minecraft Launcher profile was updated.", "success");
@@ -3322,23 +3922,7 @@ els.scanLauncherBuildsButton.addEventListener("click", () => scanLauncherBuilds(
 els.publishLauncherUpdateButton.addEventListener("click", () => publishLauncherUpdate());
 els.planServerTransferButton.addEventListener("click", () => planServerTransfer().catch(() => {}));
 els.uploadServerFilesButton.addEventListener("click", () => uploadServerFiles().catch(() => {}));
-els.loadDashboardButton.addEventListener("click", async () => {
-  try {
-    const summary = await window.aht.devSummary();
-    els.installCount.textContent = summary.counts?.installs ?? 0;
-    els.repairCount.textContent = summary.counts?.repairs ?? 0;
-    els.changeCount.textContent = summary.counts?.changeReports ?? 0;
-    els.ipCount.textContent = summary.counts?.uniqueIps ?? 0;
-    const events = await window.aht.devEvents(50);
-    allDashboardEvents = events.events || [];
-    renderDashboardEvents(activeEventFilter);
-    showToast("Dashboard loaded", `${allDashboardEvents.length} recent events loaded.`, "success");
-  } catch (error) {
-    const message = cleanErrorMessage(error);
-    setDevLog(message);
-    showToast("Dashboard load failed", message, "error");
-  }
-});
+els.loadDashboardButton.addEventListener("click", () => loadPlayerDownloadHistory());
 els.metricButtons.forEach((button) => {
   button.addEventListener("click", () => {
     renderDashboardEvents(button.dataset.eventFilter || "all");
@@ -3376,7 +3960,16 @@ if (els.pickClientModpackDirButton) {
     }
   });
 }
-
+if (els.pickPtbClientModpackDirButton) {
+  els.pickPtbClientModpackDirButton.addEventListener("click", async () => {
+    const folder = await window.aht.selectFolder(inputValue(els.ptbClientModpackDirInput, currentStatus?.config?.developer?.ptbClientModpackDir || ""));
+    if (folder) {
+      setInputValue(els.ptbClientModpackDirInput, folder, { force: true });
+      await window.aht.saveSettings(serializeSettings()).catch(() => {});
+      invalidateReleaseValidation("PTB source selected", "Create ZIP will package and upload this folder to the isolated PTB track.", "ptb");
+    }
+  });
+}
 function setClientZipStatus(state, title, detail = "") {
   if (!els.clientZipStatus) return;
   els.clientZipStatus.className = `release-check-card ${state}`.trim();
@@ -3431,12 +4024,67 @@ async function buildClientZipFromSelectedFolder() {
 if (els.buildClientZipButton) {
   els.buildClientZipButton.addEventListener("click", () => buildClientZipFromSelectedFolder());
 }
+async function buildPtbClientZipFromSelectedFolder() {
+  const sourceDir = inputValue(els.ptbClientModpackDirInput, currentStatus?.config?.developer?.ptbClientModpackDir || "");
+  const version = inputValue(els.ptbClientZipVersionInput, "");
+  if (!sourceDir) {
+    setReleaseCheck("bad", "PTB folder required", "Choose the PTB client modpack folder", "The default CurseForge instance can be changed before creating the ZIP.", "ptb");
+    return;
+  }
+  if (!version) {
+    setReleaseCheck("bad", "PTB version required", "Enter the PTB pack version", "The version is used by the PTB player feed and GitHub release.", "ptb");
+    return;
+  }
+  setUnavailable(els.buildPtbClientZipButton, true);
+  setReleaseCheck("warn", "Creating PTB ZIP", "Reading the configured client", sourceDir, "ptb");
+  try {
+    await window.aht.saveSettings(serializeSettings());
+    const result = await window.aht.devBuildClientZip({
+      sourceDir,
+      version,
+      outDir: developerOutDir(),
+      releaseTarget: "ptb",
+      minecraft: currentStatus?.latest?.minecraft || currentStatus?.installed?.minecraft || null
+    });
+    setInputValue(els.ptbPackZipInput, result.zipPath, { force: true });
+    invalidateReleaseValidation("PTB ZIP created", `${result.fileCount} files, ${formatBytes(result.totalBytes)}. Starting the isolated PTB upload now.`, "ptb");
+    setReleaseCheck("warn", "Uploading PTB", `${result.version} package created`, "Validating and uploading the PTB ZIP. Stable AHT remains unchanged.", "ptb");
+    setDevLog(result);
+    await publishSelectedRelease("ptb");
+  } catch (error) {
+    const message = cleanErrorMessage(error);
+    setReleaseCheck("bad", "PTB ZIP failed", "Could not create PTB package", message, "ptb");
+    setDevLog(message);
+    showToast("PTB ZIP failed", message, "error");
+  } finally {
+    setUnavailable(els.buildPtbClientZipButton, false);
+  }
+}
+if (els.buildPtbClientZipButton) {
+  els.buildPtbClientZipButton.addEventListener("click", buildPtbClientZipFromSelectedFolder);
+}
 els.pickServerSourceButton.addEventListener("click", async () => {
   const folder = await window.aht.selectFolder(els.serverSourceInput.value.trim() || currentStatus?.config?.serverTransfer?.sourceDir || "");
   if (folder) {
     els.serverSourceInput.value = folder;
+    try {
+      await saveServerTransferSettings();
+      setServerTransferStatus("warn", "Folder saved", "Scanning selected server folder", folder);
+      await planServerTransfer();
+    } catch (error) {
+      const message = cleanErrorMessage(error);
+      setServerTransferStatus("bad", "Folder failed", "Could not use selected server folder", message);
+      showToast("Server folder failed", message, "error");
+    }
   }
 });
+for (const input of [els.serverSourceInput, els.serverHostInput, els.serverPortInput, els.serverUsernameInput, els.serverRemoteDirInput]) {
+  input.addEventListener("change", () => {
+    saveServerTransferSettings().catch((error) => {
+      showToast("Server settings not saved", cleanErrorMessage(error), "error");
+    });
+  });
+}
 function setReleaseBusy(value) {
   releaseBusy = value;
   updateReleaseUploadState();
@@ -3551,83 +4199,100 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
   }
 }
 
-async function validateSelectedRelease() {
-  await buildReleaseFromSelectedZip("Building selected ZIP");
+async function validateSelectedRelease(target = "stable") {
+  await buildReleaseFromSelectedZip(target === "ptb" ? "Building PTB release" : "Building selected ZIP", target);
   const validation = await window.aht.devValidateRelease({
     outDir: developerOutDir(),
-    publicLatestUrl: playerFeedUrl()
+    publicLatestUrl: releaseFeedUrl(target),
+    releaseTarget: target
   });
   const latestTitle = validation.latest
     ? `${displayPackName(validation.latest.name || "Pack")} ${validation.latest.version || ""}`.trim()
     : "No release metadata";
   if (!validation.ok) {
     const summary = validation.errors?.map((error) => error.label).join(", ") || "release validation failed";
-    releaseValidation = null;
+    releaseValidationByTarget.delete(target);
     setDevLog(validation);
-    setReleaseCheck("bad", "Release blocked", latestTitle, summary);
+    setReleaseCheck("bad", "Release blocked", latestTitle, summary, target);
     throw new Error(`Release blocked: ${summary}`);
   }
   const cacheOnlyReason = cacheOnlyValidationBlockReason(validation);
   if (cacheOnlyReason) {
-    releaseValidation = null;
+    releaseValidationByTarget.delete(target);
     setDevLog(validation);
-    setReleaseCheck("bad", "Cache-only blocked", latestTitle, cacheOnlyReason);
+    setReleaseCheck("bad", "Cache-only blocked", latestTitle, cacheOnlyReason, target);
     throw new Error(`Release blocked: ${cacheOnlyReason}`);
   }
-  releaseValidation = { ok: true, outDir: releaseKey(), result: validation };
+  releaseValidationByTarget.set(target, { ok: true, outDir: releaseKey(target), result: validation });
   setDevLog(validation);
-  setReleaseCheck((validation.warnings?.length || 0) ? "warn" : "ok", "Release ready", latestTitle, releaseSummary(validation));
+  setReleaseCheck((validation.warnings?.length || 0) ? "warn" : "ok", "Release ready", latestTitle, releaseSummary(validation), target);
   return validation;
 }
 
-async function publishSelectedRelease() {
-  const reason = publishBlockReason();
+async function publishSelectedRelease(target = "stable") {
+  const reason = publishBlockReason(target);
   if (reason) {
-    showToast("Publish locked", reason, "warn");
-    return;
+    setReleaseCheck("bad", target === "ptb" ? "PTB upload blocked" : "Publish locked", "Release was not uploaded", reason, target);
+    showToast(target === "ptb" ? "PTB publish locked" : "Publish locked", reason, "warn");
+    return { ok: false, blocked: true, error: reason };
   }
   setReleaseBusy(true);
+  let r2Result = null;
   try {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings());
-    if (!/^https?:\/\//i.test(playerFeedUrl())) {
+    if (!/^https?:\/\//i.test(releaseFeedUrl(target))) {
       await setupCloudForDeveloper({ keepBusy: true });
     }
-    if (!/^https?:\/\//i.test(playerFeedUrl())) {
+    if (!/^https?:\/\//i.test(releaseFeedUrl(target))) {
       throw new Error("Cloud setup did not return a Player Feed URL.");
     }
-    await validateSelectedRelease();
+    await validateSelectedRelease(target);
     const missingFastR2 = missingFastR2UploadFields();
-    setReleaseCheck("warn", "Uploading release", "Preflight passed", missingFastR2.length ? `Fast R2 upload needs ${missingFastR2.join(", ")}. Large releases will not use slow Wrangler fallback.` : "Fast direct R2 upload enabled with byte progress.");
-    setReleaseUploadProgress({ percent: 0, phase: "Starting R2 upload" });
+    setReleaseCheck("warn", target === "ptb" ? "Uploading PTB" : "Uploading release", "Preflight passed", missingFastR2.length ? `Fast R2 upload needs ${missingFastR2.join(", ")}. Large releases will not use slow Wrangler fallback.` : "Fast direct R2 upload enabled with byte progress.", target);
+    setReleaseUploadProgress({ percent: 0, phase: "Starting R2 upload" }, false, target);
     startUploadPolling();
-    const result = await window.aht.devSyncR2({
+    r2Result = await window.aht.devSyncR2({
       outDir: developerOutDir(),
       bucket: releaseBucketName(),
-      publicLatestUrl: playerFeedUrl(),
+      publicLatestUrl: releaseFeedUrl(target),
+      releaseTarget: target,
       r2AccountId: inputValue(els.r2AccountIdInput, ""),
       r2AccessKeyId: inputValue(els.r2AccessKeyIdInput, ""),
       r2SecretAccessKey: inputValue(els.r2SecretAccessKeyInput, "")
     });
-    const defaults = await writePlayerDefaultsForCurrentFeed().catch((error) => ({ error: cleanErrorMessage(error) }));
-    setDevLog({ upload: result, playerDefaults: defaults });
-    if (result.validation?.ok) {
-      releaseValidation = { ok: true, outDir: releaseKey(), result: result.validation };
-      const feed = result.verification?.publicLatestUrl ? ` Verified ${result.verification.publicLatestUrl}.` : "";
+    setReleaseCheck("warn", "Publishing GitHub mirror", target === "ptb" ? "Using modpack-ptb tag" : "Using modpack-stable tag", "R2 is verified. Uploading the exact ZIP and channel manifest to the separate GitHub release.", target);
+    const github = await window.aht.devPublishModpackGithub({
+      outDir: developerOutDir(),
+      releaseTarget: target,
+      githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
+      githubBranch: inputValue(els.githubBranchInput, "main"),
+      githubToken: inputValue(els.githubTokenInput, "")
+    });
+    const defaults = target === "stable"
+      ? await writePlayerDefaultsForCurrentFeed().catch((error) => ({ error: cleanErrorMessage(error) }))
+      : null;
+    setDevLog({ r2: r2Result, github, playerDefaults: defaults });
+    if (r2Result.validation?.ok) {
+      releaseValidationByTarget.set(target, { ok: true, outDir: releaseKey(target), result: r2Result.validation });
+      const feed = r2Result.verification?.publicLatestUrl ? ` Verified ${r2Result.verification.publicLatestUrl}.` : "";
       const defaultsLine = defaults?.written?.length ? ` Player defaults updated in ${defaults.written.length} location${defaults.written.length === 1 ? "" : "s"}.` : "";
-      setReleaseCheck("ok", "Upload complete", result.validation.latest ? `${displayPackName(result.validation.latest.name)} ${result.validation.latest.version}`.trim() : "Release uploaded", `${result.uploaded?.length || 0} objects uploaded.${feed}${defaultsLine}`);
+      setReleaseCheck("ok", target === "ptb" ? "PTB published" : "Upload complete", r2Result.validation.latest ? `${displayPackName(r2Result.validation.latest.name)} ${r2Result.validation.latest.version}`.trim() : "Release uploaded", `${r2Result.uploaded?.length || 0} R2 objects uploaded.${feed} GitHub ${github.tagName} published.${defaultsLine}`, target);
     }
-    showToast("Update published", `${result.uploaded?.length || 0} objects uploaded to R2.`, "success");
+    showToast(target === "ptb" ? "PTB published" : "Update published", `${r2Result.uploaded?.length || 0} R2 objects and GitHub ${github.tagName} are ready.`, "success");
+    return { ok: true, r2: r2Result, github, defaults };
   } catch (error) {
     const message = cleanErrorMessage(error);
     const uploadState = await window.aht.devUploadState().catch(() => null);
     if (uploadState) renderUploadState(uploadState);
     if (message.startsWith("Release blocked:")) {
-      releaseValidation = null;
+      releaseValidationByTarget.delete(target);
     }
     setDevLog(message);
-    setReleaseCheck("bad", message.includes("Cache-only mode requires") ? "Cache-only blocked" : (message.startsWith("Release blocked:") ? "Upload blocked" : "Publish failed"), "Update was not published", message);
-    showToast("Publish failed", message, "error");
+    const partial = Boolean(r2Result);
+    setReleaseCheck("bad", partial ? "GitHub mirror failed" : (message.includes("Cache-only mode requires") ? "Cache-only blocked" : (message.startsWith("Release blocked:") ? "Upload blocked" : "Publish failed")), partial ? "R2 published; GitHub incomplete" : "Update was not published", message, target);
+    showToast(partial ? "Publication incomplete" : "Publish failed", message, "error");
+    return { ok: false, partial, error: message };
   } finally {
     setReleaseBusy(false);
   }
@@ -3640,12 +4305,23 @@ els.writeDefaultsButton.addEventListener("click", () => {
   writeDefaultsFromDeveloperFeed().catch(() => {});
 });
 els.publishReleaseButton.addEventListener("click", () => {
-  publishSelectedRelease();
+  publishSelectedRelease("stable");
 });
-
-[els.packZipInput, els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.clientModpackDirInput, els.clientZipVersionInput, els.baseUrlInput, els.channelInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
+[els.packZipInput, els.clientModpackDirInput, els.clientZipVersionInput].filter(Boolean).forEach((input) => {
   input.addEventListener("input", () => invalidateReleaseValidation());
   input.addEventListener("change", () => invalidateReleaseValidation());
+});
+[els.ptbPackZipInput, els.ptbClientModpackDirInput, els.ptbClientZipVersionInput].filter(Boolean).forEach((input) => {
+  input.addEventListener("input", () => invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb"));
+  input.addEventListener("change", () => invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb"));
+});
+[els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
+  const invalidateBoth = () => {
+    invalidateReleaseValidation();
+    invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb");
+  };
+  input.addEventListener("input", invalidateBoth);
+  input.addEventListener("change", invalidateBoth);
 });
 if (els.curseforgeApiKeyInput) {
   els.curseforgeApiKeyInput.addEventListener("input", queueDeveloperSecretSave);
@@ -3700,7 +4376,7 @@ els.bucketInput.addEventListener("input", () => {
   updateReleaseUploadState();
 });
 
-refresh().catch((error) => {
+refresh().then(() => loadLegalGate()).catch((error) => {
   const message = cleanErrorMessage(error);
   setBadge("Error", "bad");
   setLog(message);

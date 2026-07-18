@@ -310,7 +310,15 @@ const PLAYER_PRESERVED_FILES = [
   'servers.dat',
   'servers.dat_old'
 ];
+const PLAYER_UPDATE_PRESERVED_FILES = [
+  'config/jei/bookmarks.ini'
+];
 const PLAYER_PRESERVED_MOD_DIRS = PRESERVED_UNMANAGED_MOD_DIRS.map((dirName) => `mods/${dirName}`);
+
+function isPlayerUpdatePreservedRelPath(relPath = '') {
+  const normalized = normalizeRelPath(relPath).toLowerCase();
+  return PLAYER_UPDATE_PRESERVED_FILES.some((entry) => normalized === entry.toLowerCase());
+}
 
 function installSiblingPrefix(instanceDir, label) {
   const resolved = path.resolve(instanceDir);
@@ -438,7 +446,7 @@ async function copyPathIfPresent(source, dest, options = {}) {
   return true;
 }
 
-async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger, options = {}) {
+async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, preserveUpdateState, logger, options = {}) {
   const preserved = [];
   for (const relPath of PLAYER_PRESERVED_DIRS) {
     const source = safeJoin(instanceDir, relPath);
@@ -452,6 +460,15 @@ async function copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSetti
     const dest = safeJoin(stagingDir, relPath);
     if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving player data' })) {
       preserved.push(relPath);
+    }
+  }
+  if (preserveUpdateState) {
+    for (const relPath of PLAYER_UPDATE_PRESERVED_FILES) {
+      const source = safeJoin(instanceDir, relPath);
+      const dest = safeJoin(stagingDir, relPath);
+      if (await copyPathIfPresent(source, dest, { ...options, relPath, phase: 'Preserving player data' })) {
+        preserved.push(relPath);
+      }
     }
   }
   if (preserved.length) {
@@ -602,7 +619,7 @@ async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) 
   return removeBackupAfterSuccessfulSwap(backupDir, options);
 }
 
-async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, previousManaged, forceRepair, replaceGameSettings, logger, onProgress, progressBase = 0, progressSpan = 100 }) {
+async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, previousManaged, forceRepair, replaceGameSettings, preserveUpdateState, logger, onProgress, progressBase = 0, progressSpan = 100 }) {
   const inspection = await inspectFullClientZipFile(packZipPath);
   const filesTotal = inspection.fileCount;
   const nextManaged = [];
@@ -638,10 +655,11 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       }
       const target = safeJoin(stagingDir, relPath);
       const settingsFile = isGameSettingsRelPath(relPath);
+      const playerOwnedUpdateFile = isPlayerUpdatePreservedRelPath(relPath);
 
       await ensureDir(path.dirname(target));
-      const sha256 = await extractZipEntryToFile(zipFile, entry, target, !settingsFile);
-      if (!settingsFile) {
+      const sha256 = await extractZipEntryToFile(zipFile, entry, target, !settingsFile && !playerOwnedUpdateFile);
+      if (!settingsFile && !playerOwnedUpdateFile) {
         const managed = {
           relativePath: relPath,
           source: 'full-client-zip',
@@ -670,7 +688,7 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       overrideFileCount: filesTotal
     };
 
-    await copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, logger, { onProgress, progressBase: 95, progressSpan: 0 });
+    await copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, preserveUpdateState, logger, { onProgress, progressBase: 95, progressSpan: 0 });
     await copyCurrentPackToStagingCache(packZipPath, stagingDir, logger, { onProgress, progressBase: 96, progressSpan: 1 });
     await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'installed.json'), installed);
     await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
@@ -1166,6 +1184,7 @@ export async function installPack(options) {
   if (!dryRun && isFullClientZipRelease(latest)) {
     await recoverInterruptedCleanInstall(instanceDir, logger);
   }
+  const preserveUpdateState = !dryRun && await pathExists(path.join(instanceDir, '.aht-launcher', 'installed.json'));
   const preferLocalPaths = !isHttpUrl(latestSource);
   const packRef = preferLocalPaths ? (latest.zip?.path || latest.zip?.url) : (latest.zip?.url || latest.zip?.path);
   const cacheRef = preferLocalPaths
@@ -1229,6 +1248,7 @@ export async function installPack(options) {
       previousManaged,
       forceRepair,
       replaceGameSettings,
+      preserveUpdateState,
       logger,
       onProgress,
       progressBase: 45,
@@ -1365,8 +1385,15 @@ export async function installPack(options) {
   const overrideManaged = await runConcurrent(overrideFiles, Math.min(concurrency, 16), async (override) => {
     const target = safeJoin(instanceDir, override.relPath);
     const settingsFile = isGameSettingsRelPath(override.relPath);
+    const playerOwnedUpdateFile = isPlayerUpdatePreservedRelPath(override.relPath);
     if (settingsFile && !replaceGameSettings && await pathExists(target)) {
       logger.log(`Preserving local game settings ${override.relPath}`);
+      completedWork += 1;
+      emitProgress('Overrides', override.relPath);
+      return null;
+    }
+    if (playerOwnedUpdateFile && preserveUpdateState && await pathExists(target)) {
+      logger.log(`Preserving player data ${override.relPath}`);
       completedWork += 1;
       emitProgress('Overrides', override.relPath);
       return null;
@@ -1375,7 +1402,7 @@ export async function installPack(options) {
     await fs.writeFile(target, override.data || override.entry.getData());
     completedWork += 1;
     emitProgress('Overrides', override.relPath);
-    if (settingsFile) {
+    if (settingsFile || playerOwnedUpdateFile) {
       return null;
     }
     return {

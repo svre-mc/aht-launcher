@@ -47,7 +47,8 @@ export async function validateLauncherUpdateManifestFile(manifestPath, options =
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = parseArgs();
   validateLauncherUpdateManifestFile(args.manifestPath, {
-    latestUrl: args['latest-url'] || process.env.AHT_LAUNCHER_UPDATE_URL || ''
+    latestUrl: args['latest-url'] || process.env.AHT_LAUNCHER_UPDATE_URL || '',
+    requireTrackedDownloads: true
   }).then((result) => {
     console.log(JSON.stringify({
       ok: true,

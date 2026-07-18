@@ -3,6 +3,7 @@ const developerOnlySourceFiles = [
   'src/clientModpackZip.js',
   'src/serverTransfer.js',
   'src/githubActions.js',
+  'src/githubModpackRelease.js',
   'src/r2DirectUpload.js'
 ];
 const developerOnlyNodeModules = [
@@ -21,6 +22,7 @@ const files = [
   ...developerOnlySourceFiles.map((file) => `!${file}`),
   ...developerOnlyNodeModules.map((folder) => `!${folder}`),
   'config/app.defaults.json',
+  'legal/**/*',
   'package.json',
   'README.md'
 ];

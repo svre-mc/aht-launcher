@@ -178,6 +178,14 @@ try {
   if (defaults.latestUrl !== `${workerEndpoint}/latest.json`) {
     throw new Error(`Defaults did not use entered player feed: ${JSON.stringify(defaults)}`);
   }
+  if (
+    defaults.packs?.ptb?.packId !== 'a-hard-time-ptb'
+    || defaults.packs?.ptb?.name !== 'A Hard Time PTB'
+    || defaults.packs?.ptb?.latestUrl !== `${workerEndpoint}/ptb/latest.json`
+    || defaults.packs?.ptb?.instanceDir
+  ) {
+    throw new Error(`Defaults did not write a platform-neutral isolated PTB feed: ${JSON.stringify(defaults.packs)}`);
+  }
   if (defaults.instanceDir || defaults.minecraftLauncher?.rootDir) {
     throw new Error(`Defaults should stay platform-neutral: ${JSON.stringify(defaults)}`);
   }
@@ -206,6 +214,7 @@ try {
     uiProof,
     defaults: {
       latestUrl: defaults.latestUrl,
+      ptbLatestUrl: defaults.packs?.ptb?.latestUrl,
       proxyBaseUrl: defaults.curseforge?.proxyBaseUrl,
       baseUrl: defaults.sync?.baseUrl,
       developerDefaults: Object.prototype.hasOwnProperty.call(defaults, 'developer'),

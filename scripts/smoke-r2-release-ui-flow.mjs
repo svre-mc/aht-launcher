@@ -22,6 +22,9 @@ const defaultsDir = path.join(root, 'defaults');
 const bucket = 'ahtlauncher';
 const uploadLog = path.join(root, 'upload-log.jsonl');
 const packZip = path.join(root, 'A Hard Time-2.8.3-client.zip');
+const ptbClientDir = path.join(root, 'ptb-client-source');
+const ptbInstanceDir = path.join(root, 'ptb-instance');
+const githubCalls = [];
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -207,6 +210,11 @@ zip.addFile('resourcepacks/aht-ui-test.zip', Buffer.from('fake-resourcepack\n'))
 zip.addFile('scripts/aht-ui.zs', Buffer.from('print("aht ui smoke");\n'));
 zip.writeZip(packZip);
 
+await fsp.mkdir(path.join(ptbClientDir, 'config'), { recursive: true });
+await fsp.mkdir(path.join(ptbClientDir, 'mods'), { recursive: true });
+await fsp.writeFile(path.join(ptbClientDir, 'config', 'aht-ptb-ui-test.cfg'), `ptb=${crypto.randomUUID()}\n`, 'utf8');
+await fsp.writeFile(path.join(ptbClientDir, 'mods', 'aht-ptb-ui-test.jar'), 'fake ptb jar\n', 'utf8');
+
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time',
@@ -217,9 +225,24 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
   instanceDir,
   latestUrl: `${workerEndpoint}/latest.json`,
+  packs: {
+    ptb: {
+      packId: 'a-hard-time-ptb',
+      name: 'A Hard Time PTB',
+      latestUrl: `${workerEndpoint}/ptb/latest.json`,
+      instanceDir: ptbInstanceDir
+    }
+  },
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: 'SmokeUser' },
-  developer: { adminBaseUrl: workerEndpoint, defaultOutDir: outDir, defaultCacheModsDir: '', r2Bucket: bucket },
+  developer: {
+    adminBaseUrl: workerEndpoint,
+    defaultOutDir: outDir,
+    defaultCacheModsDir: '',
+    clientModpackDir: ptbClientDir,
+    ptbClientModpackDir: ptbClientDir,
+    r2Bucket: bucket
+  },
   minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -227,6 +250,36 @@ await writeJson(path.join(userData, 'identity.json'), { installId: 'smoke-instal
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, workerEndpoint);
+  if (url.pathname.startsWith('/github-api/') || url.pathname.startsWith('/github-uploads/')) {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
+    githubCalls.push({ method: request.method, path: url.pathname, search: url.search, body: body.toString('utf8') });
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (request.method === 'GET' && url.pathname.includes('/releases/tags/')) {
+      response.statusCode = 404;
+      response.end(JSON.stringify({ message: 'Not Found' }));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname.endsWith('/releases')) {
+      response.statusCode = 201;
+      response.end(JSON.stringify({ id: 303, assets: [], html_url: 'https://github.test/releases/303' }));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname.includes('/releases/303/assets')) {
+      response.statusCode = 201;
+      response.end(JSON.stringify({ id: 400 + githubCalls.length, name: url.searchParams.get('name') }));
+      return;
+    }
+    if (request.method === 'PATCH' && url.pathname.endsWith('/releases/303')) {
+      response.statusCode = 200;
+      response.end(JSON.stringify({ id: 303, html_url: 'https://github.test/releases/303' }));
+      return;
+    }
+    response.statusCode = 500;
+    response.end(JSON.stringify({ message: `Unexpected GitHub smoke request ${request.method} ${url.pathname}` }));
+    return;
+  }
   const key = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
   if (!key) {
     response.statusCode = 200;
@@ -266,6 +319,9 @@ const child = spawn(electronBin, electronArgs, {
     AHT_PLAYER_DEFAULTS_DIR: defaultsDir,
     AHT_DEVELOPER_USERNAME: 'admin',
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_GITHUB_API_BASE: `${workerEndpoint}/github-api`,
+    AHT_TEST_GITHUB_UPLOADS_BASE: `${workerEndpoint}/github-uploads`,
 
     ELECTRON_ENABLE_LOGGING: '0'
   },
@@ -295,9 +351,9 @@ try {
       document.querySelector('#curseforgeApiKeyInput').value = 'fake-cf-key';
       document.querySelector('#launcherProofSecretInput').value = 'proof-secret';
       document.querySelector('#cacheModsInput').value = '';
-      document.querySelector('#channelInput').value = 'stable';
       document.querySelector('#bucketInput').value = ${JSON.stringify(bucket)};
-      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#cacheModsInput', '#channelInput', '#bucketInput']) {
+      document.querySelector('#githubTokenInput').value = 'test-token';
+      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#cacheModsInput', '#bucketInput', '#githubTokenInput']) {
         document.querySelector(selector).dispatchEvent(new Event('input', { bubbles: true }));
       }
     })()
@@ -340,9 +396,83 @@ try {
       throw new Error(`Exact client ZIP install misplaced or missed ${requiredPath}`);
     }
   }
+  const stableUploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);
+  if (stableUploadOrder.at(-1) !== 'latest.json') {
+    throw new Error(`Stable latest.json was not uploaded last: ${JSON.stringify(stableUploadOrder)}`);
+  }
+  const stableRemoteLatestPath = path.join(fakeR2Root, bucket, 'latest.json');
+  const stableRemoteLatestBeforePtb = await fsp.readFile(stableRemoteLatestPath);
+
+  await evaluate(client, `(() => {
+    document.querySelector('[data-dev-target="ptbModpackTools"]').click();
+    document.querySelector('#ptbClientModpackDirInput').value = ${JSON.stringify(ptbClientDir)};
+    document.querySelector('#ptbClientZipVersionInput').value = '2.9.0-ptb.10';
+    document.querySelector('#ptbClientModpackDirInput').dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#ptbClientZipVersionInput').dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(client, "document.querySelector('#ptbModpackTools').hidden === false && document.querySelector('#buildPtbClientZipButton').getAttribute('aria-disabled') !== 'true'", 'PTB create and upload enabled');
+  await evaluate(client, "document.querySelector('#buildPtbClientZipButton').click()");
+  await waitFor(client, `(() => {
+    const state = document.querySelector('#ptbReleaseCheckState')?.textContent || '';
+    return ['PTB published', 'GitHub mirror failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
+  })()`, 'PTB publish terminal state', 360);
+  const ptbUiProof = await evaluate(client, `({
+    state: document.querySelector('#ptbReleaseCheckState').textContent,
+    title: document.querySelector('#ptbReleaseCheckTitle').textContent,
+    detail: document.querySelector('#ptbReleaseCheckDetail').textContent,
+    stableZip: document.querySelector('#packZipInput').value,
+    ptbZip: document.querySelector('#ptbPackZipInput').value,
+    ptbZipInputType: document.querySelector('#ptbPackZipInput').type,
+    actionButtonIds: [...document.querySelectorAll('#ptbModpackTools .dev-actions button')].map((button) => button.id),
+    sourceValue: document.querySelector('#ptbClientModpackDirInput').value,
+    versionValue: document.querySelector('#ptbClientZipVersionInput').value,
+    extraFeedPresent: Boolean(document.querySelector('#ptbPlayerFeedUrlInput'))
+  })`);
+  if (
+    ptbUiProof.state !== 'PTB published'
+    || ptbUiProof.stableZip !== packZip
+    || !ptbUiProof.ptbZip
+    || ptbUiProof.ptbZipInputType !== 'hidden'
+    || JSON.stringify(ptbUiProof.actionButtonIds) !== JSON.stringify(['buildPtbClientZipButton'])
+    || path.resolve(ptbUiProof.sourceValue) !== path.resolve(ptbClientDir)
+    || ptbUiProof.versionValue !== '2.9.0-ptb.10'
+    || ptbUiProof.extraFeedPresent
+  ) {
+    throw new Error(`PTB UI publication did not complete independently: ${JSON.stringify(ptbUiProof)}`);
+  }
+  const generatedPtbZip = new AdmZip(ptbUiProof.ptbZip);
+  const generatedPtbMetadata = JSON.parse(generatedPtbZip.getEntry('aht-client-pack.json').getData().toString('utf8'));
+  if (generatedPtbMetadata.version !== '2.9.0-ptb.10' || !generatedPtbZip.getEntry('mods/aht-ptb-ui-test.jar')) {
+    throw new Error(`PTB one-click flow used the wrong version or source folder: ${JSON.stringify(generatedPtbMetadata)}`);
+  }
+  const stableRemoteLatestAfterPtb = await fsp.readFile(stableRemoteLatestPath);
+  if (!stableRemoteLatestBeforePtb.equals(stableRemoteLatestAfterPtb)) {
+    throw new Error('PTB UI publication changed remote stable latest.json.');
+  }
+  const ptbRemoteLatest = JSON.parse(await fsp.readFile(path.join(fakeR2Root, bucket, 'ptb', 'latest.json'), 'utf8'));
+  if (ptbRemoteLatest.packId !== 'a-hard-time-ptb' || ptbRemoteLatest.channel !== 'ptb' || ptbRemoteLatest.version !== '2.9.0-ptb.10') {
+    throw new Error(`PTB UI publication wrote an invalid remote feed: ${JSON.stringify(ptbRemoteLatest)}`);
+  }
+  const ptbStatus = await evaluate(client, "window.aht.getStatus('ptb')");
+  if (ptbStatus.latest?.version !== '2.9.0-ptb.10' || ptbStatus.config?.latestUrl !== `${workerEndpoint}/ptb/latest.json` || path.resolve(ptbStatus.config?.instanceDir || '') !== path.resolve(ptbInstanceDir)) {
+    throw new Error(`Player PTB status did not read the isolated published feed: ${JSON.stringify(ptbStatus)}`);
+  }
   const uploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);
-  if (uploadOrder.at(-1) !== 'latest.json') {
-    throw new Error(`latest.json was not uploaded last: ${JSON.stringify(uploadOrder)}`);
+  if (uploadOrder.at(-1) !== 'ptb/latest.json') {
+    throw new Error(`PTB latest.json was not uploaded last: ${JSON.stringify(uploadOrder)}`);
+  }
+  const githubReleaseBodies = githubCalls
+    .filter((call) => call.method === 'POST' && call.path.endsWith('/releases'))
+    .map((call) => JSON.parse(call.body || '{}'));
+  const githubTags = githubReleaseBodies.map((body) => body.tag_name);
+  if (!githubTags.includes('modpack-stable-v2.8.3') || !githubTags.includes('modpack-ptb-v2.9.0-ptb.10')) {
+    throw new Error(`UI publication did not create separate stable/PTB GitHub releases: ${JSON.stringify(githubReleaseBodies)}`);
+  }
+  const githubAssetNames = githubCalls
+    .filter((call) => call.method === 'POST' && call.path.includes('/assets'))
+    .map((call) => new URLSearchParams(call.search).get('name'));
+  if (!githubAssetNames.some((name) => name?.startsWith('a-hard-time-stable-')) || !githubAssetNames.some((name) => name?.startsWith('a-hard-time-ptb-'))) {
+    throw new Error(`UI publication did not upload separate stable/PTB GitHub assets: ${JSON.stringify(githubAssetNames)}`);
   }
   const defaults = JSON.parse(fs.readFileSync(path.join(defaultsDir, 'app.defaults.json'), 'utf8'));
   if (defaults.latestUrl !== `${workerEndpoint}/latest.json`) {
@@ -355,7 +485,11 @@ try {
     ok: true,
     root,
     uiProof,
+    ptbUiProof,
     uploadOrderLast: uploadOrder.at(-1),
+    githubTags,
+    githubAssetNames,
+    stableRemoteManifestUnchangedAfterPtb: stableRemoteLatestBeforePtb.equals(stableRemoteLatestAfterPtb),
     playerDefaults: {
       latestUrl: defaults.latestUrl,
       platformNeutral: !defaults.instanceDir && !defaults.minecraftLauncher?.rootDir

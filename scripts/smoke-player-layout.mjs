@@ -16,6 +16,7 @@ const electronBin = smokeExe || (process.platform === 'win32'
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-layout-'));
 const userData = path.join(root, 'userData');
 const minecraftRoot = path.join(root, '.minecraft');
+const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const defaultsPath = tempDefaults;
 const screenshotDir = path.join(root, 'screenshots');
@@ -198,6 +199,16 @@ const latest = {
   zipFormat: 'aht-full-client-zip',
   zip: { path: 'packs/a-hard-time-9.9.9.zip', size: 123, sha256: '0'.repeat(64) }
 };
+const ptbLatest = {
+  packId: 'a-hard-time-ptb',
+  name: 'A Hard Time PTB',
+  version: '10.0.0-ptb.1',
+  channel: 'ptb',
+  required: true,
+  installMode: 'full-client-zip',
+  zipFormat: 'aht-full-client-zip',
+  zip: { path: 'packs/a-hard-time-ptb-10.0.0-ptb.1.zip', size: 321, sha256: '1'.repeat(64) }
+};
 
 await writeJson(path.join(userData, 'identity.json'), {
   installId: 'layout-smoke-install',
@@ -211,6 +222,14 @@ await fsp.mkdir(minecraftRoot, { recursive: true });
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
   latestUrl: `${workerEndpoint}/latest.json`,
+  packs: {
+    ptb: {
+      packId: 'a-hard-time-ptb',
+      name: 'A Hard Time PTB',
+      latestUrl: `${workerEndpoint}/ptb/latest.json`,
+      instanceDir: ptbInstanceDir
+    }
+  },
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
@@ -223,6 +242,12 @@ const server = http.createServer((request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(latest));
+    return;
+  }
+  if (url.pathname === '/ptb/latest.json') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify(ptbLatest));
     return;
   }
   if (url.pathname === '/api/update-logs') {
@@ -313,6 +338,45 @@ try {
   if (!launcherVersionProof.label.includes(status.appVersion)) {
     throw new Error(`Launcher version label must show the running app version: ${JSON.stringify({ launcherVersionProof, appVersion: status.appVersion })}`);
   }
+  const launcherVisualProof = await waitFor(client, `
+    (() => {
+      const frame = document.querySelector('.app-frame');
+      const workspace = document.querySelector('.workspace');
+      const heroPanel = document.querySelector('.hero-panel');
+      const heroArt = document.querySelector('.hero-art');
+      const actions = document.querySelector('.quick-actions');
+      const scanButton = document.querySelector('#scanButton');
+      return frame && workspace && heroPanel && heroArt && actions && scanButton ? {
+        frameBackground: getComputedStyle(frame).backgroundImage,
+        workspaceBackground: getComputedStyle(workspace).backgroundImage,
+        heroBeforeBackground: getComputedStyle(heroPanel, '::before').backgroundImage,
+        heroAfterBackground: getComputedStyle(heroPanel, '::after').backgroundImage,
+        heroArtAfterBackground: getComputedStyle(heroArt, '::after').backgroundImage,
+        repairText: scanButton.textContent.trim(),
+        repairIcon: scanButton.querySelector('.button-icon')?.className || '',
+        actionsMarginTop: parseFloat(getComputedStyle(actions).marginTop || '0')
+      } : false;
+    })()
+  `, 'launcher background and repair quick action');
+  if (
+    launcherVisualProof.frameBackground !== 'none'
+    || !launcherVisualProof.workspaceBackground.includes('launcher-background.png')
+  ) {
+    throw new Error(`Launcher must draw the high-resolution background once on the player workspace: ${JSON.stringify(launcherVisualProof)}`);
+  }
+  if (
+    launcherVisualProof.heroBeforeBackground !== 'none'
+    || launcherVisualProof.heroAfterBackground !== 'none'
+    || launcherVisualProof.heroArtAfterBackground !== 'none'
+  ) {
+    throw new Error(`Launcher background must not be covered by decorative hero overlays: ${JSON.stringify(launcherVisualProof)}`);
+  }
+  if (launcherVisualProof.repairText !== 'Repair' || !launcherVisualProof.repairIcon.includes('icon-wrench')) {
+    throw new Error(`Quick action must be labeled Repair with the wrench icon: ${JSON.stringify(launcherVisualProof)}`);
+  }
+  if (launcherVisualProof.actionsMarginTop < 10) {
+    throw new Error(`Repair/Game settings buttons need positive spacing above them: ${JSON.stringify(launcherVisualProof)}`);
+  }
   const sidebarIconProof = await waitFor(client, `
     (() => {
       const tile = document.querySelector('#gameTileButton');
@@ -342,6 +406,91 @@ try {
   }
   if (!sidebarArtProof.every((thumb) => thumb.backgroundImage.includes('aht-bill-transparent.png'))) {
     throw new Error(`Sidebar AHT thumbnails must use the transparent bill asset: ${JSON.stringify(sidebarArtProof)}`);
+  }
+  const sidebarPackProof = await waitFor(client, `
+    (() => {
+      const tiles = [...document.querySelectorAll('.game-list .game-tile')].map((tile) => ({
+        id: tile.id || '',
+        pack: tile.dataset.pack || '',
+        title: tile.querySelector('.game-copy strong')?.textContent?.trim() || '',
+        subtitle: tile.querySelector('.game-copy small')?.textContent?.trim() || '',
+        disabled: tile.disabled === true,
+        active: tile.classList.contains('active')
+      }));
+      return tiles.length >= 3 ? tiles : false;
+    })()
+  `, 'sidebar pack order');
+  const expectedPackOrder = ['AHT', 'PTB', 'AHT 3.0'];
+  if (
+    sidebarPackProof.slice(0, 3).map((tile) => tile.title).join('|') !== expectedPackOrder.join('|')
+    || sidebarPackProof[1].pack !== 'ptb'
+    || !/Public test build/i.test(sidebarPackProof[1].subtitle)
+    || sidebarPackProof[2].disabled !== true
+    || !/Coming soon/i.test(sidebarPackProof[2].subtitle)
+  ) {
+    throw new Error(`Sidebar must show AHT, PTB, then disabled AHT 3.0: ${JSON.stringify(sidebarPackProof)}`);
+  }
+  await click(client, '#ptbTileButton');
+  const ptbActiveProof = await waitFor(client, `
+    window.aht.getStatus('ptb').then((status) => {
+      const aht = document.querySelector('#gameTileButton');
+      const ptb = document.querySelector('#ptbTileButton');
+      const heroTitle = document.querySelector('#playerPackTitle')?.textContent?.trim() || '';
+      const latestVersion = document.querySelector('#latestVersion')?.textContent?.trim() || '';
+      return ptb?.classList.contains('active') && heroTitle === 'A Hard Time PTB' && latestVersion === '10.0.0-ptb.1' ? {
+        ahtActive: aht.classList.contains('active'),
+        ptbActive: ptb.classList.contains('active'),
+        activeView: document.querySelector('.view.active')?.id || '',
+        heroTitle,
+        latestVersion,
+        activePack: status.activePack,
+        releaseTarget: status.releaseTarget,
+        packId: status.config?.packId,
+        latestUrl: status.config?.latestUrl,
+        instanceDir: status.config?.instanceDir,
+        profileId: status.config?.minecraftLauncher?.profileId,
+        profileName: status.config?.minecraftLauncher?.profileName,
+        feedPackId: status.latest?.packId
+      } : false;
+    })
+  `, 'PTB sidebar selection');
+  if (
+    ptbActiveProof.ahtActive
+    || !ptbActiveProof.ptbActive
+    || ptbActiveProof.activeView !== 'player'
+    || ptbActiveProof.activePack !== 'ptb'
+    || ptbActiveProof.releaseTarget !== 'ptb'
+    || ptbActiveProof.packId !== 'a-hard-time-ptb'
+    || ptbActiveProof.feedPackId !== 'a-hard-time-ptb'
+    || ptbActiveProof.latestUrl !== `${workerEndpoint}/ptb/latest.json`
+    || path.resolve(ptbActiveProof.instanceDir) !== path.resolve(ptbInstanceDir)
+    || ptbActiveProof.profileId !== 'a-hard-time-ptb'
+    || ptbActiveProof.profileName !== 'A Hard Time PTB'
+  ) {
+    throw new Error(`PTB selection must use isolated feed, instance, and Minecraft profile state: ${JSON.stringify(ptbActiveProof)}`);
+  }
+  await click(client, '#gameTileButton');
+  const stableRestoredProof = await waitFor(client, `
+    window.aht.getStatus('stable').then((status) => {
+      const heroTitle = document.querySelector('#playerPackTitle')?.textContent?.trim() || '';
+      const latestVersion = document.querySelector('#latestVersion')?.textContent?.trim() || '';
+      return document.querySelector('#gameTileButton')?.classList.contains('active') && heroTitle === 'A Hard Time' && latestVersion === '9.9.9' ? {
+        activePack: status.activePack,
+        releaseTarget: status.releaseTarget,
+        packId: status.config?.packId,
+        latestUrl: status.config?.latestUrl,
+        profileId: status.config?.minecraftLauncher?.profileId
+      } : false;
+    })
+  `, 'stable sidebar state restored after PTB');
+  if (
+    stableRestoredProof.activePack !== 'aht'
+    || stableRestoredProof.releaseTarget !== 'stable'
+    || stableRestoredProof.packId !== 'a-hard-time-dregora'
+    || stableRestoredProof.latestUrl !== `${workerEndpoint}/latest.json`
+    || stableRestoredProof.profileId !== 'a-hard-time-dregora'
+  ) {
+    throw new Error(`Returning from PTB changed stable player state: ${JSON.stringify(stableRestoredProof)}`);
   }
   const identityProof = await waitFor(client, `
     window.aht.getStatus().then((status) => status.identity?.minecraftUsername ? {

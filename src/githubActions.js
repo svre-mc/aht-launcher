@@ -52,6 +52,19 @@ function githubHeaders(token) {
   };
 }
 
+function normalizedWorkflowRun(run = null) {
+  return run ? {
+    id: run.id,
+    name: run.name,
+    status: run.status,
+    conclusion: run.conclusion,
+    htmlUrl: run.html_url,
+    createdAt: run.created_at,
+    updatedAt: run.updated_at,
+    branch: run.head_branch
+  } : null;
+}
+
 async function readGithubJson(response, label) {
   const text = await response.text();
   let parsed = null;
@@ -151,15 +164,49 @@ export async function findRecentWorkflowRun({
   const run = (parsed?.workflow_runs || [])
     .filter((item) => Date.parse(item.created_at || '') >= sinceMs - 10_000)
     .sort((left, right) => Date.parse(right.created_at || '') - Date.parse(left.created_at || ''))[0];
-  return run ? {
-    id: run.id,
-    name: run.name,
-    status: run.status,
-    conclusion: run.conclusion,
-    htmlUrl: run.html_url,
-    createdAt: run.created_at,
-    branch: run.head_branch
-  } : null;
+  return normalizedWorkflowRun(run);
+}
+
+export async function readGithubWorkflowRun({
+  repo = DEFAULT_REPO,
+  runId,
+  token,
+  fetchImpl = globalThis.fetch
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is not available.');
+  const cleanRepo = cleanGithubRepo(repo);
+  const cleanRunId = String(runId || '').trim();
+  if (!/^\d+$/.test(cleanRunId)) throw new Error('GitHub workflow run id is invalid.');
+  const response = await fetchImpl(`${GITHUB_API}/repos/${cleanRepo}/actions/runs/${cleanRunId}`, {
+    headers: githubHeaders(token)
+  });
+  return normalizedWorkflowRun(await readGithubJson(response, 'GitHub workflow run status'));
+}
+
+export async function waitForGithubWorkflowRun({
+  repo = DEFAULT_REPO,
+  runId,
+  token,
+  waitForCompletionMs = 45 * 60 * 1000,
+  pollIntervalMs = 5_000,
+  fetchImpl = globalThis.fetch,
+  sleepImpl = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
+  onProgress = null
+} = {}) {
+  const deadline = Date.now() + Math.max(1, Number(waitForCompletionMs) || 1);
+  let run = null;
+  do {
+    run = await readGithubWorkflowRun({ repo, runId, token, fetchImpl });
+    if (typeof onProgress === 'function') onProgress(run);
+    if (run?.status === 'completed') {
+      if (run.conclusion !== 'success') {
+        throw new Error(`GitHub launcher workflow completed with ${run.conclusion || 'an unknown result'}. ${run.htmlUrl || ''}`.trim());
+      }
+      return run;
+    }
+    await sleepImpl(Math.max(1, Number(pollIntervalMs) || 1));
+  } while (Date.now() < deadline);
+  throw new Error(`GitHub launcher workflow did not finish before the timeout. ${run?.htmlUrl || ''}`.trim());
 }
 
 export async function triggerLauncherReleaseWorkflow(options = {}) {

@@ -1,0 +1,136 @@
+A HARD TIME PRIVACY POLICY
+
+Effective Date: July 14, 2026
+Privacy Version: 2026-07-14.1
+
+This Privacy Policy explains how SIIS Enterprise LLC ("SIIS," "we," "us," or "our") collects, uses, discloses, and protects information when you use the A Hard Time launcher, official game servers, websites, APIs, update services, community features, and related services (collectively, the "Services"). It also describes your privacy choices.
+
+1. SCOPE AND CONTROLLER
+
+SIIS Enterprise LLC is responsible for the personal information described in this policy. This policy does not govern Microsoft, Mojang, Minecraft, Forge, CurseForge, Discord, Cloudflare, GitHub, third-party mod authors, or other third parties. Their privacy policies apply to information they collect.
+
+The Services are intended for users age 13 and older and are not directed to children under 13.
+
+2. INFORMATION WE COLLECT
+
+A. Information you provide
+
+- Minecraft username and other profile identifiers you choose to connect to the launcher or server.
+- Friend requests, friend relationships, blocked-player relationships, presence preferences, reports, support requests, and communications you submit.
+- Content you submit to community or server features, including chat, commands, reports, feedback, and user-created content where those features are enabled.
+- Transaction and entitlement information if you purchase a rank, benefit, or other item. Payment processors handle full payment-card data; SIIS should receive only transaction status and limited billing metadata needed to fulfill and support the purchase.
+- Your affirmative acceptance of the Terms and Privacy Policy, including acceptance version and time.
+
+B. Information collected automatically by the launcher
+
+- A launcher installation identifier, launcher version, operating system, platform, architecture, update channel, and general device/runtime compatibility information.
+- Modpack version, install/update/repair events, download status, error details, and technical diagnostics.
+- Managed-mod integrity results, such as the name or relative path and hash/status of a missing, changed, added, or corrupted managed mod file. The launcher is not intended to inspect personal documents or report user-edited configuration files as unauthorized changes.
+- Launcher proof and security information, including short-lived signed proof tokens, launch identifiers, pack/version claims, timestamps, and hashes used to bind proof to an installation. SIIS does not receive your Microsoft password through the launcher.
+- Network information such as IP address, request time, requested resource, response status, transfer size, user agent, and rate-limit/security events when the launcher communicates with our infrastructure.
+
+C. Information collected on official game servers
+
+- Minecraft UUID and username; login/logout and online presence; server, dimension, and session information; gameplay and progression records; commands; moderation actions; rule or anti-cheat events; launcher-authentication status; and technical server logs.
+- Friends, incoming friend requests, blocked players, and whether you permit friends to see your online status. The launcher receives only the social information needed to show and update the signed-in player's own friend and blocked-player lists.
+- Data needed for ranks, permissions, economy, factions, claims, inventories, achievements, support, abuse prevention, and restoration of service where those systems are enabled.
+
+D. Information collected on the website
+
+- IP address, request date and time, page or file requested, referrer where supplied, browser/user-agent information, response code, bytes transferred, and security events in ordinary web-server and analytics logs.
+- Download events and aggregate traffic statistics.
+- The website does not currently use advertising cookies or sell information for cross-context behavioral advertising. If that changes, this policy and any legally required consent controls will be updated first.
+
+E. Information from third parties
+
+We may receive limited account, entitlement, moderation, security, transaction, or service-status information from Microsoft/Minecraft, Discord, payment providers, hosting and security providers, or other services you connect or use. We collect only what is reasonably needed for the purpose described at the time.
+
+3. HOW WE USE INFORMATION
+
+We use information to:
+
+- provide, operate, authenticate, update, repair, and support the Services;
+- associate the correct Minecraft username with a launcher installation and server session;
+- install the modpack and create or maintain a compatible Minecraft Launcher profile;
+- deliver downloads, enforce required versions, diagnose failures, and improve reliability and performance;
+- show and update your friends, blocked players, requests, and permitted online status;
+- maintain progression, permissions, ranks, purchases, community systems, and server features;
+- detect corrupted files, cheating, abuse, fraud, ban evasion, unauthorized access, attacks, and violations of the Terms;
+- investigate reports, enforce rules, protect users, preserve evidence, and comply with law;
+- measure downloads, unique network activity, feature usage, and aggregate service health;
+- communicate service, security, legal, and policy notices; and
+- establish, exercise, or defend legal rights.
+
+Where applicable law requires a legal basis, processing may be based on performance of our contract with you, our legitimate interests in operating and protecting the Services, compliance with legal obligations, protection of vital interests, or consent. You may withdraw consent where consent is the basis, without affecting earlier lawful processing.
+
+4. HOW WE DISCLOSE INFORMATION
+
+We may disclose information:
+
+- to infrastructure, hosting, content-delivery, source/release hosting, security, analytics, support, communications, and payment providers that process information for us under appropriate restrictions;
+- to Microsoft/Mojang, Discord, payment providers, or other connected services when needed to provide a feature you request;
+- to moderators, administrators, contractors, and professional advisers who need the information for authorized duties and are subject to confidentiality or use restrictions;
+- when we reasonably believe disclosure is required by law, legal process, or a valid government request;
+- to investigate or prevent fraud, abuse, security incidents, threats, infringement, or harm to users, SIIS, or others;
+- in connection with a merger, financing, reorganization, bankruptcy, sale of assets, or transfer of all or part of the Services, subject to appropriate notice and continued protection; or
+- with your direction or consent.
+
+SIIS does not sell personal information for money. SIIS does not share personal information for cross-context behavioral advertising as those terms are defined by applicable U.S. state privacy laws. We do not disclose one player's private friend or blocked-player list to another player except as required to perform a user-requested social action, enforce safety, or comply with law.
+
+5. RETENTION
+
+We retain information only for as long as reasonably necessary for the purposes described in this policy, including service operation, account continuity, security, dispute resolution, enforcement, backup integrity, and legal obligations. Retention depends on the category and context:
+
+- Short-lived launcher proof tokens expire by design, although related security events may be retained longer.
+- Current friendship, block, progression, permissions, and server-state records generally remain while your player record or the relevant server system remains active.
+- Launcher, download, web, security, moderation, and diagnostic logs may be retained as reasonably needed to investigate incidents, measure service operation, prevent repeated abuse, or meet legal requirements. SIIS does not promise a fixed deletion date where an active incident, dispute, ban, chargeback, legal hold, backup cycle, or security need requires continued retention.
+- Local acceptance and launcher configuration records remain on your device until replaced, deleted, or the launcher data is removed.
+- Backups may retain information for a limited additional period before rotation and may be restored only for disaster recovery, integrity, or legal needs.
+
+When information is no longer needed, we may delete it, de-identify it, or aggregate it so it is no longer reasonably linked to an individual.
+
+6. SECURITY
+
+We use reasonable administrative, technical, and organizational measures designed to protect information, including access controls, signed launcher proof, restricted administrative systems, transport encryption where supported, integrity validation, rate limits, and security logging. No system is perfectly secure. You are responsible for protecting your Microsoft, Minecraft, Discord, and device credentials and for keeping your system updated.
+
+Do not send passwords, private keys, authentication tokens, or unnecessary sensitive information in support requests. Report suspected security issues privately through the official support channel rather than publicly disclosing active credentials or exploit details.
+
+7. YOUR CHOICES AND RIGHTS
+
+Depending on where you live and subject to legal exceptions, you may have rights to request access to, correction of, deletion of, or a portable copy of personal information; to learn categories of information collected or disclosed; to restrict or object to certain processing; to withdraw consent; to opt out of sale, sharing, targeted advertising, or certain profiling; and to appeal a denied request.
+
+SIIS does not currently sell personal information or share it for cross-context behavioral advertising. You can change supported presence settings in game, unfriend players, unblock players, uninstall the launcher, stop using the Services, or remove local launcher data. Blocking and safety records may be retained where needed to honor a block or prevent abuse.
+
+Submit a privacy request through the official A Hard Time Discord support channel linked at https://ahardtime.net/ and clearly label it "Privacy Request - SIIS Enterprise LLC." We may need to verify your Minecraft identity, launcher installation, account control, or other information before acting. An authorized agent may submit a request where law permits, but we may require proof of authorization and identity. We will not discriminate against you for exercising a privacy right.
+
+8. CALIFORNIA AND OTHER U.S. STATE NOTICES
+
+Residents of California and other states with comprehensive privacy laws may request the disclosures and rights provided by their applicable law, subject to coverage thresholds and exceptions. The categories described in Section 2 are collected for the business and operational purposes in Section 3 and disclosed to the categories of recipients in Section 4. We do not use or disclose sensitive personal information for purposes that require a right to limit under California law, and we do not offer financial incentives for personal information unless separate terms are presented.
+
+California's "Shine the Light" law may permit residents to request information about certain disclosures for direct marketing. SIIS does not disclose personal information to third parties for their own direct marketing as described by that law.
+
+9. CHILDREN'S PRIVACY
+
+The Services are not directed to children under 13, and children under 13 may not use them. We do not knowingly collect personal information online from a child under 13 without legally required parental consent. IP addresses, device/install identifiers, and usernames can qualify as personal information under children's privacy law in some circumstances.
+
+If we learn that a child under 13 provided personal information without required consent, we will take reasonable steps to delete it and terminate the associated access. A parent or guardian who believes this occurred should submit a clearly labeled "Child Privacy Request" through the official support channel.
+
+Users age 13 through the age of majority must have a parent or legal guardian review and accept the Terms where required. Age requirements imposed by Microsoft, Minecraft, Discord, payment providers, or local law also apply.
+
+10. INTERNATIONAL USERS
+
+The Services are operated from the United States. Information may be processed and stored in the United States and other countries where our providers operate. Those countries may have different privacy laws. Where required, we use legally recognized transfer mechanisms or other safeguards.
+
+11. AUTOMATED SECURITY AND MODERATION
+
+The launcher and servers may automatically evaluate version, managed-mod integrity, launcher proof, rate limits, gameplay events, and known abuse indicators. These systems may block launch, require repair or update, restrict access, or flag an event for review. Significant enforcement may also involve human review where reasonably available. You may request review through the official support channel, but we may withhold information that would compromise security, reveal another person's data, or enable evasion.
+
+12. CHANGES TO THIS POLICY
+
+We may update this policy as the Services, law, or our practices change. The version and effective date identify the current policy. Material changes will be presented through the launcher or another conspicuous notice. When legally required, we will request renewed consent before the change applies.
+
+13. CONTACT
+
+Privacy questions and requests may be submitted through the official A Hard Time Discord support channel linked at https://ahardtime.net/. Clearly label the request "Privacy Request - SIIS Enterprise LLC" and request escalation to the privacy contact. Formal legal correspondence may be delivered to SIIS Enterprise LLC at its registered office on file with the California Secretary of State.
+
+For your security, do not include passwords, authentication tokens, private keys, payment-card numbers, government identifiers, or unrelated sensitive information in a request.

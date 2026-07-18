@@ -22,6 +22,7 @@ module.exports = {
     createDesktopShortcut: true,
     createStartMenuShortcut: true,
     include: 'build/windows-installer.nsh',
+    license: 'legal/TERMS_OF_SERVICE.txt',
     shortcutName: 'AHT Launcher',
     uninstallDisplayName: 'A Hard Time Launcher'
   }

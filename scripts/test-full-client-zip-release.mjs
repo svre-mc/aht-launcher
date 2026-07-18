@@ -30,12 +30,14 @@ const installDir = path.join(root, 'install');
 await fs.mkdir(path.join(source, 'mods'), { recursive: true });
 await fs.mkdir(path.join(source, 'mods', 'OpenTerrainGenerator', 'cache'), { recursive: true });
 await fs.mkdir(path.join(source, 'config'), { recursive: true });
+await fs.mkdir(path.join(source, 'config', 'jei'), { recursive: true });
 await fs.mkdir(path.join(source, 'resourcepacks'), { recursive: true });
 await fs.mkdir(path.join(source, 'scripts'), { recursive: true });
 await fs.writeFile(path.join(source, 'mods', 'aht-custom-patched.jar'), 'patched jar bytes from local client', 'utf8');
 await fs.writeFile(path.join(source, 'mods', 'aht-version-lock-1.0.0.jar'), 'version lock bytes', 'utf8');
 await fs.writeFile(path.join(source, 'mods', 'OpenTerrainGenerator', 'cache', 'huge-runtime-cache.dat'), 'runtime cache should never be zipped', 'utf8');
 await fs.writeFile(path.join(source, 'config', 'aht.cfg'), 'config=true\n', 'utf8');
+await fs.writeFile(path.join(source, 'config', 'jei', 'bookmarks.ini'), 'pack-default-bookmarks\n', 'utf8');
 await fs.writeFile(path.join(source, 'resourcepacks', 'aht-resources.zip'), 'resource bytes', 'utf8');
 await fs.writeFile(path.join(source, 'scripts', 'startup.zs'), 'print("aht");\n', 'utf8');
 await fs.writeFile(path.join(source, 'options.txt'), 'pack-options\n', 'utf8');
@@ -72,8 +74,10 @@ assert(release.latest.clientZip?.modFileCount >= 2, 'full-client release did not
 assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.0.0.jar', 'full-client release did not record the client version lock mod');
 
 await fs.mkdir(installDir, { recursive: true });
+await fs.mkdir(path.join(installDir, 'config', 'jei'), { recursive: true });
 await fs.writeFile(path.join(installDir, 'options.txt'), 'player-options\n', 'utf8');
 await fs.writeFile(path.join(installDir, 'optionsof.txt'), 'player-optionsof\n', 'utf8');
+await fs.writeFile(path.join(installDir, 'config', 'jei', 'bookmarks.ini'), 'preinstall-bookmarks\n', 'utf8');
 const firstProgress = [];
 const firstInstall = await installPack({
   latestSource: path.join(outDir, 'latest.json'),
@@ -97,10 +101,12 @@ assert(await fs.readFile(installedMod, 'utf8') === 'patched jar bytes from local
 assert(await pathExists(path.join(installDir, 'resourcepacks', 'aht-resources.zip')), 'resourcepack folder was not installed correctly');
 assert(await fs.readFile(path.join(installDir, 'options.txt'), 'utf8') === 'player-options\n', 'player options were replaced even though replaceGameSettings=false');
 assert(await fs.readFile(path.join(installDir, 'optionsof.txt'), 'utf8') === 'player-optionsof\n', 'player OptiFine options were replaced even though replaceGameSettings=false');
+assert(await fs.readFile(path.join(installDir, 'config', 'jei', 'bookmarks.ini'), 'utf8') === 'pack-default-bookmarks\n', 'first install should use the pack default JEI bookmarks');
 
 const managed = await readJsonFile(path.join(installDir, '.aht-launcher', 'managed-files.json'));
 assert(managed.some((item) => item.relativePath === 'mods/aht-custom-patched.jar'), 'custom jar was not recorded as managed');
 assert(!managed.some((item) => item.relativePath === 'options.txt' || item.relativePath === 'optionsof.txt'), 'game settings should not be managed integrity files');
+assert(!managed.some((item) => item.relativePath === 'config/jei/bookmarks.ini'), 'JEI bookmarks must remain player-owned and unmanaged');
 const sourceHash = await hashFile(path.join(source, 'mods', 'aht-custom-patched.jar'), 'sha256');
 const installedHash = await hashFile(installedMod, 'sha256');
 assert(sourceHash === installedHash, 'managed mod hash mismatch after full-client install');
@@ -132,6 +138,7 @@ await fs.mkdir(path.join(installDir, 'replay_videos'), { recursive: true });
 await fs.writeFile(path.join(installDir, 'replay_videos', 'run.mcpr'), 'replay data', 'utf8');
 await fs.writeFile(path.join(installDir, 'servers.dat'), 'player server list', 'utf8');
 await fs.writeFile(path.join(installDir, 'servers.dat_old'), 'player old server list', 'utf8');
+await fs.writeFile(path.join(installDir, 'config', 'jei', 'bookmarks.ini'), 'player-bookmarks\n', 'utf8');
 const staleSiblingStaging = path.join(root, '.install.aht-staging-crashed');
 const staleSiblingBackup = path.join(root, '.install.aht-backup-crashed');
 await fs.mkdir(staleSiblingStaging, { recursive: true });
@@ -181,6 +188,7 @@ assert(await fs.readFile(path.join(installDir, 'schematics', 'base.schematic'), 
 assert(await fs.readFile(path.join(installDir, 'replay_videos', 'run.mcpr'), 'utf8') === 'replay data', 'replay videos were not preserved during clean repair');
 assert(await fs.readFile(path.join(installDir, 'servers.dat'), 'utf8') === 'player server list', 'server list was not preserved during clean repair');
 assert(await fs.readFile(path.join(installDir, 'servers.dat_old'), 'utf8') === 'player old server list', 'old server list was not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'config', 'jei', 'bookmarks.ini'), 'utf8') === 'player-bookmarks\n', 'JEI bookmarks were not preserved during clean repair');
 const stateDownloads = await fs.readdir(path.join(installDir, '.aht-launcher', 'downloads'));
 assert(stateDownloads.some((name) => name.endsWith('.zip')), 'current pack ZIP cache was not carried into the clean install');
 const cachedPackPath = path.join(installDir, '.aht-launcher', 'downloads', stateDownloads.find((name) => name.endsWith('.zip')));

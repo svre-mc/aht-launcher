@@ -4,6 +4,8 @@ import {
   dispatchGithubWorkflow,
   findRecentWorkflowRun,
   readGithubPackageVersion,
+  readGithubWorkflowRun,
+  waitForGithubWorkflowRun,
   triggerLauncherReleaseWorkflow
 } from '../src/githubActions.js';
 
@@ -24,6 +26,18 @@ const fetchImpl = async (url, options = {}) => {
   }
   if (String(url).endsWith('/dispatches')) {
     return new Response(null, { status: 204 });
+  }
+  if (/\/actions\/runs\/123$/.test(String(url))) {
+    return Response.json({
+      id: 123,
+      name: 'Build and Publish Launchers',
+      status: 'completed',
+      conclusion: 'success',
+      html_url: 'https://github.com/svre-mc/aht-launcher/actions/runs/123',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      head_branch: 'main'
+    });
   }
   return Response.json({
     workflow_runs: [
@@ -71,6 +85,25 @@ const run = await findRecentWorkflowRun({
   fetchImpl
 });
 assert(run?.id === 123, 'workflow run lookup failed');
+
+const runStatus = await readGithubWorkflowRun({
+  repo: 'svre-mc/aht-launcher',
+  runId: 123,
+  token: 'test-token',
+  fetchImpl
+});
+assert(runStatus?.conclusion === 'success', 'workflow run status lookup failed');
+
+const completed = await waitForGithubWorkflowRun({
+  repo: 'svre-mc/aht-launcher',
+  runId: 123,
+  token: 'test-token',
+  fetchImpl,
+  waitForCompletionMs: 10,
+  pollIntervalMs: 1,
+  sleepImpl: async () => {}
+});
+assert(completed?.status === 'completed', 'workflow completion wait failed');
 
 const triggered = await triggerLauncherReleaseWorkflow({
   repo: 'svre-mc/aht-launcher',

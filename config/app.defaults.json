@@ -1,6 +1,13 @@
 {
   "packId": "a-hard-time-dregora",
   "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/latest.json",
+  "packs": {
+    "ptb": {
+      "packId": "a-hard-time-ptb",
+      "name": "A Hard Time PTB",
+      "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/ptb/latest.json"
+    }
+  },
   "curseforge": {
     "proxyBaseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/cf/",
     "apiKeyEnv": "CURSEFORGE_API_KEY"
@@ -20,6 +27,12 @@
     "required": true,
     "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
     "keyId": "aht-launcher-proof-v1"
+  },
+  "social": {
+    "enabled": true,
+    "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "stateUrl": "api/social",
+    "actionUrl": "api/social/actions"
   },
   "minecraftLauncher": {
     "enabled": true,

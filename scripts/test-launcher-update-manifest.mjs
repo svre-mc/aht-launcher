@@ -36,7 +36,8 @@ function assert(condition, message) {
 const uploadScript = await fsp.readFile(new URL('./upload-r2-plan.mjs', import.meta.url), 'utf8');
 const manifest = result.manifest;
 const validation = validateLauncherUpdateManifest(manifest, {
-  latestUrl: 'https://example.test/launcher/latest.json'
+  latestUrl: 'https://example.test/launcher/latest.json',
+  requireTrackedDownloads: true
 });
 assert(validation.ok, `generated launcher manifest failed reusable validation: ${validation.errors.join('; ')}`);
 const requiredDownloadKeys = REQUIRED_DOWNLOAD_KEYS;
@@ -51,7 +52,7 @@ assert(manifest.downloads?.['macos-arm64']?.kind === 'dmg', 'Apple Silicon manua
 for (const key of requiredDownloadKeys) {
   const entry = manifest.downloads?.[key];
   assert(entry, `manual download entry missing: ${key}`);
-  assert(/^https:\/\/example\.test\/launcher\/files\//.test(entry.url || ''), `manual download URL is not rooted at launcher files for ${key}: ${entry.url}`);
+  assert(entry.url === `https://example.test/launcher/download/${key}`, `manual download URL is not the tracked installer endpoint for ${key}: ${entry.url}`);
   assert(entry.fileName && entry.path, `manual download fileName/path missing for ${key}`);
   assert(/^[a-f0-9]{64}$/i.test(entry.sha256 || ''), `manual download sha256 missing for ${key}`);
   assert(Number(entry.size) > 0, `manual download size missing for ${key}`);
@@ -81,7 +82,8 @@ badManifest.platforms['win32-x64'].url = badManifest.platforms['win32-x64'].url.
 badManifest.platforms['windows-x64'].installArgs = [];
 badManifest.platforms['darwin-arm64'].kind = 'dmg';
 const badValidation = validateLauncherUpdateManifest(badManifest, {
-  latestUrl: 'https://example.test/launcher/latest.json'
+  latestUrl: 'https://example.test/launcher/latest.json',
+  requireTrackedDownloads: true
 });
 assert(!badValidation.ok && badValidation.errors.some((error) => error.includes('fileName must include launcher version 7.8.9')), 'manifest validator must reject stale launcher artifact filenames');
 assert(badValidation.errors.some((error) => error.includes('path basename must match fileName')), 'manifest validator must reject artifact paths that point at a different fileName');
