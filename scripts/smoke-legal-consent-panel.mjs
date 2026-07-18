@@ -15,6 +15,7 @@ const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const minecraftRoot = path.join(root, '.minecraft');
 const defaultsPath = path.join(root, 'app.defaults.json');
+const screenshotPath = String(process.env.AHT_TEST_LEGAL_SCREENSHOT || '').trim();
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
@@ -161,6 +162,7 @@ try {
       const text = document.querySelector('#legalDocumentText')?.textContent || '';
       if (!overlay || overlay.hidden || !text.includes('SIIS ENTERPRISE LLC')) return false;
       return {
+        brand: document.querySelector('#legalTitle')?.previousElementSibling?.textContent,
         title: document.querySelector('#legalTitle')?.textContent,
         acceptDisabled: document.querySelector('#legalAcceptButton')?.disabled,
         checkboxChecked: document.querySelector('#legalAcceptCheckbox')?.checked,
@@ -169,19 +171,34 @@ try {
       };
     })()
   `, 'versioned legal consent panel');
+  if (visible.brand !== 'A Hard Time') throw new Error(`Legal panel used the wrong product brand: ${JSON.stringify(visible)}`);
   if (visible.title !== 'Terms have changed' || !visible.acceptDisabled || visible.checkboxChecked) throw new Error(`Legal clickwrap did not start unaccepted: ${JSON.stringify(visible)}`);
   if (!visible.termsText.includes('USD $10,000') || !visible.termsText.includes('not a government fine')) throw new Error('Terms did not contain the qualified contractual-remedies language.');
-
   await evaluate(client, `document.querySelector('#legalPrivacyTab').click(); true`);
   await waitFor(client, "document.querySelector('#legalDocumentText')?.textContent.includes('IP address') && document.querySelector('#legalDocumentText')?.textContent.includes('blocked players')", 'privacy document');
-  await evaluate(client, `
+  const clicked = await evaluate(client, `
     (() => {
       const checkbox = document.querySelector('#legalAcceptCheckbox');
-      checkbox.checked = true;
-      checkbox.dispatchEvent(new Event('change', { bubbles: true }));
-      return !document.querySelector('#legalAcceptButton').disabled;
+      checkbox.click();
+      const style = getComputedStyle(checkbox);
+      return {
+        checked: checkbox.checked,
+        acceptEnabled: !document.querySelector('#legalAcceptButton').disabled,
+        width: checkbox.getBoundingClientRect().width,
+        height: checkbox.getBoundingClientRect().height,
+        appearance: style.appearance,
+        accentColor: style.accentColor
+      };
     })()
   `);
+  if (!clicked.checked || !clicked.acceptEnabled || clicked.width > 24 || clicked.height > 24 || clicked.appearance === 'none') {
+    throw new Error(`Legal checkbox did not visibly toggle from a real click: ${JSON.stringify(clicked)}`);
+  }
+  if (screenshotPath) {
+    const screenshot = await client.call('Page.captureScreenshot', { format: 'png', fromSurface: true });
+    await fsp.mkdir(path.dirname(screenshotPath), { recursive: true });
+    await fsp.writeFile(screenshotPath, Buffer.from(screenshot.data, 'base64'));
+  }
   await evaluate(client, `document.querySelector('#legalAcceptButton').click(); true`);
   await waitFor(client, "document.querySelector('#legalOverlay').hidden === true", 'accepted legal panel dismissal');
 

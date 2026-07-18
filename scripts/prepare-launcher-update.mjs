@@ -115,6 +115,12 @@ async function artifactEntry({ file, key, label, kind, rootUrl, installArgs = []
   };
 }
 
+function trackedInstallerUrl(entryUrl, downloadKey) {
+  const url = new URL(entryUrl);
+  url.searchParams.set('aht_download', downloadKey);
+  return url.toString();
+}
+
 function addAliases(platforms, aliases, entry) {
   for (const alias of aliases) {
     platforms[alias] = { ...entry };
@@ -214,9 +220,9 @@ export async function prepareLauncherUpdate(options = {}) {
   uploads.push(macX64Installer.upload);
 
   const downloads = {
-    'windows-x64': { ...windows.entry, url: new URL('launcher/download/windows-x64', rootUrl).toString() },
-    'macos-arm64': { ...macArmInstaller.entry, url: new URL('launcher/download/macos-arm64', rootUrl).toString() },
-    'macos-x64': { ...macX64Installer.entry, url: new URL('launcher/download/macos-x64', rootUrl).toString() }
+    'windows-x64': { ...windows.entry, url: trackedInstallerUrl(windows.entry.url, 'windows-x64') },
+    'macos-arm64': { ...macArmInstaller.entry, url: trackedInstallerUrl(macArmInstaller.entry.url, 'macos-arm64') },
+    'macos-x64': { ...macX64Installer.entry, url: trackedInstallerUrl(macX64Installer.entry.url, 'macos-x64') }
   };
 
   const manifest = {

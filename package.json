@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -56,6 +56,7 @@
     "test:release-builder-default-outdir": "node scripts/test-release-builder-default-outdir.mjs",
     "test:update-repair-state": "node scripts/test-update-repair-state.mjs",
     "test:local-changes-large-tree": "node scripts/test-local-changes-large-tree.mjs",
+    "test:atomic-json": "node scripts/test-atomic-json-writes.mjs",
     "test:update-logs": "node scripts/smoke-player-update-logs.mjs",
     "test:item-fire-fix-release": "node scripts/smoke-item-fire-fix-release.mjs",
     "test:release-flow": "node scripts/smoke-r2-release-flow.mjs",

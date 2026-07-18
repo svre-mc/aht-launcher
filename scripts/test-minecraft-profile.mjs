@@ -8,7 +8,8 @@ import {
   inspectMinecraftLauncherAuth,
   inspectMinecraftLauncherProfile,
   minecraftRootCandidates,
-  loaderVersionId
+  loaderVersionId,
+  setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
 import {
   buildForgeInstallPlan,
@@ -315,6 +316,19 @@ const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const curseForgeVersionId = 'forge-14.23.5.2860';
 await fs.mkdir(path.join(curseForgeRoot, 'versions', curseForgeVersionId), { recursive: true });
 await fs.writeFile(path.join(curseForgeRoot, 'versions', curseForgeVersionId, `${curseForgeVersionId}.json`), '{}');
+const launcherUiStatePath = path.join(curseForgeRoot, 'launcher_ui_state.json');
+const launcherUiPreamble = '#$\nMinecraft Launcher internal state\n$#\n';
+await fs.writeFile(launcherUiStatePath, `${launcherUiPreamble}${JSON.stringify({
+  data: { UiSettings: JSON.stringify({ lastVisitedPage: 'realms', animate: { transitions: false } }) },
+  formatVersion: 1
+}, null, 2)}\n`);
+const homePageResult = await setMinecraftLauncherHomePage(curseForgeRoot);
+const updatedLauncherUiState = await fs.readFile(launcherUiStatePath, 'utf8');
+const updatedLauncherUiJson = JSON.parse(updatedLauncherUiState.slice(updatedLauncherUiState.indexOf('{')));
+const updatedLauncherUiSettings = JSON.parse(updatedLauncherUiJson.data.UiSettings);
+if (!homePageResult.ok || !homePageResult.changed || updatedLauncherUiSettings.lastVisitedPage !== 'home' || !updatedLauncherUiState.startsWith(launcherUiPreamble)) {
+  throw new Error(`Minecraft Launcher home page state was not prepared safely: ${JSON.stringify(homePageResult)}`);
+}
 await fs.writeFile(path.join(curseForgeRoot, 'launcher_accounts.json'), JSON.stringify({
   activeAccountLocalId: 'active',
   accounts: {

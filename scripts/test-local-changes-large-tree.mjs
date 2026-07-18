@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanManagedIntegrity } from '../src/localChanges.js';
+import { captureManagedModFingerprint, scanManagedIntegrity } from '../src/localChanges.js';
 import { hashFile, writeJsonFile } from '../src/utils.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,8 +48,28 @@ try {
   assert.equal(scan.counts.corrupted, 5);
   assert.equal(scan.truncated, true);
   assert(scan.added.every((item) => item.path.startsWith('mods/managed-tree/huge/')), JSON.stringify(scan.added));
+  assert(scan.fingerprint?.digest, 'full integrity scan must produce a reusable fingerprint');
 
-  console.log(JSON.stringify({ ok: true, root, counts: scan.counts, truncated: scan.truncated }, null, 2));
+  const unchangedFingerprint = await captureManagedModFingerprint(instanceDir);
+  assert.equal(unchangedFingerprint.digest, scan.fingerprint.digest, 'unchanged mods must keep the same fingerprint');
+
+  await fs.writeFile(knownJar, 'managed JAR', 'utf8');
+  const rewrittenFingerprint = await captureManagedModFingerprint(instanceDir);
+  assert.notEqual(rewrittenFingerprint.digest, unchangedFingerprint.digest, 'same-size mod rewrites must change the fingerprint');
+
+  const otgDir = path.join(instanceDir, 'mods', 'OpenTerrainGenerator');
+  await fs.mkdir(otgDir, { recursive: true });
+  await fs.writeFile(path.join(otgDir, 'runtime.dat'), 'runtime data', 'utf8');
+  const otgFingerprint = await captureManagedModFingerprint(instanceDir);
+  assert.equal(otgFingerprint.digest, rewrittenFingerprint.digest, 'OpenTerrainGenerator runtime data must not affect the fingerprint');
+
+  console.log(JSON.stringify({
+    ok: true,
+    root,
+    counts: scan.counts,
+    truncated: scan.truncated,
+    fingerprintEntries: scan.fingerprint.entryCount
+  }, null, 2));
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

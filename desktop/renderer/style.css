@@ -2984,7 +2984,19 @@ body.dev-mode .button.strong.is-disabled {
 }
 
 .legal-consent-check input {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
   margin-top: 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  box-shadow: none;
+  accent-color: var(--amber);
+  cursor: pointer;
 }
 
 .legal-actions {

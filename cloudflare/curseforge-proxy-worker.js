@@ -207,8 +207,9 @@ function releaseNotFound(key, origin) {
   return json({ error: 'Release object not found', key }, 404, origin);
 }
 
-async function serveReleaseObject(request, env, origin) {
-  const pathname = new URL(request.url).pathname;
+async function serveReleaseObject(request, env, origin, context = null) {
+  const requestUrl = new URL(request.url);
+  const pathname = requestUrl.pathname;
   const method = request.method;
   if (!isReleaseCandidatePath(pathname)) {
     return null;
@@ -246,6 +247,19 @@ async function serveReleaseObject(request, env, origin) {
 
   if (!object) {
     return releaseNotFound(key, origin);
+  }
+  const installerDownloadKey = cleanString(requestUrl.searchParams.get('aht_download') || '', 80);
+  if (method === 'GET' && LAUNCHER_DOWNLOAD_KEYS.has(installerDownloadKey) && key.startsWith('launcher/files/')) {
+    const write = readLauncherManifest(env)
+      .then((manifest) => {
+        const artifact = manifest?.downloads?.[installerDownloadKey];
+        const expectedKey = safeReleaseKey(`/${artifact?.path || ''}`);
+        if (!artifact || expectedKey !== key) return null;
+        return recordLauncherInstallerDownload(request, env, installerDownloadKey, manifest, artifact);
+      })
+      .catch((error) => console.error('launcher download telemetry failed', error));
+    if (context?.waitUntil) context.waitUntil(write);
+    else await write;
   }
   const headers = releaseHeaders(key, origin, object, range);
   return new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
@@ -1128,7 +1142,7 @@ export default {
     const url = new URL(request.url);
     try {
       if (request.method === 'GET' || request.method === 'HEAD') {
-        const releaseResponse = await serveReleaseObject(request, env, origin);
+        const releaseResponse = await serveReleaseObject(request, env, origin, context);
         if (releaseResponse) {
           return releaseResponse;
         }

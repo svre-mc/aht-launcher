@@ -437,6 +437,41 @@ async function readProfiles(file) {
   return readRepairableJsonFile(file, {});
 }
 
+export async function setMinecraftLauncherHomePage(rootDir = '') {
+  const file = path.join(String(rootDir || ''), 'launcher_ui_state.json');
+  if (!rootDir || !(await pathExists(file))) {
+    return { ok: true, changed: false, skipped: true, file };
+  }
+
+  try {
+    const raw = await fs.readFile(file, 'utf8');
+    const jsonStart = raw.indexOf('{');
+    if (jsonStart < 0) {
+      return { ok: false, changed: false, file, reason: 'launcher UI state has no JSON payload' };
+    }
+    const preamble = raw.slice(0, jsonStart);
+    const state = JSON.parse(raw.slice(jsonStart));
+    const storedSettings = state?.data?.UiSettings;
+    if (storedSettings === undefined || storedSettings === null) {
+      return { ok: true, changed: false, skipped: true, file };
+    }
+    const settings = typeof storedSettings === 'string'
+      ? JSON.parse(storedSettings)
+      : { ...storedSettings };
+    if (settings.lastVisitedPage === 'home') {
+      return { ok: true, changed: false, file, page: 'home' };
+    }
+    settings.lastVisitedPage = 'home';
+    state.data.UiSettings = typeof storedSettings === 'string'
+      ? JSON.stringify(settings)
+      : settings;
+    await fs.writeFile(file, `${preamble}${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    return { ok: true, changed: true, file, page: 'home' };
+  } catch (error) {
+    return { ok: false, changed: false, file, reason: error.message || String(error) };
+  }
+}
+
 async function profileStateForRoot({ config, latest = null, installed = null, rootDir = minecraftRoot(config), authRoots = null }) {
   const profilesPath = path.join(rootDir, 'launcher_profiles.json');
   const minecraft = minecraftMetadata(latest, installed);

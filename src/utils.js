@@ -6,17 +6,88 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const jsonWriteQueues = new Map();
+let jsonWriteSequence = 0;
+
 export async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true });
 }
 
 export async function readJsonFile(filePath) {
-  return JSON.parse((await fs.readFile(filePath, 'utf8')).replace(/^\uFEFF/, ''));
+  let lastError = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      return JSON.parse((await fs.readFile(filePath, 'utf8')).replace(/^\uFEFF/, ''));
+    } catch (error) {
+      lastError = error;
+      const transient = error?.code === 'ENOENT' || error?.code === 'EPERM' || error instanceof SyntaxError;
+      if (!transient || attempt === 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
+    }
+  }
+  throw lastError;
 }
 
-export async function writeJsonFile(filePath, value) {
-  await ensureDir(path.dirname(filePath));
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+async function writeJsonFileAtomic(filePath, value) {
+  const resolved = path.resolve(filePath);
+  await ensureDir(path.dirname(resolved));
+  jsonWriteSequence += 1;
+  const temporary = path.join(
+    path.dirname(resolved),
+    `.${path.basename(resolved)}.${process.pid}.${jsonWriteSequence}.tmp`
+  );
+  const backup = `${temporary}.previous`;
+  let keepBackup = false;
+  try {
+    await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    try {
+      await fs.rename(temporary, resolved);
+    } catch (error) {
+      if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
+      let movedPrevious = false;
+      try {
+        await fs.rename(resolved, backup);
+        movedPrevious = true;
+        keepBackup = true;
+      } catch (moveError) {
+        if (moveError?.code !== 'ENOENT') throw moveError;
+      }
+      try {
+        await fs.rename(temporary, resolved);
+      } catch (replaceError) {
+        if (movedPrevious) {
+          try {
+            await fs.rename(backup, resolved);
+            keepBackup = false;
+          } catch (restoreError) {
+            throw new Error(`JSON replace failed and the previous file remains at ${backup}: ${restoreError.message || restoreError}`, { cause: replaceError });
+          }
+        }
+        throw replaceError;
+      }
+      if (movedPrevious) {
+        await fs.rm(backup, { force: true }).catch(() => {});
+        keepBackup = false;
+      }
+    }
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+    if (!keepBackup) {
+      await fs.rm(backup, { force: true }).catch(() => {});
+    }
+  }
+}
+
+export function writeJsonFile(filePath, value) {
+  const key = path.resolve(filePath).toLowerCase();
+  const previous = jsonWriteQueues.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(() => writeJsonFileAtomic(filePath, value));
+  jsonWriteQueues.set(key, current);
+  return current.finally(() => {
+    if (jsonWriteQueues.get(key) === current) {
+      jsonWriteQueues.delete(key);
+    }
+  });
 }
 
 export async function pathExists(filePath) {

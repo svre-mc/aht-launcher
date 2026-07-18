@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   LAUNCHER_PROOF_PROTOCOL,
+  inspectLauncherProof,
   launcherProofJavaArgs,
   launcherProofPath,
   signLauncherProofPayload,
@@ -52,6 +53,24 @@ if (saved.payload.protocol !== LAUNCHER_PROOF_PROTOCOL || saved.payload.minecraf
 }
 if (saved.proofFile !== path.resolve(proofFile)) {
   throw new Error(`Unexpected proof file path: ${saved.proofFile}`);
+}
+const reusableProof = await inspectLauncherProof({ config, identity, latest, installed, minValidityMs: 30_000 });
+if (!reusableProof.usable || reusableProof.proofFile !== path.resolve(proofFile)) {
+  throw new Error(`Fresh matching proof was not reusable: ${JSON.stringify(reusableProof)}`);
+}
+const wrongUserProof = await inspectLauncherProof({
+  config,
+  identity: { ...identity, minecraftUsername: 'OtherUser' },
+  latest,
+  installed,
+  minValidityMs: 30_000
+});
+if (wrongUserProof.usable || !/username mismatch/i.test(wrongUserProof.reason || '')) {
+  throw new Error(`Mismatched launcher proof was incorrectly reused: ${JSON.stringify(wrongUserProof)}`);
+}
+const expiringProof = await inspectLauncherProof({ config, identity, latest, installed, minValidityMs: 2 * 60 * 60 * 1000 });
+if (expiringProof.usable || !/expires too soon/i.test(expiringProof.reason || '')) {
+  throw new Error(`Expiring launcher proof was incorrectly reused: ${JSON.stringify(expiringProof)}`);
 }
 const javaArgs = launcherProofJavaArgs(proofFile).join(' ');
 if (!javaArgs.includes('-Daht.launcher.present=true') || !javaArgs.includes('-Daht.launcher.proofFile=')) {

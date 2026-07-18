@@ -16,6 +16,8 @@ const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
+const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
+const curseForgeSpawnCapture = path.join(root, 'curseforge-spawn.json');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -157,6 +159,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
     memoryMb: 4096,
+    syncDefaultRoots: false,
     openCommand: process.execPath,
     openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
   },
@@ -190,6 +193,7 @@ await writeJson(
 );
 
 const registeredUsers = new Map();
+let launcherProofRequests = 0;
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/latest.json') {
@@ -237,6 +241,7 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url.pathname === '/api/launcher-proof') {
+    launcherProofRequests += 1;
     let body = '';
     request.on('data', (chunk) => { body += String(chunk); });
     request.on('end', () => {
@@ -267,7 +272,14 @@ await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', AHT_APP_DEFAULTS: defaultsPath },
+  env: {
+    ...process.env,
+    ELECTRON_ENABLE_LOGGING: '0',
+    AHT_APP_DEFAULTS: defaultsPath,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_CURSEFORGE_MINECRAFT_ROOT: curseForgeRoot,
+    AHT_TEST_MINECRAFT_SPAWN_CAPTURE_PATH: curseForgeSpawnCapture
+  },
   stdio: 'ignore',
   windowsHide: true
 });
@@ -314,6 +326,9 @@ try {
   if (persistedIntegrity.source !== 'play-check' || persistedIntegrity.counts?.corrupted !== 1) {
     throw new Error(`Play check integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
   }
+  if (!persistedIntegrity.fingerprint?.digest || persistedIntegrity.checkMode !== 'full-hash') {
+    throw new Error(`Full Play integrity scan did not establish a fingerprint: ${JSON.stringify(persistedIntegrity)}`);
+  }
 
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
   await fsp.rm(fakeLauncherMarker, { force: true });
@@ -350,6 +365,67 @@ try {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
   }
 
+  let curseForgePlayResult = null;
+  if (process.platform === 'win32') {
+    const routeConfigPath = path.join(userData, 'launcher.config.json');
+    const routeConfig = JSON.parse(fs.readFileSync(routeConfigPath, 'utf8'));
+    delete routeConfig.minecraftLauncher.openCommand;
+    delete routeConfig.minecraftLauncher.openArgs;
+    routeConfig.minecraftLauncher.syncDefaultRoots = false;
+    await writeJson(routeConfigPath, routeConfig);
+    await fsp.cp(mcRoot, curseForgeRoot, { recursive: true });
+    await fsp.writeFile(path.join(curseForgeRoot, 'minecraft.exe'), 'test launcher placeholder', 'utf8');
+    const launcherUiPreamble = '#$\nMinecraft Launcher internal state\n$#\n';
+    await fsp.writeFile(path.join(curseForgeRoot, 'launcher_ui_state.json'), `${launcherUiPreamble}${JSON.stringify({
+      data: { UiSettings: JSON.stringify({ lastVisitedPage: 'realms' }) },
+      formatVersion: 1
+    }, null, 2)}\n`, 'utf8');
+    await fsp.rm(curseForgeSpawnCapture, { force: true });
+
+    const curseForgePlayStartedAt = Date.now();
+    curseForgePlayResult = await evaluate(client, `
+      window.aht.play()
+        .then((result) => ({ ok: true, result }))
+        .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
+    `);
+    const curseForgePlayDurationMs = Date.now() - curseForgePlayStartedAt;
+    if (!curseForgePlayResult.ok || curseForgePlayResult.result?.kind !== 'curseforge') {
+      throw new Error(`Play did not prioritize the CurseForge Minecraft launcher: ${JSON.stringify(curseForgePlayResult)}`);
+    }
+    if (curseForgePlayDurationMs >= 1000) {
+      throw new Error(`Prepared CurseForge Play took too long (${curseForgePlayDurationMs}ms).`);
+    }
+    if (launcherProofRequests !== 1) {
+      throw new Error(`Prepared Play requested another launcher proof instead of reusing the valid proof (${launcherProofRequests} requests).`);
+    }
+    const spawnCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
+    if (path.resolve(spawnCapture.command) !== path.resolve(curseForgeRoot, 'minecraft.exe')) {
+      throw new Error(`Play launched the wrong Minecraft executable: ${JSON.stringify(spawnCapture)}`);
+    }
+    if (JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', curseForgeRoot]) || path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
+      throw new Error(`Play did not use the CurseForge storage root: ${JSON.stringify(spawnCapture)}`);
+    }
+    if (spawnCapture.windowsHide !== false) {
+      throw new Error(`Play hid the Minecraft Launcher GUI process: ${JSON.stringify(spawnCapture)}`);
+    }
+    const curseForgeProfiles = JSON.parse(fs.readFileSync(path.join(curseForgeRoot, 'launcher_profiles.json'), 'utf8'));
+    const curseForgeProfile = curseForgeProfiles.profiles?.['a-hard-time-dregora'];
+    if (!curseForgeProfile || path.resolve(curseForgeProfile.gameDir) !== path.resolve(instanceDir)) {
+      throw new Error(`AHT profile was not synchronized into CurseForge: ${JSON.stringify(curseForgeProfile)}`);
+    }
+    const launcherUiStateRaw = fs.readFileSync(path.join(curseForgeRoot, 'launcher_ui_state.json'), 'utf8');
+    const launcherUiState = JSON.parse(launcherUiStateRaw.slice(launcherUiStateRaw.indexOf('{')));
+    const launcherUiSettings = JSON.parse(launcherUiState.data.UiSettings);
+    if (launcherUiSettings.lastVisitedPage !== 'home' || !launcherUiStateRaw.startsWith(launcherUiPreamble)) {
+      throw new Error(`Play did not prepare Minecraft Launcher Home safely: ${launcherUiStateRaw}`);
+    }
+    const fastIntegrity = await evaluate(client, 'window.aht.getStatus().then((status) => status.integrity)');
+    if (fastIntegrity?.checkMode !== 'fingerprint' || !fastIntegrity?.quickCheckedAt) {
+      throw new Error(`Prepared Play did not use the verified fingerprint path: ${JSON.stringify(fastIntegrity)}`);
+    }
+    curseForgePlayResult.durationMs = curseForgePlayDurationMs;
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -357,6 +433,10 @@ try {
     cleanPlayResult,
     blockedReason: after.launchBlockedReason,
     cleanLaunchCommand: cleanPlayResult.result.command,
+    curseForgeLaunchCommand: curseForgePlayResult?.result?.command || '',
+    curseForgeLaunchKind: curseForgePlayResult?.result?.kind || '',
+    curseForgePlayDurationMs: curseForgePlayResult?.durationMs || 0,
+    launcherProofRequests,
     proofSource: proof.source,
     integrity: {
       source: persistedIntegrity.source,

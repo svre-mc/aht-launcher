@@ -24,6 +24,7 @@ const pureChecks = [
   ['test:resourcepack-keyed-cache'],
   ['test:release-builder-default-outdir'],
   ['test:update-repair-state'],
+  ['test:atomic-json'],
   ['test:item-fire-fix-release']
 ];
 

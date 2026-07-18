@@ -52,9 +52,9 @@ function hasLauncherFileUrl(urlText = '', expectedRootUrl = '', options = {}) {
 function hasTrackedLauncherDownloadUrl(urlText = '', downloadKey = '', expectedRootUrl = '', options = {}) {
   if (!isAllowedArtifactUrl(urlText, options)) return false;
   const url = new URL(urlText);
-  if (url.pathname !== `/launcher/download/${downloadKey}`) return false;
   if (expectedRootUrl && !urlText.startsWith(expectedRootUrl)) return false;
-  return true;
+  if (url.pathname === `/launcher/download/${downloadKey}`) return true;
+  return url.pathname.includes('/launcher/files/') && url.searchParams.get('aht_download') === downloadKey;
 }
 
 function escapeRegExp(value = '') {

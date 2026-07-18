@@ -12,6 +12,7 @@ const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-launcher-self-update-'));
 const userData = path.join(root, 'userData');
+const appDefaultsPath = path.join(root, 'app.defaults.json');
 const pendingUpdatePath = path.join(userData, 'launcher-updates', 'pending-launcher-update.json');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const artifactName = process.platform === 'win32'
@@ -145,6 +146,13 @@ async function waitFor(client, expression, label, attempts = 180) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+await writeJson(appDefaultsPath, {
+  packId: 'a-hard-time-dregora',
+  latestUrl: `${workerEndpoint}/latest.json`,
+  launcherUpdate: { enabled: true, latestUrl: `${workerEndpoint}/launcher/latest.json` },
+  sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: '' },
+  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 }
+});
 await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
   instanceDir: path.join(root, 'instance'),
@@ -152,7 +160,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: 'SmokeUser' },
   developer: { adminBaseUrl: workerEndpoint, defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
-  launcherUpdate: { enabled: true, latestUrl: `${workerEndpoint}/launcher/latest.json` },
+  launcherUpdate: { enabled: false, latestUrl: 'https://stale-launcher-feed.invalid/launcher/latest.json' },
   minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
   playCommand: { command: '', args: [], cwd: path.join(root, 'instance') }
 });
@@ -219,6 +227,7 @@ let child = spawn(electronBin, electronArgs, {
   env: {
     ...process.env,
     AHT_TEST_HOOKS: '1',
+    AHT_APP_DEFAULTS: appDefaultsPath,
     AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE: '1',
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_LAUNCHER_UPDATE_NO_QUIT: '1',
@@ -251,6 +260,13 @@ try {
   }))()`);
   if (!stagedProof.state.lastResult?.restartRequired || !stagedProof.state.lastResult?.preparedRestart) {
     throw new Error(`Launcher update was not staged for explicit restart: ${JSON.stringify(stagedProof.state)}`);
+  }
+  if (stagedProof.status.config?.launcherUpdate?.enabled !== true || stagedProof.status.config?.launcherUpdate?.latestUrl !== `${workerEndpoint}/launcher/latest.json`) {
+    throw new Error(`Legacy player update settings were not restored from packaged defaults: ${JSON.stringify(stagedProof.status.config?.launcherUpdate)}`);
+  }
+  const migratedConfig = JSON.parse(fs.readFileSync(path.join(userData, 'launcher.config.json'), 'utf8'));
+  if (migratedConfig.launcherUpdate?.enabled !== true || migratedConfig.launcherUpdate?.latestUrl !== `${workerEndpoint}/launcher/latest.json`) {
+    throw new Error(`Restored player update settings were not persisted: ${JSON.stringify(migratedConfig.launcherUpdate)}`);
   }
   if (!fs.existsSync(pendingUpdatePath)) {
     throw new Error(`Launcher update did not write pending handoff state at ${pendingUpdatePath}`);
@@ -366,6 +382,7 @@ try {
     env: {
       ...process.env,
       AHT_TEST_HOOKS: '1',
+      AHT_APP_DEFAULTS: appDefaultsPath,
       AHT_TEST_REMOTE_DEBUG_PORT: String(guardPort),
       AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
       ELECTRON_ENABLE_LOGGING: '0'

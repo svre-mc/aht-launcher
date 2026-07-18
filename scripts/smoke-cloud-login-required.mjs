@@ -124,7 +124,8 @@ if (args.includes('whoami')) {
     console.log('You are not authenticated. Please run \`wrangler login\`.');
     process.exit(0);
   }
-  console.log('smoke@example.com');
+  console.log('You are logged in with an OAuth Token, associated with the email smoke@example.com.');
+  console.log('WARNING: Wrangler is missing an optional OAuth scope. To fix this, run wrangler login.');
   process.exit(0);
 }
 if (args.includes('login')) {

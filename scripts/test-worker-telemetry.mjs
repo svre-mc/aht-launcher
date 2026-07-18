@@ -97,6 +97,17 @@ const downloadCountAfterDirectUpdate = [...objects.keys()].filter((key) => key.s
 if (downloadCountAfterDirectUpdate !== downloadCountBeforeDirectUpdate) {
   throw new Error('Launcher self-update artifact requests must not be counted as installer downloads.');
 }
+const taggedInstaller = await worker.fetch(new Request('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe?aht_download=windows-x64', {
+  headers: {
+    'CF-Connecting-IP': '203.0.113.43',
+    'User-Agent': 'AHT website legacy-compatible test'
+  }
+}), env, {});
+if (!taggedInstaller.ok) throw new Error(`Tagged launcher installer artifact failed: ${taggedInstaller.status}`);
+const downloadCountAfterTaggedInstaller = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
+if (downloadCountAfterTaggedInstaller !== downloadCountBeforeDirectUpdate + 1) {
+  throw new Error('Telemetry-tagged direct installer request was not counted exactly once.');
+}
 
 await jsonRequest('/api/events', {
   method: 'POST',

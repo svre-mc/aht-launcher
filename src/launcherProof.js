@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { writeJsonFile } from './utils.js';
+import { pathExists, readJsonFile, writeJsonFile } from './utils.js';
 
 export const LAUNCHER_PROOF_PROTOCOL = 'aht-launcher-proof-v1';
 export const LAUNCHER_PROOF_FILE_NAME = 'launcher-proof.json';
@@ -54,6 +54,66 @@ export function launcherProofJavaArgs(proofFile = '') {
     `-Daht.launcher.protocol=${LAUNCHER_PROOF_PROTOCOL}`,
     `-Daht.launcher.proofFile=${quoteJavaValue(path.resolve(proofFile))}`
   ];
+}
+
+export async function inspectLauncherProof({
+  config = {},
+  identity = {},
+  latest = null,
+  installed = null,
+  minValidityMs = 0,
+  now = Date.now()
+} = {}) {
+  if (config.launcherProof?.enabled === false) {
+    return { enabled: false, usable: true, trusted: false, source: 'disabled', reason: '' };
+  }
+
+  const proofFile = launcherProofPath(config.instanceDir || '');
+  if (!(await pathExists(proofFile))) {
+    return { enabled: true, usable: false, trusted: false, proofFile, reason: 'missing proof file' };
+  }
+
+  let proof = null;
+  try {
+    proof = await readJsonFile(proofFile);
+  } catch (error) {
+    return {
+      enabled: true,
+      usable: false,
+      trusted: false,
+      proofFile,
+      reason: `unreadable proof file: ${error.message || error}`
+    };
+  }
+
+  const payload = proof?.payload || {};
+  const expiresAt = Date.parse(payload.expiresAt || '');
+  const minimumExpiry = Number(now) + Math.max(0, Number(minValidityMs) || 0);
+  const expectedPackId = cleanString(latest?.packId || installed?.packId || config.packId || '', 80);
+  const expectedInstalledVersion = cleanString(installed?.version || '', 80);
+  const expectedLatestVersion = cleanString(latest?.version || '', 80);
+  const expectedUsername = cleanString(identity.minecraftUsername || config.sync?.playerLabel || '', 16);
+  const expectedInstallId = cleanString(identity.installId || '', 120);
+  const expectedInstanceHash = sha256Hex(path.resolve(config.instanceDir || ''));
+  const reasons = [];
+
+  if (!proof?.trusted || !proof?.token) reasons.push('proof is not trusted');
+  if (proof?.protocol !== LAUNCHER_PROOF_PROTOCOL || payload.protocol !== LAUNCHER_PROOF_PROTOCOL) reasons.push('protocol mismatch');
+  if (!Number.isFinite(expiresAt) || expiresAt <= minimumExpiry) reasons.push('proof expired or expires too soon');
+  if (expectedPackId && cleanString(payload.packId || '', 80) !== expectedPackId) reasons.push('pack mismatch');
+  if (expectedInstalledVersion && cleanString(payload.installedVersion || payload.packVersion || '', 80) !== expectedInstalledVersion) reasons.push('installed version mismatch');
+  if (expectedLatestVersion && cleanString(payload.latestVersion || '', 80) !== expectedLatestVersion) reasons.push('latest version mismatch');
+  if (expectedUsername && cleanString(payload.minecraftUsername || '', 16).toLowerCase() !== expectedUsername.toLowerCase()) reasons.push('Minecraft username mismatch');
+  if (expectedInstallId && cleanString(payload.installId || '', 120) !== expectedInstallId) reasons.push('launcher install mismatch');
+  if (cleanString(payload.instanceDirHash || '', 80) !== expectedInstanceHash) reasons.push('instance path mismatch');
+
+  return {
+    ...proof,
+    enabled: true,
+    usable: reasons.length === 0,
+    proofFile: path.resolve(proofFile),
+    reason: reasons.join(', ')
+  };
 }
 
 export function buildLauncherProofPayload({ config = {}, identity = {}, latest = null, installed = null, now = new Date() }) {

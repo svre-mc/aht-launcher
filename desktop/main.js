@@ -9,19 +9,24 @@ import AdmZip from 'adm-zip';
 import yauzl from 'yauzl';
 import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from '../src/clientPackFormat.js';
 import { installPack } from '../src/installer.js';
-import { scanLocalChanges, scanManagedIntegrity } from '../src/localChanges.js';
+import {
+  captureManagedModFingerprint,
+  scanLocalChanges,
+  scanManagedIntegrity
+} from '../src/localChanges.js';
 import {
   defaultMinecraftRoot,
   ensureMinecraftLauncherAssets,
   ensureMinecraftLauncherProfile,
   inspectMinecraftLauncherAuth,
   inspectMinecraftLauncherProfile,
-  minecraftRootCandidates
+  minecraftRootCandidates,
+  setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
 import { installForgeLoader } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
-import { writeLauncherProof } from '../src/launcherProof.js';
+import { inspectLauncherProof, writeLauncherProof } from '../src/launcherProof.js';
 import { fetchSocialState, sendSocialAction } from '../src/socialClient.js';
 import { legalConsentStatus, recordLegalConsent } from '../src/legalConsent.js';
 import { selectLauncherArtifact, validateLauncherUpdateManifest } from '../src/launcherUpdateManifest.js';
@@ -189,6 +194,9 @@ let uploadState = { running: false, total: 0, completed: 0, current: '', lines: 
 let launcherDeployState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let adminToken = '';
 let developerSession = null;
+const latestReleaseCache = new Map();
+const launcherProofRefreshes = new Map();
+const LATEST_RELEASE_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
 const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
@@ -499,6 +507,51 @@ function hasEncryptedStoredSecret(file, key) {
   return Boolean(file?.secrets?.[key]?.encrypted && storedSecretValue(file, key));
 }
 
+function storedDeveloperSecretCount(file = {}) {
+  return DEVELOPER_SECRET_KEYS.filter((key) => hasStoredSecret(file?.secrets?.[key])).length;
+}
+
+function developerSecretVaultEnabled() {
+  return launchMode === 'developer' && (!explicitUserDataDir || Boolean(process.env.AHT_DEVELOPER_VAULT_DIR));
+}
+
+function developerSecretVaultDir() {
+  const override = String(process.env.AHT_DEVELOPER_VAULT_DIR || '').trim();
+  if (override) return path.resolve(override);
+  const localData = process.env.LOCALAPPDATA || app.getPath('appData');
+  return path.join(localData, 'AHT', 'developer-secret-vault');
+}
+
+function developerSecretVaultSnapshotsDir() {
+  return path.join(developerSecretVaultDir(), 'snapshots');
+}
+
+function developerSecretVaultRecordsSync() {
+  if (!developerSecretVaultEnabled()) return [];
+  const snapshotsDir = developerSecretVaultSnapshotsDir();
+  try {
+    return fsSync.readdirSync(snapshotsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map((entry) => {
+        const dir = path.join(snapshotsDir, entry.name);
+        const secrets = readJsonSync(path.join(dir, 'developer.secrets.json'));
+        const localState = path.join(dir, 'Local State');
+        return {
+          dir,
+          name: entry.name,
+          secrets,
+          localState,
+          count: storedDeveloperSecretCount(secrets),
+          hasLocalState: fsSync.existsSync(localState)
+        };
+      })
+      .filter((entry) => entry.secrets?.secrets && entry.count > 0)
+      .sort((left, right) => right.count - left.count || right.name.localeCompare(left.name));
+  } catch {
+    return [];
+  }
+}
+
 function developerSecretsUseLegacyKey(currentSecrets, legacySecrets) {
   if (!currentSecrets?.secrets || !legacySecrets?.secrets) {
     return true;
@@ -510,26 +563,42 @@ function developerSecretsUseLegacyKey(currentSecrets, legacySecrets) {
 }
 
 function migrateDeveloperEncryptionProfile() {
-  if (launchMode !== 'developer' || explicitUserDataDir) {
+  if (!developerSecretVaultEnabled()) {
     return;
   }
   const currentDir = app.getPath('userData');
   const legacyDir = path.join(app.getPath('appData'), 'aht-launcher');
-  if (path.normalize(currentDir).toLowerCase() === path.normalize(legacyDir).toLowerCase()) {
-    return;
-  }
-  const legacyLocalState = path.join(legacyDir, 'Local State');
   const currentLocalState = path.join(currentDir, 'Local State');
-  const legacySecrets = readJsonSync(path.join(legacyDir, 'developer.secrets.json'));
   const currentSecrets = readJsonSync(path.join(currentDir, 'developer.secrets.json'));
-  if (!fsSync.existsSync(legacyLocalState) || !legacySecrets?.secrets) {
+  const sources = developerSecretVaultRecordsSync();
+  if (path.normalize(currentDir).toLowerCase() !== path.normalize(legacyDir).toLowerCase()) {
+    const legacySecrets = readJsonSync(path.join(legacyDir, 'developer.secrets.json'));
+    const legacyLocalState = path.join(legacyDir, 'Local State');
+    if (legacySecrets?.secrets && fsSync.existsSync(legacyLocalState)) {
+      sources.push({
+        dir: legacyDir,
+        name: 'legacy',
+        secrets: legacySecrets,
+        localState: legacyLocalState,
+        count: storedDeveloperSecretCount(legacySecrets),
+        hasLocalState: true
+      });
+    }
+  }
+
+  const best = sources
+    .filter((entry) => entry.hasLocalState && entry.count > 0)
+    .sort((left, right) => right.count - left.count || right.name.localeCompare(left.name))[0];
+  if (!best) {
     return;
   }
-  if (fsSync.existsSync(currentLocalState) && !developerSecretsUseLegacyKey(currentSecrets, legacySecrets)) {
-    return;
-  }
+  const currentCount = storedDeveloperSecretCount(currentSecrets);
+  const shouldRestore = !fsSync.existsSync(currentLocalState)
+    || currentCount === 0
+    || (currentCount <= best.count && developerSecretsUseLegacyKey(currentSecrets, best.secrets));
+  if (!shouldRestore) return;
   fsSync.mkdirSync(currentDir, { recursive: true });
-  fsSync.copyFileSync(legacyLocalState, currentLocalState);
+  fsSync.copyFileSync(best.localState, currentLocalState);
 }
 
 function configPath() {
@@ -615,24 +684,37 @@ async function readDeveloperSecretsFile() {
   const file = developerSecretsPath();
   let current = { schemaVersion: 1, secrets: {} };
   if (await pathExists(file)) {
-    current = await readJsonFile(file);
+    try {
+      current = await readJsonFile(file);
+    } catch {
+      current = { schemaVersion: 1, secrets: {} };
+    }
   }
 
-  if (launchMode !== 'developer' || explicitUserDataDir) {
+  if (!developerSecretVaultEnabled()) {
     return current;
   }
 
+  const backupFiles = developerSecretVaultRecordsSync().map((entry) => path.join(entry.dir, 'developer.secrets.json'));
   const legacyFile = legacyDeveloperSecretsPath();
-  if (samePath(file, legacyFile) || !(await pathExists(legacyFile))) {
-    return current;
+  if (!samePath(file, legacyFile) && await pathExists(legacyFile)) {
+    backupFiles.push(legacyFile);
   }
 
-  const legacy = await readJsonFile(legacyFile);
-  const merged = mergeDeveloperSecretFiles(current, legacy);
-  if (merged.changed) {
-    await writeJsonFile(file, merged.file);
+  let mergedFile = current;
+  let changed = false;
+  for (const backupFile of backupFiles) {
+    try {
+      const backup = await readJsonFile(backupFile);
+      const merged = mergeDeveloperSecretFiles(mergedFile, backup);
+      mergedFile = merged.file;
+      changed ||= merged.changed;
+    } catch {
+      // A damaged backup must not hide another valid snapshot.
+    }
   }
-  return merged.file;
+  if (changed) await writeJsonFile(file, mergedFile);
+  return mergedFile;
 }
 
 function hasStoredSecret(record = {}) {
@@ -739,14 +821,55 @@ function saveDeveloperSecretField(next, secrets, key) {
     return;
   }
   const value = String(secrets[key] || '');
-  if (!value && hasStoredSecret(next.secrets[key])) {
-    return;
-  }
   if (!value) {
-    delete next.secrets[key];
     return;
   }
   next.secrets[key] = encryptDeveloperSecret(value);
+}
+
+async function attachDeveloperVaultEncryptionProfile(snapshotDir, currentLocalState) {
+  const snapshotLocalState = path.join(snapshotDir, 'Local State');
+  if (await pathExists(snapshotLocalState)) return true;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await pathExists(currentLocalState)) {
+      await fs.copyFile(currentLocalState, snapshotLocalState);
+      return true;
+    }
+    await sleep(500);
+  }
+  return false;
+}
+
+async function writeDeveloperSecretVaultSnapshot(file = {}) {
+  if (!developerSecretVaultEnabled() || storedDeveloperSecretCount(file) === 0) return null;
+  const currentLocalState = path.join(app.getPath('userData'), 'Local State');
+
+  const existing = developerSecretVaultRecordsSync()[0];
+  if (existing && JSON.stringify(existing.secrets?.secrets || {}) === JSON.stringify(file.secrets || {})) {
+    if (!existing.hasLocalState) {
+      void attachDeveloperVaultEncryptionProfile(existing.dir, currentLocalState).catch(() => {});
+    }
+    return existing.dir;
+  }
+
+  const snapshotsDir = developerSecretVaultSnapshotsDir();
+  await ensureDir(snapshotsDir);
+  const snapshotName = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const temporaryDir = path.join(snapshotsDir, `.${snapshotName}.tmp`);
+  const snapshotDir = path.join(snapshotsDir, snapshotName);
+  await ensureDir(temporaryDir);
+  try {
+    if (await pathExists(currentLocalState)) {
+      await fs.copyFile(currentLocalState, path.join(temporaryDir, 'Local State'));
+    }
+    await writeJsonFile(path.join(temporaryDir, 'developer.secrets.json'), file);
+    await fs.rename(temporaryDir, snapshotDir);
+  } catch (error) {
+    await fs.rm(temporaryDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  void attachDeveloperVaultEncryptionProfile(snapshotDir, currentLocalState).catch(() => {});
+  return snapshotDir;
 }
 
 async function saveDeveloperSecrets(secrets = {}) {
@@ -766,6 +889,7 @@ async function saveDeveloperSecrets(secrets = {}) {
   saveDeveloperSecretField(next, secrets, 'r2AccountId');
   saveDeveloperSecretField(next, secrets, 'r2AccessKeyId');
   saveDeveloperSecretField(next, secrets, 'r2SecretAccessKey');
+  await writeDeveloperSecretVaultSnapshot(next);
   await writeJsonFile(developerSecretsPath(), next);
   const usedEncryption = Object.entries(next.secrets).every(([key, item]) => key === 'r2AccountId' || !item?.value || item.encrypted);
   return {
@@ -984,6 +1108,62 @@ function localMinecraftLauncherCandidates() {
   ])];
 }
 
+function localCurseForgeMinecraftRoots(config = {}) {
+  const home = app.getPath('home');
+  const documents = app.getPath('documents');
+  const configuredRoots = [
+    config.minecraftLauncher?.rootDir,
+    ...(Array.isArray(config.minecraftLauncher?.syncRoots) ? config.minecraftLauncher.syncRoots : [])
+  ];
+  return [...new Set([
+    process.env.AHT_TEST_HOOKS === '1' ? process.env.AHT_TEST_CURSEFORGE_MINECRAFT_ROOT : '',
+    ...configuredRoots.filter(isCurseForgeMinecraftRoot),
+    path.join(home, 'curseforge', 'minecraft', 'Install'),
+    path.join(documents, 'CurseForge', 'minecraft', 'Install'),
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'CurseForge', 'minecraft', 'Install') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'CurseForge', 'minecraft', 'Install') : ''
+  ].filter(Boolean).map((item) => path.resolve(item)))];
+}
+
+async function firstExistingCurseForgeMinecraftRoot(config = {}) {
+  if (process.platform !== 'win32') return '';
+  for (const rootDir of localCurseForgeMinecraftRoots(config)) {
+    try {
+      const stat = await fs.stat(rootDir);
+      if (stat.isDirectory() && await pathExists(path.join(rootDir, 'minecraft.exe'))) {
+        return rootDir;
+      }
+    } catch {
+      // Continue to the next known CurseForge storage root.
+    }
+  }
+  return '';
+}
+
+async function minecraftLauncherRuntimeConfig(config = {}) {
+  if (config.minecraftLauncher?.openCommand) return config;
+  const configuredRoot = String(config.minecraftLauncher?.rootDir || '').trim();
+  const forcedTestRoot = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_CURSEFORGE_MINECRAFT_ROOT || '').trim()
+    : '';
+  const canAutoSelectCurseForge = Boolean(forcedTestRoot)
+    || !configuredRoot
+    || samePath(configuredRoot, defaultMinecraftRoot())
+    || isCurseForgeMinecraftRoot(configuredRoot);
+  if (!canAutoSelectCurseForge) return config;
+  const curseForgeRoot = await firstExistingCurseForgeMinecraftRoot(config);
+  if (!curseForgeRoot) return config;
+  return {
+    ...config,
+    minecraftLauncher: {
+      ...(config.minecraftLauncher || {}),
+      rootDir: curseForgeRoot,
+      syncDefaultRoots: false,
+      syncRoots: []
+    }
+  };
+}
+
 function localReleaseCandidates() {
   return [...new Set([
     path.join(appRoot, 'dist-r2-packaged-cache-test', 'latest.json'),
@@ -1176,6 +1356,13 @@ async function loadConfig() {
     }
   }
   if (!isDeveloperMode()) {
+    for (const key of ['enabled', 'latestUrl']) {
+      const value = defaults.launcherUpdate?.[key];
+      if (value !== undefined && config.launcherUpdate?.[key] !== value) {
+        config.launcherUpdate = { ...config.launcherUpdate, [key]: value };
+        changed = true;
+      }
+    }
     for (const key of ['enabled', 'required', 'baseUrl', 'keyId']) {
       const value = defaults.launcherProof?.[key];
       if (value !== undefined && config.launcherProof?.[key] !== value) {
@@ -1280,7 +1467,8 @@ async function refreshMinecraftLauncherProfile(config) {
     };
   }
 
-  const minecraftProfile = await ensureMinecraftLauncherProfile({ config, latest, installed });
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+  const minecraftProfile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
   return { profileUpdated: true, minecraftProfile };
 }
 
@@ -1341,7 +1529,8 @@ async function saveSettings(configPatch, packValue = 'stable') {
 async function setupRecommendations(config = null) {
   const current = config || await loadConfig();
   const detectedInstanceDir = await firstExistingDirectory(localInstanceCandidates());
-  const detectedMinecraftRoot = await firstExistingMinecraftLauncherRoot(localMinecraftLauncherCandidates());
+  const detectedMinecraftRoot = await firstExistingCurseForgeMinecraftRoot(current)
+    || await firstExistingMinecraftLauncherRoot(localMinecraftLauncherCandidates());
   const detectedMinecraftAuth = detectedMinecraftRoot
     ? await inspectMinecraftLauncherAuth(detectedMinecraftRoot)
     : { signedIn: false, accountCount: 0, files: [], usernames: [], preferredUsername: '' };
@@ -1506,6 +1695,33 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
       authToken: launcherProofAuthToken()
     });
   }
+}
+
+async function currentOrWriteRegisteredLauncherProof({
+  config = {},
+  identity = {},
+  latest = null,
+  installed = null,
+  minValidityMs = 2 * 60 * 1000
+} = {}) {
+  const current = await inspectLauncherProof({
+    config,
+    identity,
+    latest,
+    installed,
+    minValidityMs
+  });
+  if (current.usable) {
+    return { ...current, reused: true };
+  }
+
+  const key = path.resolve(config.instanceDir || '').toLowerCase();
+  const running = launcherProofRefreshes.get(key);
+  if (running) return running;
+  const refresh = writeRegisteredLauncherProof({ config, identity, latest, installed })
+    .finally(() => launcherProofRefreshes.delete(key));
+  launcherProofRefreshes.set(key, refresh);
+  return refresh;
 }
 
 async function socialRequestContext() {
@@ -1737,11 +1953,29 @@ function requirePlayerFullClientRelease(latest = null, options = {}) {
   }
 }
 
-async function readLatest(config) {
+function latestReleaseCacheKey(config = {}) {
+  return `${String(config.packId || '').trim()}|${String(config.latestUrl || '').trim()}`;
+}
+
+function cachedLatestRelease(config = {}, maxAgeMs = LATEST_RELEASE_CACHE_MAX_AGE_MS) {
+  const entry = latestReleaseCache.get(latestReleaseCacheKey(config));
+  if (!entry || Date.now() - entry.fetchedAt > Math.max(0, Number(maxAgeMs) || 0)) {
+    return null;
+  }
+  return entry.latest;
+}
+
+async function readLatest(config, options = {}) {
   if (!config.latestUrl) {
     return null;
   }
-  return validateLatestReleaseFeed(await readJsonFromSource(config.latestUrl), config.latestUrl);
+  if (options.preferCache) {
+    const cached = cachedLatestRelease(config, options.maxAgeMs);
+    if (cached) return cached;
+  }
+  const latest = validateLatestReleaseFeed(await readJsonFromSource(config.latestUrl), config.latestUrl);
+  latestReleaseCache.set(latestReleaseCacheKey(config), { latest, fetchedAt: Date.now() });
+  return latest;
 }
 
 async function expectedCacheExtraManagedFiles(config, latest = null) {
@@ -1821,6 +2055,55 @@ async function writeIntegrityState(config, integrity, source = 'scan') {
   };
   await writeJsonFile(file, state);
   return state;
+}
+
+async function scanPlayIntegrity(config, latest = null) {
+  const requiredManaged = await expectedCacheExtraManagedFiles(config, latest).catch((error) => {
+    console.warn(`Unable to load expected cache extras for Play integrity check: ${error.message || error}`);
+    return [];
+  });
+  const [stored, fingerprint] = await Promise.all([
+    readIntegrityState(config),
+    captureManagedModFingerprint(config.instanceDir, { requiredManaged })
+  ]);
+  const checkedAt = new Date().toISOString();
+
+  if (
+    stored?.valid
+    && fingerprint.pathsValid
+    && stored.fingerprint?.schemaVersion === fingerprint.schemaVersion
+    && stored.fingerprint?.digest === fingerprint.digest
+  ) {
+    return writeIntegrityState(config, {
+      ...stored,
+      fingerprint,
+      quickCheckedAt: checkedAt,
+      checkMode: 'fingerprint'
+    }, 'play-fast-check');
+  }
+
+  const verifiedAtMs = Date.parse(String(stored?.generatedAt || ''));
+  const canAdoptLegacyBaseline = stored?.valid
+    && !stored?.fingerprint?.digest
+    && fingerprint.pathsValid
+    && Number(stored?.counts?.corrupted || 0) === 0
+    && Number(stored?.counts?.managed || 0) === fingerprint.managedCount
+    && Number.isFinite(verifiedAtMs)
+    && fingerprint.latestChangeMs <= verifiedAtMs;
+  if (canAdoptLegacyBaseline) {
+    return writeIntegrityState(config, {
+      ...stored,
+      fingerprint,
+      quickCheckedAt: checkedAt,
+      checkMode: 'fingerprint-baseline'
+    }, 'play-fast-baseline');
+  }
+
+  const integrity = await scanManagedIntegrity(config.instanceDir, { requiredManaged });
+  return writeIntegrityState(config, {
+    ...integrity,
+    checkMode: 'full-hash'
+  }, 'play-check');
 }
 
 function developerBypassIntegrityState(config, source = 'developer-bypass') {
@@ -2239,7 +2522,8 @@ function minecraftLaunchResultForRenderer(result = {}) {
   return {
     ok: Boolean(result.ok),
     command: String(result.command || ''),
-    args: Array.isArray(result.args) ? result.args.map((arg) => String(arg)) : []
+    args: Array.isArray(result.args) ? result.args.map((arg) => String(arg)) : [],
+    kind: String(result.kind || '')
   };
 }
 
@@ -2247,7 +2531,8 @@ async function getStatus(configOverride = null, packValue = 'stable') {
   const target = releaseTarget(packValue);
   const baseConfig = configOverride || await loadConfig();
   const config = configForPack(baseConfig, target.id);
-  const identity = await identityPayload(config);
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+  const identity = await identityPayload(launcherConfig);
   let latest = null;
   let latestError = null;
   let updateLogs = [];
@@ -2278,13 +2563,13 @@ async function getStatus(configOverride = null, packValue = 'stable') {
   }
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
   const launchLatestError = developerClientBypass && installed ? null : latestError;
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
+  const minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
   const updateRequired = !updateBlockedReason && latest && latest.required !== false
     ? installed?.version !== latest.version
     : false;
-  const launchState = evaluateLaunchState(config, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
+  const launchState = evaluateLaunchState(launcherConfig, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
     skipLoaderCheck: true,
     allowLegacyRelease: developerClientBypass
   });
@@ -2360,10 +2645,12 @@ async function runUpdate(forceRepair = false, options = {}) {
     packKey: target.sidebarKey
   };
   let config = null;
+  let launcherConfig = null;
   let identity = null;
   try {
     config = configForPack(await loadConfig(), target.id);
-    identity = await identityPayload(config);
+    launcherConfig = await minecraftLauncherRuntimeConfig(config);
+    identity = await identityPayload(launcherConfig);
     if (!config.latestUrl) {
       throw new Error('latestUrl is not configured');
     }
@@ -2392,7 +2679,7 @@ async function runUpdate(forceRepair = false, options = {}) {
       try {
         latestAfterInstall = await readLatest(config);
         const launcherProof = await writeRegisteredLauncherProof({
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed,
           identity
@@ -2403,19 +2690,19 @@ async function runUpdate(forceRepair = false, options = {}) {
           source: launcherProof.source || ''
         };
         let profile = await ensureMinecraftLauncherProfile({
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed
         });
         profile = await installMinecraftProfileLoaders(profile, {
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed,
           operationState: updateState
         });
         const assetLines = [];
         result.minecraftAssets = await ensureMinecraftLauncherAssets({
-          config,
+          config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed,
           profile,
@@ -3431,12 +3718,65 @@ function releaseUploadOrder(relPath) {
   return 0;
 }
 
+function commandOnPath(command = '') {
+  const value = String(command || '').trim();
+  if (!value) return '';
+  if (path.isAbsolute(value)) return fsSync.existsSync(value) ? value : '';
+  const directories = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === 'win32'
+    ? (path.extname(value) ? [''] : String(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';'))
+    : [''];
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory.replace(/^"|"$/g, ''), `${value}${extension}`);
+      if (fsSync.existsSync(candidate)) return candidate;
+    }
+  }
+  return '';
+}
+
+function configuredWranglerPrefix() {
+  const raw = String(process.env.AHT_WRANGLER_ARGS_PREFIX || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((item) => String(item));
+  } catch {
+    // Accept a simple whitespace-separated private launcher override.
+  }
+  return raw.split(/\s+/).filter(Boolean);
+}
+
+function wranglerInvocation() {
+  const configured = commandOnPath(process.env.AHT_WRANGLER_COMMAND || '');
+  if (configured) {
+    return { command: configured, prefix: configuredWranglerPrefix(), source: 'configured' };
+  }
+  const localName = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler';
+  for (const root of developerSourceRoots()) {
+    const local = path.join(root, 'node_modules', '.bin', localName);
+    if (fsSync.existsSync(local)) return { command: local, prefix: [], source: 'local' };
+  }
+  const npx = commandOnPath(process.platform === 'win32' ? 'npx.cmd' : 'npx');
+  if (npx) return { command: npx, prefix: ['--yes', 'wrangler@4'], source: 'npx' };
+  const pnpm = commandOnPath(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm');
+  if (pnpm) return { command: pnpm, prefix: ['--silent', 'dlx', 'wrangler@4'], source: 'pnpm' };
+  return { command: process.platform === 'win32' ? 'npx.cmd' : 'npx', prefix: ['--yes', 'wrangler@4'], source: 'missing' };
+}
+
 function wranglerCommand() {
-  return process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  return wranglerInvocation().command;
 }
 
 function wranglerArgs(args = []) {
-  return ['--yes', 'wrangler', ...args];
+  return [...wranglerInvocation().prefix, ...args];
+}
+
+function wranglerToolHint() {
+  const invocation = wranglerInvocation();
+  return invocation.source === 'missing'
+    ? 'No local Wrangler runner was found. Install Node/npm, provide pnpm on PATH, or configure AHT_WRANGLER_COMMAND.'
+    : `Wrangler runner: ${invocation.source}`;
 }
 
 function wranglerWorkDir() {
@@ -3511,8 +3851,14 @@ function parseWorkerUrl(output = '') {
   return matches.find((url) => /workers\.dev/i.test(url)) || matches[0] || '';
 }
 
+function wranglerOutputShowsAuthenticated(output = '') {
+  return /\byou are logged in\b|\byou're logged in\b/i.test(String(output || ''));
+}
+
 function wranglerOutputNeedsLogin(output = '') {
-  return /not authenticated|wrangler login|please run [`'"]?wrangler login/i.test(String(output || ''));
+  const text = String(output || '');
+  if (wranglerOutputShowsAuthenticated(text)) return false;
+  return /not authenticated|not logged in|please run [`'"]?wrangler login|run [`'"]?wrangler login/i.test(text);
 }
 
 function wranglerAccountSummary(output = '') {
@@ -3534,7 +3880,7 @@ async function wranglerWhoami(cwd) {
       return {
         ok: false,
         output,
-        summary: `${output.trim()}\nRun Setup Cloud, or run: npx wrangler login`
+        summary: `${output.trim()}\nRun Setup Cloud to authenticate Wrangler.`
       };
     }
     return {
@@ -3547,7 +3893,7 @@ async function wranglerWhoami(cwd) {
     return {
       ok: false,
       output,
-      summary: `${output}\nRun Setup Cloud, or run: npx wrangler login`
+      summary: `${output}\nRun Setup Cloud to authenticate Wrangler.`
     };
   }
 }
@@ -3778,7 +4124,7 @@ async function cloudPreflight({ publicLatestUrl = '', bucket = '' }) {
     const version = await spawnLogged(npx, wranglerArgs(['--version']), { cwd, timeoutMs: 180_000 });
     add('ok', 'Wrangler available', version.trim().split(/\r?\n/).at(-1) || 'wrangler');
   } catch (error) {
-    add('error', 'Wrangler unavailable', `${error.message}\nThe app uses npx --yes wrangler. Install Node/npm or run npm/npx once on this machine.`);
+    add('error', 'Wrangler unavailable', `${error.message}\n${wranglerToolHint()}`);
   }
 
   const auth = await wranglerWhoami(cwd);
@@ -4315,9 +4661,11 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
       }
     }
     if (descriptor.downloadKey) {
+      const trackedUrl = new URL(entry.url);
+      trackedUrl.searchParams.set('aht_download', descriptor.downloadKey);
       downloads[descriptor.downloadKey] = {
         ...entry,
-        url: new URL(`launcher/download/${descriptor.downloadKey}`, rootUrl).toString()
+        url: trackedUrl.toString()
       };
     }
     uploads.push({ rel, file, label: descriptor.label, size: stat.size });
@@ -4381,7 +4729,8 @@ async function findLauncherBuilds() {
 }
 
 function githubCommand() {
-  return process.platform === 'win32' ? 'gh.cmd' : 'gh';
+  const name = process.platform === 'win32' ? 'gh.exe' : 'gh';
+  return commandOnPath(name) || name;
 }
 
 async function resolveGithubToken(payload = {}) {
@@ -5600,14 +5949,23 @@ function minecraftLaunchEnv() {
   };
 }
 
-function spawnDetached(command, args = [], cwd = app.getPath('home'), env = process.env) {
+function spawnDetached(command, args = [], cwd = app.getPath('home'), env = process.env, options = {}) {
+  const windowsHide = options.windowsHide !== false;
+  const capturePath = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_MINECRAFT_SPAWN_CAPTURE_PATH || '').trim()
+    : '';
+  if (capturePath && path.basename(String(command || '')).toLowerCase() === 'minecraft.exe') {
+    fsSync.mkdirSync(path.dirname(capturePath), { recursive: true });
+    fsSync.writeFileSync(capturePath, `${JSON.stringify({ command, args, cwd, windowsHide }, null, 2)}\n`, 'utf8');
+    return Promise.resolve({ ok: true, command, args, captured: true });
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       env,
       detached: true,
       stdio: 'ignore',
-      windowsHide: true
+      windowsHide
     });
     child.once('error', reject);
     child.once('spawn', () => {
@@ -5615,6 +5973,10 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
       resolve({ ok: true, command, args });
     });
   });
+}
+
+function spawnDetachedGui(command, args = [], cwd = app.getPath('home'), env = process.env) {
+  return spawnDetached(command, args, cwd, env, { windowsHide: false });
 }
 
 async function existingLaunchCwd(preferred = '') {
@@ -5690,17 +6052,28 @@ async function openWindowsStoreMinecraftLauncher(cwd, env) {
   }
 }
 async function openMinecraftLauncher(config) {
-  const requestedCwd = config.minecraftLauncher?.rootDir || app.getPath('home');
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+  const requestedCwd = launcherConfig.minecraftLauncher?.rootDir || app.getPath('home');
   const cwd = await existingLaunchCwd(requestedCwd);
   const env = minecraftLaunchEnv();
-  if (config.minecraftLauncher?.openCommand) {
-    return spawnDetached(config.minecraftLauncher.openCommand, config.minecraftLauncher.openArgs || [], cwd, env);
+  if (launcherConfig.minecraftLauncher?.openCommand) {
+    return spawnDetachedGui(launcherConfig.minecraftLauncher.openCommand, launcherConfig.minecraftLauncher.openArgs || [], cwd, env);
   }
 
   if (process.platform === 'win32') {
     const rootLauncher = cwd ? path.join(cwd, 'minecraft.exe') : '';
     if (rootLauncher && await pathExists(rootLauncher)) {
-      return spawnDetached(rootLauncher, ['--workDir', cwd], cwd, env);
+      const homePage = await setMinecraftLauncherHomePage(cwd);
+      if (!homePage.ok) {
+        console.warn(`Unable to set Minecraft Launcher home page: ${homePage.reason || 'unknown error'}`);
+      }
+      const result = await spawnDetachedGui(rootLauncher, ['--workDir', cwd], cwd, env);
+      return {
+        ...result,
+        kind: isCurseForgeMinecraftRoot(cwd) ? 'curseforge' : 'configured-root',
+        rootDir: cwd,
+        homePagePrepared: Boolean(homePage.ok)
+      };
     }
     const candidates = [
       process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
@@ -5709,7 +6082,7 @@ async function openMinecraftLauncher(config) {
     ].filter(Boolean);
     for (const candidate of candidates) {
       if (await pathExists(candidate)) {
-        return spawnDetached(candidate, [], cwd, env);
+        return spawnDetachedGui(candidate, [], cwd, env);
       }
     }
     return openWindowsStoreMinecraftLauncher(cwd, env);
@@ -5719,7 +6092,7 @@ async function openMinecraftLauncher(config) {
     return openMacMinecraftLauncher(cwd, env);
   }
 
-  return spawnDetached('minecraft-launcher', [], cwd, env);
+  return spawnDetachedGui('minecraft-launcher', [], cwd, env);
 }
 
 function createWindow() {
@@ -5839,6 +6212,7 @@ ipcMain.handle('changes:sync', async (_event, payload = {}) => {
 ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload = {}) => {
   const target = releaseTarget(payload?.packKey || payload || 'stable');
   const config = configForPack(await loadConfig(), target.id);
+  const launcherConfig = await minecraftLauncherRuntimeConfig(config);
   const developerClientBypass = developerClientBypassAllowed();
 
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
@@ -5853,7 +6227,7 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload 
   let latest = null;
   let latestError = null;
   try {
-    latest = await readLatest(config);
+    latest = await readLatest(config, { preferCache: true });
   } catch (error) {
     latestError = error.message;
     if (!developerClientBypass) {
@@ -5862,11 +6236,11 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload 
   }
 
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
-  const integrity = developerClientBypass
-    ? null
-    : await writeIntegrityState(config, await scanCurrentManagedIntegrity(config, launchLatest), 'play-check');
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config, latest: launchLatest, installed });
-  const initialLaunchState = evaluateLaunchState(config, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
+  const [integrity, minecraftProfile] = await Promise.all([
+    developerClientBypass ? Promise.resolve(null) : scanPlayIntegrity(config, launchLatest),
+    inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed })
+  ]);
+  const initialLaunchState = evaluateLaunchState(launcherConfig, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
     skipLoaderCheck: true,
     allowLegacyRelease: developerClientBypass
   });
@@ -5874,23 +6248,26 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload 
     throw new Error(initialLaunchState.launchBlockedReason);
   }
 
-  const identity = await identityPayload(config);
-  const launcherProof = await writeRegisteredLauncherProof({
-    config,
+  const identity = await identityPayload(launcherConfig);
+  const launcherProofPromise = currentOrWriteRegisteredLauncherProof({
+    config: launcherConfig,
     latest: launchLatest,
     installed,
     identity
   });
-  let profile = await ensureMinecraftLauncherProfile({ config, latest: launchLatest, installed });
-  profile = await installMinecraftProfileLoaders(profile, { config, latest: launchLatest, installed });
-  const minecraftAssets = await ensureMinecraftLauncherAssets({ config, latest: launchLatest, installed, profile });
-  const finalLaunchState = evaluateLaunchState(config, launchLatest, null, installed, profile, integrity, {
+  let profile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
+  profile = await installMinecraftProfileLoaders(profile, { config: launcherConfig, latest: launchLatest, installed });
+  const [minecraftAssets, launcherProof] = await Promise.all([
+    ensureMinecraftLauncherAssets({ config: launcherConfig, latest: launchLatest, installed, profile }),
+    launcherProofPromise
+  ]);
+  const finalLaunchState = evaluateLaunchState(launcherConfig, launchLatest, null, installed, profile, integrity, {
     allowLegacyRelease: developerClientBypass
   });
   if (!finalLaunchState.launchReady) {
     throw new Error(finalLaunchState.launchBlockedReason);
   }
-  const launchResult = await openMinecraftLauncher(config);
+  const launchResult = await openMinecraftLauncher(launcherConfig);
   return {
     ...minecraftLaunchResultForRenderer(launchResult),
     minecraftProfile: minecraftProfileForRenderer(profile),

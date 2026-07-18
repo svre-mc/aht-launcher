@@ -397,6 +397,10 @@ assert(desktopMain.includes("app.requestSingleInstanceLock({ mode: launchMode })
 assert(desktopMain.includes("legacyDeveloperSecretsPath()"), 'Developer mode must migrate existing local secrets from the old app data folder.');
 assert(desktopMain.includes("migrateDeveloperEncryptionProfile()"), 'Developer mode must migrate the old Electron encryption profile before decrypting old secrets.');
 assert(desktopMain.includes("saveDeveloperSecretField(next, secrets, 'launcherProofSecret')"), 'Developer secrets must not be wiped by empty password fields.');
+assert(desktopMain.includes('function writeDeveloperSecretVaultSnapshot') && desktopMain.includes("'developer-secret-vault'") && desktopMain.includes("'snapshots'"), 'Developer credentials must have an update-proof encrypted vault outside replaceable app user data.');
+assert(!/if \(!value\) \{\s*delete next\.secrets\[key\]/.test(desktopMain), 'Blank developer form values must never delete existing credentials.');
+assert(desktopMain.includes("prefix: ['--silent', 'dlx', 'wrangler@4']") && desktopMain.includes('AHT_WRANGLER_COMMAND'), 'Developer cloud tooling must support pnpm Wrangler when global npx is unavailable.');
+assert(desktopMain.includes("const name = process.platform === 'win32' ? 'gh.exe' : 'gh';"), 'Windows GitHub CLI fallback must resolve the real gh.exe executable.');
 assert(desktopMain.includes('launcherProof: { ...current.launcherProof, ...nextConfig.launcherProof }'), 'Saved settings must merge launcher proof settings instead of replacing them.');
 assert(desktopMain.includes('function rendererStatusConfig(config = {})') && desktopMain.includes('const { developer, serverTransfer, ...safeConfig } = config;'), 'Player status must not expose developer or server-transfer config.');
 for (const [label, source] of Object.entries({ desktopMain, rendererApp, rendererHtml })) {

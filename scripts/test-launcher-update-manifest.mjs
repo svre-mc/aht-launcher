@@ -52,11 +52,22 @@ assert(manifest.downloads?.['macos-arm64']?.kind === 'dmg', 'Apple Silicon manua
 for (const key of requiredDownloadKeys) {
   const entry = manifest.downloads?.[key];
   assert(entry, `manual download entry missing: ${key}`);
-  assert(entry.url === `https://example.test/launcher/download/${key}`, `manual download URL is not the tracked installer endpoint for ${key}: ${entry.url}`);
+  const downloadUrl = new URL(entry.url);
+  assert(downloadUrl.pathname.startsWith('/launcher/files/'), `manual download URL is not compatible with installed legacy launchers for ${key}: ${entry.url}`);
+  assert(path.posix.basename(downloadUrl.pathname) === entry.fileName, `manual download URL basename does not match ${key}: ${entry.url}`);
+  assert(downloadUrl.searchParams.get('aht_download') === key, `manual download URL is not telemetry-tagged for ${key}: ${entry.url}`);
   assert(entry.fileName && entry.path, `manual download fileName/path missing for ${key}`);
   assert(/^[a-f0-9]{64}$/i.test(entry.sha256 || ''), `manual download sha256 missing for ${key}`);
   assert(Number(entry.size) > 0, `manual download size missing for ${key}`);
 }
+const legacyRuntimeErrors = Object.entries(manifest.downloads || {}).flatMap(([key, entry]) => {
+  const url = new URL(entry.url);
+  const errors = [];
+  if (!url.pathname.includes('/launcher/files/')) errors.push(`${key} is not under launcher/files`);
+  if (path.posix.basename(url.pathname) !== entry.fileName) errors.push(`${key} URL basename differs from fileName`);
+  return errors;
+});
+assert(legacyRuntimeErrors.length === 0, `generated feed breaks launcher 0.1.75 and older update discovery: ${legacyRuntimeErrors.join('; ')}`);
 assert(manifest.downloads['windows-x64'].kind === 'nsis', 'Windows manual download must use the NSIS installer');
 assert(manifest.downloads['windows-x64'].installArgs?.[0] === '/S', 'Windows manual download must preserve silent install args');
 assert(manifest.downloads['macos-x64'].kind === 'dmg', 'Intel manual download must keep DMG installer');
