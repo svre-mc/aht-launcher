@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.77",
+  "version": "0.1.78",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -49,6 +49,7 @@
     "test:account-switch": "node scripts/smoke-launcher-account-switch.mjs",
     "test:cache-fallback": "node scripts/smoke-cache-fallback-install.mjs",
     "test:full-client-zip": "node scripts/test-full-client-zip-release.mjs",
+    "test:delta-update": "node scripts/test-delta-client-update.mjs",
     "test:cache-extra-integrity": "node scripts/smoke-cache-extra-integrity.mjs",
     "test:download-retry": "node scripts/test-download-retry.mjs",
     "test:resourcepack-placement": "node scripts/test-resourcepack-placement.mjs",

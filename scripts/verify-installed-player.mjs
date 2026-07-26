@@ -20,8 +20,20 @@ const checks = [
   ['test:launcher-self-update']
 ];
 
-function npmCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+function packageManagerInvocation(args) {
+  const activePackageManager = String(process.env.npm_execpath || '').trim();
+  if (activePackageManager) {
+    return {
+      command: process.execPath,
+      args: [activePackageManager, 'run', ...args],
+      shell: false
+    };
+  }
+  return {
+    command: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    args: ['run', ...args],
+    shell: process.platform === 'win32'
+  };
 }
 
 function defaultInstalledPlayerExe() {
@@ -48,10 +60,11 @@ function runCheck(args, smokeExe) {
   const label = `npm run ${args.join(' ')}`;
   const started = Date.now();
   return new Promise((resolve, reject) => {
+    const invocation = packageManagerInvocation(args);
     let output = '';
-    const child = spawn(npmCommand(), ['run', ...args], {
+    const child = spawn(invocation.command, invocation.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
+      shell: invocation.shell,
       env: {
         ...process.env,
         AHT_SMOKE_EXE: smokeExe,

@@ -18,6 +18,7 @@ const pureChecks = [
   ['test:mod-only-changes'],
   ['test:cache-fallback'],
   ['test:full-client-zip'],
+  ['test:delta-update'],
   ['test:cache-extra-integrity'],
   ['test:download-retry'],
   ['test:resourcepack-placement'],
@@ -59,8 +60,20 @@ const electronChecks = [
 const verbose = process.argv.includes('--verbose') || process.env.AHT_VERIFY_VERBOSE === '1';
 const parallel = Math.max(1, Number(process.env.AHT_VERIFY_PARALLEL || 4));
 
-function npmCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+function packageManagerInvocation(args) {
+  const activePackageManager = String(process.env.npm_execpath || '').trim();
+  if (activePackageManager) {
+    return {
+      command: process.execPath,
+      args: [activePackageManager, 'run', ...args],
+      shell: false
+    };
+  }
+  return {
+    command: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    args: ['run', ...args],
+    shell: process.platform === 'win32'
+  };
 }
 
 function formatMs(ms) {
@@ -72,10 +85,11 @@ function runCheck(args) {
   const label = `npm run ${args.join(' ')}`;
   const started = Date.now();
   return new Promise((resolve, reject) => {
+    const invocation = packageManagerInvocation(args);
     let output = '';
-    const child = spawn(npmCommand(), ['run', ...args], {
+    const child = spawn(invocation.command, invocation.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
+      shell: invocation.shell,
       env: {
         ...process.env,
         ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING || '0'

@@ -347,14 +347,14 @@
               <label>Port <input id="serverPortInput" type="number" min="1" max="65535" value="22"></label>
               <label>Username <input id="serverUsernameInput" type="text" placeholder="SSH username" autocomplete="username"></label>
               <label>Password <input id="serverPasswordInput" type="password" autocomplete="current-password"></label>
-              <label class="span-2">Remote Destination Folder <input id="serverRemoteDirInput" type="text" placeholder="/home/user/Desktop/AHT Server Files"></label>
+              <label class="span-2">Remote Parent Folder <input id="serverRemoteDirInput" type="text" placeholder="/home/user/Desktop"></label>
             </div>
             <div id="serverTransferStatus" class="release-check-card warn">
               <div>
                 <span>Local transfer</span>
                 <strong>Ready to plan</strong>
               </div>
-              <p>Uploads root files plus mods, scripts, config, and ForgeEssentials over local SFTP. DregoraRL is always excluded.</p>
+              <p>Creates a folder matching the selected server folder name, then uploads root files plus mods, scripts, config, and ForgeEssentials. DregoraRL is always excluded.</p>
             </div>
             <div id="serverTransferProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="serverTransferProgressLabel">Preparing upload</span><span id="serverTransferProgressCount">0%</span></div>

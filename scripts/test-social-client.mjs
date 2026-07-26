@@ -69,7 +69,7 @@ const actionResult = await sendSocialAction({
   identity,
   proofToken: 'signed.launcher.proof',
   action: 'add_friend',
-  target: 'TargetUser',
+  target: 'tArGeTuSeR',
   fetchImpl: async (url, options) => {
     actionRequest = { url, options, body: JSON.parse(options.body) };
     return new Response(JSON.stringify({ ok: true, queued: true, message: 'Friend request queued.' }), {
@@ -82,7 +82,7 @@ assert(actionResult.ok && actionResult.queued, 'Social action was not accepted a
 assert(actionRequest.url === endpoints.actionUrl
   && actionRequest.options.headers.Authorization === 'Bearer signed.launcher.proof',
   'Social action did not use launcher proof authentication.');
-assert(actionRequest.body.action === 'add_friend' && actionRequest.body.target === 'TargetUser'
+assert(actionRequest.body.action === 'add_friend' && actionRequest.body.target === 'tArGeTuSeR'
   && !('username' in actionRequest.body) && !('installId' in actionRequest.body),
   `Renderer-controlled identity leaked into action body: ${JSON.stringify(actionRequest.body)}`);
 

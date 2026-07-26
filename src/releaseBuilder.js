@@ -1,4 +1,5 @@
 import { createWriteStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,11 +10,24 @@ import {
   artifactUrl,
   ensureDir,
   hashFile,
+  isFileUrl,
+  isHttpUrl,
   normalizeRelPath,
+  readJsonFromSource,
+  resolveSource,
   slugify,
   writeJsonFile
 } from './utils.js';
-import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from './clientPackFormat.js';
+import {
+  CLIENT_DELTA_FORMAT,
+  CLIENT_DELTA_METADATA_ENTRY,
+  CLIENT_MANIFEST_FORMAT,
+  CLIENT_PACK_FORMAT,
+  CLIENT_PACK_METADATA_ENTRY,
+  isClientGameSettingsPath,
+  isClientPackContentPath,
+  isManagedClientPackPath
+} from './clientPackFormat.js';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -562,6 +576,283 @@ async function inspectFullClientArtifact(filePath, { required = true } = {}) {
   };
 }
 
+function normalizedClientManifestFile(record = {}) {
+  const relativePath = normalizeRelPath(record.relativePath || record.path || '');
+  const size = Number(record.size);
+  const sha256 = String(record.sha256 || '').trim().toLowerCase();
+  if (!isClientPackContentPath(relativePath)
+    || !Number.isSafeInteger(size) || size < 0
+    || !/^[a-f0-9]{64}$/.test(sha256)) {
+    return null;
+  }
+  return {
+    relativePath,
+    size,
+    sha256,
+    managed: isManagedClientPackPath(relativePath)
+  };
+}
+
+function clientManifestMap(files = [], label = 'client manifest') {
+  const byPath = new Map();
+  const byFoldedPath = new Map();
+  for (const raw of files) {
+    const file = normalizedClientManifestFile(raw);
+    if (!file) {
+      throw new Error(`${label} contains an invalid file record: ${JSON.stringify(raw)}`);
+    }
+    const folded = file.relativePath.toLowerCase();
+    if (byPath.has(file.relativePath) || byFoldedPath.has(folded)) {
+      throw new Error(`${label} contains a duplicate path: ${file.relativePath}`);
+    }
+    byPath.set(file.relativePath, file);
+    byFoldedPath.set(folded, file);
+  }
+  return { byPath, byFoldedPath };
+}
+
+async function hashClientArtifactEntries(filePath, inspection, wantedPaths) {
+  const wanted = new Set(wantedPaths);
+  const results = new Map();
+  await forEachZipEntry(filePath, async (entry, zipFile) => {
+    if (!zipEntryIsFile(entry)) return;
+    const relativePath = safeClientZipRelPath(entry.fileName, inspection.rootPrefix);
+    if (!wanted.has(relativePath)) return;
+    const hash = createHash('sha256');
+    const stream = await openZipEntryStream(zipFile, entry);
+    let size = 0;
+    for await (const chunk of stream) {
+      hash.update(chunk);
+      size += chunk.length;
+    }
+    results.set(relativePath, {
+      relativePath,
+      size,
+      sha256: hash.digest('hex'),
+      managed: isManagedClientPackPath(relativePath)
+    });
+  });
+  const missing = [...wanted].filter((relativePath) => !results.has(relativePath));
+  if (missing.length) {
+    throw new Error(`Client ZIP manifest could not hash ${missing.length} file(s), beginning with ${missing[0]}.`);
+  }
+  return results;
+}
+
+async function buildClientManifest(filePath, inspection, { packId, name, version }) {
+  const entryPaths = [];
+  const foldedEntries = new Set();
+  for (const rawPath of inspection.entries) {
+    const relativePath = normalizeRelPath(rawPath);
+    if (!isClientPackContentPath(relativePath)) {
+      throw new Error(`Full client ZIP contains an unsupported managed path: ${relativePath}`);
+    }
+    const folded = relativePath.toLowerCase();
+    if (foldedEntries.has(folded)) {
+      throw new Error(`Full client ZIP contains a duplicate path: ${relativePath}`);
+    }
+    foldedEntries.add(folded);
+    entryPaths.push(relativePath);
+  }
+
+  const embeddedFiles = Array.isArray(inspection.metadata?.files)
+    ? inspection.metadata.files.map(normalizedClientManifestFile).filter(Boolean)
+    : [];
+  const embeddedByPath = new Map(embeddedFiles.map((file) => [file.relativePath, file]));
+  const missingPaths = entryPaths.filter((relativePath) => !embeddedByPath.has(relativePath));
+  const computed = missingPaths.length
+    ? await hashClientArtifactEntries(filePath, inspection, missingPaths)
+    : new Map();
+  const files = entryPaths
+    .map((relativePath) => embeddedByPath.get(relativePath) || computed.get(relativePath))
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+
+  return {
+    schemaVersion: 1,
+    format: CLIENT_MANIFEST_FORMAT,
+    packId,
+    name,
+    version,
+    createdAt: new Date().toISOString(),
+    fileCount: files.length,
+    managedFileCount: files.filter((file) => file.managed).length,
+    files
+  };
+}
+
+function validatePreviousClientManifest(manifest, latest, { packId, channel }) {
+  if (!manifest || manifest.format !== CLIENT_MANIFEST_FORMAT || !Array.isArray(manifest.files)) {
+    throw new Error('Previous release does not have a supported client manifest.');
+  }
+  if (String(manifest.packId || '') !== packId || String(latest.packId || '') !== packId) {
+    throw new Error('Previous client manifest belongs to another pack.');
+  }
+  if (channel && latest.channel && String(latest.channel) !== String(channel)) {
+    throw new Error('Previous client manifest belongs to another release channel.');
+  }
+  if (String(manifest.version || '') !== String(latest.version || '')) {
+    throw new Error('Previous client manifest version does not match previous latest.json.');
+  }
+  clientManifestMap(manifest.files, 'previous client manifest');
+  return manifest;
+}
+
+async function previousClientRelease({ outDir, previousLatestSource = '', packId, version, channel }) {
+  const localLatestPath = path.join(outDir, 'latest.json');
+  const candidates = [
+    await pathExists(localLatestPath) ? localLatestPath : '',
+    String(previousLatestSource || '').trim()
+  ].filter(Boolean);
+  const seen = new Set();
+  const errors = [];
+  for (const source of candidates) {
+    const key = String(source).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const latest = await readJsonFromSource(source);
+      if (String(latest.version || '') === String(version)) {
+        errors.push(`${source}: release version is already ${version}`);
+        continue;
+      }
+      const manifestRef = latest.clientManifest?.url || latest.clientManifest?.path;
+      if (manifestRef) {
+        const manifestSource = resolveSource(source, manifestRef);
+        const manifest = validatePreviousClientManifest(
+          await readJsonFromSource(manifestSource),
+          latest,
+          { packId, channel }
+        );
+        return { latest, manifest, latestSource: source, manifestSource, errors };
+      }
+
+      const zipRef = latest.zip?.path || latest.zip?.url;
+      const zipSource = zipRef ? resolveSource(source, zipRef) : '';
+      if (!zipSource || isHttpUrl(zipSource)) {
+        errors.push(`${source}: client manifest is unavailable and the previous full ZIP is not local`);
+        continue;
+      }
+      const zipPath = isFileUrl(zipSource) ? fileURLToPath(zipSource) : zipSource;
+      if (!(await pathExists(zipPath))) {
+        errors.push(`${source}: client manifest is unavailable and the previous full ZIP is missing`);
+        continue;
+      }
+      const inspection = await inspectFullClientArtifact(zipPath);
+      const reconstructed = await buildClientManifest(zipPath, inspection, {
+        packId,
+        name: String(latest.name || inspection.metadata?.name || 'A Hard Time'),
+        version: String(latest.version || '')
+      });
+      const manifest = validatePreviousClientManifest(
+        reconstructed,
+        latest,
+        { packId, channel }
+      );
+      return {
+        latest,
+        manifest,
+        latestSource: source,
+        manifestSource: zipPath,
+        reconstructedFromZip: true,
+        errors
+      };
+    } catch (error) {
+      errors.push(`${source}: ${error?.message || error}`);
+    }
+  }
+  return { latest: null, manifest: null, latestSource: '', manifestSource: '', errors };
+}
+
+function compareClientManifests(previousManifest, currentManifest) {
+  const previous = clientManifestMap(previousManifest.files, 'previous client manifest').byFoldedPath;
+  const current = clientManifestMap(currentManifest.files, 'current client manifest').byFoldedPath;
+  const changed = [];
+  const deleted = [];
+
+  for (const file of currentManifest.files) {
+    const old = previous.get(file.relativePath.toLowerCase());
+    if (!old
+      || old.relativePath !== file.relativePath
+      || old.size !== file.size
+      || old.sha256 !== file.sha256
+      || isClientGameSettingsPath(file.relativePath)) {
+      changed.push(file);
+    }
+  }
+  for (const file of previousManifest.files) {
+    const next = current.get(file.relativePath.toLowerCase());
+    if (!next || next.relativePath !== file.relativePath) {
+      deleted.push(file.relativePath);
+    }
+  }
+  changed.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  deleted.sort((left, right) => left.localeCompare(right));
+  return { changed, deleted };
+}
+
+async function writeClientDeltaZip({ sourceZip, sourceInspection, destZip, metadata }) {
+  await ensureDir(path.dirname(destZip));
+  const temporary = `${destZip}.tmp`;
+  await fs.rm(temporary, { force: true }).catch(() => {});
+  await fs.rm(destZip, { force: true }).catch(() => {});
+  const wanted = new Map(metadata.files.map((file) => [file.relativePath, file]));
+  const found = new Set();
+  const zipOut = new yazl.ZipFile();
+  zipOut.addBuffer(
+    Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, 'utf8'),
+    CLIENT_DELTA_METADATA_ENTRY
+  );
+  const outputDone = new Promise((resolve, reject) => {
+    const output = createWriteStream(temporary);
+    output.on('close', resolve);
+    output.on('error', reject);
+    zipOut.outputStream.on('error', reject);
+    zipOut.outputStream.pipe(output);
+  });
+
+  if (wanted.size) {
+    const zipIn = await openZipFile(sourceZip);
+    await new Promise((resolve, reject) => {
+      zipIn.on('entry', (entry) => {
+        const relativePath = zipEntryIsFile(entry)
+          ? safeClientZipRelPath(entry.fileName, sourceInspection.rootPrefix)
+          : '';
+        if (!relativePath || !wanted.has(relativePath)) {
+          zipIn.readEntry();
+          return;
+        }
+        zipIn.openReadStream(entry, (error, readStream) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          found.add(relativePath);
+          readStream.on('error', reject);
+          readStream.on('end', () => zipIn.readEntry());
+          zipOut.addReadStream(readStream, relativePath, {
+            mtime: entry.getLastModDate(),
+            size: Number(entry.uncompressedSize || wanted.get(relativePath).size)
+          });
+        });
+      });
+      zipIn.on('end', resolve);
+      zipIn.on('error', reject);
+      zipIn.readEntry();
+    }).finally(() => zipIn.close());
+  }
+
+  const missing = [...wanted.keys()].filter((relativePath) => !found.has(relativePath));
+  if (missing.length) {
+    zipOut.end();
+    await outputDone.catch(() => {});
+    await fs.rm(temporary, { force: true }).catch(() => {});
+    throw new Error(`Delta ZIP is missing ${missing.length} changed file(s), beginning with ${missing[0]}.`);
+  }
+  zipOut.end();
+  await outputDone;
+  await fs.rename(temporary, destZip);
+}
+
 async function writeZipWithInjectedFiles({ sourceZip, destZip, injections }) {
   await ensureDir(path.dirname(destZip));
   const zipIn = await openZipFile(sourceZip);
@@ -770,7 +1061,7 @@ function readClientPackMetadata(zip) {
 
 async function prepareReleaseOutput(outDir) {
   await ensureDir(outDir);
-  for (const rel of ['packs', 'cache', 'server']) {
+  for (const rel of ['packs', 'patches', 'manifests', 'cache', 'server']) {
     await fs.rm(path.join(outDir, rel), { recursive: true, force: true });
   }
   for (const rel of ['latest.json', 'release-report.json']) {
@@ -802,7 +1093,8 @@ async function buildFullClientRelease(options, sourceInspection) {
     baseUrl = '',
     channel = 'stable',
     copyZip = true,
-    versionLockJar = ''
+    versionLockJar = '',
+    previousLatestSource = ''
   } = options;
 
   const metadata = sourceInspection.metadata;
@@ -815,9 +1107,18 @@ async function buildFullClientRelease(options, sourceInspection) {
   const versionLockJarPath = await findVersionLockJar(versionLockJar);
   const serverLockModRelPath = versionLockJarPath ? `server/mods/${path.basename(versionLockJarPath)}` : null;
   const zipDest = path.join(outDir, zipRelPath);
+  const previousRelease = await previousClientRelease({
+    outDir,
+    previousLatestSource,
+    packId,
+    version,
+    channel
+  });
 
   await prepareReleaseOutput(outDir);
   await ensureDir(path.join(outDir, 'packs'));
+  await ensureDir(path.join(outDir, 'patches'));
+  await ensureDir(path.join(outDir, 'manifests'));
   await ensureDir(path.join(outDir, 'server'));
   await ensureDir(path.join(outDir, 'server', 'mods'));
 
@@ -854,6 +1155,92 @@ async function buildFullClientRelease(options, sourceInspection) {
   const entries = artifactInspection.entries.filter((entry) => entry !== CLIENT_PACK_METADATA_ENTRY);
   const modEntries = artifactInspection.modEntries;
   const clientItemFireFixPath = artifactInspection.itemFireFixPath;
+  const clientManifest = await buildClientManifest(artifactPath, artifactInspection, {
+    packId,
+    name,
+    version
+  });
+  const clientManifestRelPath = `manifests/${packId}-${slugify(version)}.json`;
+  const clientManifestPath = path.join(outDir, clientManifestRelPath);
+  await writeJsonFile(clientManifestPath, clientManifest);
+  const clientManifestStats = await fs.stat(clientManifestPath);
+  const clientManifestSha256 = await hashFile(clientManifestPath, 'sha256');
+  const clientManifestArtifact = {
+    format: CLIENT_MANIFEST_FORMAT,
+    fileName: path.basename(clientManifestRelPath),
+    path: clientManifestRelPath,
+    url: artifactUrl(baseUrl, clientManifestRelPath),
+    sha256: clientManifestSha256,
+    size: clientManifestStats.size,
+    fileCount: clientManifest.fileCount,
+    managedFileCount: clientManifest.managedFileCount
+  };
+
+  let delta = null;
+  let deltaSummary = {
+    available: false,
+    fromVersion: '',
+    toVersion: version,
+    changedFileCount: 0,
+    deletedFileCount: 0,
+    changedBytes: 0,
+    reason: previousRelease.errors.join(' | ') || 'No previous client manifest is available yet.'
+  };
+  if (previousRelease.manifest && previousRelease.latest) {
+    const compared = compareClientManifests(previousRelease.manifest, clientManifest);
+    const fromVersion = String(previousRelease.latest.version);
+    const deltaFileName = `${packId}-${slugify(fromVersion)}-to-${slugify(version)}.zip`;
+    const deltaRelPath = `patches/${deltaFileName}`;
+    const deltaPath = path.join(outDir, deltaRelPath);
+    const deltaMetadata = {
+      schemaVersion: 1,
+      format: CLIENT_DELTA_FORMAT,
+      packId,
+      name,
+      fromVersion,
+      toVersion: version,
+      createdAt: new Date().toISOString(),
+      targetManifest: {
+        format: CLIENT_MANIFEST_FORMAT,
+        path: clientManifestRelPath,
+        sha256: clientManifestSha256
+      },
+      files: compared.changed,
+      deleted: compared.deleted
+    };
+    await writeClientDeltaZip({
+      sourceZip: artifactPath,
+      sourceInspection: artifactInspection,
+      destZip: deltaPath,
+      metadata: deltaMetadata
+    });
+    const deltaStats = await fs.stat(deltaPath);
+    const deltaSha256 = await hashFile(deltaPath, 'sha256');
+    delta = {
+      format: CLIENT_DELTA_FORMAT,
+      fromVersion,
+      toVersion: version,
+      fileName: deltaFileName,
+      path: deltaRelPath,
+      url: artifactUrl(baseUrl, deltaRelPath),
+      sha256: deltaSha256,
+      size: deltaStats.size,
+      changedFileCount: compared.changed.length,
+      deletedFileCount: compared.deleted.length
+    };
+    deltaSummary = {
+      available: true,
+      fromVersion,
+      toVersion: version,
+      changedFileCount: compared.changed.length,
+      deletedFileCount: compared.deleted.length,
+      changedBytes: compared.changed.reduce((sum, file) => sum + file.size, 0),
+      size: deltaStats.size,
+      fullZipSize: stats.size,
+      savingsBytes: Math.max(0, stats.size - deltaStats.size),
+      reason: ''
+    };
+  }
 
   const latest = {
     schemaVersion: 1,
@@ -883,6 +1270,8 @@ async function buildFullClientRelease(options, sourceInspection) {
       fileCount: entries.length,
       modFileCount: modEntries.length
     },
+    clientManifest: clientManifestArtifact,
+    delta,
     serverLock: {
       configPath: serverLockRelPath,
       modPath: serverLockModRelPath,
@@ -909,9 +1298,13 @@ async function buildFullClientRelease(options, sourceInspection) {
     },
     minecraft: latest.minecraft,
     clientZipSummary: latest.clientZip,
+    clientManifestSummary: clientManifestArtifact,
+    deltaSummary,
     output: {
       latest: 'latest.json',
       packZip: zipRelPath,
+      clientManifest: clientManifestRelPath,
+      deltaPatch: delta?.path || null,
       serverLockConfig: serverLockRelPath,
       serverLockMod: serverLockModRelPath,
       clientVersionLockMod: clientVersionLockPath,
@@ -942,7 +1335,8 @@ export async function buildRelease(options) {
     channel = 'stable',
     copyZip = true,
     versionLockJar = '',
-    cacheModsDir = ''
+    cacheModsDir = '',
+    previousLatestSource = ''
   } = options;
 
   if (!packZip) {
@@ -960,7 +1354,8 @@ export async function buildRelease(options) {
       baseUrl,
       channel,
       copyZip,
-      versionLockJar
+      versionLockJar,
+      previousLatestSource
     }, clientPackInspection);
   }
   const zip = new AdmZip(packZip);

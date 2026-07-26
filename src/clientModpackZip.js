@@ -2,8 +2,13 @@ import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import yazl from 'yazl';
-import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from './clientPackFormat.js';
-import { ensureDir, pathExists, readJsonFile, slugify } from './utils.js';
+import {
+  CLIENT_GAME_SETTINGS_FILES,
+  CLIENT_PACK_FORMAT,
+  CLIENT_PACK_METADATA_ENTRY,
+  isManagedClientPackPath
+} from './clientPackFormat.js';
+import { ensureDir, hashFile, pathExists, readJsonFile, slugify } from './utils.js';
 
 export { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from './clientPackFormat.js';
 export const CLIENT_PACK_DIRS = [
@@ -15,7 +20,7 @@ export const CLIENT_PACK_DIRS = [
   'scripts',
   'structures'
 ];
-export const CLIENT_PACK_FILES = ['options.txt', 'optionsof.txt'];
+export const CLIENT_PACK_FILES = CLIENT_GAME_SETTINGS_FILES;
 
 const JUNK_FILE_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
 const SKIPPED_DIRECTORY_NAMES = new Set(['.aht-launcher', '.git', 'openterraingenerator']);
@@ -113,13 +118,21 @@ function rememberReportFile(report, fileRecord) {
   }
 }
 
-async function addFile(zip, absPath, relPath, report) {
+async function addFile(zip, absPath, relPath, report, manifestFiles) {
   const zipPath = safeZipPath(relPath);
   const stat = await fs.stat(absPath);
+  const sha256 = await hashFile(absPath, 'sha256');
   zip.addFile(absPath, zipPath, { mtime: stat.mtime });
   report.fileCount += 1;
   report.totalBytes += stat.size;
-  rememberReportFile(report, { path: zipPath, size: stat.size });
+  const fileRecord = {
+    path: zipPath,
+    size: stat.size,
+    sha256,
+    managed: isManagedClientPackPath(zipPath)
+  };
+  manifestFiles.push(fileRecord);
+  rememberReportFile(report, fileRecord);
 }
 
 export async function createClientModpackZip(options = {}) {
@@ -168,6 +181,7 @@ export async function createClientModpackZip(options = {}) {
   if (includeFiles) {
     report.files = [];
   }
+  const manifestFiles = [];
 
   const zip = new yazl.ZipFile();
   const output = createWriteStream(tmpPath);
@@ -186,7 +200,7 @@ export async function createClientModpackZip(options = {}) {
     }
     report.includedRoots.push(dirName);
     for await (const relFile of walkFiles(absDir)) {
-      await addFile(zip, path.join(absDir, relFile), path.posix.join(dirName, normalizeZipPath(relFile)), report);
+      await addFile(zip, path.join(absDir, relFile), path.posix.join(dirName, normalizeZipPath(relFile)), report, manifestFiles);
     }
   }
 
@@ -197,7 +211,7 @@ export async function createClientModpackZip(options = {}) {
       continue;
     }
     report.includedRoots.push(fileName);
-    await addFile(zip, absFile, fileName, report);
+    await addFile(zip, absFile, fileName, report, manifestFiles);
   }
 
   const minecraft = await detectMinecraft(sourceDir, options.minecraft || {});
@@ -214,7 +228,8 @@ export async function createClientModpackZip(options = {}) {
     missingRoots: report.missingRoots,
     fileCount: report.fileCount,
     totalBytes: report.totalBytes,
-    settingsFiles: CLIENT_PACK_FILES
+    settingsFiles: CLIENT_PACK_FILES,
+    files: manifestFiles
   };
   zip.addBuffer(Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, 'utf8'), CLIENT_PACK_METADATA_ENTRY);
   zip.end();

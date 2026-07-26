@@ -12,6 +12,7 @@ const rendererHtml = fs.readFileSync(new URL('../desktop/renderer/index.html', i
 const rendererCss = fs.readFileSync(new URL('../desktop/renderer/style.css', import.meta.url), 'utf8');
 const desktopMain = fs.readFileSync(new URL('../desktop/main.js', import.meta.url), 'utf8');
 const installerSource = fs.readFileSync(new URL('../src/installer.js', import.meta.url), 'utf8');
+const clientPackFormatSource = fs.readFileSync(new URL('../src/clientPackFormat.js', import.meta.url), 'utf8');
 const utilsSource = fs.readFileSync(new URL('../src/utils.js', import.meta.url), 'utf8');
 const githubActionsSource = fs.readFileSync(new URL('../src/githubActions.js', import.meta.url), 'utf8');
 const releaseWorkflow = fs.readFileSync(new URL('../.github/workflows/build-macos.yml', import.meta.url), 'utf8');
@@ -135,7 +136,7 @@ assert(rendererApp.includes('while (true)') && rendererApp.includes('devLauncher
 assert(rendererCss.includes('max-height: min(68vh, 760px)') && rendererCss.includes('overflow-y: scroll'), 'Developer launcher download history must remain fully scrollable.');
 assert(preloadScript.includes("devSaveServerTransfer: (payload) => ipcRenderer.invoke('dev:saveServerTransfer'"), 'Server folder settings must have a dedicated persistence IPC.');
 assert(desktopMain.includes('async function persistServerTransferSettings') && rendererApp.includes('await saveServerTransferSettings();') && rendererApp.includes('await planServerTransfer();'), 'Selecting a server folder must persist it and immediately produce an upload plan.');
-assert(installerSource.includes("'config/jei/bookmarks.ini'") && installerSource.includes('isPlayerUpdatePreservedRelPath') && installerSource.includes('preserveUpdateState'), 'JEI bookmarks must be player-owned after the first install and preserved by updates and repairs.');
+assert(clientPackFormatSource.includes("'config/jei/bookmarks.ini'") && installerSource.includes('isPlayerUpdatePreservedRelPath') && installerSource.includes('preserveUpdateState'), 'JEI bookmarks must be player-owned after the first install and preserved by updates and repairs.');
 assert(rendererHtml.includes('Deploy Latest Launcher') && preloadScript.includes("devDeployLauncher: (payload) => ipcRenderer.invoke('dev:deployLauncher'"), 'Developer launcher must expose a one-click public launcher deploy control.');
 assert(desktopMain.includes('function publicLauncherWorkflow()') && desktopMain.includes("repo: LAUNCHER_WORKFLOW_DEFAULTS.repo") && desktopMain.includes("ref: LAUNCHER_WORKFLOW_DEFAULTS.branch") && desktopMain.includes("workflow: LAUNCHER_WORKFLOW_DEFAULTS.workflow"), 'One-click launcher deployment must ignore stale UI targets and stay locked to the public repository, main branch, and player workflow.');
 assert(!rendererApp.slice(rendererApp.indexOf('async function publishLauncherUpdate()'), rendererApp.indexOf('function serverTransferPayload()')).includes('githubRepo:'), 'One-click launcher deployment must not accept a repository override from the renderer.');

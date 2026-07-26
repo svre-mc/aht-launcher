@@ -7,7 +7,14 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import AdmZip from 'adm-zip';
 import yauzl from 'yauzl';
-import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from '../src/clientPackFormat.js';
+import {
+  CLIENT_DELTA_FORMAT,
+  CLIENT_DELTA_METADATA_ENTRY,
+  CLIENT_MANIFEST_FORMAT,
+  CLIENT_PACK_FORMAT,
+  CLIENT_PACK_METADATA_ENTRY,
+  isClientPackContentPath
+} from '../src/clientPackFormat.js';
 import { installPack } from '../src/installer.js';
 import {
   captureManagedModFingerprint,
@@ -1251,6 +1258,10 @@ function mergeConfig(defaults, stored) {
   if (merged.minecraftLauncher?.profileName === 'A Hard Time Dregora') {
     merged.minecraftLauncher.profileName = 'A Hard Time';
   }
+  merged.serverTransfer.remoteDir = serverTransferParentDir(
+    merged.serverTransfer.remoteDir,
+    merged.serverTransfer.sourceDir
+  );
   merged.developer.defaultOutDir = resolveReleaseOutDir(merged.developer?.defaultOutDir);
   return merged;
 }
@@ -1421,6 +1432,10 @@ async function saveConfig(nextConfig) {
     minecraftLauncher: { ...current.minecraftLauncher, ...nextConfig.minecraftLauncher },
     playCommand: { ...current.playCommand, ...nextConfig.playCommand }
   };
+  merged.serverTransfer.remoteDir = serverTransferParentDir(
+    merged.serverTransfer.remoteDir,
+    merged.serverTransfer.sourceDir
+  );
   merged.developer.defaultOutDir = resolveReleaseOutDir(merged.developer?.defaultOutDir);
   if (merged.instanceDir) {
     merged.playCommand = {
@@ -3459,17 +3474,65 @@ async function restartLauncherUpdate() {
   }
 }
 
+function serverTransferPrivateKeyPath(configuredPath = '') {
+  const home = process.env.USERPROFILE || process.env.HOME || app.getPath('home');
+  const sshDir = path.join(home, '.ssh');
+  const candidates = [
+    configuredPath,
+    process.env.AHT_SERVER_TRANSFER_PRIVATE_KEY || '',
+    path.join(sshDir, 'aht_ubuntu_deploy'),
+    path.join(sshDir, 'aht_mc_node_1_ed25519'),
+    path.join(sshDir, 'id_ed25519'),
+    path.join(sshDir, 'id_rsa')
+  ];
+  return candidates
+    .map((candidate) => String(candidate || '').trim())
+    .find((candidate) => candidate && fsSync.existsSync(candidate)) || '';
+}
+
+function serverTransferFolderName(sourceDir = '') {
+  const normalized = String(sourceDir || '').trim().replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).pop() || '';
+}
+
+function serverTransferParentDir(remoteDir = '', sourceDir = '') {
+  const normalized = String(remoteDir || '').trim().replaceAll('\\', '/').replace(/\/+$/, '');
+  if (!normalized) return '';
+  const slash = normalized.lastIndexOf('/');
+  const leaf = normalized.slice(slash + 1);
+  const sourceFolderName = serverTransferFolderName(sourceDir);
+  if (
+    slash > 0
+    && (leaf.toLowerCase() === sourceFolderName.toLowerCase() || leaf.toLowerCase() === 'new folder-copy')
+  ) {
+    return normalized.slice(0, slash);
+  }
+  return normalized;
+}
+
+function serverTransferDestinationDir(remoteParentDir = '', sourceDir = '') {
+  const parent = String(remoteParentDir || '').trim().replaceAll('\\', '/').replace(/\/+$/, '');
+  const sourceFolderName = serverTransferFolderName(sourceDir);
+  if (!parent || !sourceFolderName) return parent;
+  return `${parent}/${sourceFolderName}`;
+}
+
 function serverTransferOptions(config = {}, payload = {}, password = '') {
   const configured = config.serverTransfer || {};
   const excludeDirs = [...new Set(['DregoraRL', ...(configured.excludeDirs || []), ...(payload.excludeDirs || [])])];
   const includeDirs = [...new Set([...(payload.includeDirs || configured.includeDirs || DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS)])];
+  const sourceDir = payload.sourceDir || configured.sourceDir || process.env.AHT_SERVER_TRANSFER_SOURCE_DIR || '';
+  const configuredRemoteDir = payload.remoteDir || configured.remoteDir || process.env.AHT_SERVER_TRANSFER_REMOTE_DIR || '';
+  const remoteParentDir = serverTransferParentDir(configuredRemoteDir, sourceDir);
   return {
-    sourceDir: payload.sourceDir || configured.sourceDir || process.env.AHT_SERVER_TRANSFER_SOURCE_DIR || '',
+    sourceDir,
     host: payload.host || configured.host || process.env.AHT_SERVER_TRANSFER_HOST || '',
     port: Number(payload.port || configured.port || 22),
     username: payload.username || configured.username || process.env.AHT_SERVER_TRANSFER_USERNAME || '',
-    remoteDir: payload.remoteDir || configured.remoteDir || process.env.AHT_SERVER_TRANSFER_REMOTE_DIR || '',
+    remoteParentDir,
+    remoteDir: serverTransferDestinationDir(remoteParentDir, sourceDir),
     password,
+    privateKeyPath: serverTransferPrivateKeyPath(payload.privateKeyPath || configured.privateKeyPath || ''),
     excludeDirs,
     includeDirs,
     includeRootFiles: payload.includeRootFiles ?? configured.includeRootFiles ?? true,
@@ -3487,7 +3550,8 @@ async function persistServerTransferSettings(payload = {}) {
       host: options.host,
       port: options.port,
       username: options.username,
-      remoteDir: options.remoteDir,
+      remoteDir: options.remoteParentDir,
+      privateKeyPath: options.privateKeyPath,
       excludeDirs: options.excludeDirs,
       includeDirs: options.includeDirs,
       includeRootFiles: options.includeRootFiles,
@@ -3502,11 +3566,17 @@ async function planServerTransfer(payload = {}) {
   const { collectServerTransferFiles } = await loadServerTransferModule();
   const persisted = await persistServerTransferSettings(payload);
   const options = serverTransferOptions({ serverTransfer: persisted });
-  return collectServerTransferFiles(options.sourceDir, {
+  const plan = await collectServerTransferFiles(options.sourceDir, {
     excludeDirs: options.excludeDirs,
     includeDirs: options.includeDirs,
     includeRootFiles: options.includeRootFiles
   });
+  return {
+    ...plan,
+    remoteParentDir: options.remoteParentDir,
+    remoteDir: options.remoteDir,
+    remoteFolderName: serverTransferFolderName(options.sourceDir)
+  };
 }
 
 async function syncServerFiles(payload = {}) {
@@ -3525,6 +3595,7 @@ async function syncServerFiles(payload = {}) {
     running: true,
     lines: [
       `Uploading server files to ${options.username}@${options.host}:${options.remoteDir}`,
+      `Authentication: ${options.privateKeyPath ? 'AHT SSH key' : 'saved SSH password'}`,
       `Scope: root files plus ${options.includeDirs.join(', ')}. DregoraRL is always excluded.`
     ],
     lastResult: null,
@@ -3716,6 +3787,17 @@ function releaseUploadOrder(relPath) {
   if (relPath === 'latest.json') return 1000;
   if (relPath === 'release-report.json') return 900;
   return 0;
+}
+
+function isPublishableReleasePath(relPath = '') {
+  const normalized = String(relPath || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  return normalized === 'latest.json'
+    || normalized === 'release-report.json'
+    || normalized.startsWith('packs/')
+    || normalized.startsWith('patches/')
+    || normalized.startsWith('manifests/')
+    || normalized.startsWith('cache/')
+    || normalized.startsWith('server/');
 }
 
 function commandOnPath(command = '') {
@@ -4282,6 +4364,14 @@ async function verifyRemoteRelease({ publicLatestUrl, localLatest }) {
       if (remoteLatest.zip?.sha256 !== localLatest.zip?.sha256) {
         throw new Error('remote latest.json does not contain the uploaded pack SHA256');
       }
+      if (localLatest.clientManifest?.sha256
+        && remoteLatest.clientManifest?.sha256 !== localLatest.clientManifest.sha256) {
+        throw new Error('remote latest.json does not contain the uploaded client manifest SHA256');
+      }
+      if (localLatest.delta?.sha256
+        && remoteLatest.delta?.sha256 !== localLatest.delta.sha256) {
+        throw new Error('remote latest.json does not contain the uploaded delta SHA256');
+      }
       verified = true;
       break;
     } catch (error) {
@@ -4299,8 +4389,20 @@ async function verifyRemoteRelease({ publicLatestUrl, localLatest }) {
   const cacheUrl = remoteLatest.cacheManifest?.url || remoteLatest.cacheManifest?.path
     ? resolveSource(latestUrl, remoteLatest.cacheManifest.url || remoteLatest.cacheManifest.path)
     : '';
+  const clientManifestUrl = remoteLatest.clientManifest?.url || remoteLatest.clientManifest?.path
+    ? resolveSource(latestUrl, remoteLatest.clientManifest.url || remoteLatest.clientManifest.path)
+    : '';
+  const deltaUrl = remoteLatest.delta?.url || remoteLatest.delta?.path
+    ? resolveSource(latestUrl, remoteLatest.delta.url || remoteLatest.delta.path)
+    : '';
   const checks = [];
   checks.push(await verifyRemoteHead(packUrl, remoteLatest.zip?.size || null));
+  if (clientManifestUrl) {
+    checks.push(await verifyRemoteHead(clientManifestUrl, remoteLatest.clientManifest?.size || null));
+  }
+  if (deltaUrl) {
+    checks.push(await verifyRemoteHead(deltaUrl, remoteLatest.delta?.size || null));
+  }
   if (cacheUrl) {
     checks.push(await verifyRemoteHead(cacheUrl));
   }
@@ -5055,11 +5157,19 @@ async function syncR2(payload = {}) {
   const localLatestPath = path.join(outDir, 'latest.json');
   const localLatest = await readJsonFile(localLatestPath);
   assertReleaseMatchesTarget(localLatest, target.id);
-  const files = (await listFiles(outDir)).sort((a, b) => {
+  const listedFiles = await listFiles(outDir);
+  const files = listedFiles.filter((file) => {
+    const rel = path.relative(outDir, file).replaceAll(path.sep, '/');
+    return isPublishableReleasePath(rel);
+  }).sort((a, b) => {
     const left = path.relative(outDir, a).replaceAll(path.sep, '/');
     const right = path.relative(outDir, b).replaceAll(path.sep, '/');
     const order = releaseUploadOrder(left) - releaseUploadOrder(right);
     return order || left.localeCompare(right);
+  });
+  const excludedFiles = listedFiles.filter((file) => {
+    const rel = path.relative(outDir, file).replaceAll(path.sep, '/');
+    return !isPublishableReleasePath(rel);
   });
   const fileStats = new Map();
   let totalBytes = 0;
@@ -5067,6 +5177,10 @@ async function syncR2(payload = {}) {
     const stat = await fs.stat(file);
     fileStats.set(file, stat);
     totalBytes += stat.size;
+  }
+  let excludedBytes = 0;
+  for (const file of excludedFiles) {
+    excludedBytes += (await fs.stat(file)).size;
   }
   const secrets = await loadDeveloperSecrets().catch(() => ({}));
   const directCredentials = await resolveR2DirectCredentials({ payload, config, secrets });
@@ -5103,6 +5217,9 @@ async function syncR2(payload = {}) {
     },
     lines: [
       `Uploading ${files.length} ${target.name} files to remote R2 bucket ${bucket}`,
+      ...(excludedFiles.length
+        ? [`Excluded ${excludedFiles.length} local staging files (${formatBytes(excludedBytes)}) from the R2 upload.`]
+        : []),
       `${releaseTargetObjectKey('latest.json', target.id)} will upload last so only ${target.name} players see the update after artifacts are ready.`,
       fastUpload
         ? 'Fast direct R2 upload enabled: multipart upload with byte progress.'
@@ -5681,6 +5798,149 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
         }
       } catch (error) {
         add('error', 'pack ZIP could not be inspected', error.message);
+      }
+    }
+  }
+
+  if (fullClientRelease) {
+    const clientManifestRef = latest.clientManifest?.path || latest.clientManifest?.url;
+    validateAbsoluteReleaseUrl({
+      add,
+      publicLatestUrl,
+      label: 'client manifest',
+      url: latest.clientManifest?.url || '',
+      pathRef: latest.clientManifest?.path || ''
+    });
+    let clientManifest = null;
+    if (!clientManifestRef) {
+      add('error', 'client manifest reference missing', 'Full client releases require latest.clientManifest.');
+    } else {
+      const clientManifestPath = localReleasePath(outDir, clientManifestRef);
+      if (!clientManifestPath) {
+        add('warning', 'client manifest is remote-only', clientManifestRef);
+      } else if (!(await pathExists(clientManifestPath))) {
+        add('error', 'client manifest missing', clientManifestPath);
+      } else {
+        try {
+          const stat = await fs.stat(clientManifestPath);
+          if (Number(latest.clientManifest?.size || 0) > 0 && stat.size !== Number(latest.clientManifest.size)) {
+            add('error', 'client manifest size mismatch', `latest.json=${latest.clientManifest.size}, actual=${stat.size}`);
+          } else {
+            add('ok', 'client manifest size matches', `${stat.size} bytes`);
+          }
+          if (!/^[a-f0-9]{64}$/i.test(String(latest.clientManifest?.sha256 || ''))) {
+            add('error', 'client manifest SHA256 missing', 'A verified client manifest hash is required.');
+          } else {
+            const actualHash = await hashFile(clientManifestPath, 'sha256');
+            if (actualHash.toLowerCase() === String(latest.clientManifest.sha256).toLowerCase()) {
+              add('ok', 'client manifest SHA256 matches', actualHash);
+            } else {
+              add('error', 'client manifest SHA256 mismatch', `latest.json=${latest.clientManifest.sha256}, actual=${actualHash}`);
+            }
+          }
+
+          clientManifest = await readJsonFile(clientManifestPath);
+          const files = Array.isArray(clientManifest.files) ? clientManifest.files : [];
+          const foldedPaths = new Set();
+          let invalidFiles = 0;
+          for (const file of files) {
+            const relativePath = normalizeRelPath(file?.relativePath || file?.path || '');
+            const folded = relativePath.toLowerCase();
+            if (!isClientPackContentPath(relativePath)
+              || !Number.isSafeInteger(Number(file?.size)) || Number(file.size) < 0
+              || !/^[a-f0-9]{64}$/i.test(String(file?.sha256 || ''))
+              || foldedPaths.has(folded)) {
+              invalidFiles += 1;
+            }
+            foldedPaths.add(folded);
+          }
+          if (clientManifest.format !== CLIENT_MANIFEST_FORMAT
+            || String(clientManifest.packId || '') !== String(latest.packId || '')
+            || String(clientManifest.version || '') !== String(latest.version || '')
+            || invalidFiles > 0) {
+            add('error', 'client manifest invalid', `format=${clientManifest.format || 'missing'}, files=${files.length}, invalid=${invalidFiles}`);
+          } else {
+            add('ok', 'client manifest parsed', `${files.length} exact files for ${clientManifest.version}`);
+          }
+        } catch (error) {
+          add('error', 'client manifest could not be inspected', error.message);
+        }
+      }
+    }
+
+    if (!latest.delta) {
+      add('warning', 'delta update unavailable', 'This release remains installable from the full ZIP; a later release can use this manifest as its delta baseline.');
+    } else {
+      const deltaRef = latest.delta.path || latest.delta.url;
+      validateAbsoluteReleaseUrl({
+        add,
+        publicLatestUrl,
+        label: 'delta ZIP',
+        url: latest.delta.url || '',
+        pathRef: latest.delta.path || ''
+      });
+      if (!deltaRef) {
+        add('error', 'delta ZIP reference missing', 'latest.delta.path or latest.delta.url is required.');
+      } else if (latest.delta.format !== CLIENT_DELTA_FORMAT
+        || String(latest.delta.toVersion || '') !== String(latest.version || '')
+        || !String(latest.delta.fromVersion || '')) {
+        add('error', 'delta release metadata invalid', `format=${latest.delta.format || 'missing'}, from=${latest.delta.fromVersion || 'missing'}, to=${latest.delta.toVersion || 'missing'}`);
+      } else {
+        const deltaPath = localReleasePath(outDir, deltaRef);
+        if (!deltaPath) {
+          add('warning', 'delta ZIP is remote-only', deltaRef);
+        } else if (!(await pathExists(deltaPath))) {
+          add('error', 'delta ZIP missing', deltaPath);
+        } else {
+          try {
+            const stat = await fs.stat(deltaPath);
+            if (Number(latest.delta.size || 0) > 0 && stat.size !== Number(latest.delta.size)) {
+              add('error', 'delta ZIP size mismatch', `latest.json=${latest.delta.size}, actual=${stat.size}`);
+            } else {
+              add('ok', 'delta ZIP size matches', `${stat.size} bytes`);
+            }
+            if (!/^[a-f0-9]{64}$/i.test(String(latest.delta.sha256 || ''))) {
+              add('error', 'delta ZIP SHA256 missing', 'A verified delta hash is required.');
+            } else {
+              const actualHash = await hashFile(deltaPath, 'sha256');
+              if (actualHash.toLowerCase() === String(latest.delta.sha256).toLowerCase()) {
+                add('ok', 'delta ZIP SHA256 matches', actualHash);
+              } else {
+                add('error', 'delta ZIP SHA256 mismatch', `latest.json=${latest.delta.sha256}, actual=${actualHash}`);
+              }
+            }
+
+            const zip = new AdmZip(deltaPath);
+            const metadataEntry = zip.getEntry(CLIENT_DELTA_METADATA_ENTRY);
+            if (!metadataEntry) {
+              add('error', 'delta metadata missing', `${CLIENT_DELTA_METADATA_ENTRY} was not found.`);
+            } else {
+              const metadata = JSON.parse(metadataEntry.getData().toString('utf8'));
+              const files = Array.isArray(metadata.files) ? metadata.files : [];
+              const deleted = Array.isArray(metadata.deleted) ? metadata.deleted.map((value) => normalizeRelPath(value)) : [];
+              const filePaths = new Set(files.map((file) => normalizeRelPath(file?.relativePath || file?.path || '')));
+              const archivePaths = zip.getEntries()
+                .filter((entry) => !entry.isDirectory && entry.entryName !== CLIENT_DELTA_METADATA_ENTRY)
+                .map((entry) => normalizeRelPath(entry.entryName));
+              const exactPayload = archivePaths.length === filePaths.size
+                && archivePaths.every((relativePath) => filePaths.has(relativePath));
+              const validDeleted = deleted.every((relativePath) => isClientPackContentPath(relativePath) && !filePaths.has(relativePath));
+              const targetHashMatches = String(metadata.targetManifest?.sha256 || '').toLowerCase()
+                === String(latest.clientManifest?.sha256 || '').toLowerCase();
+              if (metadata.format !== CLIENT_DELTA_FORMAT
+                || String(metadata.packId || '') !== String(latest.packId || '')
+                || String(metadata.fromVersion || '') !== String(latest.delta.fromVersion || '')
+                || String(metadata.toVersion || '') !== String(latest.version || '')
+                || !exactPayload || !validDeleted || !targetHashMatches) {
+                add('error', 'delta metadata invalid', `${files.length} changed, ${deleted.length} deleted, exactPayload=${exactPayload}, targetManifest=${targetHashMatches}`);
+              } else {
+                add('ok', 'delta metadata parsed', `${files.length} changed files, ${deleted.length} explicit deletions`);
+              }
+            }
+          } catch (error) {
+            add('error', 'delta ZIP could not be inspected', error.message);
+          }
+        }
       }
     }
   }
@@ -6349,6 +6609,7 @@ ipcMain.handle('dev:buildRelease', diagnosticIpc('dev:buildRelease', async (_eve
   }
   const { buildRelease } = await loadReleaseBuilderModule();
   const config = await loadConfig();
+  const targetConfig = configForPack(config, target.id);
   const baseOutDir = resolveReleaseOutDir(payload?.outDir || config.developer?.defaultOutDir);
   const outDir = releaseTargetOutDir(baseOutDir, target.id);
   await ensureDir(outDir);
@@ -6357,7 +6618,8 @@ ipcMain.handle('dev:buildRelease', diagnosticIpc('dev:buildRelease', async (_eve
     outDir,
     baseUrl: payload.baseUrl,
     channel: target.channel,
-    cacheModsDir: payload.cacheModsDir || ''
+    cacheModsDir: payload.cacheModsDir || '',
+    previousLatestSource: targetConfig.latestUrl || ''
   });
   assertReleaseMatchesTarget(result.latest, target.id);
   return { ...result, releaseTarget: target.id };

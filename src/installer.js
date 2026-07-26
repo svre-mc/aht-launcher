@@ -7,7 +7,18 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import AdmZip from 'adm-zip';
 import yauzl from 'yauzl';
-import { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from './clientPackFormat.js';
+import {
+  CLIENT_DELTA_FORMAT,
+  CLIENT_DELTA_METADATA_ENTRY,
+  CLIENT_MANIFEST_FORMAT,
+  CLIENT_PACK_FORMAT,
+  CLIENT_PACK_METADATA_ENTRY,
+  CLIENT_UPDATE_PRESERVED_FILES,
+  isClientGameSettingsPath,
+  isClientPackContentPath,
+  isClientUpdatePreservedPath,
+  isManagedClientPackPath
+} from './clientPackFormat.js';
 import { getHash, getModFile, getModFileDownloadUrl } from './curseforge.js';
 import {
   downloadToFile,
@@ -30,8 +41,7 @@ function isFullClientZipRelease(latest = {}) {
 }
 
 function isGameSettingsRelPath(relPath = '') {
-  const normalized = normalizeRelPath(relPath).toLowerCase();
-  return normalized === 'options.txt' || normalized === 'optionsof.txt';
+  return isClientGameSettingsPath(relPath);
 }
 
 const PRESERVED_UNMANAGED_MOD_DIRS = ['OpenTerrainGenerator'];
@@ -310,14 +320,11 @@ const PLAYER_PRESERVED_FILES = [
   'servers.dat',
   'servers.dat_old'
 ];
-const PLAYER_UPDATE_PRESERVED_FILES = [
-  'config/jei/bookmarks.ini'
-];
+const PLAYER_UPDATE_PRESERVED_FILES = CLIENT_UPDATE_PRESERVED_FILES;
 const PLAYER_PRESERVED_MOD_DIRS = PRESERVED_UNMANAGED_MOD_DIRS.map((dirName) => `mods/${dirName}`);
 
 function isPlayerUpdatePreservedRelPath(relPath = '') {
-  const normalized = normalizeRelPath(relPath).toLowerCase();
-  return PLAYER_UPDATE_PRESERVED_FILES.some((entry) => normalized === entry.toLowerCase());
+  return isClientUpdatePreservedPath(relPath);
 }
 
 function installSiblingPrefix(instanceDir, label) {
@@ -502,6 +509,26 @@ async function movePreservedRuntimeDataFromBackup(backupDir, instanceDir, logger
   return preserved;
 }
 
+async function movePreservedPlayerDataFromBackup(backupDir, instanceDir, replaceGameSettings, logger) {
+  const preserved = [];
+  const paths = [
+    ...PLAYER_PRESERVED_DIRS,
+    ...preservedFilesForInstall(replaceGameSettings),
+    ...PLAYER_UPDATE_PRESERVED_FILES
+  ];
+  for (const relPath of paths) {
+    const source = safeJoin(backupDir, relPath);
+    const dest = safeJoin(instanceDir, relPath);
+    if (await movePathIfPresent(source, dest)) {
+      preserved.push(relPath);
+    }
+  }
+  if (preserved.length) {
+    logger?.log?.(`Preserved player data without copying: ${preserved.join(', ')}`);
+  }
+  return preserved;
+}
+
 async function copyCurrentPackToStagingCache(packZipPath, stagingDir, logger, options = {}) {
   const dest = path.join(stagingDir, '.aht-launcher', 'downloads', path.basename(packZipPath));
   if (path.resolve(packZipPath) === path.resolve(dest)) {
@@ -615,7 +642,17 @@ async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) 
   if (!oldInstallMoved) {
     return { backupRemoved: true, backupDir: '', backupCleanupWarning: '' };
   }
-  await movePreservedRuntimeDataFromBackup(backupDir, resolvedInstanceDir, options.logger);
+  if (options.preservePlayerDataFromBackup) {
+    await movePreservedPlayerDataFromBackup(
+      backupDir,
+      resolvedInstanceDir,
+      options.replaceGameSettings === true,
+      options.logger
+    );
+  }
+  if (!options.preservedRuntimeInStaging) {
+    await movePreservedRuntimeDataFromBackup(backupDir, resolvedInstanceDir, options.logger);
+  }
   return removeBackupAfterSuccessfulSwap(backupDir, options);
 }
 
@@ -726,6 +763,360 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       removedStaleCount: removed.length,
       removedStale: removed,
       cleanInstall: true,
+      backupRemoved: replacement.backupRemoved,
+      backupDir: replacement.backupDir,
+      backupCleanupWarning: replacement.backupCleanupWarning
+    };
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function normalizedClientManifestFile(record = {}) {
+  const relativePath = normalizeRelPath(record.relativePath || record.path || '');
+  const size = Number(record.size);
+  const sha256 = String(record.sha256 || '').trim().toLowerCase();
+  if (!isClientPackContentPath(relativePath)
+    || !Number.isSafeInteger(size) || size < 0
+    || !/^[a-f0-9]{64}$/.test(sha256)) {
+    throw new Error(`Client manifest contains an invalid file record: ${JSON.stringify(record)}`);
+  }
+  return {
+    relativePath,
+    size,
+    sha256,
+    managed: isManagedClientPackPath(relativePath)
+  };
+}
+
+function validatedClientManifest(manifest, latest) {
+  if (!manifest || manifest.format !== CLIENT_MANIFEST_FORMAT || !Array.isArray(manifest.files)) {
+    throw new Error('Client manifest is missing or unsupported.');
+  }
+  if (String(manifest.packId || '') !== String(latest.packId || '')
+    || String(manifest.version || '') !== String(latest.version || '')) {
+    throw new Error('Client manifest does not match the selected release.');
+  }
+  const files = [];
+  const byPath = new Map();
+  const byFoldedPath = new Map();
+  for (const raw of manifest.files) {
+    const file = normalizedClientManifestFile(raw);
+    const folded = file.relativePath.toLowerCase();
+    if (byPath.has(file.relativePath) || byFoldedPath.has(folded)) {
+      throw new Error(`Client manifest contains a duplicate path: ${file.relativePath}`);
+    }
+    files.push(file);
+    byPath.set(file.relativePath, file);
+    byFoldedPath.set(folded, file);
+  }
+  files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  return { ...manifest, files, byPath, byFoldedPath };
+}
+
+function normalizedPreviousManaged(managed = []) {
+  const byPath = new Map();
+  for (const item of managed) {
+    const relativePath = normalizeRelPath(item?.relativePath || '');
+    const sha256 = String(item?.sha256 || '').trim().toLowerCase();
+    if (!relativePath || !/^[a-f0-9]{64}$/.test(sha256)) continue;
+    byPath.set(relativePath, { ...item, relativePath, sha256 });
+  }
+  return byPath;
+}
+
+function shouldApplyDeltaPath(relativePath, replaceGameSettings) {
+  if (isClientUpdatePreservedPath(relativePath)) return false;
+  if (isClientGameSettingsPath(relativePath) && !replaceGameSettings) return false;
+  return true;
+}
+
+async function inspectClientDeltaZipFile(deltaZipPath) {
+  let metadata = null;
+  const archiveFiles = [];
+  const foldedArchivePaths = new Set();
+  await forEachZipEntry(deltaZipPath, async (entry, zipFile) => {
+    if (!zipEntryIsFile(entry)) return;
+    const relativePath = normalizeRelPath(entry.fileName);
+    if (relativePath === CLIENT_DELTA_METADATA_ENTRY) {
+      if (metadata) throw new Error(`Delta ZIP contains multiple ${CLIENT_DELTA_METADATA_ENTRY} entries.`);
+      metadata = JSON.parse((await readZipEntryBuffer(zipFile, entry, 25 * 1024 * 1024)).toString('utf8'));
+      return;
+    }
+    if (!isClientPackContentPath(relativePath)) {
+      throw new Error(`Delta ZIP contains an unsupported path: ${relativePath}`);
+    }
+    const folded = relativePath.toLowerCase();
+    if (foldedArchivePaths.has(folded)) {
+      throw new Error(`Delta ZIP contains a duplicate path: ${relativePath}`);
+    }
+    foldedArchivePaths.add(folded);
+    archiveFiles.push(relativePath);
+  });
+  if (!metadata || metadata.format !== CLIENT_DELTA_FORMAT || !Array.isArray(metadata.files) || !Array.isArray(metadata.deleted)) {
+    throw new Error(`Delta ZIP is missing supported ${CLIENT_DELTA_METADATA_ENTRY} metadata.`);
+  }
+
+  const files = metadata.files.map(normalizedClientManifestFile);
+  const byPath = new Map();
+  const byFoldedPath = new Map();
+  for (const file of files) {
+    const folded = file.relativePath.toLowerCase();
+    if (byPath.has(file.relativePath) || byFoldedPath.has(folded)) {
+      throw new Error(`Delta metadata contains a duplicate changed path: ${file.relativePath}`);
+    }
+    byPath.set(file.relativePath, file);
+    byFoldedPath.set(folded, file);
+  }
+  const deleted = [];
+  const deletedFolded = new Set();
+  for (const raw of metadata.deleted) {
+    const relativePath = normalizeRelPath(raw);
+    if (!isClientPackContentPath(relativePath)) {
+      throw new Error(`Delta metadata contains an unsupported deletion path: ${relativePath}`);
+    }
+    const folded = relativePath.toLowerCase();
+    if (deletedFolded.has(folded)) {
+      throw new Error(`Delta metadata contains a duplicate deletion path: ${relativePath}`);
+    }
+    deletedFolded.add(folded);
+    deleted.push(relativePath);
+  }
+  if (archiveFiles.length !== files.length
+    || archiveFiles.some((relativePath) => !byPath.has(relativePath))) {
+    throw new Error('Delta ZIP contents do not exactly match its changed-file manifest.');
+  }
+  return { ...metadata, files, byPath, byFoldedPath, deleted };
+}
+
+async function cloneInstallWithHardLinks(instanceDir, stagingDir, targetManifest, changedPaths, options = {}) {
+  const changedFolded = new Set(changedPaths.map((relativePath) => relativePath.toLowerCase()));
+  const files = targetManifest.files.filter((file) => (
+    file.managed && !changedFolded.has(file.relativePath.toLowerCase())
+  ));
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  await ensureDir(stagingDir);
+  let completed = 0;
+  for (const file of files) {
+    const source = safeJoin(instanceDir, file.relativePath);
+    const target = safeJoin(stagingDir, file.relativePath);
+    await ensureDir(path.dirname(target));
+    try {
+      await fs.link(source, target);
+    } catch (error) {
+      if (!['EXDEV', 'EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error;
+      await fs.copyFile(source, target);
+    }
+    completed += 1;
+    if (onProgress) {
+      onProgress({
+        phase: 'Preparing update',
+        currentPath: file.relativePath,
+        completed,
+        total: files.length,
+        percent: weightedProgress(files.length ? Math.round((completed / files.length) * 100) : 100, 38, 18)
+      });
+    }
+    if (completed % 100 === 0) await yieldToEventLoop();
+  }
+  return files.length;
+}
+
+async function verifyDeltaBase(instanceDir, previousManaged, targetManifest, changedPaths) {
+  const previousByPath = normalizedPreviousManaged(previousManaged);
+  const changedFolded = new Set(changedPaths.map((relativePath) => relativePath.toLowerCase()));
+  for (const file of targetManifest.files) {
+    if (!file.managed || changedFolded.has(file.relativePath.toLowerCase())) continue;
+    const previous = previousByPath.get(file.relativePath);
+    if (!previous || previous.sha256 !== file.sha256) {
+      throw new Error(`Installed base manifest does not match unchanged file ${file.relativePath}.`);
+    }
+    const target = safeJoin(instanceDir, file.relativePath);
+    const stat = await fs.stat(target).catch(() => null);
+    const playerEditableConfig = file.relativePath.toLowerCase().startsWith('config/');
+    if (!stat?.isFile() || (!playerEditableConfig && stat.size !== file.size)) {
+      throw new Error(`Installed base file is missing or has the wrong size: ${file.relativePath}.`);
+    }
+  }
+}
+
+async function installClientDeltaFromFile({
+  deltaZipPath,
+  targetManifest,
+  latest,
+  instanceDir,
+  previousManaged,
+  previousInstalled,
+  replaceGameSettings,
+  logger,
+  onProgress
+}) {
+  const delta = await inspectClientDeltaZipFile(deltaZipPath);
+  if (String(delta.packId || '') !== String(latest.packId || '')
+    || String(delta.fromVersion || '') !== String(previousInstalled.version || '')
+    || String(delta.toVersion || '') !== String(latest.version || '')) {
+    throw new Error('Delta ZIP does not match the installed and target versions.');
+  }
+  if (String(delta.targetManifest?.sha256 || '').toLowerCase()
+    !== String(latest.clientManifest?.sha256 || '').toLowerCase()) {
+    throw new Error('Delta ZIP target manifest does not match latest.json.');
+  }
+
+  for (const file of delta.files) {
+    const target = targetManifest.byFoldedPath.get(file.relativePath.toLowerCase());
+    if (!target || target.relativePath !== file.relativePath
+      || target.size !== file.size || target.sha256 !== file.sha256) {
+      throw new Error(`Delta changed file does not match the target manifest: ${file.relativePath}.`);
+    }
+  }
+  for (const relativePath of delta.deleted) {
+    if (targetManifest.byPath.has(relativePath)) {
+      throw new Error(`Delta attempts to delete a file still present in the target manifest: ${relativePath}.`);
+    }
+  }
+
+  await verifyDeltaBase(
+    instanceDir,
+    previousManaged,
+    targetManifest,
+    delta.files.map((file) => file.relativePath)
+  );
+  assertSafeInstanceRoot(instanceDir);
+  await recoverInterruptedCleanInstall(instanceDir, logger);
+  const stagingDir = uniqueInstallSiblingDir(instanceDir, 'staging');
+  await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+  try {
+    logger.log(`Applying delta ${delta.fromVersion} -> ${delta.toVersion}: ${delta.files.length} changed, ${delta.deleted.length} deleted`);
+    await cloneInstallWithHardLinks(
+      instanceDir,
+      stagingDir,
+      targetManifest,
+      delta.files.map((file) => file.relativePath),
+      { onProgress }
+    );
+
+    const removed = [];
+    let deleteCompleted = 0;
+    for (const relativePath of delta.deleted) {
+      if (!shouldApplyDeltaPath(relativePath, replaceGameSettings)) continue;
+      const target = safeJoin(stagingDir, relativePath);
+      await fs.rm(target, { recursive: true, force: true });
+      removed.push(relativePath);
+      deleteCompleted += 1;
+      if (onProgress) {
+        onProgress({
+          phase: 'Removing retired files',
+          currentPath: relativePath,
+          completed: deleteCompleted,
+          total: delta.deleted.length,
+          percent: weightedProgress(delta.deleted.length ? Math.round((deleteCompleted / delta.deleted.length) * 100) : 100, 56, 6)
+        });
+      }
+    }
+
+    const applied = new Set();
+    let changedCompleted = 0;
+    await forEachZipEntry(deltaZipPath, async (entry, zipFile) => {
+      if (!zipEntryIsFile(entry)) return;
+      const relativePath = normalizeRelPath(entry.fileName);
+      if (relativePath === CLIENT_DELTA_METADATA_ENTRY) return;
+      const expected = delta.byPath.get(relativePath);
+      if (!expected) throw new Error(`Delta ZIP contains an undeclared file: ${relativePath}.`);
+      if (shouldApplyDeltaPath(relativePath, replaceGameSettings)) {
+        const target = safeJoin(stagingDir, relativePath);
+        await fs.rm(target, { recursive: true, force: true });
+        await ensureDir(path.dirname(target));
+        const actualSha256 = await extractZipEntryToFile(zipFile, entry, target, true);
+        const stat = await fs.stat(target);
+        if (stat.size !== expected.size || actualSha256 !== expected.sha256) {
+          throw new Error(`Delta file verification failed: ${relativePath}.`);
+        }
+        applied.add(relativePath);
+      }
+      changedCompleted += 1;
+      if (onProgress) {
+        onProgress({
+          phase: 'Applying changed files',
+          currentPath: relativePath,
+          completed: changedCompleted,
+          total: delta.files.length,
+          percent: weightedProgress(delta.files.length ? Math.round((changedCompleted / delta.files.length) * 100) : 100, 62, 25)
+        });
+      }
+      if (changedCompleted % 25 === 0) await yieldToEventLoop();
+    });
+
+    const expectedApplied = delta.files
+      .filter((file) => shouldApplyDeltaPath(file.relativePath, replaceGameSettings))
+      .map((file) => file.relativePath);
+    const missingApplied = expectedApplied.filter((relativePath) => !applied.has(relativePath));
+    if (missingApplied.length) {
+      throw new Error(`Delta update did not apply ${missingApplied.length} file(s), beginning with ${missingApplied[0]}.`);
+    }
+
+    const nextManaged = targetManifest.files
+      .filter((file) => file.managed)
+      .map((file) => ({
+        relativePath: file.relativePath,
+        source: 'client-manifest',
+        sha256: file.sha256
+      }));
+    const nextManagedSet = new Set(nextManaged.map((file) => file.relativePath));
+    const removedUnexpectedMods = await removeUnexpectedModFiles(stagingDir, nextManagedSet);
+    for (const relativePath of removedUnexpectedMods) {
+      if (!removed.includes(relativePath)) removed.push(relativePath);
+    }
+
+    for (const file of targetManifest.files) {
+      if (!file.managed) continue;
+      const target = safeJoin(stagingDir, file.relativePath);
+      const stat = await fs.stat(target).catch(() => null);
+      const playerEditableConfig = file.relativePath.toLowerCase().startsWith('config/');
+      if (!stat?.isFile() || (!playerEditableConfig && stat.size !== file.size)) {
+        throw new Error(`Patched install is missing target file ${file.relativePath}.`);
+      }
+    }
+
+    const installed = {
+      schemaVersion: 1,
+      packId: latest.packId,
+      name: latest.name,
+      version: latest.version,
+      installMode: 'full-client-zip',
+      updateMode: 'delta',
+      installedAt: new Date().toISOString(),
+      latestSource: latest.source || null,
+      minecraft: latest.minecraft || null,
+      manifestFileCount: 0,
+      overrideFileCount: targetManifest.files.length
+    };
+    await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'installed.json'), installed);
+    await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
+    if (onProgress) {
+      onProgress({ phase: 'Replacing install', completed: 1, total: 1, percent: 94 });
+    }
+    const replacement = await replaceInstallWithStaging(instanceDir, stagingDir, {
+      logger,
+      simulateFailure: true,
+      preservedRuntimeInStaging: false,
+      preservePlayerDataFromBackup: true,
+      replaceGameSettings
+    });
+    if (onProgress) {
+      onProgress({ phase: 'Finalizing delta update', completed: 1, total: 1, percent: 95 });
+    }
+    return {
+      dryRun: false,
+      installed,
+      deltaApplied: true,
+      deltaFromVersion: delta.fromVersion,
+      deltaChangedFileCount: delta.files.length,
+      deltaDeletedFileCount: delta.deleted.length,
+      downloadedModCount: delta.files.filter((file) => file.relativePath.startsWith('mods/')).length,
+      overrideFileCount: targetManifest.files.length,
+      removedStaleCount: removed.length,
+      removedStale: removed,
+      cleanInstall: false,
       backupRemoved: replacement.backupRemoved,
       backupDir: replacement.backupDir,
       backupCleanupWarning: replacement.backupCleanupWarning
@@ -1184,7 +1575,16 @@ export async function installPack(options) {
   if (!dryRun && isFullClientZipRelease(latest)) {
     await recoverInterruptedCleanInstall(instanceDir, logger);
   }
-  const preserveUpdateState = !dryRun && await pathExists(path.join(instanceDir, '.aht-launcher', 'installed.json'));
+  const previousInstalledPath = path.join(instanceDir, '.aht-launcher', 'installed.json');
+  const previousManagedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
+  const preserveUpdateState = !dryRun && await pathExists(previousInstalledPath);
+  const previousInstalled = preserveUpdateState
+    ? await readOptionalJson(previousInstalledPath)
+    : null;
+  const previousManagedValue = !dryRun && await pathExists(previousManagedPath)
+    ? await readOptionalJson(previousManagedPath)
+    : [];
+  const previousManaged = Array.isArray(previousManagedValue) ? previousManagedValue : [];
   const preferLocalPaths = !isHttpUrl(latestSource);
   const packRef = preferLocalPaths ? (latest.zip?.path || latest.zip?.url) : (latest.zip?.url || latest.zip?.path);
   const cacheRef = preferLocalPaths
@@ -1202,6 +1602,110 @@ export async function installPack(options) {
   const packZipPath = path.join(downloadsDir, latest.zip?.fileName || `${latest.packId}-${latest.version}.zip`);
   const packZipSize = Number(latest.zip?.size || 0);
   const packMultipartThresholdBytes = (Number(process.env.AHT_PACK_DOWNLOAD_THRESHOLD_MB) || 16) * 1024 * 1024;
+
+  const delta = latest.delta;
+  const clientManifestRef = latest.clientManifest;
+  const deltaEligible = !dryRun
+    && !forceRepair
+    && isFullClientZipRelease(latest)
+    && delta?.format === CLIENT_DELTA_FORMAT
+    && clientManifestRef?.format === CLIENT_MANIFEST_FORMAT
+    && String(previousInstalled?.packId || '') === String(latest.packId || '')
+    && String(previousInstalled?.version || '') === String(delta.fromVersion || '')
+    && String(delta.toVersion || '') === String(latest.version || '')
+    && previousManaged.length > 0;
+
+  if (deltaEligible) {
+    try {
+      logger.log(`Fetching delta ${delta.fromVersion} -> ${delta.toVersion}`);
+      const manifestRef = preferLocalPaths
+        ? (clientManifestRef.path || clientManifestRef.url)
+        : (clientManifestRef.url || clientManifestRef.path);
+      const deltaRef = preferLocalPaths
+        ? (delta.path || delta.url)
+        : (delta.url || delta.path);
+      if (!manifestRef || !deltaRef) {
+        throw new Error('Delta release references are incomplete.');
+      }
+
+      const manifestSource = resolveSource(latestSource, manifestRef);
+      const manifestPath = path.join(
+        downloadsDir,
+        path.basename(clientManifestRef.fileName || clientManifestRef.path || 'client-manifest.json')
+      );
+      await downloadVerified(manifestSource, manifestPath, clientManifestRef.sha256 || null, {
+        logger,
+        currentPath: path.basename(manifestPath),
+        onProgress,
+        cacheVerifyPhase: 'Verifying client manifest',
+        cacheVerifyBase: 3,
+        cacheVerifySpan: 5,
+        downloadPhase: 'Downloading client manifest',
+        downloadBase: 3,
+        downloadSpan: 3,
+        verifyPhase: 'Verifying client manifest',
+        verifyBase: 6,
+        verifySpan: 2
+      });
+      const manifestStat = await fs.stat(manifestPath);
+      if (Number(clientManifestRef.size || 0) > 0 && manifestStat.size !== Number(clientManifestRef.size)) {
+        throw new Error(`Client manifest size mismatch: expected ${clientManifestRef.size}, got ${manifestStat.size}.`);
+      }
+      const targetManifest = validatedClientManifest(await readJsonFile(manifestPath), latest);
+
+      const deltaSource = resolveSource(latestSource, deltaRef);
+      const deltaZipPath = path.join(
+        downloadsDir,
+        path.basename(delta.fileName || delta.path || `${latest.packId}-${delta.fromVersion}-to-${delta.toVersion}.zip`)
+      );
+      const deltaZipSize = Number(delta.size || 0);
+      await downloadVerified(deltaSource, deltaZipPath, delta.sha256 || null, {
+        logger,
+        currentPath: path.basename(deltaZipPath),
+        onProgress,
+        cacheVerifyPhase: 'Verifying cached update',
+        cacheVerifyBase: 8,
+        cacheVerifySpan: 30,
+        multipart: isHttpUrl(deltaSource) && (!deltaZipSize || deltaZipSize >= packMultipartThresholdBytes),
+        multipartConcurrency: process.env.AHT_PACK_DOWNLOAD_CONCURRENCY || 6,
+        multipartPartSizeBytes: (Number(process.env.AHT_PACK_DOWNLOAD_PART_MB) || 8) * 1024 * 1024,
+        multipartThresholdBytes: packMultipartThresholdBytes,
+        downloadPhase: 'Downloading changed files',
+        downloadBase: 8,
+        downloadSpan: 25,
+        verifyPhase: 'Verifying changed files',
+        verifyBase: 33,
+        verifySpan: 5
+      });
+      const deltaStat = await fs.stat(deltaZipPath);
+      if (deltaZipSize > 0 && deltaStat.size !== deltaZipSize) {
+        throw new Error(`Delta ZIP size mismatch: expected ${deltaZipSize}, got ${deltaStat.size}.`);
+      }
+      return await installClientDeltaFromFile({
+        deltaZipPath,
+        targetManifest,
+        latest: { ...latest, source: latestSource },
+        instanceDir,
+        previousManaged,
+        previousInstalled,
+        replaceGameSettings,
+        logger,
+        onProgress
+      });
+    } catch (error) {
+      logger.log(`Delta update could not be applied; falling back to the full verified package. ${error?.message || error}`);
+      if (onProgress) {
+        onProgress({
+          phase: 'Retrying with full package',
+          currentPath: '',
+          completed: 0,
+          total: 1,
+          percent: 3
+        });
+      }
+    }
+  }
+
   logger.log(`Fetching pack ${latest.name} ${latest.version}`);
   await downloadVerified(packSource, packZipPath, latest.zip?.sha256 || null, {
     logger,
@@ -1221,11 +1725,6 @@ export async function installPack(options) {
     verifyBase: 40,
     verifySpan: 5
   });
-
-  const previousManagedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
-  const previousManaged = !dryRun && await pathExists(previousManagedPath)
-    ? await readJsonFile(previousManagedPath)
-    : [];
 
   if (isFullClientZipRelease(latest)) {
     const fullClientInspection = await inspectFullClientZipFile(packZipPath);

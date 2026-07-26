@@ -360,6 +360,8 @@ try {
   `);
   await waitFor(client, "document.querySelector('#setupCloudButton').getAttribute('aria-disabled') !== 'true'", 'setup cloud enabled with CurseForge key and proof secret');
   await waitFor(client, "document.querySelector('#publishReleaseButton').getAttribute('aria-disabled') !== 'true'", 'publish enabled');
+  await fsp.mkdir(path.join(outDir, 'client-zips'), { recursive: true });
+  await fsp.writeFile(path.join(outDir, 'client-zips', 'stale-stable-client.zip'), 'local staging only\n', 'utf8');
   await evaluate(client, "document.querySelector('#publishReleaseButton').click()");
   await waitFor(client, `(() => {
     const state = document.querySelector('#releaseCheckState')?.textContent || '';
@@ -399,6 +401,9 @@ try {
   const stableUploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);
   if (stableUploadOrder.at(-1) !== 'latest.json') {
     throw new Error(`Stable latest.json was not uploaded last: ${JSON.stringify(stableUploadOrder)}`);
+  }
+  if (stableUploadOrder.some((key) => key.startsWith('client-zips/'))) {
+    throw new Error(`Stable UI upload included local client ZIP staging files: ${JSON.stringify(stableUploadOrder)}`);
   }
   const stableRemoteLatestPath = path.join(fakeR2Root, bucket, 'latest.json');
   const stableRemoteLatestBeforePtb = await fsp.readFile(stableRemoteLatestPath);
@@ -460,6 +465,9 @@ try {
   const uploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);
   if (uploadOrder.at(-1) !== 'ptb/latest.json') {
     throw new Error(`PTB latest.json was not uploaded last: ${JSON.stringify(uploadOrder)}`);
+  }
+  if (uploadOrder.some((key) => key.startsWith('client-zips/') || key.includes('/client-zips/'))) {
+    throw new Error(`UI upload included local client ZIP staging files: ${JSON.stringify(uploadOrder)}`);
   }
   const githubReleaseBodies = githubCalls
     .filter((call) => call.method === 'POST' && call.path.endsWith('/releases'))

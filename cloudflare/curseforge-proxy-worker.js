@@ -8,9 +8,13 @@ const RELEASE_PATHS = new Set([
 ]);
 const RELEASE_PREFIXES = [
   'packs/',
+  'patches/',
+  'manifests/',
   'cache/',
   'server/',
   'ptb/packs/',
+  'ptb/patches/',
+  'ptb/manifests/',
   'ptb/cache/',
   'ptb/server/',
   'launcher/files/',
@@ -1201,8 +1205,12 @@ export default {
         endpoints: [
           '/latest.json',
           '/packs/{packZip}',
+          '/patches/{deltaZip}',
+          '/manifests/{clientManifest}',
           '/ptb/latest.json',
           '/ptb/packs/{packZip}',
+          '/ptb/patches/{deltaZip}',
+          '/ptb/manifests/{clientManifest}',
           '/cache/mod-cache.json',
           '/cache/files/{sha256}.jar',
           '/server/{serverArtifact}',

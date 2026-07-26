@@ -121,7 +121,7 @@ export async function collectServerTransferFiles(sourceDir, options = {}) {
   };
 }
 
-function connectSftp({ host, port = 22, username, password }) {
+function connectSftp({ host, port = 22, username, password, privateKey }) {
   return new Promise((resolve, reject) => {
     const client = new Client();
     let settled = false;
@@ -142,11 +142,14 @@ function connectSftp({ host, port = 22, username, password }) {
       });
     });
     client.once('error', fail);
+    const authentication = {};
+    if (privateKey) authentication.privateKey = privateKey;
+    if (password) authentication.password = password;
     client.connect({
       host,
       port: Number(port) || 22,
       username,
-      password,
+      ...authentication,
       readyTimeout: 20_000,
       keepaliveInterval: 15_000
     });
@@ -271,6 +274,7 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
     port = 22,
     username,
     password,
+    privateKeyPath = '',
     excludeDirs = DEFAULT_EXCLUDED_DIRS,
     includeDirs = DEFAULT_INCLUDED_DIRS,
     includeRootFiles = true,
@@ -281,8 +285,22 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
 
   if (!host) throw new Error('Server host/IP is required.');
   if (!username) throw new Error('Server username is required.');
-  if (!password) throw new Error('Server password is required.');
   if (!remoteDir) throw new Error('Remote destination folder is required.');
+  if (/\/Desktop\/?$/i.test(toRemotePath(remoteDir))) {
+    throw new Error('Remote destination must include a dedicated server folder under Desktop; uploading managed folders directly onto Desktop is blocked.');
+  }
+
+  let privateKey = null;
+  if (privateKeyPath) {
+    try {
+      privateKey = await fs.readFile(path.resolve(privateKeyPath));
+    } catch (error) {
+      throw new Error(`Could not read the configured SSH private key: ${error.message}`);
+    }
+  }
+  if (!password && !privateKey) {
+    throw new Error('Server authentication is required. Configure an SSH private key or password.');
+  }
 
   const plan = await collectServerTransferFiles(sourceDir, { excludeDirs, includeDirs, includeRootFiles });
   hooks.onProgress?.({
@@ -295,8 +313,18 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
     skipped: 0,
     percent: 0
   });
-  hooks.logger?.log?.(`Connecting to ${username}@${host}:${port}`);
-  const { client, sftp } = await connectSftp({ host, port, username, password });
+  hooks.logger?.log?.(`Connecting to ${username}@${host}:${port} with ${privateKey ? 'public-key authentication' : 'password authentication'}`);
+  let connection;
+  try {
+    connection = await connectSftp({ host, port, username, password, privateKey });
+  } catch (error) {
+    if (/all configured authentication methods failed/i.test(error.message || '')) {
+      const method = privateKey ? 'configured SSH key and password fallback were rejected' : 'saved SSH password was rejected';
+      throw new Error(`SSH authentication failed: ${method} by ${username}@${host}.`);
+    }
+    throw error;
+  }
+  const { client, sftp } = connection;
   const ensureRemoteDirCached = createRemoteDirEnsurer(sftp);
   let uploaded = 0;
   let skipped = 0;
@@ -375,6 +403,7 @@ export async function uploadServerFiles(options = {}, hooks = {}) {
       remoteDir,
       host,
       username,
+      authentication: privateKey ? 'public-key' : 'password',
       uploaded,
       skipped,
       uploadedBytes,

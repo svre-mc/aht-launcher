@@ -375,6 +375,8 @@ try {
   if (!validation.ok || validation.latest.version !== '2.8.2') {
     throw new Error(`Release validation failed: ${JSON.stringify(validation)}`);
   }
+  await fsp.mkdir(path.join(outDir, 'client-zips'), { recursive: true });
+  await fsp.writeFile(path.join(outDir, 'client-zips', 'stale-stable-client.zip'), 'local staging only\n', 'utf8');
   const upload = await evaluate(client, `window.aht.devSyncR2({
     outDir: ${JSON.stringify(outDir)},
     bucket: ${JSON.stringify(bucket)},
@@ -384,6 +386,9 @@ try {
   const uploaded = upload.uploaded.map((item) => item.path);
   if (uploaded.at(-1) !== 'latest.json') {
     throw new Error(`latest.json was not uploaded last: ${JSON.stringify(uploaded)}`);
+  }
+  if (uploaded.some((key) => key.startsWith('client-zips/'))) {
+    throw new Error(`Stable upload included local client ZIP staging files: ${JSON.stringify(uploaded)}`);
   }
   if (upload.verification?.latest?.version !== '2.8.2') {
     throw new Error(`Remote verification failed: ${JSON.stringify(upload.verification)}`);
@@ -408,6 +413,8 @@ try {
   if (!ptbValidation.ok || ptbValidation.releaseTarget !== 'ptb') {
     throw new Error(`PTB release validation failed: ${JSON.stringify(ptbValidation)}`);
   }
+  await fsp.mkdir(path.join(outDir, 'ptb', 'client-zips'), { recursive: true });
+  await fsp.writeFile(path.join(outDir, 'ptb', 'client-zips', 'stale-ptb-client.zip'), 'local staging only\n', 'utf8');
   const ptbUpload = await evaluate(client, `window.aht.devSyncR2({
     outDir: ${JSON.stringify(outDir)},
     bucket: ${JSON.stringify(bucket)},
@@ -417,6 +424,9 @@ try {
   const ptbUploaded = ptbUpload.uploaded.map((item) => item.path);
   if (ptbUploaded.at(-1) !== 'ptb/latest.json' || ptbUploaded.some((key) => !key.startsWith('ptb/'))) {
     throw new Error(`PTB upload escaped its R2 prefix or did not publish its feed last: ${JSON.stringify(ptbUploaded)}`);
+  }
+  if (ptbUploaded.some((key) => key.includes('/client-zips/'))) {
+    throw new Error(`PTB upload included local client ZIP staging files: ${JSON.stringify(ptbUploaded)}`);
   }
   if (ptbUpload.verification?.latest?.packId !== 'a-hard-time-ptb' || ptbUpload.verification?.latest?.version !== '2.9.0-ptb.9') {
     throw new Error(`PTB remote verification failed: ${JSON.stringify(ptbUpload.verification)}`);

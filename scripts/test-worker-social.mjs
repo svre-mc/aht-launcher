@@ -124,7 +124,7 @@ assert(/unavailable/i.test(blockedAction.error), 'Launcher-side block action was
 const queued = await jsonRequest('/api/social/actions', {
   method: 'POST',
   headers: { ...authorization, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ action: 'add_friend', target: 'TargetUser' })
+  body: JSON.stringify({ action: 'add_friend', target: 'tArGeTuSeR' })
 }, 202);
 assert(queued.queued && queued.actionId, 'Friend action was not queued.');
 
@@ -132,7 +132,7 @@ const pulled = await serverSync({ snapshots: [], acknowledgements: [] });
 assert(pulled.actions.length === 1, `Server did not receive one action: ${JSON.stringify(pulled)}`);
 assert(pulled.actions[0].actor === 'SocialUser'
   && pulled.actions[0].action === 'add_friend'
-  && pulled.actions[0].target === 'TargetUser',
+  && pulled.actions[0].target === 'tArGeTuSeR',
   `Server action was not bound to proof identity: ${JSON.stringify(pulled.actions[0])}`);
 
 const acknowledged = await serverSync({

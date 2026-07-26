@@ -1926,11 +1926,15 @@ async function buildReleaseFromSelectedZip(reason = "Building release", target =
   releaseValidationByTarget.delete(target);
   const cacheCount = result.report?.cacheSummary?.matchedManifestFiles ?? 0;
   const exactZip = inspected.fullClientZip || result.latest?.installMode === "full-client-zip";
+  const delta = result.report?.deltaSummary;
+  const exactDetail = delta?.available
+    ? `${delta.changedFileCount} changed, ${delta.deletedFileCount} deleted since ${delta.fromVersion}. Delta ${formatBytes(delta.size)}; full fallback ${formatBytes(delta.fullZipSize)}.`
+    : `${inspected.fileCount || result.latest?.clientZip?.fileCount || 0} exact client files. ${delta?.reason || "This release establishes the delta baseline."}`;
   setReleaseCheck(
     "warn",
     "Release built",
     `${inspected.name || result.report?.name || "Pack"} ${inspected.version || result.report?.version || ""}`.trim(),
-    exactZip ? `${inspected.fileCount || result.latest?.clientZip?.fileCount || 0} exact client files. Running validation next.` : `${cacheCount} cache entries matched. Running validation next.`,
+    exactZip ? `${exactDetail} Running validation next.` : `${cacheCount} cache entries matched. Running validation next.`,
     target
   );
   setDevLog(result.report);
@@ -2939,7 +2943,7 @@ async function planServerTransfer() {
     await saveDeveloperSecrets();
     const result = await window.aht.devPlanServerTransfer(serverTransferPayload());
     const excluded = result.excludedDirs?.length ? ` Excluded: ${result.excludedDirs.join(", ")}.` : "";
-    setServerTransferStatus("ok", "Plan ready", `${result.fileCount || 0} files`, `${Math.round((result.totalBytes || 0) / 1024 / 1024)} MB will upload. Scope: root files, mods, scripts, config, ForgeEssentials.${excluded}`);
+    setServerTransferStatus("ok", "Plan ready", `${result.fileCount || 0} files`, `${Math.round((result.totalBytes || 0) / 1024 / 1024)} MB will upload to ${result.remoteDir || "the remote server folder"}. Scope: root files, mods, scripts, config, ForgeEssentials.${excluded}`);
     setTextContentBounded(els.serverTransferLog, stringifyLogValue(result, DEV_LOG_TEXT_LIMIT), DEV_LOG_TEXT_LIMIT);
     return result;
   } catch (error) {
