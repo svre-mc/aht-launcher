@@ -30,7 +30,7 @@ import {
   minecraftRootCandidates,
   setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
-import { installForgeLoader } from '../src/forgeInstaller.js';
+import { installForgeLoader, minecraftJavaExecutable } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
 import { inspectLauncherProof, writeLauncherProof } from '../src/launcherProof.js';
@@ -1020,7 +1020,7 @@ function defaultConfig() {
       rootDir: defaultMinecraftRoot(),
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
-      memoryMb: 4096
+      memoryMb: 6144
     },
     playCommand: {
       command: '',
@@ -1354,8 +1354,8 @@ async function loadConfig() {
     config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir || defaultMinecraftRoot();
     changed = true;
   }
-  if (!Number.isFinite(Number(stored.minecraftLauncher?.memoryMb))) {
-    config.minecraftLauncher.memoryMb = 4096;
+  if (!Number.isFinite(Number(stored.minecraftLauncher?.memoryMb)) || Number(stored.minecraftLauncher?.memoryMb) < 6144) {
+    config.minecraftLauncher.memoryMb = 6144;
     changed = true;
   }
   if (isDeveloperMode()) {
@@ -2228,31 +2228,46 @@ function minecraftRootSummary(items = []) {
 }
 
 async function installMinecraftProfileLoaders(profile, { config, latest, installed, operationState = null } = {}) {
-  const missing = missingForgeLoaderProfiles(profile);
-  if (!missing.length) return profile;
-  const total = missing.length;
-  for (const [index, target] of missing.entries()) {
+  const targets = minecraftProfileInstallTargets(profile).filter((item) => (
+    item.versionId && item.loaderId?.startsWith('forge-')
+  ));
+  if (!targets.length) return profile;
+  const total = targets.length;
+  let selectedJavaPath = String(config.minecraftLauncher?.javaPath || '').trim();
+  for (const [index, target] of targets.entries()) {
+    const installing = !target.loaderInstalled;
     if (operationState) {
       operationState.progress = {
-        phase: `Installing Forge (${index + 1}/${total})`,
+        phase: `${installing ? 'Installing' : 'Validating'} Forge (${index + 1}/${total})`,
         completed: index,
         total,
         percent: 97
       };
-      appendOperationLine(operationState, `Installing Forge ${target.versionId} for Minecraft Launcher root ${target.rootDir}...`);
+      appendOperationLine(operationState, `${installing ? 'Installing' : 'Validating'} Forge ${target.versionId} for Minecraft Launcher root ${target.rootDir}...`);
     }
     const forgeLines = [];
-    await installForgeLoader(target, {
-      javaPath: config.minecraftLauncher?.javaPath || 'java',
+    const result = await installForgeLoader(target, {
+      javaPath: selectedJavaPath || target.javaPath || 'java',
       installerUrl: target.loaderInstallerUrl || latest?.minecraft?.forgeInstallerUrl || latest?.minecraft?.loaderInstallerUrl || '',
+      verifyLibraries: true,
       logger: { log: (line) => forgeLines.push(String(line)) }
     });
+    selectedJavaPath = await minecraftJavaExecutable(result.plan?.javaPath) || selectedJavaPath;
     if (operationState) {
       appendOperationLines(operationState, forgeLines);
       appendOperationLine(operationState, `Forge ${target.versionId} is ready in ${target.rootDir}.`);
     }
   }
-  const refreshed = await ensureMinecraftLauncherProfile({ config, latest, installed });
+  const profileConfig = selectedJavaPath
+    ? {
+      ...config,
+      minecraftLauncher: {
+        ...(config.minecraftLauncher || {}),
+        javaPath: selectedJavaPath
+      }
+    }
+    : config;
+  const refreshed = await ensureMinecraftLauncherProfile({ config: profileConfig, latest, installed });
   const stillMissing = missingForgeLoaderProfiles(refreshed);
   if (stillMissing.length) {
     throw new Error(`Forge ${stillMissing[0].versionId} did not appear in all Minecraft Launcher roots: ${minecraftRootSummary(stillMissing)}`);
@@ -4266,7 +4281,7 @@ function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '', cac
       enabled: true,
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
-      memoryMb: 4096
+      memoryMb: 6144
     }
   };
 }

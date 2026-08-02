@@ -125,7 +125,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   latestUrl: `${workerEndpoint}/latest.json`,
   sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: 'DevSmoke' },
   developer: { adminBaseUrl: `${workerEndpoint}/`, r2Bucket: 'ahtlauncher' },
-  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileName: 'A Hard Time', memoryMb: 4096 }
+  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileName: 'A Hard Time', memoryMb: 6144 }
 });
 await writeJson(path.join(userData, 'identity.json'), {
   installId: 'dev-smoke-install',

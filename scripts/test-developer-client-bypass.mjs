@@ -137,7 +137,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   developer: { adminBaseUrl: '', defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
   launcherUpdate: { enabled: false, latestUrl: '' },
   launcherProof: { enabled: false, required: false, baseUrl: '', keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, rootDir: mcRoot, profileId: latest.packId, profileName: latest.name, memoryMb: 4096 },
+  minecraftLauncher: { enabled: true, rootDir: mcRoot, profileId: latest.packId, profileName: latest.name, memoryMb: 6144 },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'developer-smoke-install', minecraftUsername: 'DeveloperSmoke' });

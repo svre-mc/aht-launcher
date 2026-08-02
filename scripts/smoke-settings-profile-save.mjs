@@ -141,7 +141,7 @@ await writeJson(defaultsPath, {
     rootDir: minecraftRoot,
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
-    memoryMb: 4096
+    memoryMb: 6144
   },
   playCommand: {
     command: '',

@@ -9,6 +9,7 @@ import {
   writeJsonFile
 } from './utils.js';
 import { launcherProofJavaArgs, launcherProofPath } from './launcherProof.js';
+import { findInstalledForgeVersion } from './forgeInstaller.js';
 
 export function defaultMinecraftRoot(platform = process.platform, env = process.env) {
   if (platform === 'win32') {
@@ -188,16 +189,20 @@ function quoteJavaValue(value = '') {
   return text.includes(' ') ? `"${text.replace(/"/g, '\\"')}"` : text;
 }
 
-function memoryMbFor(config = {}) {
-  const value = Number(config.minecraftLauncher?.memoryMb || 4096);
+function memoryMbFor(config = {}, latest = null, installed = null) {
+  const configured = Number(config.minecraftLauncher?.memoryMb);
+  const recommended = Number(latest?.minecraft?.recommendedRam || installed?.minecraft?.recommendedRam);
+  const value = Number.isFinite(configured)
+    ? configured
+    : (Number.isFinite(recommended) ? recommended : 6144);
   if (!Number.isFinite(value)) {
-    return 4096;
+    return 6144;
   }
-  return Math.max(4096, Math.min(32768, Math.round(value / 512) * 512));
+  return Math.max(6144, Math.min(32768, Math.round(value / 512) * 512));
 }
 
-function javaArgsFor({ config = {}, rootDir = '', gameDir = '' }) {
-  const ram = memoryMbFor(config);
+function javaArgsFor({ config = {}, latest = null, installed = null, rootDir = '', gameDir = '' }) {
+  const ram = memoryMbFor(config, latest, installed);
   const args = [];
   args.push(`-Xmx${ram}m`, '-Xms512m');
   if (config.launcherProof?.enabled !== false && gameDir) {
@@ -478,12 +483,32 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
   const versionCandidates = loaderVersionIdCandidates(minecraft || {});
   let versionId = versionCandidates[0] || '';
   let versionJson = versionId ? path.join(rootDir, 'versions', versionId, `${versionId}.json`) : '';
-  for (const candidate of versionCandidates) {
-    const candidateJson = path.join(rootDir, 'versions', candidate, `${candidate}.json`);
-    if (await pathExists(candidateJson)) {
-      versionId = candidate;
-      versionJson = candidateJson;
-      break;
+  let loaderInstalled = false;
+  const loaderId = primaryModLoader(minecraft || {})?.id || '';
+  if (loaderId.startsWith('forge-') && minecraft?.version && versionId) {
+    const forgeInstall = await findInstalledForgeVersion({
+      rootDir,
+      minecraftVersion: minecraft.version,
+      loaderId,
+      versionId
+    }, {
+      backupInvalid: false,
+      verifyLibraries: true
+    });
+    loaderInstalled = Boolean(forgeInstall.installed);
+    if (forgeInstall.versionId) {
+      versionId = forgeInstall.versionId;
+      versionJson = forgeInstall.versionJson || path.join(rootDir, 'versions', versionId, `${versionId}.json`);
+    }
+  } else {
+    for (const candidate of versionCandidates) {
+      const candidateJson = path.join(rootDir, 'versions', candidate, `${candidate}.json`);
+      if (await pathExists(candidateJson)) {
+        versionId = candidate;
+        versionJson = candidateJson;
+        loaderInstalled = true;
+        break;
+      }
     }
   }
   const profileId = config.minecraftLauncher?.profileId || profileIdFor(latest?.packId || installed?.packId || config.packId);
@@ -500,12 +525,13 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
     profileName: profileName(config, latest, installed),
     profileExists: Boolean(profile),
     versionId,
-    loaderInstalled: versionJson ? await pathExists(versionJson) : false,
+    loaderInstalled,
     versionJson,
     gameDir: config.instanceDir,
-    javaArgs: javaArgsFor({ config, rootDir, gameDir: config.instanceDir }),
+    javaArgs: javaArgsFor({ config, latest, installed, rootDir, gameDir: config.instanceDir }),
+    javaPath: String(config.minecraftLauncher?.javaPath || profile?.javaDir || '').trim(),
     minecraftVersion: minecraft?.version || '',
-    loaderId: primaryModLoader(minecraft || {})?.id || '',
+    loaderId,
     loaderInstallerUrl: loaderInstallerUrl(minecraft || {}),
     accountReuseAvailable: auth.signedIn,
     accountCount: auth.accountCount,
@@ -560,6 +586,9 @@ async function writeMinecraftLauncherProfile(state) {
   };
   if (state.javaArgs) {
     next.javaArgs = state.javaArgs;
+  }
+  if (state.javaPath && path.isAbsolute(state.javaPath)) {
+    next.javaDir = path.resolve(state.javaPath);
   }
   profiles.profiles[state.profileId] = next;
   profiles.selectedProfile = state.profileId;

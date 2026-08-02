@@ -685,7 +685,7 @@ function checkPlayerDefaults() {
     addCheck(`${label} has non-local Worker URLs`, 'blocker', urls.length > 0 && !hasLocalOrExample, urls.join(', ') || 'missing worker URLs');
     addCheck(`${label} has neutral install path`, 'blocker', !Object.hasOwn(defaults || {}, 'instanceDir') && !defaults?.minecraftLauncher?.rootDir, 'installer chooses per OS');
     addCheck(`${label} has no developer defaults`, 'blocker', !Object.hasOwn(defaults || {}, 'developer'), Object.hasOwn(defaults || {}, 'developer') ? 'remove developer block from player defaults' : 'player-only defaults');
-    addCheck(`${label} default RAM is 4096 MB`, 'blocker', Number(defaults?.minecraftLauncher?.memoryMb) === 4096, String(defaults?.minecraftLauncher?.memoryMb ?? 'missing'));
+    addCheck(`${label} default RAM is 6144 MB`, 'blocker', Number(defaults?.minecraftLauncher?.memoryMb) === 6144, String(defaults?.minecraftLauncher?.memoryMb ?? 'missing'));
     addCheck(`${label} launcher proof enabled`, 'blocker', launcherProof.enabled !== false, `enabled=${String(launcherProof.enabled)}`);
     addCheck(`${label} launcher proof required`, 'blocker', launcherProof.required === true, `required=${String(launcherProof.required)}`);
     addCheck(`${label} launcher proof has Worker URL`, 'blocker', /^https?:\/\//i.test(proofBaseUrl) && !textIncludesAny(proofBaseUrl, ['127.0.0.1', 'localhost', 'example.workers.dev', 'aht.local']), proofBaseUrl || 'missing proof Worker URL');

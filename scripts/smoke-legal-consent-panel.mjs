@@ -122,7 +122,7 @@ await writeJson(defaultsPath, {
   sync: { enabled: false, sendLocalChanges: false, baseUrl: '', playerLabel: '' },
   launcherProof: { enabled: false, required: false, baseUrl: '' },
   social: { enabled: false },
-  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 4096, autoImportAccount: false }
+  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time', profileName: 'A Hard Time', memoryMb: 6144, autoImportAccount: false }
 });
 
 const server = http.createServer((request, response) => {

@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
 
 const port = Number(process.argv[2] || 10010);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -18,6 +19,11 @@ const mcRoot = path.join(root, 'minecraft');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const curseForgeSpawnCapture = path.join(root, 'curseforge-spawn.json');
+const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
+const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const fakeMinecraftJavaPath = process.platform === 'win32'
+  ? path.join(path.dirname(fakeJavaPath), 'javaw.exe')
+  : fakeJavaPath;
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -137,6 +143,12 @@ const latest = {
 const expectedContent = 'managed=true\n';
 const corruptContent = 'managed=false\n';
 const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
+await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
+await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
+if (process.platform === 'win32') {
+  await fsp.writeFile(fakeMinecraftJavaPath, 'fake windowless Java 8 executable\n', 'utf8');
+}
+await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
   latestUrl: `${workerEndpoint}/latest.json`,
@@ -158,7 +170,8 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
     rootDir: mcRoot,
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
-    memoryMb: 4096,
+    memoryMb: 6144,
+    javaPath: fakeJavaPath,
     syncDefaultRoots: false,
     openCommand: process.execPath,
     openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
@@ -187,10 +200,7 @@ await fsp.mkdir(path.join(instanceDir, 'config'), { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'config', 'aht-integrity-test.cfg'), corruptContent, 'utf8');
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), corruptContent, 'utf8');
-await writeJson(
-  path.join(mcRoot, 'versions', '1.12.2-forge-14.23.5.2860', '1.12.2-forge-14.23.5.2860.json'),
-  { id: '1.12.2-forge-14.23.5.2860', type: 'release' }
-);
+await writeForgeInstallationFixture(mcRoot, { versionId: '1.12.2-forge-14.23.5.2860' });
 
 const registeredUsers = new Map();
 let launcherProofRequests = 0;
@@ -359,6 +369,11 @@ try {
   }
   if (cleanStatus.integrity?.counts?.corrupted !== 0) {
     throw new Error(`Clean install still reported corrupted files: ${JSON.stringify(cleanStatus.integrity)}`);
+  }
+  const cleanProfiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
+  const cleanProfile = cleanProfiles.profiles?.['a-hard-time-dregora'];
+  if (!cleanProfile?.javaArgs?.includes('-Xmx6144m') || path.resolve(cleanProfile.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)) {
+    throw new Error(`Clean Play did not write the 6 GB and Java 8 launcher profile: ${JSON.stringify(cleanProfile)}`);
   }
   const proof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
   if (!proof.trusted || proof.source !== 'worker' || !Array.isArray(proof.javaProperties) || !proof.javaProperties.some((arg) => arg.startsWith('-Daht.launcher.proofFile='))) {

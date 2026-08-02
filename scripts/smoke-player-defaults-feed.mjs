@@ -153,7 +153,7 @@ await writeJson(defaultsPath, {
     rootDir: minecraftRoot,
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
-    memoryMb: 4096
+    memoryMb: 6144
   }
 });
 
@@ -212,8 +212,8 @@ try {
   if (leakedFreshInstanceFragments.length) {
     throw new Error(`Fresh player leaked a legacy instance dir: ${JSON.stringify({ leakedFreshInstanceFragments, config: status.config })}`);
   }
-  if (status.config.minecraftLauncher?.memoryMb !== 4096) {
-    throw new Error(`Fresh player default RAM is not 4096 MB: ${JSON.stringify(status.config.minecraftLauncher)}`);
+  if (status.config.minecraftLauncher?.memoryMb !== 6144) {
+    throw new Error(`Fresh player default RAM is not 6144 MB: ${JSON.stringify(status.config.minecraftLauncher)}`);
   }
   if (status.config.minecraftLauncher?.enabled === false) {
     throw new Error(`Fresh player default disabled Minecraft Launcher profile integration: ${JSON.stringify(status.config.minecraftLauncher)}`);

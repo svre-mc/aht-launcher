@@ -1571,16 +1571,16 @@ function setInputValue(input, value, options = {}) {
 }
 
 function formatMemory(mb) {
-  const value = Number(mb || 4096);
-  const rounded = Math.max(4096, Math.min(32768, Math.round(value / 512) * 512));
+  const value = Number(mb || 6144);
+  const rounded = Math.max(6144, Math.min(32768, Math.round(value / 512) * 512));
   return Number.isInteger(rounded / 1024) ? `${rounded / 1024} GB` : `${(rounded / 1024).toFixed(1)} GB`;
 }
 
 function setMemoryValue(mb) {
   if (!els.minecraftMemoryInput) return;
-  const value = Number(mb || 4096);
+  const value = Number(mb || 6144);
   const rounded = Math.max(
-    Number(els.minecraftMemoryInput.min || 4096),
+    Number(els.minecraftMemoryInput.min || 6144),
     Math.min(Number(els.minecraftMemoryInput.max || 16384), Math.round(value / 512) * 512)
   );
   els.minecraftMemoryInput.value = String(rounded);
@@ -3072,7 +3072,7 @@ function serializeSettings() {
       enabled: els.minecraftProfileEnabledInput.checked,
       rootDir: els.minecraftRootInput.value.trim(),
       profileName: els.minecraftProfileNameInput.value.trim(),
-      memoryMb: Number(els.minecraftMemoryInput.value || 4096)
+      memoryMb: Number(els.minecraftMemoryInput.value || 6144)
     },
     playCommand: {
       command: els.playCommandInput.value.trim(),
@@ -3118,7 +3118,7 @@ function fillSettings(status) {
   setInputValue(els.instanceInput, config.instanceDir || "");
   setInputValue(els.minecraftRootInput, config.minecraftLauncher?.rootDir || status.minecraftProfile?.rootDir || "");
   setInputValue(els.minecraftProfileNameInput, config.minecraftLauncher?.profileName || status.minecraftProfile?.profileName || "");
-  setMemoryValue(config.minecraftLauncher?.memoryMb || 4096);
+  setMemoryValue(config.minecraftLauncher?.memoryMb || 6144);
   setInputValue(els.playCommandInput, config.playCommand?.command || "");
   setInputValue(els.playArgsInput, Array.isArray(config.playCommand?.args) ? config.playCommand.args.join(" ") : "");
   els.minecraftProfileEnabledInput.checked = config.minecraftLauncher?.enabled !== false;

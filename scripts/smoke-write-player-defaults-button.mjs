@@ -189,8 +189,8 @@ try {
   if (defaults.instanceDir || defaults.minecraftLauncher?.rootDir) {
     throw new Error(`Defaults should stay platform-neutral: ${JSON.stringify(defaults)}`);
   }
-  if (defaults.minecraftLauncher?.memoryMb !== 4096) {
-    throw new Error(`Defaults should keep 4 GB baseline RAM: ${JSON.stringify(defaults.minecraftLauncher)}`);
+  if (defaults.minecraftLauncher?.memoryMb !== 6144) {
+    throw new Error(`Defaults should keep 6 GB baseline RAM: ${JSON.stringify(defaults.minecraftLauncher)}`);
   }
   if (defaults.launcherProof?.enabled !== true || defaults.launcherProof?.required !== true || defaults.launcherProof?.baseUrl !== `${workerEndpoint}/` || defaults.launcherProof?.keyId !== 'aht-launcher-proof-v1') {
     throw new Error(`Defaults must require launcher proof through the Worker: ${JSON.stringify(defaults.launcherProof)}`);

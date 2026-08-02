@@ -22,6 +22,11 @@ const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const forgeInstallerUrl = `${workerEndpoint}/forge/forge-1.12.2-14.23.5.2860-installer.jar`;
 const versionId = '1.12.2-forge-14.23.5.2860';
+const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
+const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const fakeMinecraftJavaPath = process.platform === 'win32'
+  ? path.join(path.dirname(fakeJavaPath), 'javaw.exe')
+  : fakeJavaPath;
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -221,6 +226,12 @@ const registrationRequests = [];
 const proofRequests = [];
 
 const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
+await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
+await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
+if (process.platform === 'win32') {
+  await fsp.writeFile(fakeMinecraftJavaPath, 'fake windowless Java 8 executable\n', 'utf8');
+}
+await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
 await writeJson(defaultsPath, {
   packId: 'a-hard-time',
   instanceDir,
@@ -234,7 +245,8 @@ await writeJson(defaultsPath, {
     rootDir: mcRoot,
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
-    memoryMb: 4096,
+    memoryMb: 6144,
+    javaPath: fakeJavaPath,
     syncRoots: [syncedMcRoot],
     autoImportAccount: false,
     openCommand: process.execPath,
@@ -242,6 +254,8 @@ await writeJson(defaultsPath, {
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
+await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), {});
+await writeJson(path.join(syncedMcRoot, 'versions', versionId, `${versionId}.json`), {});
 
 const registeredUsers = new Map();
 const server = http.createServer((request, response) => {
@@ -427,18 +441,29 @@ try {
   if (!forgeVersion.ahtTestForgeInstaller) {
     throw new Error(`Forge install hook did not write expected version metadata: ${JSON.stringify(forgeVersion)}`);
   }
+  const invalidForgeBackups = (await fsp.readdir(path.dirname(forgeVersionJson)))
+    .filter((name) => name.includes(`${versionId}.json.aht-invalid-`) && name.endsWith('.bak'));
+  if (!invalidForgeBackups.length) {
+    throw new Error('Invalid placeholder Forge metadata was not backed up before repair.');
+  }
   const profiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
   const profile = profiles.profiles?.['a-hard-time'];
   if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
     throw new Error(`Minecraft Launcher profile was not written for the installed instance: ${JSON.stringify(profile)}`);
   }
-  if (!profile.javaArgs.includes('-Xmx4096m') || !profile.javaArgs.includes('-Daht.launcher.proofFile=') || !profile.javaArgs.includes('-Dminecraft.applet.TargetDirectory=')) {
+  if (!profile.javaArgs.includes('-Xmx6144m') || !profile.javaArgs.includes('-Daht.launcher.proofFile=') || !profile.javaArgs.includes('-Dminecraft.applet.TargetDirectory=')) {
     throw new Error(`Minecraft Launcher profile is missing required Java args: ${profile.javaArgs}`);
+  }
+  if (path.resolve(profile.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)) {
+    throw new Error(`Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(profile)}`);
   }
   const syncedProfiles = JSON.parse(fs.readFileSync(path.join(syncedMcRoot, 'launcher_profiles.json'), 'utf8'));
   const syncedProfile = syncedProfiles.profiles?.['a-hard-time'];
   if (!syncedProfile || syncedProfile.lastVersionId !== versionId || path.resolve(syncedProfile.gameDir) !== path.resolve(instanceDir)) {
     throw new Error(`Synced Minecraft Launcher profile was not written for the installed instance: ${JSON.stringify(syncedProfile)}`);
+  }
+  if (path.resolve(syncedProfile.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)) {
+    throw new Error(`Synced Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(syncedProfile)}`);
   }
 
   const afterUpdate = await evaluate(client, 'window.aht.getStatus()');

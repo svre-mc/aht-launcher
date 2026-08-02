@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import AdmZip from 'adm-zip';
 import {
   defaultMinecraftRoot,
   ensureMinecraftLauncherAssets,
@@ -17,15 +18,17 @@ import {
   forgeInstallerUrl,
   friendlyForgeJavaErrorMessage,
   javaSetupHelpMessage,
+  minecraftJavaExecutable,
+  resolveMinecraftProfileJavaPath,
   resolveJavaPath
 } from '../src/forgeInstaller.js';
+import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-profile-test-'));
 const instanceDir = path.join(root, 'instance');
 const minecraftRoot = path.join(root, '.minecraft');
 const versionId = '1.12.2-forge-14.23.5.2860';
-await fs.mkdir(path.join(minecraftRoot, 'versions', versionId), { recursive: true });
-await fs.writeFile(path.join(minecraftRoot, 'versions', versionId, `${versionId}.json`), '{}');
+await writeForgeInstallationFixture(minecraftRoot, { versionId });
 
 const platformRoots = {
   win32: defaultMinecraftRoot('win32', {
@@ -98,7 +101,7 @@ if (profile.lastVersionId !== versionId) {
 if (profile.gameDir !== path.resolve(instanceDir)) {
   throw new Error(`Expected gameDir ${path.resolve(instanceDir)}, got ${profile.gameDir}`);
 }
-if (!profile.javaArgs.includes('-Xmx4096m') || !profile.javaArgs.includes('-Daht.launcher.present=true') || !profile.javaArgs.includes('-Daht.launcher.proofFile=')) {
+if (!profile.javaArgs.includes('-Xmx6144m') || !profile.javaArgs.includes('-Daht.launcher.present=true') || !profile.javaArgs.includes('-Daht.launcher.proofFile=')) {
   throw new Error(`Expected RAM and launcher proof args, got ${profile.javaArgs}`);
 }
 await ensureMinecraftLauncherProfile({
@@ -136,10 +139,33 @@ const exactForgeInstall = await findInstalledForgeVersion(forgePlan);
 if (!exactForgeInstall.installed || exactForgeInstall.versionId !== versionId) {
   throw new Error(`Expected exact Forge profile detection, got ${JSON.stringify(exactForgeInstall)}`);
 }
+const invalidForgeRoot = path.join(root, 'invalid-forge-root');
+await fs.mkdir(path.join(invalidForgeRoot, 'versions', versionId), { recursive: true });
+await fs.writeFile(path.join(invalidForgeRoot, 'versions', versionId, `${versionId}.json`), '{}');
+const invalidForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: invalidForgeRoot }, { verifyLibraries: true });
+if (invalidForgeInstall.installed || invalidForgeInstall.invalidVersions.length !== 1 || !/incomplete Forge/i.test(invalidForgeInstall.invalidVersions[0].reason || '')) {
+  throw new Error(`Placeholder Forge metadata was accepted as installed: ${JSON.stringify(invalidForgeInstall)}`);
+}
+const missingForgeLibraryRoot = path.join(root, 'missing-forge-library-root');
+await writeForgeInstallationFixture(missingForgeLibraryRoot, { versionId, includeLibrary: false });
+const missingForgeLibraryInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: missingForgeLibraryRoot }, { verifyLibraries: true });
+if (missingForgeLibraryInstall.installed || missingForgeLibraryInstall.invalidVersions[0]?.missingLibraries?.length !== 1) {
+  throw new Error(`Forge metadata with a missing library was accepted as installed: ${JSON.stringify(missingForgeLibraryInstall)}`);
+}
+const corruptForgeLibraryRoot = path.join(root, 'corrupt-forge-library-root');
+const corruptForgeFixture = await writeForgeInstallationFixture(corruptForgeLibraryRoot, { versionId });
+const corruptForgeArtifact = corruptForgeFixture.metadata.libraries[0].downloads.artifact;
+await fs.writeFile(
+  path.join(corruptForgeLibraryRoot, 'libraries', corruptForgeArtifact.path),
+  Buffer.alloc(corruptForgeArtifact.size, 0x78)
+);
+const corruptForgeLibraryInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: corruptForgeLibraryRoot }, { verifyLibraries: true });
+if (corruptForgeLibraryInstall.installed || !/SHA-1 mismatch/i.test(corruptForgeLibraryInstall.invalidVersions[0]?.missingLibraries?.[0]?.reason || '')) {
+  throw new Error(`Forge metadata with a corrupt same-size library was accepted as installed: ${JSON.stringify(corruptForgeLibraryInstall)}`);
+}
 const altForgeRoot = path.join(root, 'alt-forge-root');
 const altForgeVersionId = '1.12.2-forge1.12.2-14.23.5.2860';
-await fs.mkdir(path.join(altForgeRoot, 'versions', altForgeVersionId), { recursive: true });
-await fs.writeFile(path.join(altForgeRoot, 'versions', altForgeVersionId, `${altForgeVersionId}.json`), '{}');
+await writeForgeInstallationFixture(altForgeRoot, { versionId: altForgeVersionId });
 const altForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: altForgeRoot });
 if (!altForgeInstall.installed || altForgeInstall.versionId !== altForgeVersionId) {
   throw new Error(`Expected alternate Forge profile detection, got ${JSON.stringify(altForgeInstall)}`);
@@ -155,22 +181,111 @@ const resolvedJava = await resolveJavaPath(created, { javaRoots: [fakeRuntimeRoo
 if (resolvedJava !== fakeLegacyJava) {
   throw new Error(`Expected legacy Minecraft Java runtime, got ${resolvedJava}`);
 }
+const resolvedLegacyProfileJava = await resolveMinecraftProfileJavaPath(created, forgePlan, {
+  javaRoots: [fakeRuntimeRoot],
+  javaInstallRoots: [],
+  javaDownloadUrl: path.join(root, 'must-not-download-java.zip')
+});
+if (resolvedLegacyProfileJava !== fakeLegacyJava) {
+  throw new Error(`Expected a valid Mojang Java 8 runtime to be reused without an Adoptium download, got ${resolvedLegacyProfileJava}`);
+}
 const fakeBundledLegacyJava = path.join(minecraftRoot, 'runtime', 'jre-legacy', 'windows-x64', 'jre-legacy', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const fakeInstalledJavaRoot = path.join(root, 'Program Files', 'Eclipse Adoptium');
 const fakeInstalledJava = path.join(fakeInstalledJavaRoot, 'jdk-8.0.999.1-hotspot', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const fakeInstalledJavaw = process.platform === 'win32'
+  ? path.join(path.dirname(fakeInstalledJava), 'javaw.exe')
+  : fakeInstalledJava;
 await fs.mkdir(path.dirname(fakeBundledLegacyJava), { recursive: true });
 await fs.mkdir(path.dirname(fakeInstalledJava), { recursive: true });
 await fs.writeFile(fakeBundledLegacyJava, 'bundled-legacy');
 await fs.writeFile(fakeInstalledJava, 'temurin-8');
+if (process.platform === 'win32') {
+  await fs.writeFile(fakeInstalledJavaw, 'temurin-8-windowless');
+}
 const resolvedInstalledJava = await resolveJavaPath(created, { javaInstallRoots: [fakeInstalledJavaRoot] });
 if (resolvedInstalledJava !== fakeInstalledJava) {
   throw new Error(`Expected installed Temurin Java 8 to beat bundled legacy Java, got ${resolvedInstalledJava}`);
+}
+const profileJava = await minecraftJavaExecutable(resolvedInstalledJava);
+if (profileJava !== fakeInstalledJavaw) {
+  throw new Error(`Expected the Minecraft profile to use the windowless Java 8 executable, got ${profileJava}`);
+}
+const resolvedProfileJavaForInstaller = await resolveJavaPath(created, { javaPath: profileJava });
+if (resolvedProfileJavaForInstaller !== fakeInstalledJava) {
+  throw new Error(`Expected Forge installation to convert javaw.exe back to java.exe, got ${resolvedProfileJavaForInstaller}`);
+}
+await ensureMinecraftLauncherProfile({
+  config: {
+    ...config,
+    minecraftLauncher: {
+      ...config.minecraftLauncher,
+      javaPath: profileJava
+    }
+  },
+  latest,
+  installed: null
+});
+const javaPinnedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+if (javaPinnedProfiles.profiles['a-hard-time-dregora']?.javaDir !== path.resolve(profileJava)) {
+  throw new Error(`Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(javaPinnedProfiles.profiles['a-hard-time-dregora'])}`);
+}
+const managedJavaRoot = path.join(root, 'managed-java-clean-root');
+const managedJavaArchivePath = path.join(root, 'managed-temurin-8.zip');
+const managedJavaArchive = new AdmZip();
+const managedJavaExeName = process.platform === 'win32' ? 'java.exe' : 'java';
+managedJavaArchive.addFile(`temurin-8-clean/bin/${managedJavaExeName}`, Buffer.from('managed Java 8 executable\n'));
+if (process.platform === 'win32') {
+  managedJavaArchive.addFile('temurin-8-clean/bin/javaw.exe', Buffer.from('managed windowless Java 8 executable\n'));
+}
+managedJavaArchive.addFile('temurin-8-clean/release', Buffer.from('JAVA_VERSION="1.8.0_999"\n'));
+managedJavaArchive.writeZip(managedJavaArchivePath);
+const managedProfileJava = await resolveMinecraftProfileJavaPath(
+  { ...created, rootDir: managedJavaRoot },
+  { ...forgePlan, rootDir: managedJavaRoot },
+  {
+    javaPath: 'java',
+    javaRoots: [],
+    javaInstallRoots: [],
+    includeDefaultJavaRoots: false,
+    includeEnvironmentJava: false,
+    javaDownloadUrl: managedJavaArchivePath,
+    javaCacheDir: path.join(managedJavaRoot, '.aht-launcher', 'java')
+  }
+);
+if (!managedProfileJava.includes('temurin-8-clean') || path.basename(managedProfileJava).toLowerCase() !== managedJavaExeName) {
+  throw new Error(`Clean-player managed Java 8 provisioning returned the wrong runtime: ${managedProfileJava}`);
+}
+const managedMinecraftJava = await minecraftJavaExecutable(managedProfileJava);
+if (process.platform === 'win32' && path.basename(managedMinecraftJava).toLowerCase() !== 'javaw.exe') {
+  throw new Error(`Managed Minecraft profile Java did not use javaw.exe: ${managedMinecraftJava}`);
 }
 const fakeJava17Home = path.join(root, 'Program Files', 'Java', 'jdk-17');
 const fakeJava17 = path.join(fakeJava17Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 await fs.mkdir(path.dirname(fakeJava17), { recursive: true });
 await fs.writeFile(fakeJava17, 'java-17');
 await fs.writeFile(path.join(fakeJava17Home, 'release'), 'JAVA_VERSION="17.0.10"\n');
+let macJava17Error = null;
+const macNoJava8Root = path.join(root, 'mac-no-java8-root');
+try {
+  await resolveMinecraftProfileJavaPath(
+    { ...created, rootDir: macNoJava8Root },
+    { ...forgePlan, rootDir: macNoJava8Root },
+    {
+      javaPath: fakeJava17,
+      javaRoots: [],
+      javaInstallRoots: [],
+      includeDefaultJavaRoots: false,
+      includeEnvironmentJava: false,
+      platform: 'darwin',
+      arch: 'arm64'
+    }
+  );
+} catch (error) {
+  macJava17Error = error;
+}
+if (!macJava17Error || !/requires Java 8/i.test(macJava17Error.message || '')) {
+  throw new Error(`macOS Java 17 was not rejected for Forge 1.12.2: ${macJava17Error?.message || 'no error'}`);
+}
 const previousJavaHome = process.env.JAVA_HOME;
 process.env.JAVA_HOME = fakeJava17Home;
 try {
@@ -314,8 +429,7 @@ if (!msaOnlyAuth.signedIn || msaOnlyAuth.accountCount !== 0) {
 }
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const curseForgeVersionId = 'forge-14.23.5.2860';
-await fs.mkdir(path.join(curseForgeRoot, 'versions', curseForgeVersionId), { recursive: true });
-await fs.writeFile(path.join(curseForgeRoot, 'versions', curseForgeVersionId, `${curseForgeVersionId}.json`), '{}');
+await writeForgeInstallationFixture(curseForgeRoot, { versionId: curseForgeVersionId });
 const launcherUiStatePath = path.join(curseForgeRoot, 'launcher_ui_state.json');
 const launcherUiPreamble = '#$\nMinecraft Launcher internal state\n$#\n';
 await fs.writeFile(launcherUiStatePath, `${launcherUiPreamble}${JSON.stringify({
@@ -356,7 +470,7 @@ if (curseForgeProfile.preferredMinecraftUsername !== 'ActiveUser') {
 const curseForgeProfiles = JSON.parse(await fs.readFile(path.join(curseForgeRoot, 'launcher_profiles.json'), 'utf8'));
 const curseForgeProfileJson = curseForgeProfiles.profiles['a-hard-time-dregora'];
 if (
-  !curseForgeProfileJson.javaArgs.includes('-Xmx4096m')
+  !curseForgeProfileJson.javaArgs.includes('-Xmx6144m')
   || !curseForgeProfileJson.javaArgs.includes('-DlibraryDirectory=')
   || !curseForgeProfileJson.javaArgs.includes('-Dfml.ignorePatchDiscrepancies=true')
 ) {
@@ -364,8 +478,7 @@ if (
 }
 
 const syncedMinecraftRoot = path.join(root, 'synced-minecraft-root');
-await fs.mkdir(path.join(syncedMinecraftRoot, 'versions', versionId), { recursive: true });
-await fs.writeFile(path.join(syncedMinecraftRoot, 'versions', versionId, `${versionId}.json`), '{}');
+await writeForgeInstallationFixture(syncedMinecraftRoot, { versionId });
 const syncedConfig = {
   ...curseForgeConfig,
   minecraftLauncher: {
@@ -409,8 +522,7 @@ if (!inspectedMissingProfile || inspectedMissingProfile.loaderInstalled || inspe
 }
 
 const corruptProfileRoot = path.join(root, 'corrupt-profile-root');
-await fs.mkdir(path.join(corruptProfileRoot, 'versions', versionId), { recursive: true });
-await fs.writeFile(path.join(corruptProfileRoot, 'versions', versionId, `${versionId}.json`), '{}', 'utf8');
+await writeForgeInstallationFixture(corruptProfileRoot, { versionId });
 await fs.writeFile(path.join(corruptProfileRoot, 'launcher_profiles.json'), '', 'utf8');
 const corruptProfileConfig = {
   ...config,

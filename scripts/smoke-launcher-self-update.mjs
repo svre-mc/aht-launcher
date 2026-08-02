@@ -151,7 +151,7 @@ await writeJson(appDefaultsPath, {
   latestUrl: `${workerEndpoint}/latest.json`,
   launcherUpdate: { enabled: true, latestUrl: `${workerEndpoint}/launcher/latest.json` },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: '' },
-  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 }
+  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 }
 });
 await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
@@ -161,7 +161,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: 'SmokeUser' },
   developer: { adminBaseUrl: workerEndpoint, defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
   launcherUpdate: { enabled: false, latestUrl: 'https://stale-launcher-feed.invalid/launcher/latest.json' },
-  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
+  minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 },
   playCommand: { command: '', args: [], cwd: path.join(root, 'instance') }
 });
 await writeJson(path.join(userData, 'identity.json'), {
