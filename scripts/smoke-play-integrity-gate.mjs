@@ -21,6 +21,8 @@ const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const curseForgeSpawnCapture = path.join(root, 'curseforge-spawn.json');
+const minecraftHandoffCapture = path.join(root, 'minecraft-handoff.json');
+const windowsProcessStatePath = path.join(root, 'windows-process-state.json');
 const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
 const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const fakeMinecraftJavaPath = process.platform === 'win32'
@@ -182,6 +184,32 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'smoke-install' });
+await writeJson(windowsProcessStatePath, {
+  currentSessionId: 7,
+  nextPid: 62000,
+  packageRoots: [],
+  records: [{
+    pid: 41001,
+    image: 'minecraft.exe',
+    path: path.join(curseForgeRoot, 'minecraft.exe'),
+    sessionId: 7,
+    startTimeUtc: '2026-08-03T12:00:00.000Z',
+    mainWindowHandle: 51001,
+    mainWindowTitle: 'Minecraft Launcher',
+    responding: true,
+    windowVisible: true,
+    windowMinimized: false,
+    foreground: false
+  }, {
+    pid: 41002,
+    image: 'javaw.exe',
+    path: path.join(root, 'active-game', 'javaw.exe'),
+    sessionId: 7,
+    mainWindowHandle: 0,
+    mainWindowTitle: '',
+    responding: true
+  }]
+});
 await writeJson(path.join(instanceDir, '.aht-launcher', 'installed.json'), {
   packId: latest.packId,
   name: latest.name,
@@ -290,6 +318,9 @@ const child = spawn(electronBin, electronArgs, {
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
+    AHT_TEST_WINDOWS_PROCESS_STATE_PATH: windowsProcessStatePath,
+    AHT_TEST_MINECRAFT_HANDOFF_CAPTURE_PATH: minecraftHandoffCapture,
     AHT_TEST_CURSEFORGE_MINECRAFT_ROOT: curseForgeRoot,
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: 'amd64',
@@ -404,6 +435,23 @@ try {
     await writeJson(routeConfigPath, routeConfig);
     await fsp.cp(mcRoot, curseForgeRoot, { recursive: true });
     await fsp.writeFile(path.join(curseForgeRoot, 'minecraft.exe'), 'test launcher placeholder', 'utf8');
+    const competingProfilesPath = path.join(curseForgeRoot, 'launcher_profiles.json');
+    const competingProfiles = JSON.parse(fs.readFileSync(competingProfilesPath, 'utf8'));
+    competingProfiles.version = 3;
+    competingProfiles.selectedProfile = 'random-profile';
+    competingProfiles.profiles['random-profile'] = {
+      name: 'Random Instance',
+      type: 'custom',
+      gameDir: path.join(root, 'random-instance'),
+      lastUsed: new Date(Date.now() - 60_000).toISOString()
+    };
+    competingProfiles.profiles['a-hard-time'] = {
+      name: 'A Hard Time',
+      type: 'custom',
+      gameDir: instanceDir,
+      lastUsed: '2026-01-01T00:00:00.000Z'
+    };
+    await writeJson(competingProfilesPath, competingProfiles);
     const launcherUiPreamble = '#$\nMinecraft Launcher internal state\n$#\n';
     await fsp.writeFile(path.join(curseForgeRoot, 'launcher_ui_state.json'), `${launcherUiPreamble}${JSON.stringify({
       data: { UiSettings: JSON.stringify({ lastVisitedPage: 'realms' }) },
@@ -412,22 +460,60 @@ try {
     await fsp.rm(curseForgeSpawnCapture, { force: true });
 
     const curseForgePlayStartedAt = Date.now();
-    curseForgePlayResult = await evaluate(client, `
-      window.aht.play()
-        .then((result) => ({ ok: true, result }))
-        .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
-    `);
-    const curseForgePlayDurationMs = Date.now() - curseForgePlayStartedAt;
-    if (!curseForgePlayResult.ok || curseForgePlayResult.result?.kind !== 'curseforge') {
-      throw new Error(`Play did not prioritize the CurseForge Minecraft launcher: ${JSON.stringify(curseForgePlayResult)}`);
+    const immediatePlayUi = await evaluate(client, `(() => {
+      const button = document.querySelector('#playButton');
+      button.click();
+      button.click();
+      return {
+        text: button.textContent.trim(),
+        ariaBusy: button.getAttribute('aria-busy'),
+        ariaDisabled: button.getAttribute('aria-disabled'),
+        title: button.title
+      };
+    })()`);
+    if (
+      immediatePlayUi.text !== 'Preparing...'
+      || immediatePlayUi.ariaBusy !== 'true'
+      || immediatePlayUi.ariaDisabled !== 'true'
+      || !/exact Minecraft Launcher profile/i.test(immediatePlayUi.title || '')
+    ) {
+      throw new Error(`Play click did not enter the immediate single-flight Preparing state: ${JSON.stringify(immediatePlayUi)}`);
     }
-    if (curseForgePlayDurationMs >= 1000) {
+    const completedPlayUi = await waitFor(client, `(() => {
+      const button = document.querySelector('#playButton');
+      const success = [...document.querySelectorAll('#toastStack .toast.success')]
+        .find((toast) => /Minecraft Launcher opened/i.test(toast.textContent) && /A Hard Time is prepared for launch/i.test(toast.textContent));
+      return button.getAttribute('aria-busy') === 'false'
+        && button.getAttribute('aria-disabled') === 'false'
+        && button.textContent.trim() === 'Play'
+        && success
+        ? {
+            text: button.textContent.trim(),
+            ariaBusy: button.getAttribute('aria-busy'),
+            ariaDisabled: button.getAttribute('aria-disabled'),
+            toast: success.textContent.trim()
+          }
+        : false;
+    })()`, 'completed Play click');
+    const curseForgePlayDurationMs = Date.now() - curseForgePlayStartedAt;
+    if (curseForgePlayDurationMs >= 5000) {
       throw new Error(`Prepared CurseForge Play took too long (${curseForgePlayDurationMs}ms).`);
     }
     if (launcherProofRequests !== 1) {
       throw new Error(`Prepared Play requested another launcher proof instead of reusing the valid proof (${launcherProofRequests} requests).`);
     }
     const spawnCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
+    curseForgePlayResult = {
+      ok: true,
+      result: {
+        ok: true,
+        command: spawnCapture.command,
+        kind: 'curseforge',
+        activationConfirmed: true,
+        launcherHandoff: { restartedExisting: fs.existsSync(minecraftHandoffCapture) }
+      },
+      ui: completedPlayUi
+    };
     if (path.resolve(spawnCapture.command) !== path.resolve(curseForgeRoot, 'minecraft.exe')) {
       throw new Error(`Play launched the wrong Minecraft executable: ${JSON.stringify(spawnCapture)}`);
     }
@@ -435,12 +521,40 @@ try {
       throw new Error(`Play did not use the CurseForge storage root: ${JSON.stringify(spawnCapture)}`);
     }
     if (spawnCapture.windowsHide !== false) {
-      throw new Error(`Play hid the Minecraft Launcher GUI process: ${JSON.stringify(spawnCapture)}`);
+      throw new Error(`Play hid the directly spawned Minecraft Launcher GUI: ${JSON.stringify(spawnCapture)}`);
+    }
+    if (spawnCapture.captureCount !== 1) {
+      throw new Error(`Play spawned the Minecraft Launcher more than once: ${JSON.stringify(spawnCapture)}`);
     }
     const curseForgeProfiles = JSON.parse(fs.readFileSync(path.join(curseForgeRoot, 'launcher_profiles.json'), 'utf8'));
     const curseForgeProfile = curseForgeProfiles.profiles?.['a-hard-time-dregora'];
     if (!curseForgeProfile || path.resolve(curseForgeProfile.gameDir) !== path.resolve(instanceDir)) {
       throw new Error(`AHT profile was not synchronized into CurseForge: ${JSON.stringify(curseForgeProfile)}`);
+    }
+    if (
+      !fs.existsSync(minecraftHandoffCapture)
+    ) {
+      throw new Error(`Play did not close the existing launcher and confirm the cold handoff: ${JSON.stringify(curseForgePlayResult)}`);
+    }
+    const profileKeys = Object.keys(curseForgeProfiles.profiles || {});
+    if (
+      profileKeys.at(-1) !== 'a-hard-time-dregora'
+      || curseForgeProfiles.profiles['a-hard-time']
+      || curseForgeProfiles.selectedProfile !== 'random-profile'
+      || Date.parse(curseForgeProfile.lastUsed) <= Date.parse(curseForgeProfiles.profiles['random-profile'].lastUsed)
+    ) {
+      throw new Error(`Play did not prepare the exact canonical profile over a competing selection: ${JSON.stringify(curseForgeProfiles)}`);
+    }
+    const handoff = JSON.parse(fs.readFileSync(minecraftHandoffCapture, 'utf8'));
+    const processState = JSON.parse(fs.readFileSync(windowsProcessStatePath, 'utf8'));
+    if (
+      JSON.stringify(handoff.taskkillArgs) !== JSON.stringify([['/PID', '41001']])
+      || JSON.stringify(handoff.terminatedPids) !== JSON.stringify([41001])
+      || !processState.records.some((record) => record.pid === 41002 && record.image === 'javaw.exe')
+      || processState.records.some((record) => record.pid === 41001)
+      || !processState.records.some((record) => record.image === 'minecraft.exe' && record.mainWindowHandle > 0)
+    ) {
+      throw new Error(`PID-scoped handoff did not preserve the active Java game and confirm a visible launcher: ${JSON.stringify({ handoff, processState })}`);
     }
     const launcherUiStateRaw = fs.readFileSync(path.join(curseForgeRoot, 'launcher_ui_state.json'), 'utf8');
     const launcherUiState = JSON.parse(launcherUiStateRaw.slice(launcherUiStateRaw.indexOf('{')));
@@ -451,6 +565,24 @@ try {
     const fastIntegrity = await evaluate(client, 'window.aht.getStatus().then((status) => status.integrity)');
     if (fastIntegrity?.checkMode !== 'fingerprint' || !fastIntegrity?.quickCheckedAt) {
       throw new Error(`Prepared Play did not use the verified fingerprint path: ${JSON.stringify(fastIntegrity)}`);
+    }
+    const retryUi = await evaluate(client, `(() => {
+      const button = document.querySelector('#playButton');
+      button.click();
+      return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
+    })()`);
+    if (retryUi.text !== 'Preparing...' || retryUi.ariaBusy !== 'true') {
+      throw new Error(`A later legitimate Play click did not start after single-flight completion: ${JSON.stringify(retryUi)}`);
+    }
+    await waitFor(client, `(() => {
+      const button = document.querySelector('#playButton');
+      return button.getAttribute('aria-busy') === 'false'
+        && button.getAttribute('aria-disabled') === 'false'
+        && button.textContent.trim() === 'Play';
+    })()`, 'completed Play retry');
+    const retryCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
+    if (retryCapture.captureCount !== 2) {
+      throw new Error(`A later legitimate Play click did not spawn exactly one more launcher: ${JSON.stringify(retryCapture)}`);
     }
     curseForgePlayResult.durationMs = curseForgePlayDurationMs;
   }

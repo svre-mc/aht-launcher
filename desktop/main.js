@@ -52,6 +52,17 @@ import {
   releaseTargetObjectKey,
   releaseTargetOutDir
 } from '../src/releaseTargets.js';
+import {
+  buildWindowsMinecraftProcessSnapshotPowerShell,
+  isKnownWindowsMinecraftLauncher,
+  normalizeWindowsLauncherRecord,
+  windowsLauncherRecordHasUsableWindow,
+  windowsLauncherRecordIdentity,
+  windowsLauncherRecordMatchesAllowedPath,
+  windowsLauncherRecordMatchesTarget,
+  windowsLauncherTaskkillArgs,
+  windowsLauncherWindowIdentity
+} from '../src/windowsMinecraftLauncher.js';
 
 import {
   ensureDir,
@@ -609,6 +620,11 @@ function isDeveloperAuthenticated() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function trustedMinecraftOpenCommandAllowed() {
+  return process.env.AHT_TEST_HOOKS === '1'
+    && process.env.AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND === '1';
 }
 
 function assertDeveloperMode() {
@@ -1191,10 +1207,13 @@ function defaultInstanceDir() {
 
 function configForPack(baseConfig, packValue = 'stable') {
   const target = releaseTarget(packValue);
-  if (target.id === 'stable') return baseConfig;
-  const packSettings = baseConfig.packs?.[target.id] || {};
-  const instanceDir = String(packSettings.instanceDir || '').trim() || defaultPtbInstanceDir();
-  const latestUrl = String(packSettings.latestUrl || '').trim() || releaseTargetFeedUrl(baseConfig.latestUrl, target.id);
+  const packSettings = target.id === 'stable' ? {} : (baseConfig.packs?.[target.id] || {});
+  const instanceDir = target.id === 'stable'
+    ? baseConfig.instanceDir
+    : (String(packSettings.instanceDir || '').trim() || defaultPtbInstanceDir());
+  const latestUrl = target.id === 'stable'
+    ? baseConfig.latestUrl
+    : (String(packSettings.latestUrl || '').trim() || releaseTargetFeedUrl(baseConfig.latestUrl, target.id));
   return {
     ...baseConfig,
     packId: target.packId,
@@ -1275,8 +1294,18 @@ async function firstExistingCurseForgeMinecraftRoot(config = {}) {
 }
 
 async function minecraftLauncherRuntimeConfig(config = {}) {
-  if (config.minecraftLauncher?.openCommand) return config;
-  const configuredRoot = String(config.minecraftLauncher?.rootDir || '').trim();
+  if (trustedMinecraftOpenCommandAllowed() && config.minecraftLauncher?.openCommand) return config;
+  const safeConfig = config.minecraftLauncher?.openCommand
+    ? {
+      ...config,
+      minecraftLauncher: {
+        ...(config.minecraftLauncher || {}),
+        openCommand: '',
+        openArgs: []
+      }
+    }
+    : config;
+  const configuredRoot = String(safeConfig.minecraftLauncher?.rootDir || '').trim();
   const forcedTestRoot = process.env.AHT_TEST_HOOKS === '1'
     ? String(process.env.AHT_TEST_CURSEFORGE_MINECRAFT_ROOT || '').trim()
     : '';
@@ -1284,13 +1313,13 @@ async function minecraftLauncherRuntimeConfig(config = {}) {
     || !configuredRoot
     || samePath(configuredRoot, defaultMinecraftRoot())
     || isCurseForgeMinecraftRoot(configuredRoot);
-  if (!canAutoSelectCurseForge) return config;
-  const curseForgeRoot = await firstExistingCurseForgeMinecraftRoot(config);
-  if (!curseForgeRoot) return config;
+  if (!canAutoSelectCurseForge) return safeConfig;
+  const curseForgeRoot = await firstExistingCurseForgeMinecraftRoot(safeConfig);
+  if (!curseForgeRoot) return safeConfig;
   return {
-    ...config,
+    ...safeConfig,
     minecraftLauncher: {
-      ...(config.minecraftLauncher || {}),
+      ...(safeConfig.minecraftLauncher || {}),
       rootDir: curseForgeRoot,
       syncDefaultRoots: false,
       syncRoots: []
@@ -1385,6 +1414,10 @@ function mergeConfig(defaults, stored) {
   if (merged.minecraftLauncher?.profileName === 'A Hard Time Dregora') {
     merged.minecraftLauncher.profileName = 'A Hard Time';
   }
+  if (!trustedMinecraftOpenCommandAllowed()) {
+    merged.minecraftLauncher.openCommand = '';
+    merged.minecraftLauncher.openArgs = [];
+  }
   merged.serverTransfer.remoteDir = serverTransferParentDir(
     merged.serverTransfer.remoteDir,
     merged.serverTransfer.sourceDir
@@ -1452,6 +1485,9 @@ async function loadConfig() {
   const stored = await readJsonFile(file);
   const config = mergeConfig(defaults, stored);
   let changed = false;
+  if (!trustedMinecraftOpenCommandAllowed() && String(stored.minecraftLauncher?.openCommand || '').trim()) {
+    changed = true;
+  }
   if (!isDeveloperMode() && ('developer' in (stored || {}) || 'serverTransfer' in (stored || {}))) {
     changed = true;
   }
@@ -1559,6 +1595,10 @@ async function saveConfig(nextConfig) {
     minecraftLauncher: { ...current.minecraftLauncher, ...nextConfig.minecraftLauncher },
     playCommand: { ...current.playCommand, ...nextConfig.playCommand }
   };
+  if (!trustedMinecraftOpenCommandAllowed()) {
+    merged.minecraftLauncher.openCommand = '';
+    merged.minecraftLauncher.openArgs = [];
+  }
   merged.serverTransfer.remoteDir = serverTransferParentDir(
     merged.serverTransfer.remoteDir,
     merged.serverTransfer.sourceDir
@@ -2790,7 +2830,16 @@ function minecraftLaunchResultForRenderer(result = {}) {
     ok: Boolean(result.ok),
     command: String(result.command || ''),
     args: Array.isArray(result.args) ? result.args.map((arg) => String(arg)) : [],
-    kind: String(result.kind || '')
+    kind: String(result.kind || ''),
+    activationMode: String(result.activationMode || ''),
+    activationConfirmed: Boolean(result.activationConfirmed)
+  };
+}
+
+function minecraftLauncherHandoffForRenderer(handoff = {}) {
+  return {
+    restartedExisting: Boolean(handoff.detected && handoff.closed),
+    profileReloadPrepared: Boolean(handoff.closed || !handoff.detected)
   };
 }
 
@@ -3901,13 +3950,15 @@ function spawnLogged(command, args, options = {}) {
       shell: needsWindowsShell,
       windowsHide: true
     });
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
     let timedOut = false;
     const timer = timeoutMs > 0 ? setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
     }, timeoutMs) : null;
     const record = (chunk) => {
-      const text = chunk.toString();
+      const text = String(chunk);
       lines.push(text);
       if (onOutput) {
         onOutput(text);
@@ -6475,7 +6526,12 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
     : '';
   if (capturePath && path.basename(String(command || '')).toLowerCase() === 'minecraft.exe') {
     fsSync.mkdirSync(path.dirname(capturePath), { recursive: true });
-    fsSync.writeFileSync(capturePath, `${JSON.stringify({ command, args, cwd, windowsHide }, null, 2)}\n`, 'utf8');
+    let captureCount = 1;
+    try {
+      captureCount = (Number(JSON.parse(fsSync.readFileSync(capturePath, 'utf8'))?.captureCount) || 0) + 1;
+    } catch {}
+    fsSync.writeFileSync(capturePath, `${JSON.stringify({ command, args, cwd, windowsHide, captureCount }, null, 2)}\n`, 'utf8');
+    registerTestWindowsLauncherProcess(command);
     return Promise.resolve({ ok: true, command, args, captured: true });
   }
   return new Promise((resolve, reject) => {
@@ -6494,8 +6550,415 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
   });
 }
 
+function spawnCaptured(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const { timeoutMs = 0, ...spawnOptions } = options;
+    const child = spawn(command, args, {
+      ...spawnOptions,
+      shell: false,
+      windowsHide: true
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+    let timedOut = false;
+    const timer = timeoutMs > 0 ? setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, timeoutMs) : null;
+    child.on('error', (error) => {
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s\n${stderr || stdout}`));
+      } else if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(`${command} exited with ${code}\n${stderr || stdout}`));
+      }
+    });
+  });
+}
+
 function spawnDetachedGui(command, args = [], cwd = app.getPath('home'), env = process.env) {
+  // This is the actual launcher GUI, not a console helper. SW_HIDE here can
+  // suppress Minecraft Launcher itself on Windows.
   return spawnDetached(command, args, cwd, env, { windowsHide: false });
+}
+
+function windowsSystemExecutable(name) {
+  const windowsRoot = process.env.SystemRoot || 'C:\\Windows';
+  return path.join(windowsRoot, 'System32', name);
+}
+
+function windowsPowerShellExecutable() {
+  return path.join(
+    process.env.SystemRoot || 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe'
+  );
+}
+
+function encodedPowerShell(script) {
+  return Buffer.from(String(script || ''), 'utf16le').toString('base64');
+}
+
+function testWindowsProcessStatePath() {
+  return process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_WINDOWS_PROCESS_STATE_PATH || '').trim()
+    : '';
+}
+
+function readTestWindowsProcessState() {
+  const statePath = testWindowsProcessStatePath();
+  if (!statePath) return null;
+  try {
+    const parsed = JSON.parse(fsSync.readFileSync(statePath, 'utf8'));
+    return {
+      currentSessionId: Number(parsed.currentSessionId) || 1,
+      nextPid: Number(parsed.nextPid) || 62000,
+      packageRoots: Array.isArray(parsed.packageRoots) ? parsed.packageRoots : [],
+      records: Array.isArray(parsed.records) ? parsed.records : []
+    };
+  } catch {
+    return { currentSessionId: 1, nextPid: 62000, packageRoots: [], records: [] };
+  }
+}
+
+function writeTestWindowsProcessState(state) {
+  const statePath = testWindowsProcessStatePath();
+  if (!statePath) return;
+  fsSync.mkdirSync(path.dirname(statePath), { recursive: true });
+  fsSync.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
+function registerTestWindowsLauncherProcess(executablePath) {
+  const state = readTestWindowsProcessState();
+  if (!state) return;
+  const pid = state.nextPid;
+  state.nextPid += 1;
+  state.records = state.records.filter((record) => Number(record.pid) !== pid);
+  state.records.push({
+    pid,
+    image: path.basename(executablePath).toLowerCase(),
+    path: path.resolve(executablePath),
+    sessionId: state.currentSessionId,
+    startTimeUtc: new Date().toISOString(),
+    mainWindowHandle: pid + 1000,
+    mainWindowTitle: 'Minecraft Launcher',
+    responding: true,
+    windowVisible: true,
+    windowMinimized: false,
+    foreground: false
+  });
+  writeTestWindowsProcessState(state);
+}
+
+async function windowsMinecraftLauncherProcessSnapshot() {
+  if (process.platform !== 'win32') return { currentSessionId: -1, packageRoots: [], records: [] };
+  const testState = readTestWindowsProcessState();
+  if (testState) {
+    return {
+      currentSessionId: testState.currentSessionId,
+      packageRoots: testState.packageRoots,
+      records: testState.records.filter(isKnownWindowsMinecraftLauncher).map(normalizeWindowsLauncherRecord)
+    };
+  }
+  const result = await spawnCaptured(windowsPowerShellExecutable(), [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-EncodedCommand',
+    encodedPowerShell(buildWindowsMinecraftProcessSnapshotPowerShell())
+  ], { timeoutMs: 20_000 });
+  const parsed = JSON.parse(String(result.stdout || '').trim() || '{}');
+  return {
+    currentSessionId: Number(parsed.currentSessionId),
+    packageRoots: Array.isArray(parsed.packageRoots) ? parsed.packageRoots.map((root) => path.resolve(root)) : [],
+    records: (Array.isArray(parsed.records) ? parsed.records : []).filter(isKnownWindowsMinecraftLauncher).map(normalizeWindowsLauncherRecord)
+  };
+}
+
+function windowsDesktopMinecraftLauncherCandidates() {
+  return [
+    process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe') : ''
+  ].filter(Boolean).map((candidate) => path.resolve(candidate));
+}
+
+function windowsMinecraftLauncherAllowedPaths(config = {}) {
+  const configuredRoot = String(config.minecraftLauncher?.rootDir || '').trim();
+  return [
+    configuredRoot ? path.join(configuredRoot, 'minecraft.exe') : '',
+    ...windowsDesktopMinecraftLauncherCandidates()
+  ].filter(Boolean).map((candidate) => path.resolve(candidate));
+}
+
+function launcherRecordLabel(record = {}) {
+  const normalized = normalizeWindowsLauncherRecord(record);
+  return `${normalized.image || 'unknown'} PID ${normalized.pid || '?'}${normalized.path ? ` at ${normalized.path}` : ' with an unreadable path'}`;
+}
+
+async function terminateTestWindowsLauncherRecord(record) {
+  const state = readTestWindowsProcessState();
+  if (!state) return false;
+  const before = state.records.length;
+  state.records = state.records.filter((candidate) => Number(candidate.pid) !== Number(record.pid));
+  writeTestWindowsProcessState(state);
+  return state.records.length !== before;
+}
+
+async function closeWindowsMinecraftLaunchersForProfileReload(config = {}) {
+  const snapshot = await windowsMinecraftLauncherProcessSnapshot();
+  const currentSessionRecords = snapshot.records.filter((record) => record.sessionId === snapshot.currentSessionId);
+  if (!currentSessionRecords.length) {
+    return { detected: false, closed: false, images: [], sessionId: snapshot.currentSessionId };
+  }
+  const allowedPaths = windowsMinecraftLauncherAllowedPaths(config);
+  const trusted = currentSessionRecords.filter((record) => windowsLauncherRecordMatchesAllowedPath(record, {
+    allowedPaths,
+    allowStore: true,
+    storeRoots: snapshot.packageRoots,
+    sessionId: snapshot.currentSessionId
+  }));
+  const untrusted = currentSessionRecords.filter((record) => !trusted.some((candidate) => candidate.pid === record.pid));
+  if (untrusted.length) {
+    throw new Error(`Close Minecraft Launcher and click Play again. A Hard Time will not close an unverified process: ${untrusted.map(launcherRecordLabel).join('; ')}.`);
+  }
+
+  const capturePath = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_MINECRAFT_HANDOFF_CAPTURE_PATH || '').trim()
+    : '';
+  const terminatedPids = [];
+  for (const record of trusted) {
+    const current = (await windowsMinecraftLauncherProcessSnapshot()).records.find((candidate) => candidate.pid === record.pid);
+    if (!current) continue;
+    if (windowsLauncherRecordIdentity(current) !== windowsLauncherRecordIdentity(record)) {
+      throw new Error(`Minecraft Launcher changed while preparing Play. Close it manually and try again: ${launcherRecordLabel(current)}.`);
+    }
+    try {
+      if (readTestWindowsProcessState()) {
+        await terminateTestWindowsLauncherRecord(record);
+      } else {
+        // PID targeting avoids killing unrelated launchers; never use /T or /F,
+        // because a running Java game must survive and force-close is unsafe.
+        await spawnLogged(windowsSystemExecutable('taskkill.exe'), windowsLauncherTaskkillArgs(record), { timeoutMs: 10_000 });
+      }
+      terminatedPids.push(record.pid);
+    } catch {
+      // The exact readback below distinguishes a normal self-close from refusal.
+    }
+  }
+
+  const deadline = Date.now() + 10_000;
+  let remaining = [];
+  do {
+    const current = await windowsMinecraftLauncherProcessSnapshot();
+    remaining = current.records.filter((record) => currentSessionRecords.some((before) => before.pid === record.pid));
+    if (!remaining.length) break;
+    await sleep(250);
+  } while (Date.now() < deadline);
+  if (remaining.length) {
+    throw new Error(`Minecraft Launcher did not close cleanly. Close it manually and click Play again: ${remaining.map(launcherRecordLabel).join('; ')}.`);
+  }
+  // Require a quiet interval before the final readback so an updater respawn
+  // cannot slip between the check and the profile write.
+  await sleep(500);
+  const postClose = await windowsMinecraftLauncherProcessSnapshot();
+  const reopened = postClose.records.filter((record) => record.sessionId === snapshot.currentSessionId);
+  if (reopened.length) {
+    throw new Error(`Minecraft Launcher reopened while A Hard Time was preparing the selected profile. Close it and click Play again: ${reopened.map(launcherRecordLabel).join('; ')}.`);
+  }
+  if (capturePath) {
+    fsSync.mkdirSync(path.dirname(capturePath), { recursive: true });
+    fsSync.writeFileSync(capturePath, `${JSON.stringify({
+      detected: trusted,
+      action: 'close-for-profile-reload',
+      terminatedPids,
+      taskkillArgs: trusted.map((record) => windowsLauncherTaskkillArgs(record))
+    }, null, 2)}\n`, 'utf8');
+  }
+  return {
+    detected: true,
+    closed: true,
+    images: trusted.map((record) => record.image),
+    pids: trusted.map((record) => record.pid),
+    sessionId: snapshot.currentSessionId,
+    storeRoots: snapshot.packageRoots
+  };
+}
+
+async function prepareMinecraftLauncherForPlay(config = {}) {
+  if (trustedMinecraftOpenCommandAllowed() && config.minecraftLauncher?.openCommand) {
+    return { detected: false, closed: false, images: [], sessionId: -1 };
+  }
+  if (process.platform === 'win32') {
+    return closeWindowsMinecraftLaunchersForProfileReload(config);
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const output = await spawnLogged('/usr/bin/pgrep', [
+        '-f',
+        'Minecraft( Launcher)?[.]app/Contents/MacOS|com[.]mojang[.]minecraftlauncher'
+      ], { timeoutMs: 5_000 });
+      if (String(output || '').trim()) {
+        throw new Error('Close Minecraft Launcher and click Play again so A Hard Time can reload the exact profile.');
+      }
+    } catch (error) {
+      if (/Close Minecraft Launcher/.test(String(error?.message || ''))) throw error;
+      // pgrep exits 1 when no matching launcher exists.
+    }
+  }
+  return { detected: false, closed: false, images: [], sessionId: -1 };
+}
+
+async function assertMinecraftLauncherStayedClosedForProfileWrite(handoff = {}) {
+  if (process.platform !== 'win32' || Number(handoff.sessionId) < 0) return;
+  await sleep(250);
+  const snapshot = await windowsMinecraftLauncherProcessSnapshot();
+  const reopened = snapshot.records.filter((record) => record.sessionId === Number(handoff.sessionId));
+  if (reopened.length) {
+    throw new Error(`Minecraft Launcher reopened before the selected A Hard Time profile was ready. Close it and click Play again: ${reopened.map(launcherRecordLabel).join('; ')}.`);
+  }
+}
+
+async function focusWindowsMinecraftLauncher(record) {
+  if (process.platform !== 'win32') return { focused: true, visible: true, minimized: false, foregroundPid: Number(record?.pid) || 0 };
+  const testState = readTestWindowsProcessState();
+  if (testState) {
+    const target = testState.records.find((candidate) => Number(candidate.pid) === Number(record?.pid));
+    if (!target || target.focusAllowed === false) {
+      return { focused: false, visible: Boolean(target?.windowVisible), minimized: Boolean(target?.windowMinimized), foregroundPid: 0 };
+    }
+    for (const candidate of testState.records) candidate.foreground = false;
+    target.windowVisible = true;
+    target.windowMinimized = false;
+    target.foreground = true;
+    writeTestWindowsProcessState(testState);
+    return { focused: true, visible: true, minimized: false, foregroundPid: Number(target.pid) };
+  }
+  const pid = Number(record?.pid);
+  if (!pid) return { focused: false, visible: false, minimized: false, foregroundPid: 0 };
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    '$utf8 = New-Object System.Text.UTF8Encoding($false)',
+    '[Console]::OutputEncoding = $utf8',
+    '$OutputEncoding = $utf8',
+    "Add-Type -TypeDefinition @'",
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'public static class AhtWindowFocus {',
+    '  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);',
+    '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);',
+    '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);',
+    '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);',
+    '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+    '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);',
+    '}',
+    "'@",
+    `$process = Get-Process -Id ${pid} -ErrorAction Stop`,
+    '$handle = [IntPtr]$process.MainWindowHandle',
+    'if ($handle -eq [IntPtr]::Zero) { throw "Minecraft Launcher has no main window." }',
+    '[void][AhtWindowFocus]::ShowWindowAsync($handle, 9)',
+    '$activated = [bool][AhtWindowFocus]::SetForegroundWindow($handle)',
+    'if (-not $activated) {',
+    '  $shell = New-Object -ComObject WScript.Shell',
+    '  $activated = [bool]$shell.AppActivate($process.Id)',
+    '}',
+    'Start-Sleep -Milliseconds 150',
+    '$foregroundHandle = [AhtWindowFocus]::GetForegroundWindow()',
+    '$foregroundPid = [uint32]0',
+    'if ($foregroundHandle -ne [IntPtr]::Zero) { [void][AhtWindowFocus]::GetWindowThreadProcessId($foregroundHandle, [ref]$foregroundPid) }',
+    '[pscustomobject]@{',
+    '  focused = [bool]($activated -and $foregroundPid -eq [uint32]$process.Id)',
+    '  visible = [bool][AhtWindowFocus]::IsWindowVisible($handle)',
+    '  minimized = [bool][AhtWindowFocus]::IsIconic($handle)',
+    '  foregroundPid = [int]$foregroundPid',
+    '} | ConvertTo-Json -Compress'
+  ].join('\n');
+  try {
+    const result = await spawnCaptured(windowsPowerShellExecutable(), [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      encodedPowerShell(script)
+    ], { timeoutMs: 10_000 });
+    return JSON.parse(String(result.stdout || '').trim() || '{}');
+  } catch {
+    return { focused: false, visible: false, minimized: false, foregroundPid: 0 };
+  }
+}
+
+async function confirmWindowsMinecraftLauncherActivation(result, target = {}, timeoutMs = 20_000) {
+  if (process.platform !== 'win32') {
+    return { ...result, activationConfirmed: true };
+  }
+  const deadline = Date.now() + timeoutMs;
+  let stableIdentity = '';
+  let stableSince = 0;
+  let lastSeen = [];
+  while (Date.now() < deadline) {
+    const snapshot = await windowsMinecraftLauncherProcessSnapshot();
+    const scopedTarget = {
+      ...target,
+      sessionId: target.sessionId ?? snapshot.currentSessionId,
+      storeRoots: target.storeRoots?.length ? target.storeRoots : snapshot.packageRoots
+    };
+    lastSeen = snapshot.records.filter((record) => windowsLauncherRecordMatchesTarget(record, scopedTarget));
+    const candidate = lastSeen.find(windowsLauncherRecordHasUsableWindow);
+    if (candidate) {
+      const identity = windowsLauncherWindowIdentity(candidate);
+      if (identity !== stableIdentity) {
+        stableIdentity = identity;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= 750) {
+        const focusResult = await focusWindowsMinecraftLauncher(candidate);
+        const focusReadback = await windowsMinecraftLauncherProcessSnapshot();
+        const focusedCandidate = focusReadback.records.find((current) => windowsLauncherRecordIdentity(current) === windowsLauncherRecordIdentity(candidate));
+        const visibleAndFocused = Boolean(
+          focusResult.focused
+          && focusResult.visible
+          && !focusResult.minimized
+          && Number(focusResult.foregroundPid) === candidate.pid
+          && focusedCandidate?.windowVisible
+          && !focusedCandidate?.windowMinimized
+          && focusedCandidate?.foreground
+        );
+        if (!visibleAndFocused) {
+          throw new Error('Minecraft Launcher opened, but Windows did not make its window visible and active. Close Minecraft Launcher and click Play again.');
+        }
+        try {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+        } catch {}
+        return {
+          ...result,
+          activationConfirmed: true,
+          visibilityConfirmed: true,
+          focusRequested: true,
+          processImage: candidate.image,
+          processPid: candidate.pid,
+          processPath: candidate.path
+        };
+      }
+    } else {
+      stableIdentity = '';
+      stableSince = 0;
+    }
+    await sleep(250);
+  }
+  const detail = lastSeen.length ? ` Found ${lastSeen.map(launcherRecordLabel).join('; ')}, but it did not present a responsive window.` : '';
+  throw new Error(`Minecraft Launcher did not open a usable window.${detail} Repair or reinstall Minecraft Launcher, then click Play again.`);
 }
 
 async function existingLaunchCwd(preferred = '') {
@@ -6556,21 +7019,34 @@ async function openMacMinecraftLauncher(cwd, env) {
   throw new Error(`Minecraft Launcher could not be opened on macOS.${lastError ? ` ${lastError.message}` : ''}`);
 }
 
-async function openWindowsStoreMinecraftLauncher(cwd, env) {
+async function openWindowsStoreMinecraftLauncher(cwd, env, sessionId = -1, storeRoots = []) {
   const appTarget = 'shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft';
   const explorer = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe') : 'explorer.exe';
+  const target = { kind: 'store', sessionId, storeRoots };
+  let explorerError = null;
   try {
-    return await spawnDetached(explorer, [appTarget], cwd, env);
-  } catch (explorerError) {
-    const commandPrompt = process.env.ComSpec || (process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
-    try {
-      return await spawnDetached(commandPrompt, ['/d', '/s', '/c', 'start', '""', appTarget], cwd, env);
-    } catch (startError) {
-      throw new Error(`Minecraft Launcher could not be opened. Explorer failed: ${explorerError.message}. Start failed: ${startError.message}`);
-    }
+    const result = await spawnDetached(explorer, [appTarget], cwd, env);
+    return {
+      ...(await confirmWindowsMinecraftLauncherActivation(result, target, 12_000)),
+      kind: 'store',
+      activationMode: 'apps-folder'
+    };
+  } catch (error) {
+    explorerError = error;
+  }
+  const commandPrompt = process.env.ComSpec || (process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
+  try {
+    const result = await spawnDetached(commandPrompt, ['/d', '/s', '/c', 'start', '""', appTarget], cwd, env);
+    return {
+      ...(await confirmWindowsMinecraftLauncherActivation(result, target)),
+      kind: 'store',
+      activationMode: 'hidden-start'
+    };
+  } catch (startError) {
+    throw new Error(`Minecraft Launcher could not be opened. App activation failed: ${explorerError?.message || 'unknown error'}. Hidden fallback failed: ${startError.message}`);
   }
 }
-async function openMinecraftLauncher(config) {
+async function openMinecraftLauncher(config, options = {}) {
   const launcherConfig = await minecraftLauncherRuntimeConfig(config);
   const requestedCwd = launcherConfig.minecraftLauncher?.rootDir || app.getPath('home');
   const cwd = await existingLaunchCwd(requestedCwd);
@@ -6586,7 +7062,10 @@ async function openMinecraftLauncher(config) {
       if (!homePage.ok) {
         console.warn(`Unable to set Minecraft Launcher home page: ${homePage.reason || 'unknown error'}`);
       }
-      const result = await spawnDetachedGui(rootLauncher, ['--workDir', cwd], cwd, env);
+      const result = await confirmWindowsMinecraftLauncherActivation(
+        await spawnDetachedGui(rootLauncher, ['--workDir', cwd], cwd, env),
+        { kind: 'root', executablePath: rootLauncher, sessionId: options.sessionId }
+      );
       return {
         ...result,
         kind: isCurseForgeMinecraftRoot(cwd) ? 'curseforge' : 'configured-root',
@@ -6594,24 +7073,45 @@ async function openMinecraftLauncher(config) {
         homePagePrepared: Boolean(homePage.ok)
       };
     }
-    const candidates = [
-      process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
-      process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Minecraft Launcher', 'MinecraftLauncher.exe') : '',
-      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe') : ''
-    ].filter(Boolean);
+    const candidates = windowsDesktopMinecraftLauncherCandidates();
+    const candidateErrors = [];
     for (const candidate of candidates) {
       if (await pathExists(candidate)) {
-        return spawnDetachedGui(candidate, [], cwd, env);
+        try {
+          return {
+            ...(await confirmWindowsMinecraftLauncherActivation(
+              await spawnDetachedGui(candidate, [], cwd, env),
+              { kind: 'desktop', executablePath: candidate, sessionId: options.sessionId }
+            )),
+            kind: 'desktop'
+          };
+        } catch (error) {
+          const snapshot = await windowsMinecraftLauncherProcessSnapshot();
+          const lingering = snapshot.records.filter((record) => windowsLauncherRecordMatchesTarget(record, {
+            kind: 'desktop',
+            executablePath: candidate,
+            sessionId: options.sessionId ?? snapshot.currentSessionId
+          }));
+          if (lingering.length) {
+            throw new Error(`Minecraft Launcher started from ${candidate} but did not present a usable window. Close or repair that installation before trying again.`);
+          }
+          candidateErrors.push(`${candidate}: ${error.message || error}`);
+        }
       }
     }
-    return openWindowsStoreMinecraftLauncher(cwd, env);
+    try {
+      return await openWindowsStoreMinecraftLauncher(cwd, env, options.sessionId, options.storeRoots || []);
+    } catch (error) {
+      const prior = candidateErrors.length ? ` Desktop attempts: ${candidateErrors.join(' | ')}.` : '';
+      throw new Error(`${error.message || error}${prior}`);
+    }
   }
 
   if (process.platform === 'darwin') {
     return openMacMinecraftLauncher(cwd, env);
   }
 
-  return spawnDetachedGui('minecraft-launcher', [], cwd, env);
+  return spawnDetached('minecraft-launcher', [], cwd, env);
 }
 
 function createWindow() {
@@ -6795,10 +7295,34 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload 
   if (!finalLaunchState.launchReady) {
     throw new Error(finalLaunchState.launchBlockedReason);
   }
-  const launchResult = await openMinecraftLauncher(launcherConfig);
+  const launcherHandoff = await prepareMinecraftLauncherForPlay(launcherConfig);
+  const selectionConfig = profile?.javaPath
+    ? {
+      ...launcherConfig,
+      minecraftLauncher: {
+        ...(launcherConfig.minecraftLauncher || {}),
+        javaPath: profile.javaPath
+      }
+    }
+    : launcherConfig;
+  const selectedProfile = await ensureMinecraftLauncherProfile({
+    config: selectionConfig,
+    latest: launchLatest,
+    installed,
+    selectForPlay: true
+  });
+  if (!selectedProfile.selectionPrepared) {
+    throw new Error(`Minecraft Launcher profile selection could not be prepared for ${target.name}.`);
+  }
+  await assertMinecraftLauncherStayedClosedForProfileWrite(launcherHandoff);
+  const launchResult = await openMinecraftLauncher(launcherConfig, {
+    sessionId: launcherHandoff.sessionId,
+    storeRoots: launcherHandoff.storeRoots || []
+  });
   return {
     ...minecraftLaunchResultForRenderer(launchResult),
-    minecraftProfile: minecraftProfileForRenderer(profile),
+    minecraftProfile: minecraftProfileForRenderer(selectedProfile),
+    launcherHandoff: minecraftLauncherHandoffForRenderer(launcherHandoff),
     launcherProof: launcherProofForRenderer({
       proofFile: launcherProof.proofFile || '',
       trusted: Boolean(launcherProof.trusted),

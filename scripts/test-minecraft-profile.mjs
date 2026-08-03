@@ -88,6 +88,8 @@ const config = {
     syncDefaultRoots: false
   }
 };
+const legacyJavaPath = path.join(root, 'legacy-java', 'bin', process.platform === 'win32' ? 'javaw.exe' : 'java');
+const recentCompetingLastUsed = new Date(Date.now() - 60_000).toISOString();
 
 if (loaderVersionId(latest.minecraft) !== versionId) {
   throw new Error('Forge loader id was not mapped to the expected Minecraft Launcher version id.');
@@ -99,6 +101,25 @@ if (
   throw new Error('Unsafe Minecraft or loader identifiers were accepted for launcher paths.');
 }
 
+await fs.writeFile(path.join(minecraftRoot, 'launcher_profiles.json'), `${JSON.stringify({
+  profiles: {
+    'random-profile': {
+      name: 'A Random Instance',
+      type: 'custom',
+      gameDir: path.join(root, 'random-instance'),
+      lastUsed: recentCompetingLastUsed
+    },
+    'a-hard-time': {
+      name: 'A Hard Time Dregora',
+      type: 'custom',
+      gameDir: path.join(root, 'old-aht-instance'),
+      javaDir: legacyJavaPath,
+      lastUsed: '2026-01-01T00:00:00.000Z'
+    }
+  },
+  selectedProfile: 'random-profile',
+  version: 3
+}, null, 2)}\n`, 'utf8');
 const created = await ensureMinecraftLauncherProfile({ config, latest, installed: null });
 const inspected = await inspectMinecraftLauncherProfile({ config, latest, installed: null });
 const profiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
@@ -113,9 +134,28 @@ if (profile.lastVersionId !== versionId) {
 if (profile.gameDir !== path.resolve(instanceDir)) {
   throw new Error(`Expected gameDir ${path.resolve(instanceDir)}, got ${profile.gameDir}`);
 }
+if (profiles.profiles['a-hard-time'] || profiles.selectedProfile !== 'random-profile') {
+  throw new Error(`Legacy AHT state was not migrated without preserving the unrelated selection: ${JSON.stringify(profiles)}`);
+}
+if (path.resolve(profile.javaDir || '') !== path.resolve(legacyJavaPath)) {
+  throw new Error(`Legacy Java was not preserved during stale-path migration: ${JSON.stringify(profile)}`);
+}
 if (!profile.javaArgs.includes('-Xmx6144m') || !profile.javaArgs.includes('-Daht.launcher.present=true') || !profile.javaArgs.includes('-Daht.launcher.proofFile=')) {
   throw new Error(`Expected RAM and launcher proof args, got ${profile.javaArgs}`);
 }
+const stableSelection = await ensureMinecraftLauncherProfile({ config, latest, installed: null, selectForPlay: true });
+let selectedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+let selectedKeys = Object.keys(selectedProfiles.profiles);
+if (
+  !stableSelection.selectionPrepared
+  || selectedKeys.at(-1) !== 'a-hard-time-dregora'
+  || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) <= Date.parse(selectedProfiles.profiles['random-profile'].lastUsed)
+  || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) > Date.now() + (5 * 60 * 1000)
+  || selectedProfiles.selectedProfile !== 'random-profile'
+) {
+  throw new Error(`Stable Play did not outrank and reinsert the exact profile: ${JSON.stringify(selectedProfiles)}`);
+}
+const selectedStableLastUsed = selectedProfiles.profiles['a-hard-time-dregora'].lastUsed;
 await ensureMinecraftLauncherProfile({
   config: {
     ...config,
@@ -131,6 +171,124 @@ const ramProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launc
 const ramProfile = ramProfiles.profiles['a-hard-time-dregora'];
 if (!ramProfile.javaArgs.includes('-Xmx8192m') || !ramProfile.javaArgs.includes('-Daht.launcher.proofFile=')) {
   throw new Error(`Expected updated RAM and launcher proof args, got ${ramProfile.javaArgs}`);
+}
+if (ramProfile.lastUsed !== selectedStableLastUsed) {
+  throw new Error(`Non-Play profile refresh changed lastUsed from ${selectedStableLastUsed} to ${ramProfile.lastUsed}.`);
+}
+const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
+const ptbConfig = {
+  ...config,
+  instanceDir: ptbInstanceDir,
+  minecraftLauncher: {
+    ...config.minecraftLauncher,
+    profileId: 'a-hard-time-ptb',
+    profileName: 'A Hard Time PTB'
+  }
+};
+await ensureMinecraftLauncherProfile({ config: ptbConfig, latest, installed: null, selectForPlay: true });
+selectedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+selectedKeys = Object.keys(selectedProfiles.profiles);
+const selectedPtbLastUsed = selectedProfiles.profiles['a-hard-time-ptb']?.lastUsed;
+if (selectedKeys.at(-1) !== 'a-hard-time-ptb' || Date.parse(selectedPtbLastUsed) <= Date.parse(selectedStableLastUsed)) {
+  throw new Error(`PTB Play did not switch selection intent from stable: ${JSON.stringify(selectedProfiles)}`);
+}
+await ensureMinecraftLauncherProfile({ config, latest, installed: null, selectForPlay: true });
+selectedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+selectedKeys = Object.keys(selectedProfiles.profiles);
+if (
+  selectedKeys.at(-1) !== 'a-hard-time-dregora'
+  || Date.parse(selectedProfiles.profiles['a-hard-time-dregora']?.lastUsed) <= Date.parse(selectedPtbLastUsed)
+) {
+  throw new Error(`Stable Play did not switch selection intent back from PTB: ${JSON.stringify(selectedProfiles)}`);
+}
+
+const duplicateMigrationRoot = path.join(root, 'duplicate-migration-root');
+const duplicateInstanceDir = path.join(root, 'duplicate-current-instance');
+const duplicateLegacyJava = path.join(root, 'duplicate-legacy-java', 'bin', process.platform === 'win32' ? 'javaw.exe' : 'java');
+await fs.mkdir(duplicateMigrationRoot, { recursive: true });
+await fs.writeFile(path.join(duplicateMigrationRoot, 'launcher_profiles.json'), `${JSON.stringify({
+  profiles: {
+    unrelated: {
+      name: 'Unrelated',
+      gameDir: path.join(root, 'unrelated'),
+      lastUsed: new Date(Date.now() - 120_000).toISOString()
+    },
+    'a-hard-time-dregora': {
+      name: 'A Hard Time',
+      gameDir: duplicateInstanceDir,
+      lastVersionId: versionId,
+      lastUsed: '2026-01-02T00:00:00.000Z'
+    },
+    'a-hard-time': {
+      name: 'A Hard Time Dregora',
+      gameDir: path.join(root, 'duplicate-old-instance'),
+      javaDir: duplicateLegacyJava,
+      lastUsed: '2026-01-01T00:00:00.000Z'
+    }
+  },
+  selectedProfile: 'unrelated',
+  version: 2
+}, null, 2)}\n`, 'utf8');
+const duplicateConfig = {
+  ...config,
+  instanceDir: duplicateInstanceDir,
+  minecraftLauncher: {
+    ...config.minecraftLauncher,
+    rootDir: duplicateMigrationRoot
+  }
+};
+await ensureMinecraftLauncherProfile({ config: duplicateConfig, latest, installed: null });
+let duplicateProfiles = JSON.parse(await fs.readFile(path.join(duplicateMigrationRoot, 'launcher_profiles.json'), 'utf8'));
+if (
+  duplicateProfiles.profiles['a-hard-time']
+  || path.resolve(duplicateProfiles.profiles['a-hard-time-dregora']?.javaDir || '') !== path.resolve(duplicateLegacyJava)
+  || duplicateProfiles.selectedProfile !== 'unrelated'
+) {
+  throw new Error(`Duplicate legacy migration lost Java or unrelated non-Play selection state: ${JSON.stringify(duplicateProfiles)}`);
+}
+await ensureMinecraftLauncherProfile({ config: duplicateConfig, latest, installed: null, selectForPlay: true });
+duplicateProfiles = JSON.parse(await fs.readFile(path.join(duplicateMigrationRoot, 'launcher_profiles.json'), 'utf8'));
+if (
+  duplicateProfiles.selectedProfile !== 'a-hard-time-dregora'
+  || Object.keys(duplicateProfiles.profiles).at(-1) !== 'a-hard-time-dregora'
+  || path.resolve(duplicateProfiles.profiles['a-hard-time-dregora']?.javaDir || '') !== path.resolve(duplicateLegacyJava)
+) {
+  throw new Error(`Legacy launcher selection or Java migration was not prepared correctly: ${JSON.stringify(duplicateProfiles)}`);
+}
+
+const futureTimestampRoot = path.join(root, 'future-timestamp-root');
+await fs.mkdir(futureTimestampRoot, { recursive: true });
+await fs.writeFile(path.join(futureTimestampRoot, 'launcher_profiles.json'), `${JSON.stringify({
+  profiles: {
+    'future-profile': {
+      name: 'Future Profile',
+      gameDir: path.join(root, 'future-profile'),
+      lastUsed: '9999-12-31T23:59:59.999Z'
+    },
+    'invalid-maximum-profile': {
+      name: 'Invalid Maximum Profile',
+      gameDir: path.join(root, 'invalid-maximum-profile'),
+      lastUsed: '+275760-09-13T00:00:00.000Z'
+    }
+  },
+  version: 3
+}, null, 2)}\n`, 'utf8');
+let futureTimestampError = null;
+try {
+  await ensureMinecraftLauncherProfile({
+    config: {
+      ...config,
+      minecraftLauncher: { ...config.minecraftLauncher, rootDir: futureTimestampRoot }
+    },
+    latest,
+    installed: null,
+    selectForPlay: true
+  });
+} catch (error) {
+  futureTimestampError = error;
+}
+if (!/future last-used time/i.test(String(futureTimestampError?.message || ''))) {
+  throw new Error(`Extreme future profile timestamp did not fail closed actionably: ${futureTimestampError?.message || 'no error'}`);
 }
 const expectedUrl = 'https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-14.23.5.2860/forge-1.12.2-14.23.5.2860-installer.jar';
 if (forgeInstallerUrl(latest.minecraft.version, latest.minecraft.modLoaders[0].id) !== expectedUrl) {
@@ -364,11 +522,37 @@ await ensureMinecraftLauncherProfile({
     }
   },
   latest,
-  installed: null
+  installed: null,
+  selectForPlay: true
 });
 const javaPinnedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
 if (javaPinnedProfiles.profiles['a-hard-time-dregora']?.javaDir !== path.resolve(profileJava)) {
   throw new Error(`Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(javaPinnedProfiles.profiles['a-hard-time-dregora'])}`);
+}
+const javaPtbConfig = {
+  ...ptbConfig,
+  minecraftLauncher: {
+    ...ptbConfig.minecraftLauncher,
+    javaPath: profileJava
+  }
+};
+await ensureMinecraftLauncherProfile({ config: javaPtbConfig, latest, installed: null, selectForPlay: true });
+await ensureMinecraftLauncherProfile({
+  config: {
+    ...config,
+    minecraftLauncher: { ...config.minecraftLauncher, javaPath: profileJava }
+  },
+  latest,
+  installed: null,
+  selectForPlay: true
+});
+const javaReversalProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+if (
+  Object.keys(javaReversalProfiles.profiles).at(-1) !== 'a-hard-time-dregora'
+  || path.resolve(javaReversalProfiles.profiles['a-hard-time-dregora']?.javaDir || '') !== path.resolve(profileJava)
+  || path.resolve(javaReversalProfiles.profiles['a-hard-time-ptb']?.javaDir || '') !== path.resolve(profileJava)
+) {
+  throw new Error(`Java 8 did not survive stable to PTB to stable Play selection: ${JSON.stringify(javaReversalProfiles)}`);
 }
 const managedJavaRoot = path.join(root, 'managed-java-clean-root');
 const managedJavaArchivePath = path.join(root, 'managed-temurin-8.zip');

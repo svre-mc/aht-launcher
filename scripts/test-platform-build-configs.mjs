@@ -417,9 +417,9 @@ assert(desktopMain.includes("['-b', 'com.mojang.minecraftlauncher']") && desktop
 assert(desktopMain.includes("['-a', 'Minecraft']") && desktopMain.includes("['-a', 'Minecraft Launcher']"), 'macOS opener must fall back to both Minecraft app names.');
 assert(desktopMain.includes('async function existingLaunchCwd'), 'Minecraft Launcher opener must sanitize missing configured cwd before spawning.');
 assert(desktopMain.includes('const cwd = await existingLaunchCwd(requestedCwd);'), 'Minecraft Launcher opener must use a verified existing cwd.');
-assert(desktopMain.includes('async function openWindowsStoreMinecraftLauncher(cwd, env)'), 'Windows Store Minecraft Launcher opener must be isolated.');
+assert(desktopMain.includes('async function openWindowsStoreMinecraftLauncher('), 'Windows Store Minecraft Launcher opener must be isolated.');
 assert(desktopMain.includes("process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe')"), 'Windows Store opener must use absolute explorer.exe when available.');
-assert(desktopMain.includes('return openWindowsStoreMinecraftLauncher(cwd, env);'), 'Windows play fallback must use the robust Store opener.');
+assert(desktopMain.includes('openWindowsStoreMinecraftLauncher(cwd, env, options.sessionId, options.storeRoots || [])'), 'Windows play fallback must use the robust Store opener with registered package roots.');
 assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = null)'), 'Launcher must gather all synced Minecraft profile roots before installing loaders.');
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');
 assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update and Play must install Forge into synced launcher roots.');

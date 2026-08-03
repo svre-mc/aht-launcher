@@ -302,11 +302,14 @@ try {
     throw new Error(`Player layout should not show a CurseForge Minecraft Launcher root by default: ${JSON.stringify(status.config?.minecraftLauncher)}`);
   }
   const minecraftProfileProof = await waitFor(client, `
-    (() => ({
-      enabled: document.querySelector('#minecraftProfileEnabledInput')?.checked === true,
-      rootDir: document.querySelector('#minecraftRootInput')?.value || '',
-      profileName: document.querySelector('#minecraftProfileNameInput')?.value || ''
-    }))()
+    (() => {
+      const proof = {
+        enabled: document.querySelector('#minecraftProfileEnabledInput')?.checked === true,
+        rootDir: document.querySelector('#minecraftRootInput')?.value || '',
+        profileName: document.querySelector('#minecraftProfileNameInput')?.value || ''
+      };
+      return proof.enabled && proof.rootDir && proof.profileName ? proof : false;
+    })()
   `, 'layout Minecraft profile setting');
   if (
     !minecraftProfileProof.enabled

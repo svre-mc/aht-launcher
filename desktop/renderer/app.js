@@ -788,6 +788,7 @@ let scanProgressHideTimer = null;
 let activeUpdateKind = "";
 let activeTabName = "player";
 let activeSidebarPack = "aht";
+let playBusy = false;
 const packStatusCache = new Map();
 const releaseValidationByTarget = new Map();
 let developerAuthenticated = false;
@@ -2524,6 +2525,17 @@ function eventTypeLabel(type = "") {
   return String(type || "-").replaceAll("_", " ");
 }
 
+function setPlayBusy(busy) {
+  playBusy = Boolean(busy);
+  if (!els.playButton) return;
+  els.playButton.setAttribute("aria-busy", playBusy ? "true" : "false");
+  els.playButton.innerHTML = `<span class="button-icon icon-play" aria-hidden="true"></span>${playBusy ? "Preparing..." : "Play"}`;
+  if (playBusy) {
+    setUnavailable(els.playButton, true);
+    els.playButton.title = "Preparing the exact Minecraft Launcher profile";
+  }
+}
+
 function eventTitle(item) {
   const label = eventTypeLabel(item.event?.type);
   return label === "-" ? "Unknown event" : label.replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -3434,10 +3446,12 @@ function renderStatus(status) {
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
   setUnavailable(els.updateButton, launcherUpdateRequired || Boolean(status.updateBlockedReason) || !status.latest || !status.updateRequired || updateRunning);
-  setUnavailable(els.playButton, launcherUpdateRequired || !status.launchReady || updateRunning);
+  setUnavailable(els.playButton, playBusy || launcherUpdateRequired || !status.launchReady || updateRunning);
   setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
   els.updateButton.title = status.updateBlockedReason || (status.updateRequired ? "Update pack" : "No update available.");
-  els.playButton.title = status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing.");
+  els.playButton.title = playBusy
+    ? "Preparing the exact Minecraft Launcher profile"
+    : (status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing."));
   if (shouldShowUpdateProgress(lastUpdateState)) {
     setProgress(true, estimateProgress(lastUpdateState), updateProgressLabel(lastUpdateState));
   } else {
@@ -3723,7 +3737,7 @@ async function scanFilesForRepair() {
       const updateRunning = Boolean(lastUpdateState?.running);
       const repairNeeded = (lastIntegrityScan?.counts?.corrupted || 0) > 0 || (lastIntegrityScan?.counts?.managed === 0 && Boolean(currentStatus.installed));
       setUnavailable(els.updateButton, Boolean(currentStatus.updateBlockedReason) || !currentStatus.latest || !currentStatus.updateRequired || updateRunning);
-      setUnavailable(els.playButton, !currentStatus.launchReady || updateRunning || repairNeeded);
+      setUnavailable(els.playButton, playBusy || !currentStatus.launchReady || updateRunning || repairNeeded);
     }
     if (scanCompleted) {
       const scanLog = currentLogText();
@@ -3836,25 +3850,30 @@ if (els.downloadsUpdateIconButton) {
     if (!isUnavailable(els.downloadsUpdateIconButton)) openUpdateOptions();
   });
 }
-els.playButton.addEventListener("click", () => {
-  if (!isUnavailable(els.playButton)) {
-    window.aht.play(activeSidebarPack)
-      .then((result) => {
-        const launcherMode = Boolean(result?.minecraftProfile);
-        showToast(
-          launcherMode ? "Minecraft Launcher opened" : "Minecraft Launcher opened",
-          launcherMode ? "The A Hard Time profile is selected. Click Play inside Minecraft Launcher." : "Click Play inside Minecraft Launcher.",
-          "success"
-        );
-      })
-      .catch((error) => {
-        const message = playerSafeErrorMessage(error);
-        setLog(message);
-        showToast("Launch failed", message, "error");
-        refresh()
-          .then(() => setLog(message))
-          .catch(() => {});
-      });
+els.playButton.addEventListener("click", async () => {
+  if (playBusy || isUnavailable(els.playButton)) return;
+  const requestedPackName = activeSidebarPack === "ptb" ? "A Hard Time PTB" : "A Hard Time";
+  setPlayBusy(true);
+  setLog(`Preparing ${requestedPackName} and Minecraft Launcher...`);
+  showToast("Preparing Minecraft Launcher", `Selecting the exact ${requestedPackName} installation.`, "info");
+  try {
+    const result = await window.aht.play(activeSidebarPack);
+    const profileName = result?.minecraftProfile?.profileName || requestedPackName;
+    showToast(
+      "Minecraft Launcher opened",
+      `${profileName} is prepared for launch. Click Play inside Minecraft Launcher.`,
+      "success"
+    );
+  } catch (error) {
+    const message = playerSafeErrorMessage(error);
+    setLog(message);
+    showToast("Launch failed", message, "error");
+    void refresh().then(() => setLog(message)).catch(() => {});
+  } finally {
+    setPlayBusy(false);
+    if (currentStatus) {
+      renderStatus(currentStatus);
+    }
   }
 });
 if (els.openInstanceFromPlayerButton) {

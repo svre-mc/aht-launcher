@@ -153,7 +153,9 @@ await writeJson(defaultsPath, {
     rootDir: minecraftRoot,
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
-    memoryMb: 6144
+    memoryMb: 6144,
+    openCommand: process.env.ComSpec || 'cmd.exe',
+    openArgs: ['/d', '/s', '/c', 'exit', '0']
   }
 });
 
@@ -218,6 +220,9 @@ try {
   if (status.config.minecraftLauncher?.enabled === false) {
     throw new Error(`Fresh player default disabled Minecraft Launcher profile integration: ${JSON.stringify(status.config.minecraftLauncher)}`);
   }
+  if (status.config.minecraftLauncher?.openCommand || status.config.minecraftLauncher?.openArgs?.length) {
+    throw new Error(`Fresh player honored an unsafe persisted Minecraft shell command: ${JSON.stringify(status.config.minecraftLauncher)}`);
+  }
   const launcherRoot = String(status.config.minecraftLauncher?.rootDir || '');
   if (path.resolve(launcherRoot) !== path.resolve(minecraftRoot)) {
     throw new Error(`Fresh player did not keep the isolated Minecraft Launcher root: ${JSON.stringify({ launcherRoot, minecraftRoot, config: status.config.minecraftLauncher })}`);
@@ -237,6 +242,9 @@ try {
   const savedLauncherRoot = String(savedConfig.minecraftLauncher?.rootDir || '');
   if (/curseforge[\\/]+minecraft[\\/]+install/i.test(savedLauncherRoot)) {
     throw new Error(`Saved first-run config persisted a CurseForge launcher root: ${JSON.stringify(savedConfig.minecraftLauncher)}`);
+  }
+  if (savedConfig.minecraftLauncher?.openCommand || savedConfig.minecraftLauncher?.openArgs?.length) {
+    throw new Error(`Saved first-run config persisted an unsafe Minecraft shell command: ${JSON.stringify(savedConfig.minecraftLauncher)}`);
   }
   const appliedSetup = await evaluate(client, `
     window.aht.setupApply().then((result) => ({

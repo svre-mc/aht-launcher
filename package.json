@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.80",
+  "version": "0.1.81",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -16,6 +16,7 @@
     "test:platforms": "node scripts/test-platform-profiles.mjs",
     "test:platform-builds": "node scripts/test-platform-build-configs.mjs",
     "test:profile": "node scripts/test-minecraft-profile.mjs",
+    "test:windows-handoff": "node scripts/test-windows-minecraft-handoff.mjs",
     "test:telemetry": "node scripts/test-worker-telemetry.mjs",
     "test:social-client": "node scripts/test-social-client.mjs",
     "test:social-worker": "node scripts/test-worker-social.mjs",

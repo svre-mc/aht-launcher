@@ -4,6 +4,7 @@ const pureChecks = [
   ['test:platforms'],
   ['test:platform-builds'],
   ['test:profile'],
+  ['test:windows-handoff'],
   ['test:worker'],
   ['test:telemetry'],
   ['test:social-client'],

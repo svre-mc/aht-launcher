@@ -16,6 +16,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-update-play-'));
 const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
+const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
 const mcRoot = path.join(root, '.minecraft');
 const syncedMcRoot = path.join(root, '.minecraft-synced');
 const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
@@ -223,6 +224,12 @@ const legacyLatest = {
     url: `${workerEndpoint}/packs/legacy-curseforge-export.zip`
   }
 };
+const ptbLatest = {
+  ...fullClientLatest,
+  packId: 'a-hard-time-ptb',
+  name: 'A Hard Time PTB',
+  channel: 'ptb'
+};
 let latest = legacyLatest;
 const packRequests = [];
 const registrationRequests = [];
@@ -243,6 +250,12 @@ await writeJson(defaultsPath, {
   sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
   launcherUpdate: { enabled: false, latestUrl: '' },
+  packs: {
+    ptb: {
+      instanceDir: ptbInstanceDir,
+      latestUrl: `${workerEndpoint}/ptb/latest.json`
+    }
+  },
   minecraftLauncher: {
     enabled: true,
     rootDir: mcRoot,
@@ -268,6 +281,12 @@ const server = http.createServer((request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(latest));
+    return;
+  }
+  if (url.pathname === '/ptb/latest.json') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify(ptbLatest));
     return;
   }
   if (url.pathname.startsWith('/packs/')) {
@@ -339,6 +358,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
@@ -454,7 +474,7 @@ try {
     throw new Error('Invalid placeholder Forge metadata was not backed up before repair.');
   }
   const profiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
-  const profile = profiles.profiles?.['a-hard-time'];
+  const profile = profiles.profiles?.['a-hard-time-dregora'];
   if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
     throw new Error(`Minecraft Launcher profile was not written for the installed instance: ${JSON.stringify(profile)}`);
   }
@@ -465,7 +485,7 @@ try {
     throw new Error(`Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(profile)}`);
   }
   const syncedProfiles = JSON.parse(fs.readFileSync(path.join(syncedMcRoot, 'launcher_profiles.json'), 'utf8'));
-  const syncedProfile = syncedProfiles.profiles?.['a-hard-time'];
+  const syncedProfile = syncedProfiles.profiles?.['a-hard-time-dregora'];
   if (!syncedProfile || syncedProfile.lastVersionId !== versionId || path.resolve(syncedProfile.gameDir) !== path.resolve(instanceDir)) {
     throw new Error(`Synced Minecraft Launcher profile was not written for the installed instance: ${JSON.stringify(syncedProfile)}`);
   }
@@ -507,19 +527,116 @@ try {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
   }
 
+  const stableAfterFirstPlay = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
+  const stableFirstLastUsed = stableAfterFirstPlay.profiles?.['a-hard-time-dregora']?.lastUsed;
+  await fsp.cp(instanceDir, ptbInstanceDir, { recursive: true });
+  const ptbInstalledPath = path.join(ptbInstanceDir, '.aht-launcher', 'installed.json');
+  const ptbInstalled = JSON.parse(fs.readFileSync(ptbInstalledPath, 'utf8'));
+  ptbInstalled.packId = 'a-hard-time-ptb';
+  ptbInstalled.name = 'A Hard Time PTB';
+  await writeJson(ptbInstalledPath, ptbInstalled);
+
+  await fsp.rm(fakeLauncherMarker, { force: true });
+  await evaluate(client, `document.querySelector('#ptbTileButton')?.click(); true`);
+  await waitFor(client, `window.aht.getStatus('ptb').then((status) =>
+    document.querySelector('#ptbTileButton')?.classList.contains('active')
+      && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'
+      && status.launchReady
+      && status.config?.minecraftLauncher?.profileId === 'a-hard-time-ptb'
+  )`, 'installed PTB tile readiness');
+  const ptbClickState = await evaluate(client, `(() => {
+    const button = document.querySelector('#playButton');
+    button.click();
+    return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
+  })()`);
+  if (ptbClickState.text !== 'Preparing...' || ptbClickState.ariaBusy !== 'true') {
+    throw new Error(`Installed PTB tile did not route Play through the busy button path: ${JSON.stringify(ptbClickState)}`);
+  }
+  for (let attempt = 0; attempt < 80 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
+    await sleep(250);
+  }
+  if (!fs.existsSync(fakeLauncherMarker)) {
+    throw new Error('Installed PTB tile Play did not spawn the configured Minecraft Launcher command.');
+  }
+  await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'
+    && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'`, 'installed PTB Play completion');
+  const afterPtbProfiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
+  const syncedAfterPtbProfiles = JSON.parse(fs.readFileSync(path.join(syncedMcRoot, 'launcher_profiles.json'), 'utf8'));
+  const ptbProfile = afterPtbProfiles.profiles?.['a-hard-time-ptb'];
+  const syncedPtbProfile = syncedAfterPtbProfiles.profiles?.['a-hard-time-ptb'];
+  if (
+    Object.keys(afterPtbProfiles.profiles || {}).at(-1) !== 'a-hard-time-ptb'
+    || path.resolve(ptbProfile?.gameDir || '') !== path.resolve(ptbInstanceDir)
+    || path.resolve(ptbProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+    || Date.parse(ptbProfile?.lastUsed || '') <= Date.parse(stableFirstLastUsed || '')
+    || Object.keys(syncedAfterPtbProfiles.profiles || {}).at(-1) !== 'a-hard-time-ptb'
+    || path.resolve(syncedPtbProfile?.gameDir || '') !== path.resolve(ptbInstanceDir)
+    || path.resolve(syncedPtbProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+  ) {
+    throw new Error(`Installed PTB Play did not prepare every launcher root with the exact PTB instance and Java: ${JSON.stringify({ afterPtbProfiles, syncedAfterPtbProfiles })}`);
+  }
+
+  await fsp.rm(fakeLauncherMarker, { force: true });
+  await evaluate(client, `document.querySelector('#gameTileButton')?.click(); true`);
+  await waitFor(client, `window.aht.getStatus('stable').then((status) =>
+    document.querySelector('#gameTileButton')?.classList.contains('active')
+      && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'
+      && status.launchReady
+      && status.config?.minecraftLauncher?.profileId === 'a-hard-time-dregora'
+  )`, 'installed stable tile readiness');
+  const stableClickState = await evaluate(client, `(() => {
+    const button = document.querySelector('#playButton');
+    button.click();
+    return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
+  })()`);
+  if (stableClickState.text !== 'Preparing...' || stableClickState.ariaBusy !== 'true') {
+    throw new Error(`Installed stable tile did not route Play through the busy button path: ${JSON.stringify(stableClickState)}`);
+  }
+  for (let attempt = 0; attempt < 80 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
+    await sleep(250);
+  }
+  if (!fs.existsSync(fakeLauncherMarker)) {
+    throw new Error('Installed stable tile Play did not spawn the configured Minecraft Launcher command.');
+  }
+  await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'
+    && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'`, 'installed stable Play completion');
+  const finalProfiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
+  const syncedFinalProfiles = JSON.parse(fs.readFileSync(path.join(syncedMcRoot, 'launcher_profiles.json'), 'utf8'));
+  const finalStableProfile = finalProfiles.profiles?.['a-hard-time-dregora'];
+  const syncedFinalStableProfile = syncedFinalProfiles.profiles?.['a-hard-time-dregora'];
+  if (
+    Object.keys(finalProfiles.profiles || {}).at(-1) !== 'a-hard-time-dregora'
+    || path.resolve(finalStableProfile?.gameDir || '') !== path.resolve(instanceDir)
+    || path.resolve(finalStableProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+    || Date.parse(finalStableProfile?.lastUsed || '') <= Date.parse(ptbProfile?.lastUsed || '')
+    || Object.keys(syncedFinalProfiles.profiles || {}).at(-1) !== 'a-hard-time-dregora'
+    || path.resolve(syncedFinalStableProfile?.gameDir || '') !== path.resolve(instanceDir)
+    || path.resolve(syncedFinalStableProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+  ) {
+    throw new Error(`Installed stable to PTB to stable reversal did not restore every exact stable instance: ${JSON.stringify({ finalProfiles, syncedFinalProfiles })}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
     installedVersion: updateResult.result.installed.version,
     forgeInstallerUrl,
     profile: {
-      id: 'a-hard-time',
+      id: 'a-hard-time-dregora',
       lastVersionId: profile.lastVersionId,
       gameDir: profile.gameDir,
       syncedRoot: syncedMcRoot
     },
     cleanScanUi,
     launchCommand: playResult.result.command,
+    profileSwitch: {
+      stable: 'a-hard-time-dregora',
+      ptb: 'a-hard-time-ptb',
+      final: Object.keys(finalProfiles.profiles || {}).at(-1),
+      stableGameDir: finalStableProfile.gameDir,
+      ptbGameDir: ptbProfile.gameDir,
+      javaDir: finalStableProfile.javaDir
+    },
     proofSource: proof.source
   }, null, 2));
 } finally {

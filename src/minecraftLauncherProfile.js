@@ -886,38 +886,137 @@ export async function inspectMinecraftLauncherProfile(options) {
   return profileState(options);
 }
 
-async function writeMinecraftLauncherProfile(state) {
+const LEGACY_STABLE_PROFILE_NAMES = new Set(['A Hard Time', 'A Hard Time Dregora']);
+const PROFILE_CLOCK_SKEW_LIMIT_MS = 5 * 60 * 1000;
+
+function isExactLegacyStableProfile(profile = {}, state = {}) {
+  return state.profileId === 'a-hard-time-dregora'
+    && LEGACY_STABLE_PROFILE_NAMES.has(String(profile.name || '').trim());
+}
+
+function validAbsoluteJavaDir(profile = {}) {
+  const javaDir = String(profile.javaDir || '').trim();
+  return javaDir && path.isAbsolute(javaDir) ? path.resolve(javaDir) : '';
+}
+
+function nextProfileSelectionTimestamp(profiles = {}, nowMs = Date.now()) {
+  const safeNow = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const upperBound = safeNow + PROFILE_CLOCK_SKEW_LIMIT_MS;
+  let latestTimestamp = safeNow;
+  for (const profile of Object.values(profiles || {})) {
+    const timestamp = Date.parse(String(profile?.lastUsed || ''));
+    if (Number.isFinite(timestamp) && timestamp >= latestTimestamp && timestamp <= upperBound) {
+      latestTimestamp = timestamp;
+    }
+  }
+  return new Date(Math.min(upperBound, latestTimestamp + 1)).toISOString();
+}
+
+function updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable, selectForPlay }) {
+  const ownsSelection = Object.prototype.hasOwnProperty.call(profiles, 'selectedProfile');
+  const selectedProfile = String(profiles.selectedProfile || '').trim();
+  const schemaVersion = Number(profiles.version);
+  const legacySelectionSchema = Number.isFinite(schemaVersion) && schemaVersion > 0 && schemaVersion < 3;
+  if (ownsSelection && (
+    selectedProfile === state.profileId
+    || (migrateLegacyStable && selectedProfile === 'a-hard-time')
+  )) {
+    if (legacySelectionSchema) {
+      profiles.selectedProfile = state.profileId;
+    } else {
+      delete profiles.selectedProfile;
+    }
+  }
+  if (selectForPlay && legacySelectionSchema) {
+    profiles.selectedProfile = state.profileId;
+  }
+}
+
+async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = {}) {
   await ensureDir(state.rootDir);
   const profiles = await readProfiles(state.profilesPath);
   profiles.profiles = profiles.profiles && typeof profiles.profiles === 'object' ? profiles.profiles : {};
 
   const now = new Date().toISOString();
-  const existing = profiles.profiles[state.profileId] || {};
+  const canonical = profiles.profiles[state.profileId];
+  const legacyStable = profiles.profiles['a-hard-time'];
+  const migrateLegacyStable = isExactLegacyStableProfile(legacyStable, state);
+  const legacyJavaDir = migrateLegacyStable ? validAbsoluteJavaDir(legacyStable) : '';
+  const existing = canonical || (migrateLegacyStable ? legacyStable : {});
   const next = {
     ...existing,
     name: state.profileName,
     type: 'custom',
     created: existing.created || now,
-    lastUsed: now,
     lastVersionId: state.versionId,
     gameDir: path.resolve(state.gameDir)
   };
+  if (!validAbsoluteJavaDir(next) && legacyJavaDir) {
+    next.javaDir = legacyJavaDir;
+  }
+  if (!String(next.lastUsed || '').trim()) {
+    next.lastUsed = '1970-01-01T00:00:00.000Z';
+  }
+  let selectedAt = '';
+  if (selectForPlay) {
+    selectedAt = nextProfileSelectionTimestamp(profiles.profiles);
+    next.lastUsed = selectedAt;
+  }
   if (state.javaArgs) {
     next.javaArgs = state.javaArgs;
   }
   if (state.javaPath && path.isAbsolute(state.javaPath)) {
     next.javaDir = path.resolve(state.javaPath);
   }
+  if (migrateLegacyStable) {
+    delete profiles.profiles['a-hard-time'];
+  }
+  if (selectForPlay) {
+    // Mojang 3.x selects the newest pre-launch profile. Reinsert it last just
+    // as CurseForge does; the helper below removes only AHT-owned legacy
+    // selectedProfile state while preserving unrelated launcher state.
+    delete profiles.profiles[state.profileId];
+  }
   profiles.profiles[state.profileId] = next;
-  profiles.selectedProfile = state.profileId;
+  updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable, selectForPlay });
   await writeJsonFile(state.profilesPath, profiles);
+  const written = await readProfiles(state.profilesPath);
+  const writtenProfile = written.profiles?.[state.profileId];
+  const writtenKeys = Object.keys(written.profiles || {});
+  const writtenSchemaVersion = Number(written.version);
+  const writtenUsesLegacySelection = Number.isFinite(writtenSchemaVersion)
+    && writtenSchemaVersion > 0
+    && writtenSchemaVersion < 3;
+  const selectedTimestamp = Date.parse(selectedAt);
+  const newerCompetitors = Object.entries(written.profiles || {}).filter(([profileId, profile]) => {
+    if (profileId === state.profileId) return false;
+    const timestamp = Date.parse(String(profile?.lastUsed || ''));
+    return Number.isFinite(timestamp) && Number.isFinite(selectedTimestamp) && timestamp > selectedTimestamp;
+  });
+  const selectionPrepared = Boolean(selectForPlay
+    && writtenProfile
+    && launcherRootKey(writtenProfile.gameDir) === launcherRootKey(state.gameDir)
+    && String(writtenProfile.lastVersionId || '') === String(state.versionId || '')
+    && String(writtenProfile.lastUsed || '') === selectedAt
+    && writtenKeys.at(-1) === state.profileId
+    && newerCompetitors.length === 0
+    && (!writtenUsesLegacySelection || String(written.selectedProfile || '') === state.profileId));
+  if (selectForPlay && !selectionPrepared) {
+    if (newerCompetitors.length) {
+      throw new Error(`Minecraft Launcher has another installation with a future last-used time (${newerCompetitors[0][0]}). Correct the computer clock or open that installation once, then click Play again.`);
+    }
+    throw new Error(`Minecraft Launcher profile selection write-back failed for ${state.profileName}.`);
+  }
   return {
     ...state,
-    profileExists: true
+    profileExists: true,
+    selectionPrepared,
+    selectedAt,
+    legacyProfileRemoved: migrateLegacyStable
   };
 }
 
-export async function ensureMinecraftLauncherProfile({ config, latest = null, installed = null }) {
+export async function ensureMinecraftLauncherProfile({ config, latest = null, installed = null, selectForPlay = false }) {
   const roots = minecraftProfileRoots(config);
   const state = await profileStateForRoot({
     config,
@@ -945,11 +1044,11 @@ export async function ensureMinecraftLauncherProfile({ config, latest = null, in
     if (!rootState.versionId) {
       continue;
     }
-    syncedProfiles.push(await writeMinecraftLauncherProfile(rootState));
+    syncedProfiles.push(await writeMinecraftLauncherProfile(rootState, { selectForPlay }));
   }
 
   const primaryProfile = syncedProfiles.find((profile) => launcherRootKey(profile.rootDir) === launcherRootKey(state.rootDir))
-    || await writeMinecraftLauncherProfile(state);
+    || await writeMinecraftLauncherProfile(state, { selectForPlay });
   return {
     ...primaryProfile,
     syncedProfiles,
