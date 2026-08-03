@@ -157,6 +157,18 @@
               </div>
               <button id="settingsAutoSetupButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
             </div>
+            <div id="java8RuntimeCard" class="java-runtime-card warn">
+              <div class="java-runtime-copy">
+                <span id="java8RuntimeState" class="java-runtime-state">Java 8 runtime</span>
+                <strong id="java8RuntimeTitle">Checking this device</strong>
+                <p id="java8RuntimeDetail">Looking for a usable 64-bit Java 8 runtime for Minecraft Forge 1.12.2.</p>
+                <p id="java8MemoryWarning" class="java-runtime-memory-warning" hidden></p>
+              </div>
+              <div class="java-runtime-actions">
+                <label class="switch java-runtime-switch"><input id="java8InstallInput" type="checkbox" aria-describedby="java8RuntimeDetail java8MemoryWarning"><span></span>AHT-managed Adoptium Java 8 (64-bit)</label>
+                <button id="copyLaunchDiagnosticsButton" class="button compact" type="button">Copy launch diagnostics</button>
+              </div>
+            </div>
             <div class="form-grid">
               <label class="span-2 player-technical" hidden>Latest Feed <span class="browse"><input id="latestUrlInput" type="text"><button id="pickLatestButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label class="player-technical" hidden>CurseForge Proxy <input id="proxyUrlInput" type="url"></label>

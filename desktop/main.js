@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import AdmZip from 'adm-zip';
@@ -30,7 +31,13 @@ import {
   minecraftRootCandidates,
   setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
-import { installForgeLoader, minecraftJavaExecutable } from '../src/forgeInstaller.js';
+import {
+  clearJavaRuntimeDetectionCache,
+  detectJava8Runtime,
+  installForgeLoader,
+  minecraftJavaExecutable,
+  preflightJava8Runtime
+} from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
 import { inspectLauncherProof, writeLauncherProof } from '../src/launcherProof.js';
@@ -341,6 +348,124 @@ function recordErrorDiagnostic(channel, error, context = {}) {
   return lastErrorDiagnostic;
 }
 
+function sanitizeMinecraftLauncherLog(text = '') {
+  return String(text || '')
+    .replace(/(--accessToken(?:\s+|=))("[^"]*"|'[^']*'|\S+)/gi, '$1<redacted>')
+    .replace(/("(?:accessToken|clientToken|identityToken|refreshToken)"\s*:\s*)"[^"]*"/gi, '$1"<redacted>"')
+    .replace(/(Authorization\s*:\s*(?:Bearer|XBL3\.0)[^\r\n]*)/gi, 'Authorization: <redacted>');
+}
+
+async function readFileTail(file, maxBytes = 256 * 1024) {
+  const stat = await fs.stat(file);
+  const bytes = Math.max(0, Math.min(stat.size, maxBytes));
+  const handle = await fs.open(file, 'r');
+  try {
+    const buffer = Buffer.alloc(bytes);
+    if (bytes) await handle.read(buffer, 0, bytes, stat.size - bytes);
+    return { stat, text: buffer.toString('utf8') };
+  } finally {
+    await handle.close();
+  }
+}
+
+function launcherVersionSummary(value = null, file = '') {
+  const libraries = Array.isArray(value?.libraries) ? value.libraries : [];
+  const serialized = JSON.stringify(value || {});
+  const incompatibleNullCount = (serialized.match(/"(?:arguments|rules|natives|clientreq|serverreq|extract)":null/gi) || []).length;
+  return {
+    file,
+    id: value?.id || '',
+    inheritsFrom: value?.inheritsFrom || '',
+    mainClass: value?.mainClass || '',
+    minecraftArgumentsPresent: Boolean(String(value?.minecraftArguments || '').trim()),
+    argumentsType: !Object.prototype.hasOwnProperty.call(value || {}, 'arguments')
+      ? 'absent'
+      : (Array.isArray(value.arguments) ? 'array' : (value.arguments === null ? 'null' : typeof value.arguments)),
+    libraryCount: libraries.length,
+    libraryArtifactCount: libraries.filter((item) => String(item?.downloads?.artifact?.path || '').trim()).length,
+    incompatibleNullCount
+  };
+}
+
+async function minecraftRootLaunchDiagnostic(rootDir = '', profileId = '') {
+  const root = String(rootDir || '').trim();
+  if (!root) return null;
+  const result = { rootDir: root, profile: null, versions: [], launcherLog: null };
+  const profilesPath = path.join(root, 'launcher_profiles.json');
+  try {
+    const profiles = await readJsonFile(profilesPath);
+    const profile = profiles?.profiles?.[profileId] || null;
+    if (profile) {
+      result.profile = {
+        profileId,
+        gameDir: profile.gameDir || '',
+        lastVersionId: profile.lastVersionId || '',
+        javaDir: profile.javaDir || '',
+        javaArgs: profile.javaArgs || ''
+      };
+      const versionIds = [...new Set([profile.lastVersionId].filter(Boolean))];
+      for (const versionId of versionIds) {
+        const versionFile = path.join(root, 'versions', versionId, `${versionId}.json`);
+        try {
+          const version = await readJsonFile(versionFile);
+          result.versions.push(launcherVersionSummary(version, versionFile));
+          if (version?.inheritsFrom) {
+            const baseFile = path.join(root, 'versions', version.inheritsFrom, `${version.inheritsFrom}.json`);
+            result.versions.push(launcherVersionSummary(await readJsonFile(baseFile), baseFile));
+          }
+        } catch (error) {
+          result.versions.push({ file: versionFile, error: error.message || String(error) });
+        }
+      }
+    }
+  } catch (error) {
+    result.profileError = error.message || String(error);
+  }
+  const logPath = path.join(root, 'launcher_log.txt');
+  try {
+    const { stat, text } = await readFileTail(logPath);
+    const signalPattern = /No libraries\?!|Parsing version .*forge|\.json\.(?:arguments|libraries)|Starting game in folder|using java executable|Java argument:|Usage: javaw|Process crashed|exit code|crash report/i;
+    const signals = sanitizeMinecraftLauncherLog(text)
+      .split(/\r?\n/)
+      .filter((line) => signalPattern.test(line))
+      .slice(-180);
+    result.launcherLog = {
+      file: logPath,
+      size: stat.size,
+      modifiedAt: stat.mtime.toISOString(),
+      signals
+    };
+  } catch (error) {
+    result.launcherLog = { file: logPath, error: error.message || String(error), signals: [] };
+  }
+  return result;
+}
+
+async function minecraftLaunchDiagnostic(config = null) {
+  if (!config) return null;
+  const runtimeConfig = await minecraftLauncherRuntimeConfig(config).catch(() => config);
+  const minecraft = runtimeConfig.minecraftLauncher || {};
+  const roots = [...new Set([
+    minecraft.rootDir,
+    ...(Array.isArray(minecraft.syncRoots) ? minecraft.syncRoots : []),
+    ...minecraftRootCandidates()
+  ].filter(Boolean).map((item) => path.resolve(item)))];
+  const existingRoots = [];
+  for (const rootDir of roots) {
+    if (await pathExists(rootDir)) existingRoots.push(rootDir);
+  }
+  const rootDiagnostics = [];
+  for (const rootDir of existingRoots.slice(0, 6)) {
+    rootDiagnostics.push(await minecraftRootLaunchDiagnostic(rootDir, minecraft.profileId || 'a-hard-time-dregora'));
+  }
+  return {
+    effectiveRoot: minecraft.rootDir || '',
+    profileId: minecraft.profileId || '',
+    java8Runtime: await java8RuntimeStatus(runtimeConfig, { refresh: true }).catch((error) => ({ usable: false, error: error.message || String(error) })),
+    roots: rootDiagnostics
+  };
+}
+
 async function buildErrorDiagnosticReport(payload = {}) {
   const config = await loadConfig().catch(() => null);
   const report = {
@@ -364,6 +489,7 @@ async function buildErrorDiagnosticReport(payload = {}) {
     },
     lastMainError: lastErrorDiagnostic,
     config: safeConfigForDiagnostic(config),
+    minecraftLaunch: await minecraftLaunchDiagnostic(config).catch((error) => ({ error: error.message || String(error) })),
     operations: {
       update: operationForDiagnostic(updateState),
       launcherUpdate: operationForDiagnostic(launcherUpdateState),
@@ -1020,7 +1146,8 @@ function defaultConfig() {
       rootDir: defaultMinecraftRoot(),
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
-      memoryMb: 6144
+      memoryMb: 6144,
+      java8InstallOverride: null
     },
     playCommand: {
       command: '',
@@ -1483,8 +1610,19 @@ async function refreshMinecraftLauncherProfile(config) {
   }
 
   const launcherConfig = await minecraftLauncherRuntimeConfig(config);
-  const minecraftProfile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
-  return { profileUpdated: true, minecraftProfile };
+  let minecraftProfile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
+  const minecraftAssets = await ensureMinecraftLauncherAssets({
+    config: launcherConfig,
+    latest,
+    installed,
+    profile: minecraftProfile
+  });
+  minecraftProfile = await installMinecraftProfileLoaders(minecraftProfile, {
+    config: launcherConfig,
+    latest,
+    installed
+  });
+  return { profileUpdated: true, minecraftProfile, minecraftAssets };
 }
 
 async function saveSettings(configPatch, packValue = 'stable') {
@@ -1939,6 +2077,15 @@ function validateLatestReleaseFeed(latest, source = 'latest.json') {
   if (missing.length) {
     throw new Error(`Release feed is missing: ${missing.join(', ')}.`);
   }
+  const safeReleaseIdentifier = (value) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(String(value || '').trim());
+  if (latest.minecraft?.version && !safeReleaseIdentifier(latest.minecraft.version)) {
+    throw new Error(`Release feed has an unsafe Minecraft version identifier: ${source}.`);
+  }
+  for (const loader of Array.isArray(latest.minecraft?.modLoaders) ? latest.minecraft.modLoaders : []) {
+    if (!safeReleaseIdentifier(loader?.id)) {
+      throw new Error(`Release feed has an unsafe mod-loader identifier: ${source}.`);
+    }
+  }
   return latest;
 }
 
@@ -2234,6 +2381,8 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
   if (!targets.length) return profile;
   const total = targets.length;
   let selectedJavaPath = String(config.minecraftLauncher?.javaPath || '').trim();
+  let forceManagedJava8 = config.minecraftLauncher?.java8InstallOverride === true;
+  const allowManagedJavaDownload = config.minecraftLauncher?.java8InstallOverride !== false;
   for (const [index, target] of targets.entries()) {
     const installing = !target.loaderInstalled;
     if (operationState) {
@@ -2248,16 +2397,36 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
     const forgeLines = [];
     const result = await installForgeLoader(target, {
       javaPath: selectedJavaPath || target.javaPath || 'java',
+      forceManagedJava8,
+      allowManagedJavaDownload,
       installerUrl: target.loaderInstallerUrl || latest?.minecraft?.forgeInstallerUrl || latest?.minecraft?.loaderInstallerUrl || '',
       verifyLibraries: true,
       logger: { log: (line) => forgeLines.push(String(line)) }
     });
     selectedJavaPath = await minecraftJavaExecutable(result.plan?.javaPath) || selectedJavaPath;
+    forceManagedJava8 = false;
     if (operationState) {
       appendOperationLines(operationState, forgeLines);
       appendOperationLine(operationState, `Forge ${target.versionId} is ready in ${target.rootDir}.`);
     }
   }
+  const javaRuntime = await preflightJava8Runtime(
+    selectedJavaPath,
+    config.minecraftLauncher?.memoryMb || 6144
+  );
+  if (operationState) {
+    appendOperationLine(
+      operationState,
+      `Java preflight passed: ${javaRuntime.vendor || 'Java'} ${javaRuntime.version || '8'} ${javaRuntime.arch || '64-bit'}, ${javaRuntime.heapMb} MB heap.`
+    );
+  }
+  await saveConfig({
+    minecraftLauncher: {
+      javaPath: selectedJavaPath,
+      java8InstallOverride: null
+    }
+  });
+  clearJavaRuntimeDetectionCache();
   const profileConfig = selectedJavaPath
     ? {
       ...config,
@@ -2272,7 +2441,10 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
   if (stillMissing.length) {
     throw new Error(`Forge ${stillMissing[0].versionId} did not appear in all Minecraft Launcher roots: ${minecraftRootSummary(stillMissing)}`);
   }
-  return refreshed;
+  return {
+    ...refreshed,
+    javaRuntime
+  };
 }
 
 function evaluateLaunchState(config, latest, latestError, installed, minecraftProfile = null, integrity = null, options = {}) {
@@ -2284,6 +2456,24 @@ function evaluateLaunchState(config, latest, latestError, installed, minecraftPr
       launchReady: false,
       launchMode: 'none',
       launchBlockedReason: 'Minecraft Launcher profile integration is disabled.'
+    };
+  }
+
+  const java8Runtime = options.java8Runtime || null;
+  if (java8Runtime && !java8Runtime.usable && !java8Runtime.installSupported) {
+    return {
+      playConfigured,
+      launchReady: false,
+      launchMode: 'minecraftLauncher',
+      launchBlockedReason: java8Runtime.reason || 'A usable 64-bit Java 8 runtime was not found on this platform.'
+    };
+  }
+  if (java8Runtime && !java8Runtime.usable && !java8Runtime.installSelected) {
+    return {
+      playConfigured,
+      launchReady: false,
+      launchMode: 'minecraftLauncher',
+      launchBlockedReason: 'A usable 64-bit Java 8 runtime was not found. Enable the Adoptium Java 8 download in Launcher Settings, then run Update.'
     };
   }
 
@@ -2514,6 +2704,53 @@ function configPathForRenderer() {
   return isDeveloperMode() ? configPath() : '';
 }
 
+function managedJavaPath(javaPath = '') {
+  return String(javaPath || '').replace(/\\/g, '/').toLowerCase().includes('/.aht-launcher/java/');
+}
+
+function java8InstallSupported() {
+  return process.platform === 'win32' && process.arch === 'x64';
+}
+
+async function java8RuntimeStatus(config = {}, options = {}) {
+  const minecraft = config.minecraftLauncher || {};
+  const detected = await detectJava8Runtime({ rootDir: minecraft.rootDir || '' }, {
+    javaPath: minecraft.javaPath || '',
+    refresh: Boolean(options.refresh)
+  });
+  const override = typeof minecraft.java8InstallOverride === 'boolean'
+    ? minecraft.java8InstallOverride
+    : null;
+  const installSupported = java8InstallSupported();
+  const recommendedInstall = !detected.usable && installSupported;
+  const installSelected = override === null ? recommendedInstall : override;
+  const totalMemoryMb = Math.floor(os.totalmem() / 1024 / 1024);
+  const freeMemoryMb = Math.floor(os.freemem() / 1024 / 1024);
+  const configuredMemoryMb = Math.max(0, Math.floor(Number(minecraft.memoryMb) || 0));
+  const memoryWarning = configuredMemoryMb && totalMemoryMb && configuredMemoryMb > Math.floor(totalMemoryMb * 0.75)
+    ? `Allocated RAM is ${configuredMemoryMb} MB on a ${totalMemoryMb} MB system. Leave memory for Windows and Minecraft Launcher.`
+    : '';
+  return {
+    usable: Boolean(detected.usable),
+    path: detected.usable ? detected.javaPath : '',
+    version: detected.version || '',
+    vendor: detected.vendor || '',
+    arch: detected.arch || '',
+    is64Bit: Boolean(detected.is64Bit),
+    managed: Boolean(detected.managed || managedJavaPath(detected.javaPath)),
+    reason: detected.reason || '',
+    rejectedReason: detected.rejected?.[0]?.reason || '',
+    installSupported,
+    recommendedInstall,
+    installSelected,
+    installOverride: override,
+    totalMemoryMb,
+    freeMemoryMb,
+    configuredMemoryMb,
+    memoryWarning
+  };
+}
+
 function minecraftProfileForRenderer(profile = null) {
   if (!profile) {
     return profile;
@@ -2593,7 +2830,10 @@ async function getStatus(configOverride = null, packValue = 'stable') {
   }
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
   const launchLatestError = developerClientBypass && installed ? null : latestError;
-  const minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
+  const [minecraftProfile, java8Runtime] = await Promise.all([
+    inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
+    java8RuntimeStatus(launcherConfig)
+  ]);
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
   const updateRequired = !updateBlockedReason && latest && latest.required !== false
@@ -2601,7 +2841,8 @@ async function getStatus(configOverride = null, packValue = 'stable') {
     : false;
   const launchState = evaluateLaunchState(launcherConfig, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
     skipLoaderCheck: true,
-    allowLegacyRelease: developerClientBypass
+    allowLegacyRelease: developerClientBypass,
+    java8Runtime
   });
   const pendingLauncherUpdate = await hydratePendingLauncherUpdateState();
   let launcherUpdate = await readLauncherUpdate(config);
@@ -2650,6 +2891,7 @@ async function getStatus(configOverride = null, packValue = 'stable') {
       : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
     setup: setupForRenderer(await setupRecommendations(config)),
     minecraftProfile: minecraftProfileForRenderer(minecraftProfile),
+    java8Runtime,
     latest,
     latestError,
     updateLogs,
@@ -2724,13 +2966,8 @@ async function runUpdate(forceRepair = false, options = {}) {
           latest: latestAfterInstall,
           installed: result.installed
         });
-        profile = await installMinecraftProfileLoaders(profile, {
-          config: launcherConfig,
-          latest: latestAfterInstall,
-          installed: result.installed,
-          operationState: updateState
-        });
         const assetLines = [];
+        updateState.progress = { phase: 'Repairing Minecraft 1.12.2 runtime', completed: 0, total: 1, percent: 96 };
         result.minecraftAssets = await ensureMinecraftLauncherAssets({
           config: launcherConfig,
           latest: latestAfterInstall,
@@ -2739,6 +2976,12 @@ async function runUpdate(forceRepair = false, options = {}) {
           logger: { log: (line) => assetLines.push(String(line)) }
         });
         appendOperationLines(updateState, assetLines);
+        profile = await installMinecraftProfileLoaders(profile, {
+          config: launcherConfig,
+          latest: latestAfterInstall,
+          installed: result.installed,
+          operationState: updateState
+        });
         result.minecraftProfile = profile;
       } catch (error) {
         throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
@@ -4281,7 +4524,8 @@ function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '', cac
       enabled: true,
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
-      memoryMb: 6144
+      memoryMb: 6144,
+      java8InstallOverride: null
     }
   };
 }
@@ -6511,13 +6755,15 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload 
   }
 
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
-  const [integrity, minecraftProfile] = await Promise.all([
+  const [integrity, minecraftProfile, java8Runtime] = await Promise.all([
     developerClientBypass ? Promise.resolve(null) : scanPlayIntegrity(config, launchLatest),
-    inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed })
+    inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
+    java8RuntimeStatus(launcherConfig)
   ]);
   const initialLaunchState = evaluateLaunchState(launcherConfig, launchLatest, developerClientBypass && installed ? null : latestError, installed, minecraftProfile, integrity, {
     skipLoaderCheck: true,
-    allowLegacyRelease: developerClientBypass
+    allowLegacyRelease: developerClientBypass,
+    java8Runtime
   });
   if (!initialLaunchState.launchReady) {
     throw new Error(initialLaunchState.launchBlockedReason);
@@ -6530,14 +6776,21 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload 
     installed,
     identity
   });
-  let profile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
-  profile = await installMinecraftProfileLoaders(profile, { config: launcherConfig, latest: launchLatest, installed });
-  const [minecraftAssets, launcherProof] = await Promise.all([
-    ensureMinecraftLauncherAssets({ config: launcherConfig, latest: launchLatest, installed, profile }),
-    launcherProofPromise
-  ]);
+  const runtimeRepairPromise = (async () => {
+    let repairedProfile = await ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed });
+    const repairedAssets = await ensureMinecraftLauncherAssets({ config: launcherConfig, latest: launchLatest, installed, profile: repairedProfile });
+    repairedProfile = await installMinecraftProfileLoaders(repairedProfile, { config: launcherConfig, latest: launchLatest, installed });
+    return { profile: repairedProfile, minecraftAssets: repairedAssets };
+  })();
+  const [launcherProofOutcome, runtimeRepairOutcome] = await Promise.allSettled([launcherProofPromise, runtimeRepairPromise]);
+  if (runtimeRepairOutcome.status === 'rejected') throw runtimeRepairOutcome.reason;
+  if (launcherProofOutcome.status === 'rejected') throw launcherProofOutcome.reason;
+  const launcherProof = launcherProofOutcome.value;
+  const runtimeRepair = runtimeRepairOutcome.value;
+  const { profile, minecraftAssets } = runtimeRepair;
   const finalLaunchState = evaluateLaunchState(launcherConfig, launchLatest, null, installed, profile, integrity, {
-    allowLegacyRelease: developerClientBypass
+    allowLegacyRelease: developerClientBypass,
+    java8Runtime: profile.javaRuntime ? { ...java8Runtime, usable: true } : java8Runtime
   });
   if (!finalLaunchState.launchReady) {
     throw new Error(finalLaunchState.launchBlockedReason);

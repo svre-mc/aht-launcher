@@ -1431,6 +1431,7 @@ input:focus-visible {
 
 .settings-feed-card,
 .setup-assistant-card,
+.java-runtime-card,
 .release-check-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 0.7fr);
@@ -1449,6 +1450,10 @@ input:focus-visible {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.java-runtime-card {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, auto);
+}
+
 .release-check-card {
   grid-template-columns: 1fr;
   margin-top: 14px;
@@ -1457,6 +1462,7 @@ input:focus-visible {
 
 .settings-feed-card.ok,
 .setup-assistant-card.ok,
+.java-runtime-card.ok,
 .release-check-card.ok {
   border-color: rgba(126, 211, 33, 0.42);
   background:
@@ -1466,6 +1472,7 @@ input:focus-visible {
 
 .settings-feed-card.bad,
 .setup-assistant-card.bad,
+.java-runtime-card.bad,
 .release-check-card.bad {
   border-color: rgba(255, 75, 67, 0.42);
   background:
@@ -1475,6 +1482,7 @@ input:focus-visible {
 
 .settings-feed-card span,
 .setup-assistant-card span,
+.java-runtime-state,
 .release-check-card span {
   display: block;
   color: var(--muted);
@@ -1485,6 +1493,7 @@ input:focus-visible {
 
 .settings-feed-card strong,
 .setup-assistant-card strong,
+.java-runtime-copy > strong,
 .release-check-card strong {
   display: block;
   min-width: 0;
@@ -1501,6 +1510,7 @@ input:focus-visible {
 
 .settings-feed-card p,
 .setup-assistant-card p,
+.java-runtime-copy p,
 .release-check-card p {
   min-width: 0;
   margin: 0;
@@ -1512,6 +1522,41 @@ input:focus-visible {
 
 .setup-assistant-card p {
   margin-top: 5px;
+}
+
+.java-runtime-copy {
+  min-width: 0;
+}
+
+.java-runtime-copy > strong {
+  white-space: normal;
+}
+
+.java-runtime-copy p {
+  margin-top: 5px;
+}
+
+.java-runtime-copy .java-runtime-memory-warning {
+  margin-top: 8px;
+  color: var(--amber);
+  font-weight: 800;
+}
+
+.java-runtime-actions {
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  min-width: 0;
+}
+
+.java-runtime-switch {
+  justify-self: end;
+  max-width: 330px;
+  line-height: 1.25;
+}
+
+.java-runtime-switch input:disabled + span {
+  opacity: 0.55;
 }
 
 .setup-assistant-card .button {
@@ -3241,12 +3286,22 @@ body.dev-mode .toast {
   .developer-grid,
   .settings-feed-card,
   .setup-assistant-card,
+  .java-runtime-card,
   .release-check-card {
     grid-template-columns: 1fr;
   }
 
   .setup-assistant-card .button {
     justify-self: start;
+  }
+
+  .java-runtime-switch {
+    justify-self: start;
+    max-width: none;
+  }
+
+  .java-runtime-actions {
+    justify-items: start;
   }
 
   .launch-actions {

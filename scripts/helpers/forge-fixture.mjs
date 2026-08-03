@@ -20,6 +20,7 @@ export function forgeVersionJsonFixture(options = {}) {
     id: versionId,
     type: 'release',
     inheritsFrom: minecraftVersion,
+    mainClass: 'net.minecraft.launchwrapper.Launch',
     minecraftArguments: '--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker --versionType Forge',
     libraries: [
       {
@@ -27,6 +28,7 @@ export function forgeVersionJsonFixture(options = {}) {
         downloads: {
           artifact: {
             path: artifactPath,
+            url: `https://example.test/forge-libraries/${artifactPath}`,
             sha1: crypto.createHash('sha1').update(artifactBytes).digest('hex'),
             size: artifactBytes.length
           }

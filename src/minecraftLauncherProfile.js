@@ -2,10 +2,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  downloadToFile,
   ensureDir,
   fetchJson,
+  hashFile,
   pathExists,
   readJsonFile,
+  safeJoin,
   writeJsonFile
 } from './utils.js';
 import { launcherProofJavaArgs, launcherProofPath } from './launcherProof.js';
@@ -81,11 +84,22 @@ export function primaryModLoader(minecraft = {}) {
   return loaders.find((loader) => loader.primary) || loaders[0] || null;
 }
 
+function safeMinecraftIdentifier(value = '') {
+  const text = String(value || '').trim();
+  return Boolean(
+    text
+    && text !== '.'
+    && text !== '..'
+    && text.length <= 128
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text)
+  );
+}
+
 export function loaderVersionId(minecraft = {}) {
   const minecraftVersion = minecraft.version || '';
   const loader = primaryModLoader(minecraft);
   const loaderId = loader?.id || '';
-  if (!minecraftVersion || !loaderId) {
+  if (!safeMinecraftIdentifier(minecraftVersion) || !safeMinecraftIdentifier(loaderId)) {
     return '';
   }
   if (loaderId.startsWith('forge-')) {
@@ -130,14 +144,16 @@ function corruptJsonBackupPath(file = '') {
   return `${file}.aht-corrupt-${stamp}.bak`;
 }
 
+function invalidJsonBackupPath(file = '') {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${file}.aht-invalid-${stamp}.bak`;
+}
+
 async function backupCorruptJson(file = '') {
-  try {
-    if (await pathExists(file)) {
-      await fs.copyFile(file, corruptJsonBackupPath(file));
-    }
-  } catch {
-    // Backups are best-effort; launcher setup should continue with a clean replacement.
-  }
+  if (!(await pathExists(file))) return '';
+  const backupPath = corruptJsonBackupPath(file);
+  await fs.copyFile(file, backupPath);
+  return backupPath;
 }
 
 async function readRepairableJsonFile(file, fallback = null) {
@@ -161,6 +177,7 @@ function loaderVersionIdCandidates(minecraft = {}) {
   const loader = primaryModLoader(minecraft);
   const loaderId = loader?.id || '';
   const minecraftVersion = minecraft.version || '';
+  if (!safeMinecraftIdentifier(minecraftVersion) || !safeMinecraftIdentifier(loaderId)) return [];
   const candidates = [primary];
   if (loaderId?.startsWith('forge-') && minecraftVersion) {
     const forgeVersion = loaderId.slice('forge-'.length);
@@ -199,6 +216,13 @@ function memoryMbFor(config = {}, latest = null, installed = null) {
     return 6144;
   }
   return Math.max(6144, Math.min(32768, Math.round(value / 512) * 512));
+}
+
+async function backupInvalidJson(file = '') {
+  if (!(await pathExists(file))) return '';
+  const backupPath = invalidJsonBackupPath(file);
+  await fs.copyFile(file, backupPath);
+  return backupPath;
 }
 
 function javaArgsFor({ config = {}, latest = null, installed = null, rootDir = '', gameDir = '' }) {
@@ -344,23 +368,236 @@ function minecraftMetadata(latest = null, installed = null) {
   return latest?.minecraft || installed?.minecraft || null;
 }
 
-function validBaseVersionJson(value = null, minecraftVersion = '') {
+const minecraftBaseFileValidationCache = new Map();
+
+function validMinecraftDownloadDescriptor(value = null, { requirePath = false } = {}) {
+  const relativePath = String(value?.path || '').trim().replaceAll('\\', '/');
   return Boolean(
     value
     && typeof value === 'object'
-    && (!minecraftVersion || value.id === minecraftVersion)
-    && value.assetIndex
-    && typeof value.assetIndex === 'object'
-    && value.assetIndex.id
-    && value.assetIndex.url
+    && String(value.url || '').trim()
+    && /^[a-f0-9]{40}$/i.test(String(value.sha1 || '').trim())
+    && Number.isFinite(Number(value.size))
+    && Number(value.size) > 0
+    && (
+      !requirePath
+      || (
+        relativePath
+        && !relativePath.startsWith('/')
+        && !/^[a-z]:/i.test(relativePath)
+        && !relativePath.split('/').includes('..')
+      )
+    )
   );
+}
+
+function minecraftLibraryOsName(platform = process.platform) {
+  if (platform === 'win32') return 'windows';
+  if (platform === 'darwin') return 'osx';
+  return 'linux';
+}
+
+function minecraftLibraryRuleMatches(rule = {}, { platform = process.platform, arch = process.arch, osVersion = os.release() } = {}) {
+  if (rule?.features && Object.keys(rule.features).length) {
+    return false;
+  }
+  const expectedOs = String(rule?.os?.name || '').trim();
+  if (expectedOs && expectedOs !== minecraftLibraryOsName(platform)) {
+    return false;
+  }
+  const expectedArch = String(rule?.os?.arch || '').trim();
+  if (expectedArch) {
+    try {
+      if (!(new RegExp(expectedArch)).test(String(arch || ''))) return false;
+    } catch {
+      return false;
+    }
+  }
+  const expectedVersion = String(rule?.os?.version || '').trim();
+  if (expectedVersion) {
+    try {
+      if (!(new RegExp(expectedVersion)).test(String(osVersion || ''))) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function minecraftLibraryAllowed(library = {}, options = {}) {
+  const rules = Array.isArray(library?.rules) ? library.rules : [];
+  if (!rules.length) return true;
+  let allowed = false;
+  for (const rule of rules) {
+    if (minecraftLibraryRuleMatches(rule, options)) {
+      allowed = rule?.action === 'allow';
+    }
+  }
+  return allowed;
+}
+
+function minecraftNativeClassifier(library = {}, { platform = process.platform, arch = process.arch } = {}) {
+  const template = String(library?.natives?.[minecraftLibraryOsName(platform)] || '').trim();
+  if (!template) return '';
+  const archToken = /(?:64|x64|amd64|aarch64|arm64)/i.test(String(arch || '')) ? '64' : '32';
+  return template.replace('${arch}', archToken);
+}
+
+function minecraftBaseLibraryDownloads(versionJson = null, options = {}) {
+  const downloads = [];
+  const seenPaths = new Set();
+  for (const library of Array.isArray(versionJson?.libraries) ? versionJson.libraries : []) {
+    if (!minecraftLibraryAllowed(library, options)) continue;
+    const name = String(library?.name || 'unnamed Minecraft library').trim();
+    const artifact = library?.downloads?.artifact;
+    if (artifact) {
+      const artifactPath = String(artifact.path || '').trim().replaceAll('\\', '/');
+      if (!seenPaths.has(artifactPath.toLowerCase())) {
+        downloads.push({ name, kind: 'library', descriptor: artifact });
+        seenPaths.add(artifactPath.toLowerCase());
+      }
+    }
+    const nativeClassifier = minecraftNativeClassifier(library, options);
+    if (nativeClassifier) {
+      const nativeArtifact = library?.downloads?.classifiers?.[nativeClassifier];
+      const nativePath = String(nativeArtifact?.path || '').trim().replaceAll('\\', '/');
+      if (!seenPaths.has(nativePath.toLowerCase())) {
+        downloads.push({ name: `${name}:${nativeClassifier}`, kind: 'native', descriptor: nativeArtifact });
+        seenPaths.add(nativePath.toLowerCase());
+      }
+    }
+  }
+  return downloads;
+}
+
+function minecraftBaseVersionMetadataProblem(value = null, minecraftVersion = '', options = {}) {
+  if (!value || typeof value !== 'object') return 'metadata is not an object';
+  if (!safeMinecraftIdentifier(minecraftVersion)) return 'requested Minecraft version id is unsafe';
+  if (minecraftVersion && value.id !== minecraftVersion) return `metadata id is not ${minecraftVersion}`;
+  if (!String(value.mainClass || '').trim()) return 'mainClass is missing';
+  if ('arguments' in value && (!value.arguments || typeof value.arguments !== 'object' || Array.isArray(value.arguments))) {
+    return 'arguments is not an object';
+  }
+  if (!String(value.minecraftArguments || '').trim() && !Array.isArray(value?.arguments?.game)) {
+    return 'launch arguments are missing';
+  }
+  if (
+    !value.assetIndex
+    || typeof value.assetIndex !== 'object'
+    || !safeMinecraftIdentifier(value.assetIndex.id)
+    || !validMinecraftDownloadDescriptor(value.assetIndex)
+  ) {
+    return 'asset index metadata is incomplete';
+  }
+  if (!validMinecraftDownloadDescriptor(value?.downloads?.client)) {
+    return 'client download metadata is incomplete';
+  }
+  const libraries = Array.isArray(value.libraries) ? value.libraries : [];
+  if (!libraries.length) return 'libraries are missing';
+  for (const library of libraries) {
+    const name = String(library?.name || 'unnamed Minecraft library');
+    if (!library || typeof library !== 'object' || Array.isArray(library)) return `${name} is not an object`;
+    if ('clientreq' in library || 'serverreq' in library) return `${name} uses unsupported legacy requirement fields`;
+    if ('rules' in library && !Array.isArray(library.rules)) return `${name} rules is not an array`;
+    if ('natives' in library && (!library.natives || typeof library.natives !== 'object' || Array.isArray(library.natives))) {
+      return `${name} natives is not an object`;
+    }
+    if ('extract' in library && (!library.extract || typeof library.extract !== 'object' || Array.isArray(library.extract))) {
+      return `${name} extract is not an object`;
+    }
+  }
+  const requiredDownloads = minecraftBaseLibraryDownloads(value, options);
+  if (!requiredDownloads.length) return 'required library downloads are missing';
+  for (const library of libraries) {
+    if (!minecraftLibraryAllowed(library, options)) continue;
+    const name = String(library?.name || 'unnamed Minecraft library');
+    const artifact = library?.downloads?.artifact;
+    const nativeClassifier = minecraftNativeClassifier(library, options);
+    if (artifact && !validMinecraftDownloadDescriptor(artifact, { requirePath: true })) {
+      return `${name} library download metadata is incomplete`;
+    }
+    if (
+      nativeClassifier
+      && !validMinecraftDownloadDescriptor(library?.downloads?.classifiers?.[nativeClassifier], { requirePath: true })
+    ) {
+      return `${name}:${nativeClassifier} native download metadata is incomplete`;
+    }
+    if (!artifact && !nativeClassifier) {
+      return `${name} has no required download`;
+    }
+  }
+  return '';
+}
+
+function validBaseVersionJson(value = null, minecraftVersion = '') {
+  return !minecraftBaseVersionMetadataProblem(value, minecraftVersion);
 }
 
 function validAssetIndexJson(value = null) {
   return Boolean(value && typeof value === 'object' && value.objects && typeof value.objects === 'object');
 }
 
+function minecraftBaseTestFixtureDir() {
+  if (process.env.AHT_TEST_HOOKS !== '1') return '';
+  const configured = String(process.env.AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR || '').trim();
+  return configured ? path.resolve(configured) : '';
+}
+
+function resolveMinecraftFixtureUrl(value = '', fixtureDir = '') {
+  const source = String(value || '').trim();
+  if (!source || !fixtureDir || path.isAbsolute(source) || /^[a-z][a-z0-9+.-]*:/i.test(source)) {
+    return source;
+  }
+  return safeJoin(fixtureDir, source.replaceAll('\\', '/'));
+}
+
+function resolveMinecraftFixtureVersionJson(value = null, fixtureDir = '') {
+  if (!value || typeof value !== 'object') return value;
+  return {
+    ...value,
+    assetIndex: value.assetIndex
+      ? { ...value.assetIndex, url: resolveMinecraftFixtureUrl(value.assetIndex.url, fixtureDir) }
+      : value.assetIndex,
+    downloads: value.downloads
+      ? {
+        ...value.downloads,
+        client: value.downloads.client
+          ? { ...value.downloads.client, url: resolveMinecraftFixtureUrl(value.downloads.client.url, fixtureDir) }
+          : value.downloads.client
+      }
+      : value.downloads,
+    libraries: Array.isArray(value.libraries)
+      ? value.libraries.map((library) => ({
+        ...library,
+        downloads: library?.downloads
+          ? {
+            ...library.downloads,
+            artifact: library.downloads.artifact
+              ? { ...library.downloads.artifact, url: resolveMinecraftFixtureUrl(library.downloads.artifact.url, fixtureDir) }
+              : library.downloads.artifact,
+            classifiers: library.downloads.classifiers
+              ? Object.fromEntries(Object.entries(library.downloads.classifiers).map(([name, descriptor]) => [
+                name,
+                descriptor ? { ...descriptor, url: resolveMinecraftFixtureUrl(descriptor.url, fixtureDir) } : descriptor
+              ]))
+              : library.downloads.classifiers
+          }
+          : library?.downloads
+      }))
+      : value.libraries
+  };
+}
+
 async function fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson } = {}) {
+  const fixtureDir = minecraftBaseTestFixtureDir();
+  if (fixtureDir) {
+    const fixtureJsonPath = safeJoin(fixtureDir, `${minecraftVersion}.json`);
+    const fixtureJson = resolveMinecraftFixtureVersionJson(await readJsonFile(fixtureJsonPath), fixtureDir);
+    if (!validBaseVersionJson(fixtureJson, minecraftVersion)) {
+      throw new Error(`AHT Minecraft test fixture returned incomplete Minecraft ${minecraftVersion} metadata.`);
+    }
+    return fixtureJson;
+  }
   const manifest = await fetchJsonImpl(manifestUrl);
   const match = Array.isArray(manifest?.versions)
     ? manifest.versions.find((item) => item?.id === minecraftVersion && item?.url)
@@ -375,33 +612,110 @@ async function fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl = M
   return versionJson;
 }
 
+async function inspectMinecraftBaseFile(file = '', descriptor = null, { refresh = false } = {}) {
+  let stat;
+  try {
+    stat = await fs.stat(file);
+  } catch {
+    return { ok: false, reason: 'file is missing' };
+  }
+  if (!stat.isFile()) return { ok: false, reason: 'path is not a file' };
+  const expectedSize = Number(descriptor?.size);
+  if (stat.size !== expectedSize) {
+    return { ok: false, reason: `size mismatch (${stat.size} != ${expectedSize})` };
+  }
+  const cacheKey = process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+  const cached = minecraftBaseFileValidationCache.get(cacheKey);
+  let actualSha1 = !refresh && cached?.size === stat.size && cached?.mtimeMs === stat.mtimeMs
+    ? cached.sha1
+    : '';
+  if (!actualSha1) {
+    actualSha1 = await hashFile(file, 'sha1');
+    minecraftBaseFileValidationCache.set(cacheKey, { size: stat.size, mtimeMs: stat.mtimeMs, sha1: actualSha1 });
+  }
+  const expectedSha1 = String(descriptor?.sha1 || '').trim().toLowerCase();
+  if (actualSha1.toLowerCase() !== expectedSha1) {
+    return { ok: false, reason: 'SHA-1 mismatch', actualSha1 };
+  }
+  return { ok: true, actualSha1 };
+}
+
+async function ensureMinecraftBaseFile({ file = '', descriptor = null, label = 'Minecraft file', logger = null } = {}) {
+  const existing = await inspectMinecraftBaseFile(file, descriptor);
+  if (existing.ok) return { file, downloaded: false };
+  logger?.log?.(`Repairing ${label} (${existing.reason})`);
+  await downloadToFile(String(descriptor.url), file);
+  const downloaded = await inspectMinecraftBaseFile(file, descriptor, { refresh: true });
+  if (!downloaded.ok) {
+    await fs.rm(file, { force: true }).catch(() => {});
+    throw new Error(`Downloaded ${label} failed integrity validation: ${downloaded.reason}.`);
+  }
+  return { file, downloaded: true };
+}
+
 async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
   if (!rootDir || !minecraftVersion) {
     return { ok: false, skipped: true, reason: 'missing root or Minecraft version', rootDir, minecraftVersion };
   }
+  if (!safeMinecraftIdentifier(minecraftVersion)) {
+    throw new Error(`Refusing unsafe Minecraft version identifier: ${minecraftVersion}`);
+  }
   const actions = [];
-  const versionDir = path.join(rootDir, 'versions', minecraftVersion);
-  const versionJsonPath = path.join(versionDir, `${minecraftVersion}.json`);
+  const versionDir = safeJoin(path.join(rootDir, 'versions'), minecraftVersion);
+  const versionJsonPath = safeJoin(versionDir, `${minecraftVersion}.json`);
   let versionJson = await readRepairableJsonFile(versionJsonPath, null);
   if (!validBaseVersionJson(versionJson, minecraftVersion)) {
-    logger?.log?.(`Repairing Minecraft ${minecraftVersion} version metadata in ${rootDir}`);
+    const problem = minecraftBaseVersionMetadataProblem(versionJson, minecraftVersion);
+    logger?.log?.(`Repairing Minecraft ${minecraftVersion} version metadata in ${rootDir}${problem ? ` (${problem})` : ''}`);
+    if (versionJson && typeof versionJson === 'object') {
+      await backupInvalidJson(versionJsonPath);
+    }
     versionJson = await fetchMinecraftBaseVersionJson(minecraftVersion, { manifestUrl, fetchJsonImpl });
     await writeJsonFile(versionJsonPath, versionJson);
     actions.push(`wrote ${versionJsonPath}`);
   }
 
-  const assetId = String(versionJson.assetIndex.id || '').trim();
-  const assetUrl = String(versionJson.assetIndex.url || '').trim();
-  const assetIndexPath = path.join(rootDir, 'assets', 'indexes', `${assetId}.json`);
-  let assetIndex = await readRepairableJsonFile(assetIndexPath, null);
-  if (!validAssetIndexJson(assetIndex)) {
-    logger?.log?.(`Repairing Minecraft asset index ${assetId} in ${rootDir}`);
-    assetIndex = await fetchJsonImpl(assetUrl);
-    if (!validAssetIndexJson(assetIndex)) {
-      throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
+  const clientJarPath = safeJoin(versionDir, `${minecraftVersion}.jar`);
+  const clientResult = await ensureMinecraftBaseFile({
+    file: clientJarPath,
+    descriptor: versionJson.downloads.client,
+    label: `Minecraft ${minecraftVersion} client JAR`,
+    logger
+  });
+  if (clientResult.downloaded) actions.push(`downloaded ${clientJarPath}`);
+
+  const libraryDownloads = minecraftBaseLibraryDownloads(versionJson);
+  let downloadedLibraryCount = 0;
+  for (const item of libraryDownloads) {
+    const libraryPath = safeJoin(path.join(rootDir, 'libraries'), String(item.descriptor.path).replaceAll('\\', '/'));
+    const libraryResult = await ensureMinecraftBaseFile({
+      file: libraryPath,
+      descriptor: item.descriptor,
+      label: `Minecraft library ${item.name}`,
+      logger
+    });
+    if (libraryResult.downloaded) {
+      downloadedLibraryCount += 1;
+      actions.push(`downloaded ${libraryPath}`);
     }
-    await writeJsonFile(assetIndexPath, assetIndex);
-    actions.push(`wrote ${assetIndexPath}`);
+  }
+
+  const assetId = String(versionJson.assetIndex.id || '').trim();
+  const assetIndexPath = safeJoin(path.join(rootDir, 'assets', 'indexes'), `${assetId}.json`);
+  const existingAssetIndex = await inspectMinecraftBaseFile(assetIndexPath, versionJson.assetIndex);
+  if (!existingAssetIndex.ok && await pathExists(assetIndexPath)) {
+    await backupInvalidJson(assetIndexPath);
+  }
+  const assetIndexResult = await ensureMinecraftBaseFile({
+    file: assetIndexPath,
+    descriptor: versionJson.assetIndex,
+    label: `Minecraft asset index ${assetId}`,
+    logger
+  });
+  if (assetIndexResult.downloaded) actions.push(`downloaded ${assetIndexPath}`);
+  const assetIndex = await readJsonFile(assetIndexPath);
+  if (!validAssetIndexJson(assetIndex)) {
+    throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
   }
 
   return {
@@ -409,8 +723,11 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
     rootDir,
     minecraftVersion,
     versionJsonPath,
+    clientJarPath,
     assetIndexPath,
     assetId,
+    baseLibraryCount: libraryDownloads.length,
+    downloadedLibraryCount,
     repaired: actions.length > 0,
     actions
   };
@@ -493,6 +810,7 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
       versionId
     }, {
       backupInvalid: false,
+      repairMetadata: false,
       verifyLibraries: true
     });
     loaderInstalled = Boolean(forgeInstall.installed);

@@ -38,6 +38,7 @@
     "enabled": true,
     "profileId": "a-hard-time-dregora",
     "profileName": "A Hard Time",
-    "memoryMb": 6144
+    "memoryMb": 6144,
+    "java8InstallOverride": null
   }
 }

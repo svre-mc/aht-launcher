@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 10130);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -17,6 +18,7 @@ const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
 const syncedMcRoot = path.join(root, '.minecraft-synced');
+const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
 const packZipPath = path.join(root, 'packs', 'a-hard-time-7.7.7-client.zip');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
@@ -35,6 +37,7 @@ const electronArgs = smokeExe
   ? [`--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -248,6 +251,7 @@ await writeJson(defaultsPath, {
     memoryMb: 6144,
     javaPath: fakeJavaPath,
     syncRoots: [syncedMcRoot],
+    syncDefaultRoots: false,
     autoImportAccount: false,
     openCommand: process.execPath,
     openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
@@ -339,6 +343,9 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
     AHT_TEST_EXPECT_FORGE_INSTALLER_URL: forgeInstallerUrl,
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: 'amd64',
+    AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',

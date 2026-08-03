@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
+import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 10010);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -16,6 +17,7 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
+const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const curseForgeSpawnCapture = path.join(root, 'curseforge-spawn.json');
@@ -32,6 +34,7 @@ const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -288,6 +291,9 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_CURSEFORGE_MINECRAFT_ROOT: curseForgeRoot,
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: 'amd64',
+    AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
     AHT_TEST_MINECRAFT_SPAWN_CAPTURE_PATH: curseForgeSpawnCapture
   },
   stdio: 'ignore',
@@ -372,7 +378,15 @@ try {
   }
   const cleanProfiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
   const cleanProfile = cleanProfiles.profiles?.['a-hard-time-dregora'];
-  if (!cleanProfile?.javaArgs?.includes('-Xmx6144m') || path.resolve(cleanProfile.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)) {
+  const detectedJavaPath = cleanStatus.java8Runtime?.path || '';
+  const expectedProfileJavaPath = process.platform === 'win32' && path.basename(detectedJavaPath).toLowerCase() === 'java.exe'
+    ? path.join(path.dirname(detectedJavaPath), 'javaw.exe')
+    : detectedJavaPath;
+  if (
+    !cleanStatus.java8Runtime?.usable
+    || !cleanProfile?.javaArgs?.includes('-Xmx6144m')
+    || path.resolve(cleanProfile.javaDir || '') !== path.resolve(expectedProfileJavaPath)
+  ) {
     throw new Error(`Clean Play did not write the 6 GB and Java 8 launcher profile: ${JSON.stringify(cleanProfile)}`);
   }
   const proof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));

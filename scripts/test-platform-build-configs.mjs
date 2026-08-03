@@ -426,10 +426,91 @@ assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update a
 assert(desktopMain.includes('function isCurseForgeMinecraftRoot') && desktopMain.includes('Number(a.fallback) - Number(b.fallback)') && desktopMain.includes("isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir)"), 'Regular player setup must prefer normal Minecraft Launcher roots and migrate old CurseForge launcher roots.');
 assert(desktopMain.includes('const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();') && !desktopMain.includes("if (!rootDir || config.minecraftLauncher?.enabled === false)"), 'Minecraft account recovery must still inspect signed-in launcher accounts when the profile toggle is disabled or stale.');
 const forgeInstaller = fs.readFileSync(new URL('../src/forgeInstaller.js', import.meta.url), 'utf8');
+const minecraftLauncherProfileSource = fs.readFileSync(new URL('../src/minecraftLauncherProfile.js', import.meta.url), 'utf8');
+const packagedPlayerDefaults = JSON.parse(fs.readFileSync(new URL('../config/app.defaults.json', import.meta.url), 'utf8'));
 assert(desktopMain.includes('javaCacheDir') || forgeInstaller.includes('ensureManagedJava8Runtime'), 'Forge installer must have managed Java 8 fallback for stale jre-legacy certificates.');
 assert(forgeInstaller.includes('windowsJavaInstallRoots') && forgeInstaller.includes('Eclipse Adoptium'), 'Forge installer must prefer installed Temurin/Adoptium Java 8 before stale bundled Minecraft Java.');
-assert(forgeInstaller.includes('const resolvedIsJava8 =') && forgeInstaller.includes('ensureManagedJava8Runtime(plan, options)'), 'Forge installer must provision managed Java 8 when bare java or a non-Java-8 runtime would otherwise be selected.');
-assert(forgeInstaller.includes('export async function resolveMinecraftProfileJavaPath') && forgeInstaller.includes("if (resolved !== 'java' && await isJava8Candidate(resolved))") && forgeInstaller.includes('Minecraft Forge 1.12.2 requires Java 8.'), 'Minecraft profiles must reuse verified Java 8 runtimes and fail closed instead of pinning a newer Java.');
+assert(
+  forgeInstaller.includes('export async function inspectJavaRuntime')
+  && forgeInstaller.includes("['-XshowSettings:properties', '-version']")
+  && forgeInstaller.includes('major === 8')
+  && forgeInstaller.includes('is64Bit'),
+  'Java selection must execute and verify the reported major version and 64-bit architecture instead of trusting a path name.'
+);
+assert(
+  forgeInstaller.includes('export async function detectJava8Runtime')
+  && forgeInstaller.includes('await inspectJavaRuntime(candidate, options)')
+  && forgeInstaller.includes('if (inspected.usable)'),
+  'Java 8 discovery must accept only candidates that pass the executable runtime probe.'
+);
+assert(
+  forgeInstaller.includes('if (options.forceManagedJava8)')
+  && forgeInstaller.includes('forceDownloadJava: true')
+  && forgeInstaller.includes('options.allowManagedJavaDownload !== false')
+  && forgeInstaller.includes('ensureManagedJava8Runtime(plan'),
+  'Forge and Minecraft profile setup must support an explicit managed-Java download while retaining automatic fallback.'
+);
+assert(
+  forgeInstaller.includes('WINDOWS_JAVA8_RUNTIME_ASSETS_URL')
+  && forgeInstaller.includes('packageInfo?.checksum')
+  && forgeInstaller.includes("hashFile(archivePath, 'sha256')")
+  && forgeInstaller.includes('actualSha256.toLowerCase() !== downloadPackage.sha256')
+  && forgeInstaller.includes("process.env.AHT_TEST_HOOKS === '1'"),
+  'The managed Adoptium archive must come from official release metadata, pass SHA-256 verification before extraction, and gate environment overrides behind test hooks.'
+);
+assert(
+  forgeInstaller.includes('export async function resolveMinecraftProfileJavaPath')
+  && forgeInstaller.includes('const detected = await detectJava8Runtime(profile')
+  && forgeInstaller.includes('if (detected.usable)')
+  && forgeInstaller.includes('usable 64-bit Java 8 runtime.'),
+  'Minecraft profiles must reuse an executable-probed 64-bit Java 8 runtime and fail closed when none is usable.'
+);
+assert(
+  desktopMain.includes('config.minecraftLauncher?.java8InstallOverride === true')
+  && desktopMain.includes('config.minecraftLauncher?.java8InstallOverride !== false')
+  && desktopMain.includes('forceManagedJava8,')
+  && desktopMain.includes('allowManagedJavaDownload,'),
+  'The nullable Java 8 preference must control forced and automatic managed-runtime installation in the main process.'
+);
+assert(
+  packagedPlayerDefaults.minecraftLauncher?.java8InstallOverride === null
+  && rendererHtml.includes('id="java8InstallInput"')
+  && rendererHtml.includes('AHT-managed Adoptium Java 8 (64-bit)')
+  && rendererApp.includes('java8InstallOverride: java8InstallOverrideDirty')
+  && rendererApp.includes('effectiveInstallSelected'),
+  'Player defaults and Settings must expose the nullable, detection-driven managed Java 8 checkbox contract.'
+);
+assert(
+  minecraftLauncherProfileSource.includes('export async function ensureMinecraftLauncherAssets')
+  && minecraftLauncherProfileSource.includes('inspectMinecraftBaseFile')
+  && minecraftLauncherProfileSource.includes("hashFile(file, 'sha1')")
+  && minecraftLauncherProfileSource.includes('versionJson.downloads.client')
+  && minecraftLauncherProfileSource.includes('minecraftBaseLibraryDownloads(versionJson)')
+  && minecraftLauncherProfileSource.includes('versionJson.assetIndex'),
+  'Minecraft base bootstrap must integrity-check and repair the client JAR, base libraries, and asset index.'
+);
+assert(
+  desktopMain.includes('safeReleaseIdentifier')
+  && desktopMain.includes('unsafe Minecraft version identifier')
+  && desktopMain.includes('unsafe mod-loader identifier')
+  && minecraftLauncherProfileSource.includes('safeMinecraftIdentifier')
+  && minecraftLauncherProfileSource.includes("safeJoin(path.join(rootDir, 'assets', 'indexes')")
+  && forgeInstaller.includes('safeForgeIdentifier'),
+  'Release, Minecraft, Forge, and asset-index identifiers must be constrained before becoming filesystem paths.'
+);
+const minecraftBootstrapFlows = {
+  settings: desktopMain.slice(desktopMain.indexOf('async function refreshMinecraftLauncherProfile'), desktopMain.indexOf('async function saveSettings')),
+  update: desktopMain.slice(desktopMain.indexOf('async function runUpdate'), desktopMain.indexOf('function defaultLauncherInstallerArgs')),
+  play: desktopMain.slice(desktopMain.indexOf("ipcMain.handle('play:start'"), desktopMain.indexOf("ipcMain.handle('dialog:zip'"))
+};
+for (const [flow, source] of Object.entries(minecraftBootstrapFlows)) {
+  const assetsIndex = source.indexOf('ensureMinecraftLauncherAssets(');
+  const loaderIndex = source.indexOf('installMinecraftProfileLoaders(');
+  assert(
+    assetsIndex >= 0 && loaderIndex > assetsIndex,
+    `${flow} must bootstrap and validate the Minecraft 1.12.2 base runtime before validating or installing Forge.`
+  );
+}
 assert(utilsSource.includes('Download failed after') && utilsSource.includes('replaceFileWithDownload'), 'Player downloads must retry and replace files atomically.');
 assert(forgeInstaller.includes("process.env.AHT_TEST_HOOKS !== '1' || process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS !== '1'"), 'Forge installer test hook must require the explicit AHT_TEST_HOOKS gate.');
 assert(forgeInstaller.includes('const DEFAULT_FORGE_VERSION_WAIT_MS = 5 * 60_000') && forgeInstaller.includes('options.versionWaitMs ?? DEFAULT_FORGE_VERSION_WAIT_MS'), 'Forge installer must wait long enough for slow PCs to finish writing version metadata.');

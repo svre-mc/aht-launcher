@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,9 +15,11 @@ import {
 } from '../src/minecraftLauncherProfile.js';
 import {
   buildForgeInstallPlan,
+  detectJava8Runtime,
   findInstalledForgeVersion,
   forgeInstallerUrl,
   friendlyForgeJavaErrorMessage,
+  installForgeLoader,
   javaSetupHelpMessage,
   minecraftJavaExecutable,
   resolveMinecraftProfileJavaPath,
@@ -25,6 +28,9 @@ import {
 import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-profile-test-'));
+process.env.AHT_TEST_HOOKS = '1';
+process.env.AHT_TEST_JAVA_RUNTIME_PROBE = 'release-file';
+process.env.AHT_TEST_JAVA_ARCH = 'amd64';
 const instanceDir = path.join(root, 'instance');
 const minecraftRoot = path.join(root, '.minecraft');
 const versionId = '1.12.2-forge-14.23.5.2860';
@@ -86,6 +92,12 @@ const config = {
 if (loaderVersionId(latest.minecraft) !== versionId) {
   throw new Error('Forge loader id was not mapped to the expected Minecraft Launcher version id.');
 }
+if (
+  loaderVersionId({ version: '../1.12.2', modLoaders: latest.minecraft.modLoaders })
+  || loaderVersionId({ version: '1.12.2', modLoaders: [{ id: 'forge-../escape', primary: true }] })
+) {
+  throw new Error('Unsafe Minecraft or loader identifiers were accepted for launcher paths.');
+}
 
 const created = await ensureMinecraftLauncherProfile({ config, latest, installed: null });
 const inspected = await inspectMinecraftLauncherProfile({ config, latest, installed: null });
@@ -139,12 +151,29 @@ const exactForgeInstall = await findInstalledForgeVersion(forgePlan);
 if (!exactForgeInstall.installed || exactForgeInstall.versionId !== versionId) {
   throw new Error(`Expected exact Forge profile detection, got ${JSON.stringify(exactForgeInstall)}`);
 }
+let unsafeForgePlanError = null;
+try {
+  buildForgeInstallPlan({ ...created, loaderId: 'forge-../escape' });
+} catch (error) {
+  unsafeForgePlanError = error;
+}
+if (!unsafeForgePlanError || !/unsafe identifier/i.test(unsafeForgePlanError.message || '')) {
+  throw new Error(`Unsafe Forge installer identifier was not rejected: ${unsafeForgePlanError?.message || 'no error'}`);
+}
 const invalidForgeRoot = path.join(root, 'invalid-forge-root');
 await fs.mkdir(path.join(invalidForgeRoot, 'versions', versionId), { recursive: true });
 await fs.writeFile(path.join(invalidForgeRoot, 'versions', versionId, `${versionId}.json`), '{}');
 const invalidForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: invalidForgeRoot }, { verifyLibraries: true });
 if (invalidForgeInstall.installed || invalidForgeInstall.invalidVersions.length !== 1 || !/incomplete Forge/i.test(invalidForgeInstall.invalidVersions[0].reason || '')) {
   throw new Error(`Placeholder Forge metadata was accepted as installed: ${JSON.stringify(invalidForgeInstall)}`);
+}
+const unsafeForgeRoot = path.join(root, 'unsafe-forge-root');
+const unsafeForgeFixture = await writeForgeInstallationFixture(unsafeForgeRoot, { versionId });
+unsafeForgeFixture.metadata.libraries[0].downloads.artifact.path = '../outside-forge-library.jar';
+await fs.writeFile(unsafeForgeFixture.versionJson, `${JSON.stringify(unsafeForgeFixture.metadata, null, 2)}\n`, 'utf8');
+const unsafeForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: unsafeForgeRoot }, { verifyLibraries: true });
+if (unsafeForgeInstall.installed || !/incomplete Forge/i.test(unsafeForgeInstall.invalidVersions[0]?.reason || '')) {
+  throw new Error(`Forge metadata path traversal was accepted: ${JSON.stringify(unsafeForgeInstall)}`);
 }
 const missingForgeLibraryRoot = path.join(root, 'missing-forge-library-root');
 await writeForgeInstallationFixture(missingForgeLibraryRoot, { versionId, includeLibrary: false });
@@ -163,6 +192,96 @@ const corruptForgeLibraryInstall = await findInstalledForgeVersion({ ...forgePla
 if (corruptForgeLibraryInstall.installed || !/SHA-1 mismatch/i.test(corruptForgeLibraryInstall.invalidVersions[0]?.missingLibraries?.[0]?.reason || '')) {
   throw new Error(`Forge metadata with a corrupt same-size library was accepted as installed: ${JSON.stringify(corruptForgeLibraryInstall)}`);
 }
+const nullableForgeRoot = path.join(root, 'nullable-forge-root');
+const nullableForgeFixture = await writeForgeInstallationFixture(nullableForgeRoot, { versionId });
+const nullableForgeMetadata = {
+  ...nullableForgeFixture.metadata,
+  arguments: null,
+  libraries: nullableForgeFixture.metadata.libraries.map((library) => ({
+    ...library,
+    downloads: {
+      ...library.downloads,
+      artifact: { ...library.downloads.artifact, url: '' }
+    },
+    clientreq: null,
+    serverreq: null,
+    natives: null,
+    rules: null,
+    extract: null
+  }))
+};
+await fs.writeFile(nullableForgeFixture.versionJson, `${JSON.stringify(nullableForgeMetadata, null, 2)}\n`, 'utf8');
+const nullableForgeBeforeInspection = await fs.readFile(nullableForgeFixture.versionJson, 'utf8');
+const readOnlyNullableForgeState = await inspectMinecraftLauncherProfile({
+  config: {
+    ...config,
+    minecraftLauncher: {
+      ...config.minecraftLauncher,
+      rootDir: nullableForgeRoot,
+      syncDefaultRoots: false
+    }
+  },
+  latest,
+  installed: null
+});
+const nullableForgeAfterInspection = await fs.readFile(nullableForgeFixture.versionJson, 'utf8');
+if (readOnlyNullableForgeState.loaderInstalled || nullableForgeAfterInspection !== nullableForgeBeforeInspection) {
+  throw new Error(`Read-only profile inspection mutated or accepted unrepaired Forge metadata: ${JSON.stringify(readOnlyNullableForgeState)}`);
+}
+const nullableForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: nullableForgeRoot }, { verifyLibraries: true });
+if (!nullableForgeInstall.installed || !nullableForgeInstall.repairedMetadata) {
+  throw new Error(`Mojang-incompatible nullable Forge metadata was not sanitized in place: ${JSON.stringify(nullableForgeInstall)}`);
+}
+const sanitizedForgeMetadata = JSON.parse(await fs.readFile(nullableForgeFixture.versionJson, 'utf8'));
+if (
+  'arguments' in sanitizedForgeMetadata
+  || sanitizedForgeMetadata.libraries.some((library) => (
+    'clientreq' in library
+    || 'serverreq' in library
+    || 'natives' in library
+    || 'rules' in library
+    || 'extract' in library
+  ))
+  || sanitizedForgeMetadata.libraries.some((library) => library.downloads?.artifact?.url !== '')
+) {
+  throw new Error(`Nullable Forge metadata fields survived sanitization: ${JSON.stringify(sanitizedForgeMetadata)}`);
+}
+const nullableForgeBackups = (await fs.readdir(path.dirname(nullableForgeFixture.versionJson)))
+  .filter((name) => name.includes(`${path.basename(nullableForgeFixture.versionJson)}.aht-invalid-`));
+if (!nullableForgeBackups.length) {
+  throw new Error('Sanitized Forge launcher metadata was not backed up before repair.');
+}
+const badRulesForgeRoot = path.join(root, 'bad-rules-forge-root');
+const badRulesForgeFixture = await writeForgeInstallationFixture(badRulesForgeRoot, { versionId });
+const badRulesForgeMetadata = {
+  ...badRulesForgeFixture.metadata,
+  libraries: badRulesForgeFixture.metadata.libraries.map((library) => ({
+    ...library,
+    rules: { action: 'allow' }
+  }))
+};
+await fs.writeFile(badRulesForgeFixture.versionJson, `${JSON.stringify(badRulesForgeMetadata, null, 2)}\n`, 'utf8');
+const badRulesForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir: badRulesForgeRoot }, { verifyLibraries: true });
+if (badRulesForgeInstall.installed || !badRulesForgeInstall.invalidVersions.length) {
+  throw new Error(`Non-null malformed Forge rules object was accepted: ${JSON.stringify(badRulesForgeInstall)}`);
+}
+const previousForgeTestInstall = process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS;
+try {
+  process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS = '1';
+  await installForgeLoader({
+    ...created,
+    rootDir: badRulesForgeRoot,
+    versionJson: badRulesForgeFixture.versionJson,
+    loaderInstalled: false
+  }, { verifyLibraries: true });
+} finally {
+  if (previousForgeTestInstall === undefined) delete process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS;
+  else process.env.AHT_TEST_FORGE_INSTALLER_SUCCESS = previousForgeTestInstall;
+}
+const reinstalledBadRulesForge = await findInstalledForgeVersion({ ...forgePlan, rootDir: badRulesForgeRoot }, { verifyLibraries: true });
+if (!reinstalledBadRulesForge.installed) {
+  throw new Error(`Malformed Forge rules metadata was rejected but not reinstalled: ${JSON.stringify(reinstalledBadRulesForge)}`);
+}
 const altForgeRoot = path.join(root, 'alt-forge-root');
 const altForgeVersionId = '1.12.2-forge1.12.2-14.23.5.2860';
 await writeForgeInstallationFixture(altForgeRoot, { versionId: altForgeVersionId });
@@ -177,6 +296,8 @@ await fs.mkdir(path.dirname(fakeLegacyJava), { recursive: true });
 await fs.mkdir(path.dirname(fakeModernJava), { recursive: true });
 await fs.writeFile(fakeModernJava, 'modern');
 await fs.writeFile(fakeLegacyJava, 'legacy');
+await fs.writeFile(path.join(path.dirname(path.dirname(fakeModernJava)), 'release'), 'JAVA_VERSION="17.0.10"\n');
+await fs.writeFile(path.join(path.dirname(path.dirname(fakeLegacyJava)), 'release'), 'JAVA_VERSION="1.8.0_999"\n');
 const resolvedJava = await resolveJavaPath(created, { javaRoots: [fakeRuntimeRoot] });
 if (resolvedJava !== fakeLegacyJava) {
   throw new Error(`Expected legacy Minecraft Java runtime, got ${resolvedJava}`);
@@ -184,6 +305,9 @@ if (resolvedJava !== fakeLegacyJava) {
 const resolvedLegacyProfileJava = await resolveMinecraftProfileJavaPath(created, forgePlan, {
   javaRoots: [fakeRuntimeRoot],
   javaInstallRoots: [],
+  includeDefaultJavaRoots: false,
+  includeEnvironmentJava: false,
+  includePathJava: false,
   javaDownloadUrl: path.join(root, 'must-not-download-java.zip')
 });
 if (resolvedLegacyProfileJava !== fakeLegacyJava) {
@@ -199,12 +323,29 @@ await fs.mkdir(path.dirname(fakeBundledLegacyJava), { recursive: true });
 await fs.mkdir(path.dirname(fakeInstalledJava), { recursive: true });
 await fs.writeFile(fakeBundledLegacyJava, 'bundled-legacy');
 await fs.writeFile(fakeInstalledJava, 'temurin-8');
+await fs.writeFile(path.join(path.dirname(path.dirname(fakeBundledLegacyJava)), 'release'), 'JAVA_VERSION="1.8.0_998"\n');
+await fs.writeFile(path.join(path.dirname(path.dirname(fakeInstalledJava)), 'release'), 'JAVA_VERSION="1.8.0_999"\n');
 if (process.platform === 'win32') {
   await fs.writeFile(fakeInstalledJavaw, 'temurin-8-windowless');
 }
 const resolvedInstalledJava = await resolveJavaPath(created, { javaInstallRoots: [fakeInstalledJavaRoot] });
 if (resolvedInstalledJava !== fakeInstalledJava) {
   throw new Error(`Expected installed Temurin Java 8 to beat bundled legacy Java, got ${resolvedInstalledJava}`);
+}
+const detectedInstalledJava = await detectJava8Runtime(
+  { ...created, rootDir: minecraftRoot },
+  {
+    javaPath: fakeBundledLegacyJava,
+    javaRoots: [fakeRuntimeRoot],
+    javaInstallRoots: [fakeInstalledJavaRoot],
+    includeDefaultJavaRoots: false,
+    includeEnvironmentJava: false,
+    includePathJava: false,
+    refresh: true
+  }
+);
+if (!detectedInstalledJava.usable || detectedInstalledJava.javaPath !== fakeInstalledJava) {
+  throw new Error(`Installed Temurin Java 8 did not beat configured Mojang jre-legacy: ${JSON.stringify(detectedInstalledJava)}`);
 }
 const profileJava = await minecraftJavaExecutable(resolvedInstalledJava);
 if (profileJava !== fakeInstalledJavaw) {
@@ -239,6 +380,8 @@ if (process.platform === 'win32') {
 }
 managedJavaArchive.addFile('temurin-8-clean/release', Buffer.from('JAVA_VERSION="1.8.0_999"\n'));
 managedJavaArchive.writeZip(managedJavaArchivePath);
+const managedJavaArchiveBytes = await fs.readFile(managedJavaArchivePath);
+const managedJavaArchiveSha256 = createHash('sha256').update(managedJavaArchiveBytes).digest('hex');
 const managedProfileJava = await resolveMinecraftProfileJavaPath(
   { ...created, rootDir: managedJavaRoot },
   { ...forgePlan, rootDir: managedJavaRoot },
@@ -248,7 +391,10 @@ const managedProfileJava = await resolveMinecraftProfileJavaPath(
     javaInstallRoots: [],
     includeDefaultJavaRoots: false,
     includeEnvironmentJava: false,
+    includePathJava: false,
     javaDownloadUrl: managedJavaArchivePath,
+    javaDownloadSha256: managedJavaArchiveSha256,
+    javaDownloadSize: managedJavaArchiveBytes.length,
     javaCacheDir: path.join(managedJavaRoot, '.aht-launcher', 'java')
   }
 );
@@ -258,6 +404,31 @@ if (!managedProfileJava.includes('temurin-8-clean') || path.basename(managedProf
 const managedMinecraftJava = await minecraftJavaExecutable(managedProfileJava);
 if (process.platform === 'win32' && path.basename(managedMinecraftJava).toLowerCase() !== 'javaw.exe') {
   throw new Error(`Managed Minecraft profile Java did not use javaw.exe: ${managedMinecraftJava}`);
+}
+const rejectedManagedJavaRoot = path.join(root, 'managed-java-rejected-root');
+let managedJavaChecksumError = null;
+try {
+  await resolveMinecraftProfileJavaPath(
+    { ...created, rootDir: rejectedManagedJavaRoot },
+    { ...forgePlan, rootDir: rejectedManagedJavaRoot },
+    {
+      javaPath: 'java',
+      javaRoots: [],
+      javaInstallRoots: [],
+      includeDefaultJavaRoots: false,
+      includeEnvironmentJava: false,
+      includePathJava: false,
+      javaDownloadUrl: managedJavaArchivePath,
+      javaDownloadSha256: '0'.repeat(64),
+      javaDownloadSize: managedJavaArchiveBytes.length,
+      javaCacheDir: path.join(rejectedManagedJavaRoot, '.aht-launcher', 'java')
+    }
+  );
+} catch (error) {
+  managedJavaChecksumError = error;
+}
+if (!managedJavaChecksumError || !/SHA-256 mismatch/i.test(managedJavaChecksumError.message || '')) {
+  throw new Error(`Managed Java archive checksum mismatch was not rejected: ${managedJavaChecksumError?.message || 'no error'}`);
 }
 const fakeJava17Home = path.join(root, 'Program Files', 'Java', 'jdk-17');
 const fakeJava17 = path.join(fakeJava17Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
@@ -276,6 +447,7 @@ try {
       javaInstallRoots: [],
       includeDefaultJavaRoots: false,
       includeEnvironmentJava: false,
+      includePathJava: false,
       platform: 'darwin',
       arch: 'arm64'
     }
@@ -283,7 +455,7 @@ try {
 } catch (error) {
   macJava17Error = error;
 }
-if (!macJava17Error || !/requires Java 8/i.test(macJava17Error.message || '')) {
+if (!macJava17Error || !/Java 8/i.test(macJava17Error.message || '')) {
   throw new Error(`macOS Java 17 was not rejected for Forge 1.12.2: ${macJava17Error?.message || 'no error'}`);
 }
 const previousJavaHome = process.env.JAVA_HOME;
@@ -367,6 +539,21 @@ await fs.writeFile(path.join(fakeGenericJava8Home, 'release'), 'JAVA_VERSION="1.
 const resolvedReleaseFileJava8 = await resolveJavaPath(created, { javaRoots: [fakeGenericJava8Home] });
 if (resolvedReleaseFileJava8 !== fakeGenericJava8) {
   throw new Error(`Expected release-file Java 8 detection, got ${resolvedReleaseFileJava8}`);
+}
+const detectedExplicitJava = await detectJava8Runtime(
+  { ...created, rootDir: minecraftRoot },
+  {
+    javaPath: fakeGenericJava8,
+    javaRoots: [],
+    javaInstallRoots: [fakeInstalledJavaRoot],
+    includeDefaultJavaRoots: false,
+    includeEnvironmentJava: false,
+    includePathJava: false,
+    refresh: true
+  }
+);
+if (!detectedExplicitJava.usable || detectedExplicitJava.javaPath !== fakeGenericJava8) {
+  throw new Error(`Explicit non-legacy Java 8 was not preserved: ${JSON.stringify(detectedExplicitJava)}`);
 }
 const explicitJava = path.join(root, 'custom-java', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 await fs.mkdir(path.dirname(explicitJava), { recursive: true });
@@ -543,9 +730,75 @@ if (!profileBackups.length) {
 }
 
 const assetRoot = path.join(root, 'asset-root');
+const assetSourceRoot = path.join(root, 'asset-sources');
 const fakeManifestUrl = 'https://example.invalid/version_manifest_v2.json';
 const fakeVersionUrl = 'https://example.invalid/1.12.2.json';
-const fakeAssetUrl = 'https://example.invalid/1.12.json';
+const fakeAssetUrl = path.join(assetSourceRoot, '1.12.json');
+const clientBytes = Buffer.from('complete Minecraft 1.12.2 client fixture\n');
+const libraryBytes = Buffer.from('complete Minecraft base library fixture\n');
+const nativeBytes = Buffer.from('complete Minecraft native library fixture\n');
+const assetIndexValue = { objects: { 'minecraft/lang/en_us.lang': { hash: 'a'.repeat(40), size: 1 } } };
+const assetIndexBytes = Buffer.from(`${JSON.stringify(assetIndexValue, null, 2)}\n`);
+const clientSource = path.join(assetSourceRoot, 'client.jar');
+const librarySource = path.join(assetSourceRoot, 'base-library.jar');
+const nativeSource = path.join(assetSourceRoot, 'native-library.jar');
+const sha1 = (bytes) => createHash('sha1').update(bytes).digest('hex');
+const descriptor = (url, bytes, artifactPath = '') => ({
+  ...(artifactPath ? { path: artifactPath } : {}),
+  url,
+  sha1: sha1(bytes),
+  size: bytes.length
+});
+const nativePaths = {
+  'natives-windows': 'example/native/1/native-1-natives-windows.jar',
+  'natives-osx': 'example/native/1/native-1-natives-osx.jar',
+  'natives-linux': 'example/native/1/native-1-natives-linux.jar'
+};
+const platformNativeClassifier = process.platform === 'win32'
+  ? 'natives-windows'
+  : (process.platform === 'darwin' ? 'natives-osx' : 'natives-linux');
+await fs.mkdir(assetSourceRoot, { recursive: true });
+await fs.writeFile(clientSource, clientBytes);
+await fs.writeFile(librarySource, libraryBytes);
+await fs.writeFile(nativeSource, nativeBytes);
+await fs.writeFile(fakeAssetUrl, assetIndexBytes);
+const completeBaseVersion = {
+  id: '1.12.2',
+  mainClass: 'net.minecraft.client.main.Main',
+  minecraftArguments: '--username ${auth_player_name} --version ${version_name}',
+  assetIndex: { id: '1.12', ...descriptor(fakeAssetUrl, assetIndexBytes) },
+  downloads: { client: descriptor(clientSource, clientBytes) },
+  libraries: [
+    {
+      name: 'example:base:1',
+      downloads: {
+        artifact: descriptor(librarySource, libraryBytes, 'example/base/1/base-1.jar')
+      }
+    },
+    {
+      name: 'example:native:1',
+      natives: {
+        windows: 'natives-windows',
+        osx: 'natives-osx',
+        linux: 'natives-linux'
+      },
+      downloads: {
+        classifiers: Object.fromEntries(Object.entries(nativePaths).map(([classifier, artifactPath]) => [
+          classifier,
+          descriptor(nativeSource, nativeBytes, artifactPath)
+        ]))
+      }
+    }
+  ]
+};
+const minimalBaseVersion = { id: '1.12.2', assetIndex: { id: '1.12', url: fakeAssetUrl } };
+const baseVersionDir = path.join(assetRoot, 'versions', '1.12.2');
+await fs.mkdir(baseVersionDir, { recursive: true });
+await fs.writeFile(
+  path.join(baseVersionDir, '1.12.2.json'),
+  `${JSON.stringify(minimalBaseVersion, null, 2)}\n`,
+  'utf8'
+);
 const fakeFetches = [];
 const fakeFetchJson = async (url) => {
   fakeFetches.push(String(url));
@@ -553,10 +806,10 @@ const fakeFetchJson = async (url) => {
     return { versions: [{ id: '1.12.2', url: fakeVersionUrl }] };
   }
   if (url === fakeVersionUrl) {
-    return { id: '1.12.2', assetIndex: { id: '1.12', url: fakeAssetUrl } };
+    return completeBaseVersion;
   }
   if (url === fakeAssetUrl) {
-    return { objects: { 'minecraft/lang/en_us.lang': { hash: 'a'.repeat(40), size: 1 } } };
+    return assetIndexValue;
   }
   throw new Error(`Unexpected fake fetch ${url}`);
 };
@@ -570,13 +823,46 @@ const firstAssetRepair = await ensureMinecraftLauncherAssets({
   fetchJsonImpl: fakeFetchJson
 });
 if (!firstAssetRepair.ok || !firstAssetRepair.repaired) {
-  throw new Error(`Expected missing Minecraft metadata to be repaired: ${JSON.stringify(firstAssetRepair)}`);
+  throw new Error(`Expected incomplete Minecraft metadata to be repaired: ${JSON.stringify(firstAssetRepair)}`);
+}
+if (!fakeFetches.includes(fakeManifestUrl) || !fakeFetches.includes(fakeVersionUrl)) {
+  throw new Error(`Minimal Minecraft metadata with no libraries was not replaced from the official metadata path: ${JSON.stringify(fakeFetches)}`);
+}
+const repairedBaseVersion = JSON.parse(await fs.readFile(path.join(baseVersionDir, '1.12.2.json'), 'utf8'));
+if (!repairedBaseVersion.downloads?.client || repairedBaseVersion.libraries?.length !== 2) {
+  throw new Error(`Minimal Minecraft metadata survived repair: ${JSON.stringify(repairedBaseVersion)}`);
+}
+const baseMetadataBackups = (await fs.readdir(baseVersionDir))
+  .filter((name) => name.includes('1.12.2.json.aht-invalid-'));
+if (!baseMetadataBackups.length) {
+  throw new Error('Parseable but incomplete Minecraft base metadata was not backed up before replacement.');
+}
+const backedUpMinimalVersion = JSON.parse(await fs.readFile(path.join(baseVersionDir, baseMetadataBackups[0]), 'utf8'));
+if (backedUpMinimalVersion.id !== '1.12.2' || 'libraries' in backedUpMinimalVersion) {
+  throw new Error(`Minecraft base metadata backup did not preserve the rejected minimal JSON: ${JSON.stringify(backedUpMinimalVersion)}`);
+}
+const clientJarPath = path.join(baseVersionDir, '1.12.2.jar');
+const baseLibraryPath = path.join(assetRoot, 'libraries', 'example', 'base', '1', 'base-1.jar');
+const nativeLibraryPath = path.join(assetRoot, 'libraries', ...nativePaths[platformNativeClassifier].split('/'));
+if (!(await fs.readFile(clientJarPath)).equals(clientBytes)) {
+  throw new Error('Minecraft client JAR was not downloaded from its verified metadata descriptor.');
+}
+if (!(await fs.readFile(baseLibraryPath)).equals(libraryBytes)) {
+  throw new Error('Required Minecraft base library was not downloaded from its verified metadata descriptor.');
+}
+if (!(await fs.readFile(nativeLibraryPath)).equals(nativeBytes)) {
+  throw new Error('Required Minecraft native library was not downloaded from its verified metadata descriptor.');
+}
+if (firstAssetRepair.roots[0]?.baseLibraryCount !== 2 || firstAssetRepair.roots[0]?.downloadedLibraryCount !== 2) {
+  throw new Error(`Minecraft base download counts were wrong: ${JSON.stringify(firstAssetRepair.roots[0])}`);
 }
 const assetIndexPath = path.join(assetRoot, 'assets', 'indexes', '1.12.json');
 if (!JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
   throw new Error('Asset index was not written correctly.');
 }
-await fs.writeFile(assetIndexPath, '', 'utf8');
+await fs.writeFile(assetIndexPath, Buffer.alloc(assetIndexBytes.length, 0x7a));
+await fs.writeFile(clientJarPath, Buffer.alloc(clientBytes.length, 0x78));
+await fs.writeFile(baseLibraryPath, Buffer.alloc(libraryBytes.length, 0x79));
 const secondAssetRepair = await ensureMinecraftLauncherAssets({
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
   latest,
@@ -586,12 +872,164 @@ const secondAssetRepair = await ensureMinecraftLauncherAssets({
   fetchJsonImpl: fakeFetchJson
 });
 if (!secondAssetRepair.repaired) {
-  throw new Error('Corrupt asset index was not repaired.');
+  throw new Error('Corrupt asset index or base files were not repaired.');
+}
+if (!(await fs.readFile(clientJarPath)).equals(clientBytes)) {
+  throw new Error('Same-size corrupt Minecraft client JAR passed SHA-1 validation.');
+}
+if (!(await fs.readFile(baseLibraryPath)).equals(libraryBytes)) {
+  throw new Error('Same-size corrupt Minecraft base library passed SHA-1 validation.');
+}
+if (!JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).objects?.['minecraft/lang/en_us.lang']) {
+  throw new Error('Same-size corrupt Minecraft asset index passed SHA-1 validation.');
+}
+if (secondAssetRepair.roots[0]?.downloadedLibraryCount !== 1) {
+  throw new Error(`Expected exactly one corrupt base library repair: ${JSON.stringify(secondAssetRepair.roots[0])}`);
 }
 const assetBackupDir = path.join(assetRoot, 'assets', 'indexes');
-const assetBackups = (await fs.readdir(assetBackupDir)).filter((name) => name.includes('1.12.json.aht-corrupt-'));
+const assetBackups = (await fs.readdir(assetBackupDir)).filter((name) => name.includes('1.12.json.aht-invalid-'));
 if (!assetBackups.length) {
   throw new Error('Corrupt asset index was not backed up before repair.');
+}
+if (!(await fs.readFile(path.join(assetBackupDir, assetBackups[0]))).equals(Buffer.alloc(assetIndexBytes.length, 0x7a))) {
+  throw new Error('Asset-index rollback backup did not preserve the exact corrupt bytes.');
+}
+const nullableBaseVersion = {
+  ...completeBaseVersion,
+  arguments: null,
+  libraries: completeBaseVersion.libraries.map((library) => ({
+    ...library,
+    clientreq: null,
+    serverreq: null,
+    rules: null,
+    natives: library.natives ?? null,
+    extract: null
+  }))
+};
+await fs.writeFile(path.join(baseVersionDir, '1.12.2.json'), `${JSON.stringify(nullableBaseVersion, null, 2)}\n`, 'utf8');
+const fetchCountBeforeNullableBaseRepair = fakeFetches.length;
+const nullableBaseRepair = await ensureMinecraftLauncherAssets({
+  config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
+  latest,
+  installed: null,
+  profile: assetProfile,
+  manifestUrl: fakeManifestUrl,
+  fetchJsonImpl: fakeFetchJson
+});
+const repairedNullableBaseVersion = JSON.parse(await fs.readFile(path.join(baseVersionDir, '1.12.2.json'), 'utf8'));
+if (
+  !nullableBaseRepair.repaired
+  || fakeFetches.length < fetchCountBeforeNullableBaseRepair + 2
+  || 'arguments' in repairedNullableBaseVersion
+  || repairedNullableBaseVersion.libraries.some((library) => (
+    'clientreq' in library
+    || 'serverreq' in library
+    || library.rules === null
+    || library.natives === null
+    || library.extract === null
+  ))
+) {
+  throw new Error(`Launcher-incompatible nullable base metadata was not replaced: ${JSON.stringify(nullableBaseRepair)}`);
+}
+const incompleteOfficialRoot = path.join(root, 'incomplete-official-root');
+let incompleteOfficialError = null;
+try {
+  await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: incompleteOfficialRoot, syncDefaultRoots: false } },
+    latest,
+    installed: null,
+    profile: { rootDir: incompleteOfficialRoot, syncedProfiles: [{ rootDir: incompleteOfficialRoot }], minecraftVersion: '1.12.2' },
+    manifestUrl: fakeManifestUrl,
+    fetchJsonImpl: async (url) => {
+      if (url === fakeManifestUrl) return { versions: [{ id: '1.12.2', url: fakeVersionUrl }] };
+      if (url === fakeVersionUrl) return minimalBaseVersion;
+      throw new Error(`Unexpected incomplete metadata fetch ${url}`);
+    }
+  });
+} catch (error) {
+  incompleteOfficialError = error;
+}
+if (!incompleteOfficialError || !/incomplete Minecraft 1\.12\.2 metadata/i.test(incompleteOfficialError.message || '')) {
+  throw new Error(`Official metadata without client/libraries was not rejected: ${incompleteOfficialError?.message || 'no error'}`);
+}
+const unsafeAssetRoot = path.join(root, 'unsafe-asset-root');
+let unsafeAssetError = null;
+try {
+  await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: unsafeAssetRoot, syncDefaultRoots: false } },
+    latest,
+    installed: null,
+    profile: { rootDir: unsafeAssetRoot, syncedProfiles: [{ rootDir: unsafeAssetRoot }], minecraftVersion: '1.12.2' },
+    manifestUrl: fakeManifestUrl,
+    fetchJsonImpl: async (url) => {
+      if (url === fakeManifestUrl) return { versions: [{ id: '1.12.2', url: fakeVersionUrl }] };
+      if (url === fakeVersionUrl) return { ...completeBaseVersion, assetIndex: { ...completeBaseVersion.assetIndex, id: '../escape' } };
+      throw new Error(`Unexpected unsafe asset metadata fetch ${url}`);
+    }
+  });
+} catch (error) {
+  unsafeAssetError = error;
+}
+if (!unsafeAssetError || !/incomplete Minecraft 1\.12\.2 metadata/i.test(unsafeAssetError.message || '')) {
+  throw new Error(`Unsafe asset-index identifier was not rejected: ${unsafeAssetError?.message || 'no error'}`);
+}
+const unsafeVersionRoot = path.join(root, 'unsafe-version-root');
+let unsafeVersionError = null;
+try {
+  await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: unsafeVersionRoot, syncDefaultRoots: false } },
+    latest: { ...latest, minecraft: { ...latest.minecraft, version: '../escape' } },
+    installed: null,
+    profile: { rootDir: unsafeVersionRoot, syncedProfiles: [{ rootDir: unsafeVersionRoot }], minecraftVersion: '../escape' },
+    manifestUrl: fakeManifestUrl,
+    fetchJsonImpl: fakeFetchJson
+  });
+} catch (error) {
+  unsafeVersionError = error;
+}
+if (!unsafeVersionError || !/unsafe Minecraft version identifier/i.test(unsafeVersionError.message || '')) {
+  throw new Error(`Unsafe Minecraft version identifier was not rejected before path use: ${unsafeVersionError?.message || 'no error'}`);
+}
+const hookFixtureDir = path.join(root, 'minecraft-base-hook-fixture');
+const hookMinecraftRoot = path.join(root, 'minecraft-base-hook-root');
+await fs.mkdir(hookFixtureDir, { recursive: true });
+await fs.writeFile(path.join(hookFixtureDir, 'client.jar'), clientBytes);
+await fs.writeFile(path.join(hookFixtureDir, 'base-library.jar'), libraryBytes);
+const hookAssetIndexBytes = Buffer.from(`${JSON.stringify({ objects: {} }, null, 2)}\n`);
+await fs.writeFile(path.join(hookFixtureDir, 'asset-index.json'), hookAssetIndexBytes);
+await fs.writeFile(path.join(hookFixtureDir, '1.12.2.json'), JSON.stringify({
+  id: '1.12.2',
+  mainClass: 'net.minecraft.client.main.Main',
+  minecraftArguments: '--username ${auth_player_name}',
+  assetIndex: { id: '1.12', ...descriptor('asset-index.json', hookAssetIndexBytes) },
+  downloads: { client: descriptor('client.jar', clientBytes) },
+  libraries: [{
+    name: 'example:hook-library:1',
+    downloads: {
+      artifact: descriptor('base-library.jar', libraryBytes, 'example/hook-library/1/hook-library-1.jar')
+    }
+  }]
+}, null, 2), 'utf8');
+const previousTestHooks = process.env.AHT_TEST_HOOKS;
+const previousBaseFixtureDir = process.env.AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR;
+let hookAssetRepair = null;
+try {
+  process.env.AHT_TEST_HOOKS = '1';
+  process.env.AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR = hookFixtureDir;
+  hookAssetRepair = await ensureMinecraftLauncherAssets({
+    config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: hookMinecraftRoot, syncDefaultRoots: false } },
+    latest,
+    installed: null,
+    profile: { rootDir: hookMinecraftRoot, syncedProfiles: [{ rootDir: hookMinecraftRoot }], minecraftVersion: '1.12.2' }
+  });
+} finally {
+  if (previousTestHooks === undefined) delete process.env.AHT_TEST_HOOKS;
+  else process.env.AHT_TEST_HOOKS = previousTestHooks;
+  if (previousBaseFixtureDir === undefined) delete process.env.AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR;
+  else process.env.AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR = previousBaseFixtureDir;
+}
+if (!hookAssetRepair?.ok || !(await fs.readFile(path.join(hookMinecraftRoot, 'versions', '1.12.2', '1.12.2.jar'))).equals(clientBytes)) {
+  throw new Error(`Dual-gated offline Minecraft base fixture was not honored: ${JSON.stringify(hookAssetRepair)}`);
 }
 console.log(JSON.stringify({
   profilesPath: created.profilesPath,

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 10500);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -14,6 +15,9 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-settings-profile-'));
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'A Hard Time');
 const minecraftRoot = path.join(root, '.minecraft');
+const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
+const javaHome = path.join(root, 'adoptium-jre8');
+const javaPath = path.join(javaHome, 'bin', 'java.exe');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const latestPath = path.join(root, 'latest.json');
 const tempDefaults = path.join(root, 'app.defaults.json');
@@ -26,6 +30,7 @@ const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -117,6 +122,9 @@ async function waitFor(client, expression, label, attempts = 160) {
 
 await fsp.mkdir(path.join(minecraftRoot, 'versions', versionId), { recursive: true });
 await fsp.writeFile(path.join(minecraftRoot, 'versions', versionId, `${versionId}.json`), '{}', 'utf8');
+await fsp.mkdir(path.dirname(javaPath), { recursive: true });
+await fsp.writeFile(javaPath, 'AHT Java 8 smoke executable', 'utf8');
+await fsp.writeFile(path.join(javaHome, 'release'), 'JAVA_VERSION="1.8.0_452"\n', 'utf8');
 await writeJson(latestPath, {
   packId: 'a-hard-time-dregora',
   name: 'A Hard Time',
@@ -141,7 +149,10 @@ await writeJson(defaultsPath, {
     rootDir: minecraftRoot,
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
-    memoryMb: 6144
+    memoryMb: 6144,
+    javaPath,
+    java8InstallOverride: null,
+    syncDefaultRoots: false
   },
   playCommand: {
     command: '',
@@ -157,6 +168,10 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: 'amd64',
+    AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
     AHT_TEST_DIALOG_ECHO_DEFAULT_PATH: '1'
   },
   stdio: 'ignore',
@@ -209,6 +224,98 @@ try {
     throw new Error(`Modpack folder Browse did not pass the listed folder path to the native dialog: ${JSON.stringify(browseProof)}`);
   }
 
+  const java8InitialProof = await evaluate(client, `
+    (() => {
+      activateTab('settings');
+      const input = document.querySelector('#java8InstallInput');
+      const card = document.querySelector('#java8RuntimeCard');
+      return {
+        checked: input?.checked,
+        disabled: input?.disabled,
+        cardHidden: card?.hidden,
+        cardTechnical: card?.classList?.contains('player-technical'),
+        diagnosticsHidden: document.querySelector('#copyLaunchDiagnosticsButton')?.hidden,
+        diagnosticsTechnical: document.querySelector('#copyLaunchDiagnosticsButton')?.classList?.contains('player-technical'),
+        title: document.querySelector('#java8RuntimeTitle')?.textContent || '',
+        detail: document.querySelector('#java8RuntimeDetail')?.textContent || '',
+        warningHidden: document.querySelector('#java8MemoryWarning')?.hidden
+      };
+    })()
+  `);
+  if (
+    status.java8Runtime?.usable !== true
+    || java8InitialProof.checked !== false
+    || java8InitialProof.disabled !== false
+    || java8InitialProof.cardHidden
+    || java8InitialProof.cardTechnical
+    || java8InitialProof.diagnosticsHidden
+    || java8InitialProof.diagnosticsTechnical
+    || !/Java 8 is ready/i.test(java8InitialProof.title)
+    || !java8InitialProof.detail.includes(status.java8Runtime.path)
+    || java8InitialProof.warningHidden !== true
+  ) {
+    throw new Error(`Usable Java 8 did not render as a visible, automatically unchecked runtime: ${JSON.stringify({ java8InitialProof, java8Runtime: status.java8Runtime, javaPath })}`);
+  }
+
+  const java8MissingProof = await evaluate(client, `
+    (async () => {
+      const base = await window.aht.getStatus();
+      const missing = {
+        ...base,
+        config: {
+          ...base.config,
+          minecraftLauncher: {
+            ...base.config.minecraftLauncher,
+            java8InstallOverride: null
+          }
+        },
+        java8Runtime: {
+          usable: false,
+          path: '',
+          version: '',
+          vendor: '',
+          arch: '',
+          managed: false,
+          installSupported: true,
+          recommendedInstall: true,
+          effectiveInstallSelected: true,
+          installSelected: true,
+          installOverride: null,
+          memoryWarning: 'Allocated RAM smoke warning.',
+          reason: 'SECRET_RAW_RUNTIME_ERROR',
+          rejectedReason: 'SECRET_RAW_RUNTIME_ERROR'
+        }
+      };
+      renderStatus(missing);
+      const input = document.querySelector('#java8InstallInput');
+      const autoChecked = input.checked;
+      input.click();
+      renderStatus({ ...missing, java8Runtime: { ...missing.java8Runtime } });
+      return {
+        autoChecked,
+        checkedAfterRefresh: input.checked,
+        serializedOverride: serializeSettings().minecraftLauncher.java8InstallOverride,
+        title: document.querySelector('#java8RuntimeTitle')?.textContent || '',
+        detail: document.querySelector('#java8RuntimeDetail')?.textContent || '',
+        warning: document.querySelector('#java8MemoryWarning')?.textContent || '',
+        warningHidden: document.querySelector('#java8MemoryWarning')?.hidden,
+        bodyContainsRawError: document.body.textContent.includes('SECRET_RAW_RUNTIME_ERROR')
+      };
+    })()
+  `);
+  if (
+    java8MissingProof.autoChecked !== true
+    || java8MissingProof.checkedAfterRefresh !== false
+    || java8MissingProof.serializedOverride !== false
+    || !/setup is disabled/i.test(java8MissingProof.title)
+    || !/Enable the AHT-managed runtime/i.test(java8MissingProof.detail)
+    || java8MissingProof.warning !== 'Allocated RAM smoke warning.'
+    || java8MissingProof.warningHidden !== false
+    || java8MissingProof.bodyContainsRawError
+  ) {
+    throw new Error(`Missing-Java auto-selection, dirty refresh, or sanitized status rendering failed: ${JSON.stringify(java8MissingProof)}`);
+  }
+
   const saveResult = await evaluate(client, `
     window.aht.getStatus().then((status) => window.aht.saveSettings({
       ...status.config,
@@ -252,6 +359,10 @@ try {
       profileUpdated: saveResult.profileUpdated,
       profileId: saveResult.minecraftProfile?.profileId,
       rootDir: saveResult.minecraftProfile?.rootDir
+    },
+    java8: {
+      initial: java8InitialProof,
+      missing: java8MissingProof
     }
   }, null, 2));
 } finally {

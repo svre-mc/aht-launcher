@@ -51,7 +51,9 @@ if (!window.aht) {
         enabled: true,
         rootDir: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft",
         profileId: "a-hard-time-dregora",
-        profileName: "A Hard Time"
+        profileName: "A Hard Time",
+        memoryMb: 6144,
+        java8InstallOverride: null
       },
       playCommand: { command: "", args: [] }
     },
@@ -83,6 +85,23 @@ if (!window.aht) {
       versionId: "1.12.2-forge-14.23.5.2860",
       loaderInstalled: true,
       gameDir: "C:\\AHT\\A Hard Time Developer"
+    },
+    java8Runtime: {
+      usable: true,
+      path: "C:\\Program Files\\Eclipse Adoptium\\jre8\\bin\\javaw.exe",
+      version: "1.8.0_452",
+      vendor: "Eclipse Adoptium",
+      arch: "amd64",
+      is64Bit: true,
+      managed: false,
+      installSupported: true,
+      recommendedInstall: false,
+      installSelected: false,
+      installOverride: null,
+      totalMemoryMb: 16384,
+      freeMemoryMb: 8192,
+      configuredMemoryMb: 6144,
+      memoryWarning: ""
     },
     setup: {
       detectedInstanceDir: "C:\\AHT\\A Hard Time Developer",
@@ -131,7 +150,9 @@ if (!window.aht) {
       enabled: true,
       rootDir: "",
       profileId: "a-hard-time",
-      profileName: "A Hard Time"
+      profileName: "A Hard Time",
+      memoryMb: 6144,
+      java8InstallOverride: null
     };
     mockStatus.minecraftProfile = {
       enabled: true,
@@ -155,7 +176,24 @@ if (!window.aht) {
   window.aht = {
     getStatus: async () => mockStatus,
     copyErrorReport: async () => ({ ok: true, copied: true, chars: 0 }),
-    saveSettings: async () => ({}),
+    saveSettings: async (settings = {}) => {
+      mockStatus.config = {
+        ...mockStatus.config,
+        ...settings,
+        minecraftLauncher: {
+          ...mockStatus.config.minecraftLauncher,
+          ...settings.minecraftLauncher
+        }
+      };
+      const override = typeof mockStatus.config.minecraftLauncher.java8InstallOverride === "boolean"
+        ? mockStatus.config.minecraftLauncher.java8InstallOverride
+        : null;
+      mockStatus.java8Runtime.installOverride = override;
+      mockStatus.java8Runtime.installSelected = override === null
+        ? mockStatus.java8Runtime.recommendedInstall
+        : override;
+      return { config: mockStatus.config };
+    },
     setupRecommend: async () => mockStatus.setup,
     setupApply: async () => mockStatus,
     testFeed: async () => ({
@@ -584,6 +622,13 @@ const els = {
   minecraftProfileNameInput: $("#minecraftProfileNameInput"),
   minecraftMemoryInput: $("#minecraftMemoryInput"),
   minecraftMemoryOutput: $("#minecraftMemoryOutput"),
+  java8RuntimeCard: $("#java8RuntimeCard"),
+  java8RuntimeState: $("#java8RuntimeState"),
+  java8RuntimeTitle: $("#java8RuntimeTitle"),
+  java8RuntimeDetail: $("#java8RuntimeDetail"),
+  java8MemoryWarning: $("#java8MemoryWarning"),
+  java8InstallInput: $("#java8InstallInput"),
+  copyLaunchDiagnosticsButton: $("#copyLaunchDiagnosticsButton"),
   playCommandInput: $("#playCommandInput"),
   playArgsInput: $("#playArgsInput"),
   platformTargetView: $("#platformTargetView"),
@@ -764,6 +809,8 @@ let friendsRefreshTimer = null;
 let friendsRequestId = 0;
 const friendsActionRefreshTimers = new Set();
 let currentLegalState = null;
+let java8InstallOverrideDraft = null;
+let java8InstallOverrideDirty = false;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
 
@@ -1588,6 +1635,89 @@ function setMemoryValue(mb) {
     els.minecraftMemoryOutput.value = formatMemory(rounded);
     els.minecraftMemoryOutput.textContent = formatMemory(rounded);
   }
+}
+
+function java8InstallOverrideFromStatus(status = currentStatus) {
+  const configValue = status?.config?.minecraftLauncher?.java8InstallOverride;
+  if (typeof configValue === "boolean") return configValue;
+  const runtimeValue = status?.java8Runtime?.installOverride;
+  return typeof runtimeValue === "boolean" ? runtimeValue : null;
+}
+
+function java8InstallSelected(runtime = {}, override = null) {
+  if (typeof runtime.effectiveInstallSelected === "boolean") return runtime.effectiveInstallSelected;
+  if (typeof runtime.installSelected === "boolean") return runtime.installSelected;
+  if (typeof override === "boolean") return override;
+  return !runtime.usable && runtime.installSupported !== false;
+}
+
+function java8RuntimeText(value = "", limit = 420) {
+  return String(value || "").replace(/[\r\n\t]+/g, " ").trim().slice(0, limit);
+}
+
+function renderJava8Runtime(status = currentStatus) {
+  if (!els.java8RuntimeCard || !els.java8InstallInput) return;
+  const runtime = status?.java8Runtime;
+  if (!runtime) {
+    els.java8RuntimeCard.className = "java-runtime-card warn";
+    els.java8RuntimeState.textContent = "Java 8 runtime";
+    els.java8RuntimeTitle.textContent = "Checking this device";
+    els.java8RuntimeDetail.textContent = "Looking for a usable 64-bit Java 8 runtime for Minecraft Forge 1.12.2.";
+    els.java8MemoryWarning.textContent = "";
+    els.java8MemoryWarning.hidden = true;
+    els.java8InstallInput.disabled = true;
+    return;
+  }
+
+  const override = java8InstallOverrideFromStatus(status);
+  const selected = java8InstallOverrideDirty
+    ? Boolean(java8InstallOverrideDraft)
+    : java8InstallSelected(runtime, override);
+  if (!java8InstallOverrideDirty) {
+    java8InstallOverrideDraft = override;
+    els.java8InstallInput.checked = selected;
+  }
+  els.java8InstallInput.disabled = runtime.installSupported === false;
+
+  const runtimeParts = [runtime.vendor, runtime.version, runtime.arch]
+    .map((value) => java8RuntimeText(value, 80))
+    .filter(Boolean);
+  const runtimePath = java8RuntimeText(runtime.path);
+  let state = "warn";
+  let stateText = "Java 8 setup";
+  let title = "Java 8 setup required";
+  let detail = "No usable 64-bit Java 8 runtime was detected.";
+
+  if (runtime.usable) {
+    state = "ok";
+    stateText = "Java 8 ready";
+    title = runtime.managed ? "AHT-managed Java 8 is ready" : "Compatible Java 8 is ready";
+    detail = runtimeParts.length ? runtimeParts.join(" | ") : "A usable 64-bit Java 8 runtime was detected.";
+    if (runtimePath) detail += ` | ${runtimePath}`;
+    if (selected && !runtime.managed) detail += " AHT-managed Java 8 is selected for the next Update.";
+  } else if (runtime.installSupported === false) {
+    state = "bad";
+    stateText = "Java 8 unavailable";
+    title = "Automatic Java 8 install is unavailable";
+    detail = "Install a compatible 64-bit Java 8 runtime manually before launching A Hard Time.";
+  } else if (selected) {
+    stateText = "Java 8 selected";
+    title = "AHT-managed Java 8 will be installed";
+    detail = "No usable 64-bit Java 8 was found. Run Update to download and validate Adoptium Java 8 automatically.";
+  } else {
+    state = "bad";
+    stateText = "Java 8 required";
+    title = "Java 8 setup is disabled";
+    detail = "No usable 64-bit Java 8 was found. Enable the AHT-managed runtime, save Settings, then run Update.";
+  }
+
+  els.java8RuntimeCard.className = `java-runtime-card ${state}`;
+  els.java8RuntimeState.textContent = stateText;
+  els.java8RuntimeTitle.textContent = title;
+  els.java8RuntimeDetail.textContent = detail;
+  const memoryWarning = java8RuntimeText(runtime.memoryWarning, 500);
+  els.java8MemoryWarning.textContent = memoryWarning;
+  els.java8MemoryWarning.hidden = !memoryWarning;
 }
 
 function developerOutDir() {
@@ -3072,7 +3202,10 @@ function serializeSettings() {
       enabled: els.minecraftProfileEnabledInput.checked,
       rootDir: els.minecraftRootInput.value.trim(),
       profileName: els.minecraftProfileNameInput.value.trim(),
-      memoryMb: Number(els.minecraftMemoryInput.value || 6144)
+      memoryMb: Number(els.minecraftMemoryInput.value || 6144),
+      java8InstallOverride: java8InstallOverrideDirty
+        ? java8InstallOverrideDraft
+        : java8InstallOverrideFromStatus()
     },
     playCommand: {
       command: els.playCommandInput.value.trim(),
@@ -3119,6 +3252,7 @@ function fillSettings(status) {
   setInputValue(els.minecraftRootInput, config.minecraftLauncher?.rootDir || status.minecraftProfile?.rootDir || "");
   setInputValue(els.minecraftProfileNameInput, config.minecraftLauncher?.profileName || status.minecraftProfile?.profileName || "");
   setMemoryValue(config.minecraftLauncher?.memoryMb || 6144);
+  renderJava8Runtime(status);
   setInputValue(els.playCommandInput, config.playCommand?.command || "");
   setInputValue(els.playArgsInput, Array.isArray(config.playCommand?.args) ? config.playCommand.args.join(" ") : "");
   els.minecraftProfileEnabledInput.checked = config.minecraftLauncher?.enabled !== false;
@@ -3778,6 +3912,35 @@ els.pickMinecraftRootButton.addEventListener("click", async () => {
 if (els.minecraftMemoryInput) {
   els.minecraftMemoryInput.addEventListener("input", () => setMemoryValue(els.minecraftMemoryInput.value));
 }
+if (els.java8InstallInput) {
+  els.java8InstallInput.addEventListener("change", () => {
+    java8InstallOverrideDraft = Boolean(els.java8InstallInput.checked);
+    java8InstallOverrideDirty = true;
+    renderJava8Runtime(currentStatus);
+  });
+}
+if (els.copyLaunchDiagnosticsButton) {
+  els.copyLaunchDiagnosticsButton.addEventListener("click", async () => {
+    if (isUnavailable(els.copyLaunchDiagnosticsButton)) return;
+    setUnavailable(els.copyLaunchDiagnosticsButton, true);
+    try {
+      const result = await window.aht.copyErrorReport({
+        title: "AHT launch diagnostics",
+        context: "settings-java"
+      });
+      const copiedChars = Math.max(0, Number(result?.chars) || 0);
+      showToast(
+        "Launch diagnostics copied",
+        copiedChars ? `${copiedChars} characters copied. Paste them into your support message.` : "Paste the copied report into your support message.",
+        "success"
+      );
+    } catch {
+      showToast("Copy failed", "Try again, then copy the visible Downloads log if the problem continues.", "warn");
+    } finally {
+      setUnavailable(els.copyLaunchDiagnosticsButton, false);
+    }
+  });
+}
 els.pickLatestButton.addEventListener("click", async () => {
   const file = await window.aht.selectJson();
   if (file) {
@@ -3815,11 +3978,15 @@ els.saveSettingsButton.addEventListener("click", async () => {
   try {
     await saveDeveloperSecrets({ quiet: false });
     const result = await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
+    java8InstallOverrideDirty = false;
+    java8InstallOverrideDraft = null;
     await refresh();
     if (result?.profileUpdated) {
       showToast("Settings saved", "Minecraft Launcher profile was updated.", "success");
+    } else if (result?.profileError) {
+      showToast("Settings saved; launcher setup failed", result.profileError, "error");
     } else {
-      showToast("Settings saved", result?.profileError || result?.profileSkipped || "Launcher configuration was updated.", "success");
+      showToast("Settings saved", result?.profileSkipped || "Launcher configuration was updated.", "success");
     }
   } catch (error) {
     showToast("Save failed", cleanErrorMessage(error), "error");
