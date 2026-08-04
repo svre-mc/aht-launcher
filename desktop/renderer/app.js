@@ -244,12 +244,11 @@ if (!window.aht) {
       actionsAvailable: true,
       username: mockStatus.identity.minecraftUsername || "Preview",
       updatedAt: new Date().toISOString(),
-      counts: { friends: 2, online: 1, blocked: 1, requests: 1 },
+      counts: { friends: 2, online: 1, requests: 1 },
       friends: [
-        { username: "OnlineFriend", online: true, status: "Online" },
-        { username: "OfflineFriend", online: false, status: "Offline" }
+        { username: "OnlineFriend", online: true, status: "Online", server: "Regular", onlineSince: new Date(Date.now() - 3720000).toISOString() },
+        { username: "OfflineFriend", online: false, status: "Offline", lastSeenAt: new Date(Date.now() - 86400000).toISOString(), server: "Lobby" }
       ],
-      blocked: [{ username: "BlockedPlayer" }],
       requests: [{ username: "RequestFriend", online: false }]
     }),
     socialAction: async ({ action, target } = {}) => ({
@@ -597,16 +596,10 @@ const els = {
   friendsSummary: $("#friendsSummary"),
   friendsCount: $("#friendsCount"),
   friendsOnlineCount: $("#friendsOnlineCount"),
-  blockedCount: $("#blockedCount"),
   friendsStatus: $("#friendsStatus"),
   friendsList: $("#friendsList"),
-  blockedList: $("#blockedList"),
   friendsRequestsList: $("#friendsRequestsList"),
   friendsRequestsBadge: $("#friendsRequestsBadge"),
-  addFriendInput: $("#addFriendInput"),
-  addFriendButton: $("#addFriendButton"),
-  blockPlayerInput: $("#blockPlayerInput"),
-  blockPlayerButton: $("#blockPlayerButton"),
   accountOverlay: $("#accountOverlay"),
   accountForm: $("#accountForm"),
   minecraftUsernameInput: $("#minecraftUsernameInput"),
@@ -819,6 +812,7 @@ let friendsLoading = false;
 let friendsActionsAvailable = false;
 let friendsRefreshTimer = null;
 let friendsNotificationTimer = null;
+let friendsPresenceTimer = null;
 let friendsRequestId = 0;
 let friendsSocialState = null;
 const friendsActionRefreshTimers = new Set();
@@ -1276,11 +1270,6 @@ function renderFriendsNotification(state = friendsSocialState) {
 
 function setFriendsBusy(busy) {
   friendsBusy = Boolean(busy);
-  for (const button of [els.addFriendButton, els.blockPlayerButton]) {
-    setUnavailable(button, friendsBusy || !friendsActionsAvailable);
-  }
-  if (els.addFriendInput) els.addFriendInput.disabled = friendsBusy || !friendsActionsAvailable;
-  if (els.blockPlayerInput) els.blockPlayerInput.disabled = friendsBusy || !friendsActionsAvailable;
   for (const button of els.friendsOverlay?.querySelectorAll("[data-social-action]") || []) {
     setUnavailable(button, friendsBusy || button.dataset.actionsAvailable !== "true");
   }
@@ -1296,7 +1285,7 @@ function friendListEmpty(message) {
 function socialActionButton(action, label, target, actionsAvailable) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = `button compact friend-row-action${action === "block_player" ? " danger" : ""}`;
+  button.className = "button compact friend-row-action";
   button.textContent = label;
   button.dataset.socialAction = action;
   button.dataset.actionsAvailable = String(Boolean(actionsAvailable));
@@ -1307,7 +1296,31 @@ function socialActionButton(action, label, target, actionsAvailable) {
   return button;
 }
 
-function friendRow(person, action, label, actionsAvailable, state = "offline") {
+function relativePresenceTime(timestamp) {
+  const parsed = Date.parse(String(timestamp || ""));
+  if (!Number.isFinite(parsed)) return "";
+  const seconds = Math.max(0, Math.floor((Date.now() - parsed) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ${hours % 24}h`;
+  return `${Math.floor(days / 7)}w ${days % 7}d`;
+}
+
+function presenceDetail(person) {
+  const server = String(person?.server || "").trim();
+  if (person?.online) {
+    const duration = relativePresenceTime(person.onlineSince);
+    return `${server ? `${server} · ` : ""}Online${duration ? ` for ${duration}` : ""}`;
+  }
+  const since = relativePresenceTime(person?.lastSeenAt);
+  return `Offline${since ? ` · last seen ${since} ago` : ""}${server ? ` · ${server}` : ""}`;
+}
+
+function friendRow(person) {
   const row = document.createElement("div");
   row.className = "friend-row";
 
@@ -1315,15 +1328,9 @@ function friendRow(person, action, label, actionsAvailable, state = "offline") {
   name.textContent = person.username;
 
   const presence = document.createElement("span");
-  presence.className = `friend-state ${state}`;
-  presence.textContent = state === "blocked" ? "Blocked" : (person.online ? "Online" : "Offline");
-
-  const actions = document.createElement("span");
-  actions.className = "friend-row-actions";
-  actions.appendChild(socialActionButton(action, label, person.username, actionsAvailable));
-  if (action === "remove_friend") actions.appendChild(socialActionButton("block_player", "Block", person.username, actionsAvailable));
-
-  row.append(name, presence, actions);
+  presence.className = `friend-state ${person.online ? "online" : "offline"}`;
+  presence.textContent = presenceDetail(person);
+  row.append(name, presence);
   return row;
 }
 
@@ -1334,13 +1341,12 @@ function requestRow(person, actionsAvailable) {
   name.textContent = person.username;
   const presence = document.createElement("span");
   presence.className = `friend-state ${person.online ? "online" : "offline"}`;
-  presence.textContent = person.online ? "Online" : "Offline";
+  presence.textContent = presenceDetail(person);
   const actions = document.createElement("span");
   actions.className = "friend-row-actions";
   actions.append(
     socialActionButton("accept_friend", "Accept", person.username, actionsAvailable),
-    socialActionButton("decline_friend", "Decline", person.username, actionsAvailable),
-    socialActionButton("block_player", "Block", person.username, actionsAvailable)
+    socialActionButton("decline_friend", "Decline", person.username, actionsAvailable)
   );
   row.append(name, presence, actions);
   return row;
@@ -1349,7 +1355,6 @@ function requestRow(person, actionsAvailable) {
 function renderFriendsPanel(social) {
   const state = social || {};
   const friends = Array.isArray(state.friends) ? state.friends : [];
-  const blocked = Array.isArray(state.blocked) ? state.blocked : [];
   const requests = Array.isArray(state.requests) ? state.requests : [];
   const actionsAvailable = Boolean(state.available && state.actionsAvailable);
   friendsActionsAvailable = actionsAvailable;
@@ -1359,7 +1364,6 @@ function renderFriendsPanel(social) {
 
   els.friendsCount.textContent = String(Number.isFinite(Number(counts.friends)) ? Number(counts.friends) : friends.length);
   els.friendsOnlineCount.textContent = String(Number.isFinite(Number(counts.online)) ? Number(counts.online) : friends.filter((friend) => friend.online).length);
-  els.blockedCount.textContent = String(Number.isFinite(Number(counts.blocked)) ? Number(counts.blocked) : blocked.length);
   if (els.friendsRequestsBadge) {
     const requestCount = pendingFriendRequestCount(state);
     els.friendsRequestsBadge.textContent = requestCount > 99 ? "99+" : String(requestCount);
@@ -1373,9 +1377,7 @@ function renderFriendsPanel(social) {
   if (!friends.length) {
     els.friendsList.appendChild(friendListEmpty(state.available ? "No friends yet." : "Friends could not be loaded."));
   } else {
-    for (const friend of friends) {
-      els.friendsList.appendChild(friendRow(friend, "remove_friend", "Unadd", actionsAvailable, friend.online ? "online" : "offline"));
-    }
+    for (const friend of friends) els.friendsList.appendChild(friendRow(friend));
   }
 
   els.friendsRequestsList?.replaceChildren();
@@ -1385,19 +1387,6 @@ function renderFriendsPanel(social) {
     for (const request of requests) els.friendsRequestsList?.appendChild(requestRow(request, actionsAvailable));
   }
 
-  els.blockedList.replaceChildren();
-  if (!blocked.length) {
-    els.blockedList.appendChild(friendListEmpty(state.available ? "No blocked players." : "Blocked players could not be loaded."));
-  } else {
-    for (const player of blocked) {
-      els.blockedList.appendChild(friendRow(player, "unblock_player", "Unblock", actionsAvailable, "blocked"));
-    }
-  }
-
-  setUnavailable(els.addFriendButton, friendsBusy || !actionsAvailable);
-  setUnavailable(els.blockPlayerButton, friendsBusy || !actionsAvailable);
-  if (els.addFriendInput) els.addFriendInput.disabled = friendsBusy || !actionsAvailable;
-  if (els.blockPlayerInput) els.blockPlayerInput.disabled = friendsBusy || !actionsAvailable;
   if (state.message) setFriendsStatus(state.message, state.available ? "warn" : "bad");
   else setFriendsStatus(state.available ? "Friend list is current." : "Friend service is not connected yet.", state.available ? "ok" : "bad");
 }
@@ -1419,9 +1408,8 @@ async function refreshFriendsPanel({ quiet = false } = {}) {
       actionsAvailable: false,
       username: accountUsername(),
       friends: [],
-      blocked: [],
       requests: [],
-      counts: { friends: 0, online: 0, blocked: 0 },
+      counts: { friends: 0, online: 0, requests: 0 },
       message: cleanErrorMessage(error)
     });
   } finally {
@@ -1455,19 +1443,17 @@ function queueFriendsRefresh(delayMs) {
 
 async function runFriendAction(action, targetOverride = "") {
   if (friendsBusy || !friendsActionsAvailable || typeof window.aht?.socialAction !== "function") return;
-  const input = action === "block_player" ? els.blockPlayerInput : els.addFriendInput;
-  const target = String(targetOverride || input?.value || "").trim();
+  if (!["accept_friend", "decline_friend"].includes(action)) return;
+  const target = String(targetOverride || "").trim();
   const validation = minecraftUsernameError(target);
   if (validation) {
     setFriendsStatus(validation, "bad");
-    if (!targetOverride) input?.focus();
     return;
   }
   setFriendsBusy(true);
   setFriendsStatus("Sending action to the AHT server...", "warn");
   try {
     const result = await window.aht.socialAction({ action, target });
-    if (!targetOverride && input) input.value = "";
     if (result?.social) renderFriendsPanel(result.social);
     setFriendsStatus(result?.message || "Friend action queued.", "ok");
     queueFriendsRefresh(2500);
@@ -1487,14 +1473,17 @@ function openFriendsPanel() {
     actionsAvailable: false,
     username: accountUsername(),
     friends: [],
-    blocked: [],
     requests: [],
-    counts: { friends: 0, online: 0, blocked: 0 },
+    counts: { friends: 0, online: 0, requests: 0 },
     message: "Loading friends..."
   });
   refreshFriendsPanel();
   clearInterval(friendsRefreshTimer);
   friendsRefreshTimer = window.setInterval(() => refreshFriendsPanel({ quiet: true }), 15000);
+  clearInterval(friendsPresenceTimer);
+  friendsPresenceTimer = window.setInterval(() => {
+    if (friendsSocialState && !els.friendsOverlay.hidden && !friendsLoading) renderFriendsPanel(friendsSocialState);
+  }, 30000);
   window.setTimeout(() => els.friendsCloseButton?.focus(), 0);
 }
 
@@ -1504,6 +1493,8 @@ function closeFriendsPanel() {
   friendsRequestId += 1;
   clearInterval(friendsRefreshTimer);
   friendsRefreshTimer = null;
+  clearInterval(friendsPresenceTimer);
+  friendsPresenceTimer = null;
   for (const timer of friendsActionRefreshTimers) clearTimeout(timer);
   friendsActionRefreshTimers.clear();
   els.profileFriendsButton?.focus();
@@ -3676,32 +3667,6 @@ if (els.friendsRefreshButton) els.friendsRefreshButton.addEventListener("click",
 if (els.friendsOverlay) {
   els.friendsOverlay.addEventListener("click", (event) => {
     if (event.target === els.friendsOverlay) closeFriendsPanel();
-  });
-}
-if (els.addFriendButton) {
-  els.addFriendButton.addEventListener("click", () => {
-    if (!isUnavailable(els.addFriendButton)) runFriendAction("add_friend");
-  });
-}
-if (els.addFriendInput) {
-  els.addFriendInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      runFriendAction("add_friend");
-    }
-  });
-}
-if (els.blockPlayerButton) {
-  els.blockPlayerButton.addEventListener("click", () => {
-    if (!isUnavailable(els.blockPlayerButton)) runFriendAction("block_player");
-  });
-}
-if (els.blockPlayerInput) {
-  els.blockPlayerInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      runFriendAction("block_player");
-    }
   });
 }
 if (els.launcherUpdateNowButton) {

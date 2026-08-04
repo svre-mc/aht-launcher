@@ -21,13 +21,8 @@ const RELEASE_PREFIXES = [
   'update-media/'
 ];
 const LAUNCHER_SOCIAL_ACTIONS = new Set([
-  'add_friend',
   'accept_friend',
   'decline_friend',
-  'cancel_friend',
-  'remove_friend',
-  'block_player',
-  'unblock_player'
 ]);
 const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
@@ -865,7 +860,18 @@ function normalizeSocialRows(value, includeOnline = false) {
     const key = username.toLowerCase();
     if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || seen.has(key)) continue;
     seen.add(key);
-    rows.push(includeOnline ? { username, online: Boolean(item?.online) } : { username });
+    if (!includeOnline) {
+      rows.push({ username });
+      continue;
+    }
+    const row = { username, online: Boolean(item?.online) };
+    const server = cleanString(item?.server || item?.serverName || item?.networkServer, 64);
+    const onlineSince = cleanString(item?.onlineSince || item?.onlineSinceAt, 40);
+    const lastSeenAt = cleanString(item?.lastSeenAt || item?.lastSeen, 40);
+    if (server) row.server = server;
+    if (onlineSince) row.onlineSince = onlineSince;
+    if (lastSeenAt) row.lastSeenAt = lastSeenAt;
+    rows.push(row);
   }
   rows.sort((left, right) => includeOnline
     ? Number(right.online) - Number(left.online) || left.username.localeCompare(right.username)
@@ -877,7 +883,6 @@ function normalizeServerSocialSnapshot(value) {
   const username = normalizeMinecraftUsername(value?.username);
   if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) return null;
   const friends = normalizeSocialRows(value?.friends, true);
-  const blockedPlayers = normalizeSocialRows(value?.blockedPlayers || value?.blocked, false);
   const requests = normalizeSocialRows(value?.requests, true);
   return {
     schemaVersion: 1,
@@ -886,17 +891,31 @@ function normalizeServerSocialSnapshot(value) {
     counts: {
       friends: friends.length,
       online: friends.filter((friend) => friend.online).length,
-      blocked: blockedPlayers.length,
       requests: requests.length
     },
     friends,
-    blockedPlayers,
     requests
   };
 }
 
-function expectedSocialServerId(env) {
-  return cleanString(env.AHT_SOCIAL_SERVER_ID || 'aht-linux', 64).toLowerCase();
+function allowedSocialServerIds(env) {
+  const configured = cleanString(
+    env.AHT_SOCIAL_SERVER_IDS || env.AHT_SOCIAL_SERVER_ID || 'aht-linux', 512
+  );
+  return new Set(configured.split(',').map((value) => value.trim().toLowerCase())
+    .filter((value) => /^[a-z0-9][a-z0-9._-]{1,63}$/.test(value)));
+}
+
+function launcherSocialView(state) {
+  if (!state || typeof state !== 'object') return null;
+  const view = { ...state };
+  delete view.blockedPlayers;
+  delete view.blocked;
+  if (view.counts && typeof view.counts === 'object') {
+    view.counts = { ...view.counts };
+    delete view.counts.blocked;
+  }
+  return view;
 }
 
 async function readSocialState(env, username) {
@@ -917,14 +936,13 @@ async function launcherSocialState(request, env, origin) {
       actionsAvailable: true,
       username,
       updatedAt: '',
-      counts: { friends: 0, online: 0, blocked: 0, requests: 0 },
+      counts: { friends: 0, online: 0, requests: 0 },
       friends: [],
-      blockedPlayers: [],
       requests: [],
       message: 'Friends are syncing from the AHT server.'
     }, 200, origin);
   }
-  return privateJson({ ...state, available: true, actionsAvailable: true }, 200, origin);
+  return privateJson({ ...launcherSocialView(state), available: true, actionsAvailable: true }, 200, origin);
 }
 
 async function queueLauncherSocialAction(request, env, origin) {
@@ -958,19 +976,15 @@ async function queueLauncherSocialAction(request, env, origin) {
     httpMetadata: { contentType: 'application/json' }
   });
   const current = await readSocialState(env, actor);
-  const label = action === 'add_friend' ? 'Friend request queued.'
-    : action === 'accept_friend' ? 'Friend request acceptance queued.'
-    : action === 'decline_friend' ? 'Friend request decline queued.'
-    : action === 'cancel_friend' ? 'Friend request cancellation queued.'
-    : action === 'remove_friend' ? 'Friend removal queued.'
-    : action === 'block_player' ? 'Player block queued.'
-    : 'Unblock queued.';
+  const label = action === 'accept_friend'
+    ? 'Friend request acceptance queued.'
+    : 'Friend request decline queued.';
   return privateJson({
     ok: true,
     queued: true,
     actionId: id,
     message: label,
-    social: current ? { ...current, available: true, actionsAvailable: true } : null
+    social: current ? { ...launcherSocialView(current), available: true, actionsAvailable: true } : null
   }, 202, origin);
 }
 
@@ -999,7 +1013,7 @@ async function synchronizeServerSocial(request, env, origin) {
     return privateJson({ error: 'Invalid server social payload.' }, 400, origin);
   }
   const serverId = cleanString(body?.serverId, 64).toLowerCase();
-  if (!serverId || serverId !== expectedSocialServerId(env)) {
+  if (!serverId || !allowedSocialServerIds(env).has(serverId)) {
     return privateJson({ error: 'Social sync must come from the Linux AHT server.' }, 403, origin);
   }
   const snapshots = Array.isArray(body.snapshots) ? body.snapshots.slice(0, 250) : [];

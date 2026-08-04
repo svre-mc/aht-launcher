@@ -27,12 +27,11 @@ const socialActions = [];
 const socialState = {
   username: 'SocialUser_1',
   updatedAt: '2026-07-14T12:00:00.000Z',
-  counts: { friends: 2, online: 1, blocked: 1, requests: 1 },
+  counts: { friends: 2, online: 1, requests: 1 },
   friends: [
-    { username: 'FriendOnline', online: true },
-    { username: 'FriendOffline', online: false }
+    { username: 'FriendOnline', online: true, server: 'Regular', onlineSince: '2026-07-14T11:00:00.000Z' },
+    { username: 'FriendOffline', online: false, server: 'Lobby', lastSeenAt: '2026-07-13T12:00:00.000Z' }
   ],
-  blockedPlayers: [{ username: 'BlockedOne' }],
   requests: [{ username: 'RequestOne', online: false }]
 };
 
@@ -49,7 +48,6 @@ function updateCounts() {
   socialState.counts = {
     friends: socialState.friends.length,
     online: socialState.friends.filter((friend) => friend.online).length,
-    blocked: socialState.blockedPlayers.length,
     requests: socialState.requests.length
   };
   socialState.updatedAt = new Date().toISOString();
@@ -198,17 +196,7 @@ const server = http.createServer(async (request, response) => {
     if (!String(request.headers.authorization || '').startsWith('Bearer ')) return json(response, { error: 'unauthorized' }, 401);
     const body = await readBody(request);
     socialActions.push(body);
-    if (body.action === 'add_friend') {
-      socialState.friends.push({ username: body.target, online: false });
-    } else if (body.action === 'remove_friend') {
-      socialState.friends = socialState.friends.filter((friend) => friend.username.toLowerCase() !== String(body.target).toLowerCase());
-    } else if (body.action === 'unblock_player') {
-      socialState.blockedPlayers = socialState.blockedPlayers.filter((player) => player.username.toLowerCase() !== String(body.target).toLowerCase());
-    } else if (body.action === 'block_player') {
-      socialState.blockedPlayers.push({ username: body.target });
-      socialState.friends = socialState.friends.filter((friend) => friend.username.toLowerCase() !== String(body.target).toLowerCase());
-      socialState.requests = socialState.requests.filter((request) => request.username.toLowerCase() !== String(body.target).toLowerCase());
-    } else if (body.action === 'accept_friend') {
+    if (body.action === 'accept_friend') {
       socialState.friends.push({ username: body.target, online: false });
       socialState.requests = socialState.requests.filter((request) => request.username.toLowerCase() !== String(body.target).toLowerCase());
     } else if (body.action === 'decline_friend') {
@@ -255,41 +243,36 @@ try {
     (() => {
       const overlay = document.querySelector('#friendsOverlay');
       const text = overlay?.innerText || '';
-      if (!overlay || overlay.hidden || !text.includes('FriendOnline') || !text.includes('FriendOffline') || !text.includes('BlockedOne') || !text.includes('RequestOne')) return false;
+      if (!overlay || overlay.hidden || !text.includes('FriendOnline') || !text.includes('FriendOffline') || !text.includes('RequestOne')) return false;
       return {
         friends: document.querySelector('#friendsCount')?.textContent?.trim(),
         online: document.querySelector('#friendsOnlineCount')?.textContent?.trim(),
-        blocked: document.querySelector('#blockedCount')?.textContent?.trim(),
         requests: document.querySelector('#friendsRequestsBadge')?.textContent?.trim(),
         profileBadge: document.querySelector('#profileFriendsBadge')?.textContent?.trim(),
         friendRows: [...document.querySelectorAll('#friendsList .friend-row')].map((row) => row.innerText.replace(/\\s+/g, ' ').trim()),
-        blockedRows: [...document.querySelectorAll('#blockedList .friend-row')].map((row) => row.innerText.replace(/\\s+/g, ' ').trim()),
         actionLabels: [...document.querySelectorAll('[data-social-action]')].map((button) => button.textContent.trim()),
         actionValues: [...document.querySelectorAll('[data-social-action]')].map((button) => button.dataset.socialAction),
         hasAdd: Boolean(document.querySelector('#addFriendButton')),
         hasBlock: Boolean(document.querySelector('#blockPlayerButton')),
-        disabled: [...document.querySelectorAll('#addFriendButton, [data-social-action]')].some((button) => button.disabled)
+        disabled: [...document.querySelectorAll('[data-social-action]')].some((button) => button.disabled)
       };
     })()
   `, 'friends panel data');
-  if (panel.friends !== '2' || panel.online !== '1' || panel.blocked !== '1' || panel.requests !== '1' || panel.profileBadge !== '1') throw new Error(`Friends panel counts were wrong: ${JSON.stringify(panel)}`);
-  if (!panel.friendRows.some((line) => line.includes('FriendOnline') && line.includes('Online')) || !panel.friendRows.some((line) => line.includes('FriendOffline') && line.includes('Offline'))) throw new Error(`Friends panel did not show presence: ${JSON.stringify(panel)}`);
-  if (!panel.blockedRows.some((line) => line.includes('BlockedOne') && line.includes('Unblock'))) throw new Error(`Blocked player row was wrong: ${JSON.stringify(panel)}`);
-  if (!panel.hasAdd || !panel.hasBlock || panel.disabled || !panel.actionLabels.includes('Block') || panel.actionValues.some((action) => !['remove_friend', 'block_player', 'unblock_player', 'accept_friend', 'decline_friend'].includes(action))) throw new Error(`Friends panel controls were wrong: ${JSON.stringify(panel)}`);
+  if (panel.friends !== '2' || panel.online !== '1' || panel.requests !== '1' || panel.profileBadge !== '1') throw new Error(`Friends panel counts were wrong: ${JSON.stringify(panel)}`);
+  if (!panel.friendRows.some((line) => line.includes('FriendOnline') && line.includes('Online') && line.includes('Regular')) || !panel.friendRows.some((line) => line.includes('FriendOffline') && line.includes('Offline') && line.includes('last seen'))) throw new Error(`Friends panel did not show presence details: ${JSON.stringify(panel)}`);
+  if (panel.hasAdd || panel.hasBlock || panel.disabled || panel.actionValues.some((action) => !['accept_friend', 'decline_friend'].includes(action))) throw new Error(`Friends panel exposed disallowed controls: ${JSON.stringify(panel)}`);
 
-  await evaluate(client, `(() => { const input = document.querySelector('#addFriendInput'); input.value = 'NewFriend_1'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#addFriendButton').click(); return true; })()`);
-  await waitFor(client, "document.querySelector('#friendsList')?.innerText.includes('NewFriend_1')", 'add friend action');
-  await evaluate(client, `(() => { const row = [...document.querySelectorAll('#friendsList .friend-row')].find((item) => item.innerText.includes('FriendOffline')); row?.querySelector('[data-social-action="remove_friend"]')?.click(); return true; })()`);
-  await waitFor(client, "!document.querySelector('#friendsList')?.innerText.includes('FriendOffline')", 'unadd friend action');
-  await evaluate(client, `document.querySelector('#blockedList [data-social-action="unblock_player"]')?.click(); true`);
-  await waitFor(client, "!document.querySelector('#blockedList')?.innerText.includes('BlockedOne')", 'unblock player action');
   await evaluate(client, `document.querySelector('#friendsRequestsList [data-social-action="accept_friend"]')?.click(); true`);
   await waitFor(client, "!document.querySelector('#friendsRequestsList')?.innerText.includes('RequestOne')", 'accept friend request action');
-  await evaluate(client, `(() => { const input = document.querySelector('#blockPlayerInput'); input.value = 'BlockedNow_1'; document.querySelector('#blockPlayerButton').click(); return true; })()`);
-  await waitFor(client, "document.querySelector('#blockedList')?.innerText.includes('BlockedNow_1')", 'block player action');
+  socialState.requests.push({ username: 'RequestTwo', online: false });
+  updateCounts();
+  await evaluate(client, `document.querySelector('#friendsRefreshButton')?.click(); true`);
+  await waitFor(client, "document.querySelector('#friendsRequestsList')?.innerText.includes('RequestTwo')", 'second request');
+  await evaluate(client, `document.querySelector('#friendsRequestsList [data-social-action="decline_friend"]')?.click(); true`);
+  await waitFor(client, "!document.querySelector('#friendsRequestsList')?.innerText.includes('RequestTwo')", 'decline friend request action');
 
   const actionNames = socialActions.map((entry) => entry.action).join(',');
-  if (actionNames !== 'add_friend,remove_friend,unblock_player,accept_friend,block_player') throw new Error(`Unexpected social actions: ${JSON.stringify(socialActions)}`);
+  if (actionNames !== 'accept_friend,decline_friend') throw new Error(`Unexpected social actions: ${JSON.stringify(socialActions)}`);
   if (socialActions.some((entry) => Object.keys(entry).sort().join(',') !== 'action,target' || entry.username || entry.installId)) {
     throw new Error(`Renderer identity leaked into social action body: ${JSON.stringify(socialActions)}`);
   }
@@ -297,7 +280,7 @@ try {
     ok: true,
     root,
     packaged: Boolean(smokeExe),
-    counts: { friends: panel.friends, online: panel.online, blocked: panel.blocked, requests: panel.requests },
+    counts: { friends: panel.friends, online: panel.online, requests: panel.requests },
     actions: socialActions
   }, null, 2));
 } finally {

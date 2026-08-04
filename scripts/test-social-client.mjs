@@ -28,15 +28,14 @@ const normalized = normalizeSocialState({
     { username: 'OnlineFriend', online: true },
     { username: 'onlinefriend', online: false }
   ],
-  blockedPlayers: ['BlockedUser'],
-  requests: [{ username: 'RequestUser', online: true }]
+  requests: [{ username: 'RequestUser', online: true, server: 'Lobby', onlineSince: '2026-07-14T10:00:00.000Z' }]
 }, { actionsAvailable: true });
 assert(normalized.counts.friends === 2 && normalized.counts.online === 1
-  && normalized.counts.blocked === 1 && normalized.counts.requests === 1, `Normalized counts were wrong: ${JSON.stringify(normalized.counts)}`);
+  && normalized.counts.requests === 1, `Normalized counts were wrong: ${JSON.stringify(normalized.counts)}`);
 assert(normalized.friends[0].username === 'OnlineFriend' && normalized.friends[0].online,
   'Online friends must sort first.');
-assert(normalized.blocked[0].username === 'BlockedUser', 'Blocked player was not normalized.');
 assert(normalized.requests[0].username === 'RequestUser', 'Pending friend request was not normalized.');
+assert(normalized.requests[0].server === 'Lobby' && normalized.requests[0].onlineSince, 'Request presence details were not normalized.');
 
 let listRequest = null;
 const listed = await fetchSocialState({
@@ -49,7 +48,7 @@ const listed = await fetchSocialState({
       username: 'SocialUser',
       actionsAvailable: true,
       friends: [{ username: 'OnlineFriend', online: true }],
-      blockedPlayers: []
+      requests: []
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
 });
@@ -68,11 +67,11 @@ const actionResult = await sendSocialAction({
   config,
   identity,
   proofToken: 'signed.launcher.proof',
-  action: 'add_friend',
+  action: 'accept_friend',
   target: 'tArGeTuSeR',
   fetchImpl: async (url, options) => {
     actionRequest = { url, options, body: JSON.parse(options.body) };
-    return new Response(JSON.stringify({ ok: true, queued: true, message: 'Friend request queued.' }), {
+      return new Response(JSON.stringify({ ok: true, queued: true, message: 'Friend request acceptance queued.' }), {
       status: 202,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -82,29 +81,34 @@ assert(actionResult.ok && actionResult.queued, 'Social action was not accepted a
 assert(actionRequest.url === endpoints.actionUrl
   && actionRequest.options.headers.Authorization === 'Bearer signed.launcher.proof',
   'Social action did not use launcher proof authentication.');
-assert(actionRequest.body.action === 'add_friend' && actionRequest.body.target === 'tArGeTuSeR'
+assert(actionRequest.body.action === 'accept_friend' && actionRequest.body.target === 'tArGeTuSeR'
   && !('username' in actionRequest.body) && !('installId' in actionRequest.body),
   `Renderer-controlled identity leaked into action body: ${JSON.stringify(actionRequest.body)}`);
 
-const blockResult = await sendSocialAction({
+const declineResult = await sendSocialAction({
   config,
   identity,
   proofToken: 'signed.launcher.proof',
-  action: 'block_player',
+  action: 'decline_friend',
   target: 'TargetUser',
   fetchImpl: async (url, options) => {
     actionRequest = { url, options, body: JSON.parse(options.body) };
-    return new Response(JSON.stringify({ ok: true, queued: true, message: 'Player block queued.' }), {
+    return new Response(JSON.stringify({ ok: true, queued: true, message: 'Friend request decline queued.' }), {
       status: 202,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 });
-assert(blockResult.ok && blockResult.queued && actionRequest.body.action === 'block_player', 'Launcher-side block action was not accepted.');
+assert(declineResult.ok && declineResult.queued && actionRequest.body.action === 'decline_friend', 'Launcher-side decline action was not accepted.');
 await assertRejects(
-  () => sendSocialAction({ config, identity, proofToken: 'proof', action: 'unblock_player', target: 'SocialUser' }),
-  /choose another player/i,
-  'Self-targeted launcher social action must be rejected.'
+  () => sendSocialAction({ config, identity, proofToken: 'proof', action: 'add_friend', target: 'TargetUser' }),
+  /not available/i,
+  'Launcher add-friend action must be rejected.'
+);
+await assertRejects(
+  () => sendSocialAction({ config, identity, proofToken: 'proof', action: 'block_player', target: 'TargetUser' }),
+  /not available/i,
+  'Launcher block action must be rejected.'
 );
 
 async function assertRejects(run, pattern, message) {

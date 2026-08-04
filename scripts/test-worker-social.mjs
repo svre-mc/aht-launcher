@@ -109,7 +109,6 @@ await serverSync({
       { username: 'OnlineFriend', online: true },
       { username: 'OfflineFriend', online: false }
     ],
-    blockedPlayers: [{ username: 'BlockedUser' }],
     requests: []
   }],
   acknowledgements: []
@@ -117,7 +116,7 @@ await serverSync({
 
 const authorization = { Authorization: `Bearer ${proof.token}` };
 const initial = await jsonRequest('/api/social', { headers: authorization });
-assert(initial.counts.friends === 2 && initial.counts.online === 1 && initial.counts.blocked === 1,
+assert(initial.counts.friends === 2 && initial.counts.online === 1 && !('blocked' in initial.counts),
   `Social counts were wrong: ${JSON.stringify(initial.counts)}`);
 assert(initial.friends[0].username === 'OnlineFriend' && initial.friends[0].online,
   'Online friend state was not preserved.');
@@ -126,22 +125,29 @@ const blockedAction = await jsonRequest('/api/social/actions', {
   method: 'POST',
   headers: { ...authorization, 'Content-Type': 'application/json' },
   body: JSON.stringify({ action: 'block_player', target: 'TargetUser' })
-}, 202);
-assert(blockedAction.queued && blockedAction.actionId, 'Launcher-side block action was not queued.');
+}, 400);
+assert(/unavailable/i.test(blockedAction.error), 'Launcher-side block action was accepted.');
 
 const queued = await jsonRequest('/api/social/actions', {
   method: 'POST',
   headers: { ...authorization, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ action: 'add_friend', target: 'tArGeTuSeR' })
+  body: JSON.stringify({ action: 'accept_friend', target: 'tArGeTuSeR' })
 }, 202);
-assert(queued.queued && queued.actionId, 'Friend action was not queued.');
+assert(queued.queued && queued.actionId, 'Accept request action was not queued.');
+
+const declined = await jsonRequest('/api/social/actions', {
+  method: 'POST',
+  headers: { ...authorization, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ action: 'decline_friend', target: 'DeclineUser' })
+}, 202);
+assert(declined.queued && declined.actionId, 'Decline request action was not queued.');
 
 const pulled = await serverSync({ serverId: 'aht-linux', snapshots: [], acknowledgements: [] });
-assert(pulled.actions.length === 2, `Server did not receive two actions: ${JSON.stringify(pulled)}`);
+assert(pulled.actions.length === 2, `Server did not receive two request actions: ${JSON.stringify(pulled)}`);
 assert(pulled.actions.some((action) => action.actor === 'SocialUser'
-  && action.action === 'block_player' && action.target === 'TargetUser')
+  && action.action === 'accept_friend' && action.target === 'tArGeTuSeR')
   && pulled.actions.some((action) => action.actor === 'SocialUser'
-  && action.action === 'add_friend' && action.target === 'tArGeTuSeR'),
+  && action.action === 'decline_friend' && action.target === 'DeclineUser'),
   `Server actions were not bound to proof identity: ${JSON.stringify(pulled.actions)}`);
 
 const acknowledged = await serverSync({
@@ -150,12 +156,11 @@ const acknowledged = await serverSync({
     username: 'SocialUser',
     updatedAt: new Date().toISOString(),
     friends: [{ username: 'TargetUser', online: true }],
-    blockedPlayers: [{ username: 'BlockedUser' }],
     requests: []
   }],
   acknowledgements: [
-    { id: queued.actionId, success: true, message: 'Friend request sent.' },
-    { id: blockedAction.actionId, success: true, message: 'Player blocked.' }
+    { id: queued.actionId, success: true, message: 'Friend request accepted.' },
+    { id: declined.actionId, success: true, message: 'Friend request declined.' }
   ]
 });
 assert(acknowledged.acknowledged === 2 && acknowledged.actions.length === 0,

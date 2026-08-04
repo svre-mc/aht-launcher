@@ -1,11 +1,6 @@
 const SOCIAL_ACTIONS = new Set([
-  'add_friend',
   'accept_friend',
   'decline_friend',
-  'cancel_friend',
-  'remove_friend',
-  'block_player',
-  'unblock_player'
 ]);
 
 export function sanitizeMinecraftUsername(value = '') {
@@ -82,7 +77,14 @@ function normalizePeople(value, options = {}) {
     if (!username || seen.has(key)) continue;
     seen.add(key);
     people.push(options.includeOnline
-      ? { username, online: Boolean(item?.online), status: item?.online ? 'Online' : 'Offline' }
+      ? {
+        username,
+        online: Boolean(item?.online),
+        status: item?.online ? 'Online' : 'Offline',
+        server: firstString(item?.server, item?.serverName, item?.networkServer),
+        onlineSince: firstString(item?.onlineSince, item?.onlineSinceAt),
+        lastSeenAt: firstString(item?.lastSeenAt, item?.lastSeen)
+      }
       : { username });
   }
   people.sort((left, right) => options.includeOnline
@@ -94,7 +96,6 @@ function normalizePeople(value, options = {}) {
 export function normalizeSocialState(raw = {}, options = {}) {
   const root = raw?.social && typeof raw.social === 'object' ? raw.social : raw;
   const friends = normalizePeople(root?.friends || root?.friendList, { includeOnline: true });
-  const blocked = normalizePeople(root?.blockedPlayers || root?.blocked);
   const requests = normalizePeople(root?.requests || root?.incomingFriendRequests, { includeOnline: true });
   const available = options.available ?? root?.available ?? true;
   const actionsAvailable = options.actionsAvailable ?? root?.actionsAvailable ?? false;
@@ -106,11 +107,9 @@ export function normalizeSocialState(raw = {}, options = {}) {
     counts: {
       friends: Number(root?.counts?.friends) || friends.length,
       online: Number(root?.counts?.online) || friends.filter((friend) => friend.online).length,
-      blocked: Number(root?.counts?.blocked) || blocked.length,
       requests: Number(root?.counts?.requests) || requests.length
     },
     friends,
-    blocked,
     requests,
     message: String(root?.message || options.message || '')
   };
