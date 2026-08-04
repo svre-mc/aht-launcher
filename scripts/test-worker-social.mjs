@@ -106,8 +106,8 @@ await serverSync({
     username: 'SocialUser',
     updatedAt: new Date().toISOString(),
     friends: [
-      { username: 'OnlineFriend', online: true },
-      { username: 'OfflineFriend', online: false }
+      { username: 'OnlineFriend', online: true, server: 'Regular', onlineSince: '2026-08-04T19:00:00.000Z' },
+      { username: 'OfflineFriend', online: false, lastSeenAt: '2026-08-03T19:00:00.000Z' }
     ],
     requests: []
   }],
@@ -120,6 +120,8 @@ assert(initial.counts.friends === 2 && initial.counts.online === 1 && !('blocked
   `Social counts were wrong: ${JSON.stringify(initial.counts)}`);
 assert(initial.friends[0].username === 'OnlineFriend' && initial.friends[0].online,
   'Online friend state was not preserved.');
+assert(initial.friends[0].server === 'Regular' && initial.friends[0].onlineSince
+  && initial.friends[1].lastSeenAt, 'Friend presence metadata was not preserved.');
 
 const blockedAction = await jsonRequest('/api/social/actions', {
   method: 'POST',
