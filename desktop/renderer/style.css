@@ -484,7 +484,7 @@ body:not(.dev-mode) .workspace {
 
 .profile-card {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 174px;
@@ -566,6 +566,30 @@ body:not(.dev-mode) .workspace {
 
 .view.active {
   display: block;
+}
+
+.notification-badge {
+  display: inline-grid;
+  min-width: 21px;
+  height: 21px;
+  box-sizing: border-box;
+  place-items: center;
+  padding: 0 5px;
+  border: 2px solid #191b1c;
+  border-radius: 999px;
+  background: #e53935;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 0 0 1px rgba(229, 57, 53, 0.22), 0 4px 12px rgba(229, 57, 53, 0.32);
+}
+
+.friends-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 #player.view.active {
@@ -2909,6 +2933,10 @@ body.dev-mode .button.strong.is-disabled {
   gap: 12px;
 }
 
+.friends-requests-panel {
+  grid-column: 1 / -1;
+}
+
 .friends-panel {
   display: grid;
   gap: 9px;
@@ -2944,9 +2972,16 @@ body.dev-mode .button.strong.is-disabled {
 
 .friend-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, auto);
   align-items: center;
   gap: 10px;
+}
+
+.friend-row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
 }
 
 .friend-row strong {
@@ -2993,7 +3028,24 @@ body.dev-mode .button.strong.is-disabled {
 }
 
 .friends-add {
-  width: min(360px, 100%);
+  width: 100%;
+}
+
+.friends-add-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.button.danger {
+  border-color: rgba(229, 57, 53, 0.48);
+  color: #ffb6b2;
+}
+
+.button.danger:hover:not(:disabled) {
+  border-color: rgba(229, 57, 53, 0.82);
+  background: rgba(229, 57, 53, 0.16);
 }
 
 .inline-action {

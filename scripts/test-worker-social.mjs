@@ -91,9 +91,17 @@ assert(proof.trusted && proof.token, 'Launcher proof was not issued.');
 const unsigned = await serverSync({ snapshots: [], acknowledgements: [] }, 401, false);
 assert(/authentication/i.test(unsigned.error), 'Unsigned server sync was not rejected.');
 
-await serverSync({
+const rejectedWindowsSync = await serverSync({
   schemaVersion: 1,
   serverId: 'aht-main',
+  snapshots: [],
+  acknowledgements: []
+}, 403);
+assert(/Linux AHT server/i.test(rejectedWindowsSync.error), 'Windows social sync identity was accepted.');
+
+await serverSync({
+  schemaVersion: 1,
+  serverId: 'aht-linux',
   snapshots: [{
     username: 'SocialUser',
     updatedAt: new Date().toISOString(),
@@ -118,8 +126,8 @@ const blockedAction = await jsonRequest('/api/social/actions', {
   method: 'POST',
   headers: { ...authorization, 'Content-Type': 'application/json' },
   body: JSON.stringify({ action: 'block_player', target: 'TargetUser' })
-}, 400);
-assert(/unavailable/i.test(blockedAction.error), 'Launcher-side block action was not rejected.');
+}, 202);
+assert(blockedAction.queued && blockedAction.actionId, 'Launcher-side block action was not queued.');
 
 const queued = await jsonRequest('/api/social/actions', {
   method: 'POST',
@@ -128,14 +136,16 @@ const queued = await jsonRequest('/api/social/actions', {
 }, 202);
 assert(queued.queued && queued.actionId, 'Friend action was not queued.');
 
-const pulled = await serverSync({ snapshots: [], acknowledgements: [] });
-assert(pulled.actions.length === 1, `Server did not receive one action: ${JSON.stringify(pulled)}`);
-assert(pulled.actions[0].actor === 'SocialUser'
-  && pulled.actions[0].action === 'add_friend'
-  && pulled.actions[0].target === 'tArGeTuSeR',
-  `Server action was not bound to proof identity: ${JSON.stringify(pulled.actions[0])}`);
+const pulled = await serverSync({ serverId: 'aht-linux', snapshots: [], acknowledgements: [] });
+assert(pulled.actions.length === 2, `Server did not receive two actions: ${JSON.stringify(pulled)}`);
+assert(pulled.actions.some((action) => action.actor === 'SocialUser'
+  && action.action === 'block_player' && action.target === 'TargetUser')
+  && pulled.actions.some((action) => action.actor === 'SocialUser'
+  && action.action === 'add_friend' && action.target === 'tArGeTuSeR'),
+  `Server actions were not bound to proof identity: ${JSON.stringify(pulled.actions)}`);
 
 const acknowledged = await serverSync({
+  serverId: 'aht-linux',
   snapshots: [{
     username: 'SocialUser',
     updatedAt: new Date().toISOString(),
@@ -143,9 +153,12 @@ const acknowledged = await serverSync({
     blockedPlayers: [{ username: 'BlockedUser' }],
     requests: []
   }],
-  acknowledgements: [{ id: queued.actionId, success: true, message: 'Friend request sent.' }]
+  acknowledgements: [
+    { id: queued.actionId, success: true, message: 'Friend request sent.' },
+    { id: blockedAction.actionId, success: true, message: 'Player blocked.' }
+  ]
 });
-assert(acknowledged.acknowledged === 1 && acknowledged.actions.length === 0,
+assert(acknowledged.acknowledged === 2 && acknowledged.actions.length === 0,
   `Acknowledged action remained queued: ${JSON.stringify(acknowledged)}`);
 
 const updated = await jsonRequest('/api/social', { headers: authorization });

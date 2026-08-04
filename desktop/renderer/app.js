@@ -244,13 +244,13 @@ if (!window.aht) {
       actionsAvailable: true,
       username: mockStatus.identity.minecraftUsername || "Preview",
       updatedAt: new Date().toISOString(),
-      counts: { friends: 2, online: 1, blocked: 1 },
+      counts: { friends: 2, online: 1, blocked: 1, requests: 1 },
       friends: [
         { username: "OnlineFriend", online: true, status: "Online" },
         { username: "OfflineFriend", online: false, status: "Offline" }
       ],
       blocked: [{ username: "BlockedPlayer" }],
-      requests: []
+      requests: [{ username: "RequestFriend", online: false }]
     }),
     socialAction: async ({ action, target } = {}) => ({
       ok: true,
@@ -590,6 +590,7 @@ const els = {
   legalExitButton: $("#legalExitButton"),
   legalError: $("#legalError"),
   profileFriendsButton: $("#profileFriendsButton"),
+  profileFriendsBadge: $("#profileFriendsBadge"),
   friendsOverlay: $("#friendsOverlay"),
   friendsCloseButton: $("#friendsCloseButton"),
   friendsRefreshButton: $("#friendsRefreshButton"),
@@ -600,8 +601,12 @@ const els = {
   friendsStatus: $("#friendsStatus"),
   friendsList: $("#friendsList"),
   blockedList: $("#blockedList"),
+  friendsRequestsList: $("#friendsRequestsList"),
+  friendsRequestsBadge: $("#friendsRequestsBadge"),
   addFriendInput: $("#addFriendInput"),
   addFriendButton: $("#addFriendButton"),
+  blockPlayerInput: $("#blockPlayerInput"),
+  blockPlayerButton: $("#blockPlayerButton"),
   accountOverlay: $("#accountOverlay"),
   accountForm: $("#accountForm"),
   minecraftUsernameInput: $("#minecraftUsernameInput"),
@@ -813,7 +818,9 @@ let friendsBusy = false;
 let friendsLoading = false;
 let friendsActionsAvailable = false;
 let friendsRefreshTimer = null;
+let friendsNotificationTimer = null;
 let friendsRequestId = 0;
+let friendsSocialState = null;
 const friendsActionRefreshTimers = new Set();
 let currentLegalState = null;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
@@ -1245,10 +1252,35 @@ function setFriendsStatus(message = "", state = "") {
   els.friendsStatus.className = `friends-status ${state}`.trim();
 }
 
+function pendingFriendRequestCount(state = friendsSocialState) {
+  const requests = Array.isArray(state?.requests) ? state.requests : [];
+  const count = Number(state?.counts?.requests);
+  return Math.max(0, requests.length, Number.isFinite(count) ? count : 0);
+}
+
+function renderFriendsNotification(state = friendsSocialState) {
+  const count = pendingFriendRequestCount(state);
+  const label = count > 99 ? "99+" : String(count);
+  for (const badge of [els.profileFriendsBadge, els.friendsRequestsBadge]) {
+    if (!badge) continue;
+    badge.textContent = label;
+    badge.hidden = count < 1;
+    badge.setAttribute("aria-label", count === 1 ? "1 friend request" : `${count} friend requests`);
+  }
+  if (els.profileFriendsButton) {
+    els.profileFriendsButton.setAttribute("aria-label", count > 0
+      ? `Open friends, ${count} pending friend request${count === 1 ? "" : "s"}`
+      : "Open friends");
+  }
+}
+
 function setFriendsBusy(busy) {
   friendsBusy = Boolean(busy);
-  setUnavailable(els.addFriendButton, friendsBusy || !friendsActionsAvailable);
+  for (const button of [els.addFriendButton, els.blockPlayerButton]) {
+    setUnavailable(button, friendsBusy || !friendsActionsAvailable);
+  }
   if (els.addFriendInput) els.addFriendInput.disabled = friendsBusy || !friendsActionsAvailable;
+  if (els.blockPlayerInput) els.blockPlayerInput.disabled = friendsBusy || !friendsActionsAvailable;
   for (const button of els.friendsOverlay?.querySelectorAll("[data-social-action]") || []) {
     setUnavailable(button, friendsBusy || button.dataset.actionsAvailable !== "true");
   }
@@ -1259,6 +1291,20 @@ function friendListEmpty(message) {
   empty.className = "friends-empty";
   empty.textContent = message;
   return empty;
+}
+
+function socialActionButton(action, label, target, actionsAvailable) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `button compact friend-row-action${action === "block_player" ? " danger" : ""}`;
+  button.textContent = label;
+  button.dataset.socialAction = action;
+  button.dataset.actionsAvailable = String(Boolean(actionsAvailable));
+  setUnavailable(button, friendsBusy || !actionsAvailable);
+  button.addEventListener("click", () => {
+    if (!isUnavailable(button)) runFriendAction(action, target);
+  });
+  return button;
 }
 
 function friendRow(person, action, label, actionsAvailable, state = "offline") {
@@ -1272,18 +1318,31 @@ function friendRow(person, action, label, actionsAvailable, state = "offline") {
   presence.className = `friend-state ${state}`;
   presence.textContent = state === "blocked" ? "Blocked" : (person.online ? "Online" : "Offline");
 
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "button compact friend-row-action";
-  button.textContent = label;
-  button.dataset.socialAction = action;
-  button.dataset.actionsAvailable = String(Boolean(actionsAvailable));
-  setUnavailable(button, friendsBusy || !actionsAvailable);
-  button.addEventListener("click", () => {
-    if (!isUnavailable(button)) runFriendAction(action, person.username);
-  });
+  const actions = document.createElement("span");
+  actions.className = "friend-row-actions";
+  actions.appendChild(socialActionButton(action, label, person.username, actionsAvailable));
+  if (action === "remove_friend") actions.appendChild(socialActionButton("block_player", "Block", person.username, actionsAvailable));
 
-  row.append(name, presence, button);
+  row.append(name, presence, actions);
+  return row;
+}
+
+function requestRow(person, actionsAvailable) {
+  const row = document.createElement("div");
+  row.className = "friend-row";
+  const name = document.createElement("strong");
+  name.textContent = person.username;
+  const presence = document.createElement("span");
+  presence.className = `friend-state ${person.online ? "online" : "offline"}`;
+  presence.textContent = person.online ? "Online" : "Offline";
+  const actions = document.createElement("span");
+  actions.className = "friend-row-actions";
+  actions.append(
+    socialActionButton("accept_friend", "Accept", person.username, actionsAvailable),
+    socialActionButton("decline_friend", "Decline", person.username, actionsAvailable),
+    socialActionButton("block_player", "Block", person.username, actionsAvailable)
+  );
+  row.append(name, presence, actions);
   return row;
 }
 
@@ -1294,11 +1353,18 @@ function renderFriendsPanel(social) {
   const requests = Array.isArray(state.requests) ? state.requests : [];
   const actionsAvailable = Boolean(state.available && state.actionsAvailable);
   friendsActionsAvailable = actionsAvailable;
+  friendsSocialState = state;
+  renderFriendsNotification(state);
   const counts = state.counts || {};
 
   els.friendsCount.textContent = String(Number.isFinite(Number(counts.friends)) ? Number(counts.friends) : friends.length);
   els.friendsOnlineCount.textContent = String(Number.isFinite(Number(counts.online)) ? Number(counts.online) : friends.filter((friend) => friend.online).length);
   els.blockedCount.textContent = String(Number.isFinite(Number(counts.blocked)) ? Number(counts.blocked) : blocked.length);
+  if (els.friendsRequestsBadge) {
+    const requestCount = pendingFriendRequestCount(state);
+    els.friendsRequestsBadge.textContent = requestCount > 99 ? "99+" : String(requestCount);
+    els.friendsRequestsBadge.hidden = requestCount < 1;
+  }
   els.friendsSummary.textContent = state.available
     ? `${state.username || accountUsername()}${requests.length ? ` | ${requests.length} pending request${requests.length === 1 ? "" : "s"} in game` : ""}`
     : "Friend service unavailable";
@@ -1312,6 +1378,13 @@ function renderFriendsPanel(social) {
     }
   }
 
+  els.friendsRequestsList?.replaceChildren();
+  if (!requests.length) {
+    els.friendsRequestsList?.appendChild(friendListEmpty(state.available ? "No pending requests." : "Requests could not be loaded."));
+  } else {
+    for (const request of requests) els.friendsRequestsList?.appendChild(requestRow(request, actionsAvailable));
+  }
+
   els.blockedList.replaceChildren();
   if (!blocked.length) {
     els.blockedList.appendChild(friendListEmpty(state.available ? "No blocked players." : "Blocked players could not be loaded."));
@@ -1322,7 +1395,9 @@ function renderFriendsPanel(social) {
   }
 
   setUnavailable(els.addFriendButton, friendsBusy || !actionsAvailable);
+  setUnavailable(els.blockPlayerButton, friendsBusy || !actionsAvailable);
   if (els.addFriendInput) els.addFriendInput.disabled = friendsBusy || !actionsAvailable;
+  if (els.blockPlayerInput) els.blockPlayerInput.disabled = friendsBusy || !actionsAvailable;
   if (state.message) setFriendsStatus(state.message, state.available ? "warn" : "bad");
   else setFriendsStatus(state.available ? "Friend list is current." : "Friend service is not connected yet.", state.available ? "ok" : "bad");
 }
@@ -1355,6 +1430,21 @@ async function refreshFriendsPanel({ quiet = false } = {}) {
   }
 }
 
+async function refreshFriendsNotification() {
+  if (typeof window.aht?.socialList !== "function" || !accountUsername(currentStatus)) {
+    renderFriendsNotification(null);
+    return;
+  }
+  try {
+    const social = await window.aht.socialList();
+    friendsSocialState = social;
+    renderFriendsNotification(social);
+    if (els.friendsOverlay && !els.friendsOverlay.hidden && !friendsLoading) renderFriendsPanel(social);
+  } catch {
+    // Keep the last known request count until the service is reachable again.
+  }
+}
+
 function queueFriendsRefresh(delayMs) {
   const timer = window.setTimeout(() => {
     friendsActionRefreshTimers.delete(timer);
@@ -1365,18 +1455,19 @@ function queueFriendsRefresh(delayMs) {
 
 async function runFriendAction(action, targetOverride = "") {
   if (friendsBusy || !friendsActionsAvailable || typeof window.aht?.socialAction !== "function") return;
-  const target = String(targetOverride || els.addFriendInput?.value || "").trim();
+  const input = action === "block_player" ? els.blockPlayerInput : els.addFriendInput;
+  const target = String(targetOverride || input?.value || "").trim();
   const validation = minecraftUsernameError(target);
   if (validation) {
     setFriendsStatus(validation, "bad");
-    if (!targetOverride) els.addFriendInput?.focus();
+    if (!targetOverride) input?.focus();
     return;
   }
   setFriendsBusy(true);
   setFriendsStatus("Sending action to the AHT server...", "warn");
   try {
     const result = await window.aht.socialAction({ action, target });
-    if (action === "add_friend" && els.addFriendInput) els.addFriendInput.value = "";
+    if (!targetOverride && input) input.value = "";
     if (result?.social) renderFriendsPanel(result.social);
     setFriendsStatus(result?.message || "Friend action queued.", "ok");
     queueFriendsRefresh(2500);
@@ -1391,7 +1482,7 @@ async function runFriendAction(action, targetOverride = "") {
 function openFriendsPanel() {
   if (!els.friendsOverlay) return;
   els.friendsOverlay.hidden = false;
-  renderFriendsPanel({
+  renderFriendsPanel(friendsSocialState || {
     available: false,
     actionsAvailable: false,
     username: accountUsername(),
@@ -3129,6 +3220,11 @@ function renderStatus(status) {
   if (els.installId) els.installId.textContent = shortId(status.identity.installId);
   els.playerLabelView.textContent = accountUsername(status) || "Player";
   if (els.profileFriendsButton) els.profileFriendsButton.hidden = !accountUsername(status);
+  renderFriendsNotification(friendsSocialState);
+  if (!friendsNotificationTimer) {
+    refreshFriendsNotification();
+    friendsNotificationTimer = window.setInterval(refreshFriendsNotification, 15000);
+  }
   setSyncLine(status.config.sync?.enabled === false ? "Sync off" : "Sync on");
   els.developerTab.hidden = !status.developerMode;
   els.developerTileButton.hidden = !status.developerMode;
@@ -3592,6 +3688,19 @@ if (els.addFriendInput) {
     if (event.key === "Enter") {
       event.preventDefault();
       runFriendAction("add_friend");
+    }
+  });
+}
+if (els.blockPlayerButton) {
+  els.blockPlayerButton.addEventListener("click", () => {
+    if (!isUnavailable(els.blockPlayerButton)) runFriendAction("block_player");
+  });
+}
+if (els.blockPlayerInput) {
+  els.blockPlayerInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runFriendAction("block_player");
     }
   });
 }

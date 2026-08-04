@@ -20,7 +20,15 @@ const RELEASE_PREFIXES = [
   'launcher/files/',
   'update-media/'
 ];
-const LAUNCHER_SOCIAL_ACTIONS = new Set(['add_friend', 'remove_friend', 'unblock_player']);
+const LAUNCHER_SOCIAL_ACTIONS = new Set([
+  'add_friend',
+  'accept_friend',
+  'decline_friend',
+  'cancel_friend',
+  'remove_friend',
+  'block_player',
+  'unblock_player'
+]);
 const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
 const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64']);
@@ -878,12 +886,17 @@ function normalizeServerSocialSnapshot(value) {
     counts: {
       friends: friends.length,
       online: friends.filter((friend) => friend.online).length,
-      blocked: blockedPlayers.length
+      blocked: blockedPlayers.length,
+      requests: requests.length
     },
     friends,
     blockedPlayers,
     requests
   };
+}
+
+function expectedSocialServerId(env) {
+  return cleanString(env.AHT_SOCIAL_SERVER_ID || 'aht-linux', 64).toLowerCase();
 }
 
 async function readSocialState(env, username) {
@@ -904,7 +917,7 @@ async function launcherSocialState(request, env, origin) {
       actionsAvailable: true,
       username,
       updatedAt: '',
-      counts: { friends: 0, online: 0, blocked: 0 },
+      counts: { friends: 0, online: 0, blocked: 0, requests: 0 },
       friends: [],
       blockedPlayers: [],
       requests: [],
@@ -946,7 +959,12 @@ async function queueLauncherSocialAction(request, env, origin) {
   });
   const current = await readSocialState(env, actor);
   const label = action === 'add_friend' ? 'Friend request queued.'
-    : action === 'remove_friend' ? 'Friend removal queued.' : 'Unblock queued.';
+    : action === 'accept_friend' ? 'Friend request acceptance queued.'
+    : action === 'decline_friend' ? 'Friend request decline queued.'
+    : action === 'cancel_friend' ? 'Friend request cancellation queued.'
+    : action === 'remove_friend' ? 'Friend removal queued.'
+    : action === 'block_player' ? 'Player block queued.'
+    : 'Unblock queued.';
   return privateJson({
     ok: true,
     queued: true,
@@ -979,6 +997,10 @@ async function synchronizeServerSocial(request, env, origin) {
     body = bodyText ? JSON.parse(bodyText) : {};
   } catch {
     return privateJson({ error: 'Invalid server social payload.' }, 400, origin);
+  }
+  const serverId = cleanString(body?.serverId, 64).toLowerCase();
+  if (!serverId || serverId !== expectedSocialServerId(env)) {
+    return privateJson({ error: 'Social sync must come from the Linux AHT server.' }, 403, origin);
   }
   const snapshots = Array.isArray(body.snapshots) ? body.snapshots.slice(0, 250) : [];
   let storedSnapshots = 0;

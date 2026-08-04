@@ -32,7 +32,7 @@ const normalized = normalizeSocialState({
   requests: [{ username: 'RequestUser', online: true }]
 }, { actionsAvailable: true });
 assert(normalized.counts.friends === 2 && normalized.counts.online === 1
-  && normalized.counts.blocked === 1, `Normalized counts were wrong: ${JSON.stringify(normalized.counts)}`);
+  && normalized.counts.blocked === 1 && normalized.counts.requests === 1, `Normalized counts were wrong: ${JSON.stringify(normalized.counts)}`);
 assert(normalized.friends[0].username === 'OnlineFriend' && normalized.friends[0].online,
   'Online friends must sort first.');
 assert(normalized.blocked[0].username === 'BlockedUser', 'Blocked player was not normalized.');
@@ -86,11 +86,21 @@ assert(actionRequest.body.action === 'add_friend' && actionRequest.body.target =
   && !('username' in actionRequest.body) && !('installId' in actionRequest.body),
   `Renderer-controlled identity leaked into action body: ${JSON.stringify(actionRequest.body)}`);
 
-await assertRejects(
-  () => sendSocialAction({ config, identity, proofToken: 'proof', action: 'block_player', target: 'TargetUser' }),
-  /not available from the launcher/i,
-  'Launcher-side block action must be rejected.'
-);
+const blockResult = await sendSocialAction({
+  config,
+  identity,
+  proofToken: 'signed.launcher.proof',
+  action: 'block_player',
+  target: 'TargetUser',
+  fetchImpl: async (url, options) => {
+    actionRequest = { url, options, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({ ok: true, queued: true, message: 'Player block queued.' }), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+});
+assert(blockResult.ok && blockResult.queued && actionRequest.body.action === 'block_player', 'Launcher-side block action was not accepted.');
 await assertRejects(
   () => sendSocialAction({ config, identity, proofToken: 'proof', action: 'unblock_player', target: 'SocialUser' }),
   /choose another player/i,

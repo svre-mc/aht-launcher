@@ -1,4 +1,12 @@
-const SOCIAL_ACTIONS = new Set(['add_friend', 'remove_friend', 'unblock_player']);
+const SOCIAL_ACTIONS = new Set([
+  'add_friend',
+  'accept_friend',
+  'decline_friend',
+  'cancel_friend',
+  'remove_friend',
+  'block_player',
+  'unblock_player'
+]);
 
 export function sanitizeMinecraftUsername(value = '') {
   const username = String(value || '').trim();
@@ -98,7 +106,8 @@ export function normalizeSocialState(raw = {}, options = {}) {
     counts: {
       friends: Number(root?.counts?.friends) || friends.length,
       online: Number(root?.counts?.online) || friends.filter((friend) => friend.online).length,
-      blocked: Number(root?.counts?.blocked) || blocked.length
+      blocked: Number(root?.counts?.blocked) || blocked.length,
+      requests: Number(root?.counts?.requests) || requests.length
     },
     friends,
     blocked,

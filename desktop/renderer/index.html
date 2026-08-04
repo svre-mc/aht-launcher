@@ -77,6 +77,7 @@
             <strong id="playerLabelView">Player</strong>
             <span id="syncStatus"><span class="online-dot"></span>Sync -</span>
           </div>
+          <span id="profileFriendsBadge" class="notification-badge" aria-live="polite" hidden></span>
         </button>
       </header>
 
@@ -497,8 +498,15 @@
           <h3>Blocked Players</h3>
           <div id="blockedList" class="friends-list"></div>
         </section>
+        <section class="friends-panel friends-requests-panel">
+          <div class="friends-panel-title"><h3>Friend Requests</h3><span id="friendsRequestsBadge" class="notification-badge" hidden></span></div>
+          <div id="friendsRequestsList" class="friends-list"></div>
+        </section>
       </div>
-      <label class="friends-add">Add Friend <span class="inline-action"><input id="addFriendInput" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Minecraft username"><button id="addFriendButton" class="button compact" type="button">Add</button></span></label>
+      <div class="friends-add-grid">
+        <label class="friends-add">Add Friend <span class="inline-action"><input id="addFriendInput" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Minecraft username"><button id="addFriendButton" class="button compact" type="button">Add</button></span></label>
+        <label class="friends-add">Block Player <span class="inline-action"><input id="blockPlayerInput" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Minecraft username"><button id="blockPlayerButton" class="button compact danger" type="button">Block</button></span></label>
+      </div>
     </section>
   </div>
   <div id="updateOptionsOverlay" class="overlay repair-prompt-overlay" hidden>
