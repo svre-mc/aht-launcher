@@ -20,6 +20,7 @@
   --bevel: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 -1px 0 rgba(0, 0, 0, 0.34) inset;
   --glass: linear-gradient(180deg, rgba(244, 240, 230, 0.075), rgba(244, 240, 230, 0.018));
   --mono: "SF Mono", "Cascadia Mono", Consolas, monospace;
+  --content-max-width: 1440px;
 }
 
 * {
@@ -406,6 +407,7 @@ body.dev-mode .game-copy strong {
 
 .workspace {
   min-width: 0;
+  overflow-x: hidden;
   padding: 0;
   background: #050607;
 }
@@ -614,6 +616,8 @@ body:not(.dev-mode) .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
+  max-width: var(--content-max-width);
+  margin-inline: auto;
   min-height: 130px;
   padding: 4px 0 16px;
 }
@@ -682,6 +686,8 @@ h2 {
   position: relative;
   z-index: 1;
   display: grid;
+  max-width: var(--content-max-width);
+  margin-inline: auto;
   grid-template-columns: minmax(0, 1.7fr) minmax(210px, 1fr) minmax(210px, 1fr);
   gap: 18px;
   align-items: end;
@@ -900,6 +906,14 @@ h2 {
     repeating-linear-gradient(0deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 5px);
   box-shadow: var(--shadow-deep), var(--bevel);
   transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.quick-actions,
+.launch-strip {
+  width: calc(100% - 60px);
+  max-width: var(--content-max-width);
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .launch-strip::before {

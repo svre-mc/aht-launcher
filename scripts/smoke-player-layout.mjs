@@ -164,6 +164,13 @@ async function assertLayout(client, label) {
           return rect.left < -2 || rect.right > window.innerWidth + 2;
         })
         .map(describe);
+      const workspace = document.querySelector('.workspace');
+      const responsiveContent = [...document.querySelectorAll('.hero-art, .news-grid, .quick-actions, .launch-strip')]
+        .filter(visible)
+        .map(describe);
+      const workspaceWidth = workspace?.clientWidth || 0;
+      const contentWidthLimit = Math.min(1440, Math.max(0, workspaceWidth - 60));
+      const oversizedContent = responsiveContent.filter((item) => item.width > contentWidthLimit + 2);
       const visibleDeveloperText = !document.querySelector('#developerConsole')?.hidden && document.body.innerText.includes('Developer Console');
       return {
         label: ${JSON.stringify(label)},
@@ -172,6 +179,9 @@ async function assertLayout(client, label) {
         horizontalOverflow,
         clippedButtons,
         critical,
+        contentWidthLimit,
+        responsiveContent,
+        oversizedContent,
         visibleDeveloperText,
         bodyText: document.body.innerText.slice(0, 1000)
       };
@@ -181,6 +191,7 @@ async function assertLayout(client, label) {
   if (report.horizontalOverflow) failures.push('horizontal overflow');
   if (report.clippedButtons.length) failures.push(`clipped buttons: ${JSON.stringify(report.clippedButtons.slice(0, 5))}`);
   if (report.critical.length) failures.push(`critical elements outside viewport: ${JSON.stringify(report.critical.slice(0, 5))}`);
+  if (report.oversizedContent.length) failures.push(`responsive content exceeds its max width: ${JSON.stringify(report.oversizedContent.slice(0, 5))}`);
   if (report.visibleDeveloperText) failures.push('developer console visible in player UI');
   if (/NSIS|DMG app|package target|build -/i.test(report.bodyText)) failures.push('technical package/build wording visible in player UI');
   if (/CurseForge|fallback cache|Exact AHT client ZIP/i.test(report.bodyText)) failures.push('technical release-source wording visible in player UI');
@@ -544,7 +555,11 @@ try {
 
   const reports = [];
   const screenshots = [];
-  for (const size of [{ name: 'desktop', width: 1260, height: 760 }, { name: 'compact', width: 980, height: 700 }]) {
+  for (const size of [
+    { name: 'wide', width: 1920, height: 1080 },
+    { name: 'desktop', width: 1366, height: 768 },
+    { name: 'compact', width: 980, height: 700 }
+  ]) {
     await setWindowSize(client, target.id, size.width, size.height);
     await click(client, '.nav [data-tab="player"]');
     reports.push(await assertLayout(client, `${size.name}-player`));
