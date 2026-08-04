@@ -11,7 +11,7 @@ The Minecraft Launcher profile gets these Java properties:
 ```text
 -Daht.launcher.present=true
 -Daht.launcher.protocol=aht-launcher-proof-v1
--Daht.launcher.proofFile=<absolute path to launcher-proof.json>
+-Daht.launcher.proofFile=<absolute path to the channel-specific proof file>
 ```
 
 Client mod entry point:
@@ -25,11 +25,15 @@ If `protocol` is not `aht-launcher-proof-v1` or `proofFile` is blank, the client
 
 ## Proof File
 
-Path:
+Paths:
 
 ```text
-<instance>/.aht-launcher/launcher-proof.json
+Player launcher:    <instance>/.aht-launcher/launcher-proof.json
+Developer launcher: <instance>/.aht-launcher/launcher-proof.developer.json
 ```
+
+The separate files prevent the player and authenticated developer launchers from replacing each other's proof when they point at the same instance directory.
+Worker-backed files also record the normalized signing-service base URL as local cache metadata; that field is not part of the signed token.
 
 Important fields:
 
@@ -99,6 +103,8 @@ Cloudflare Worker secret required for real signatures:
 LAUNCHER_PROOF_SECRET=<same secret your server mod uses to verify HMAC>
 LAUNCHER_PROOF_KEY_ID=aht-launcher-proof-v1
 ```
+
+The key ID must remain `aht-launcher-proof-v1` because the launcher, Worker verifier, and Minecraft anti-cheat all enforce that exact identifier.
 
 The Worker signs launcher proof tokens with `LAUNCHER_PROOF_SECRET`. For compatibility with older server-side setups it will also accept `AHT_LAUNCHER_PROOF_SECRET`, then `ADMIN_TOKEN_SECRET`, then `ADMIN_PASSWORD` as fallback signing secrets. The server should be configured with `LAUNCHER_PROOF_SECRET` set to the exact same value whenever possible.
 

@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 
 const port = Number(process.argv[2] || 9870);
 const debuggerEndpoint = `http://127.0.0.1:${port}`;
@@ -186,11 +187,7 @@ const server = http.createServer(async (request, response) => {
   }
   if (url.pathname === '/api/launcher-proof' && request.method === 'POST') {
     const payload = await readBody(request);
-    return json(response, {
-      token: 'header.payload.signature',
-      payload,
-      signature: { alg: 'HS256', kid: 'friends-smoke', value: 'signature' }
-    });
+    return json(response, workerLauncherProofFixture(payload));
   }
   if (url.pathname === '/api/social' && request.method === 'GET') {
     if (!String(request.headers.authorization || '').startsWith('Bearer ')) return json(response, { error: 'unauthorized' }, 401);

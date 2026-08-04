@@ -88,6 +88,36 @@ export function releaseTargetBaseUrl(stableFeedUrl = '', value = 'stable') {
   }
 }
 
+export function workerServiceBaseUrl(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    url.search = '';
+    url.hash = '';
+    let pathname = url.pathname.replace(/\/{2,}/g, '/');
+
+    if (/\/ptb\/launcher\/latest\.json$/i.test(pathname)) {
+      pathname = pathname.replace(/\/ptb\/launcher\/latest\.json$/i, '/');
+    } else if (/\/launcher\/latest\.json$/i.test(pathname)) {
+      pathname = pathname.replace(/\/launcher\/latest\.json$/i, '/');
+    } else if (/\/ptb\/latest\.json$/i.test(pathname)) {
+      pathname = pathname.replace(/\/ptb\/latest\.json$/i, '/');
+    } else if (/\/latest\.json$/i.test(pathname)) {
+      pathname = pathname.replace(/\/latest\.json$/i, '/');
+    } else if (/\/ptb\/?$/i.test(pathname)) {
+      pathname = pathname.replace(/\/ptb\/?$/i, '/');
+    }
+
+    url.pathname = `${pathname.replace(/\/+$/, '')}/`.replace(/\/{2,}/g, '/');
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
 export function assertReleaseMatchesTarget(latest = {}, value = 'stable') {
   const target = releaseTarget(value);
   if (String(latest.packId || '') !== target.packId) {

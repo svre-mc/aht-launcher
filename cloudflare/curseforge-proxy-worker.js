@@ -382,7 +382,11 @@ async function launcherProofToken(payload, env) {
   if (!secret) {
     throw new Error('LAUNCHER_PROOF_SECRET is not configured');
   }
-  const header = { alg: 'HS256', typ: 'AHT-LAUNCHER-PROOF', kid: env.LAUNCHER_PROOF_KEY_ID || 'aht-launcher-proof-v1' };
+  const keyId = cleanString(env.LAUNCHER_PROOF_KEY_ID || 'aht-launcher-proof-v1', 120);
+  if (keyId !== 'aht-launcher-proof-v1') {
+    throw new Error('LAUNCHER_PROOF_KEY_ID must be aht-launcher-proof-v1');
+  }
+  const header = { alg: 'HS256', typ: 'AHT-LAUNCHER-PROOF', kid: keyId };
   const encodedHeader = base64UrlJson(header);
   const encodedPayload = base64UrlJson(payload);
   const signingInput = `${encodedHeader}.${encodedPayload}`;
@@ -561,10 +565,10 @@ async function createLauncherProof(request, env, origin) {
   const installId = cleanString(body.installId, 120);
   const minecraftUsername = normalizeMinecraftUsername(body.minecraftUsername);
   if (!installId) {
-    return json({ error: 'Install ID is required' }, 400, origin);
+    return privateJson({ error: 'Install ID is required' }, 400, origin);
   }
   if (!/^[A-Za-z0-9_]{3,16}$/.test(minecraftUsername)) {
-    return json({ error: 'Minecraft username is required' }, 400, origin);
+    return privateJson({ error: 'Minecraft username is required' }, 400, origin);
   }
   const requestedLauncherChannel = cleanString(body.launcherChannel || 'player', 32).toLowerCase();
   const developerModeRequested = Boolean(
@@ -575,13 +579,13 @@ async function createLauncherProof(request, env, origin) {
   );
   const developerAuthorized = developerModeRequested ? await verifyToken(request, env) : false;
   if (developerModeRequested && !developerAuthorized) {
-    return json({ error: 'Developer launcher proof requires developer authentication.' }, 401, origin);
+    return privateJson({ error: 'Developer launcher proof requires developer authentication.' }, 401, origin);
   }
-  if (env.AHT_DATA) {
+  if (env.AHT_DATA && !developerAuthorized) {
     const existing = await env.AHT_DATA.get(minecraftUsernameKey(minecraftUsername));
     const existingRecord = existing ? await existing.json().catch(() => null) : null;
     if (!existingRecord || existingRecord.installId !== installId) {
-      return json({ error: 'Minecraft username is not registered to this launcher install.' }, 403, origin);
+      return privateJson({ error: 'Minecraft username is not registered to this launcher install.' }, 403, origin);
     }
   }
 
@@ -595,7 +599,7 @@ async function createLauncherProof(request, env, origin) {
     packId: cleanString(body.packId || 'a-hard-time-dregora', 80),
     packVersion: cleanString(body.packVersion || body.installedVersion || '', 80),
     latestVersion: cleanString(body.latestVersion || '', 80),
-    installedVersion: cleanString(body.installedVersion || body.packVersion || '', 80),
+    installedVersion: cleanString(body.installedVersion || '', 80),
     minecraftUsername,
     installId,
     appVersion: cleanString(body.appVersion, 40),
@@ -608,7 +612,7 @@ async function createLauncherProof(request, env, origin) {
     instanceDirHash: cleanString(body.instanceDirHash, 80),
     minecraft: body.minecraft && typeof body.minecraft === 'object' ? body.minecraft : null
   };
-  return json({
+  return privateJson({
     protocol: payload.protocol,
     schemaVersion: 1,
     trusted: true,
@@ -671,7 +675,10 @@ async function verifyLauncherProofRequest(request, env) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
   if (String(header?.alg || '').toUpperCase() !== 'HS256'
-      || payload?.protocol !== 'aht-launcher-proof-v1') {
+      || header?.typ !== 'AHT-LAUNCHER-PROOF'
+      || header?.kid !== 'aht-launcher-proof-v1'
+      || payload?.protocol !== 'aht-launcher-proof-v1'
+      || payload?.schemaVersion !== 1) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
   const now = Date.now();
@@ -680,12 +687,21 @@ async function verifyLauncherProofRequest(request, env) {
   const username = normalizeMinecraftUsername(payload.minecraftUsername || payload.username);
   const installId = cleanString(payload.installId, 120);
   const expectedPackId = cleanString(env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora', 80);
+  const developerProof = cleanString(payload.launcherChannel || 'player', 32).toLowerCase() === 'developer'
+    && payload.developerClient === true
+    && payload.developerClientBypass === true
+    && payload.modIntegrityBypass === true;
+  const hasAnyDeveloperClaim = cleanString(payload.launcherChannel || 'player', 32).toLowerCase() === 'developer'
+    || Boolean(payload.developerClient)
+    || Boolean(payload.developerClientBypass)
+    || Boolean(payload.modIntegrityBypass);
   if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || !installId
       || cleanString(payload.packId, 80) !== expectedPackId
-      || !expiresAt || expiresAt <= now || issuedAt > now + 120000) {
+      || !expiresAt || expiresAt <= now || issuedAt > now + 120000
+      || (hasAnyDeveloperClaim && !developerProof)) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
-  if (env.AHT_DATA) {
+  if (env.AHT_DATA && !developerProof) {
     const registration = await env.AHT_DATA.get(minecraftUsernameKey(username));
     const record = registration ? await registration.json().catch(() => null) : null;
     if (!record || record.installId !== installId) {
@@ -989,9 +1005,9 @@ async function login(request, env, origin) {
     passwordOk = body.password && body.password === env.ADMIN_PASSWORD;
   }
   if (!usernameOk || !passwordOk) {
-    return json({ error: 'Invalid username or password' }, 401, origin);
+    return privateJson({ error: 'Invalid username or password' }, 401, origin);
   }
-  return json(await createToken(body.username, env), 200, origin);
+  return privateJson(await createToken(body.username, env), 200, origin);
 }
 
 async function listEvents(env, request, origin) {
@@ -1200,9 +1216,10 @@ export default {
       if (request.method === 'GET' && url.pathname === '/admin/summary') {
         return await summary(env, request, origin);
       }
-      return json({
-        ok: true,
-        endpoints: [
+      if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/') {
+        return json({
+          ok: true,
+          endpoints: [
           '/latest.json',
           '/packs/{packZip}',
           '/patches/{deltaZip}',
@@ -1232,8 +1249,10 @@ export default {
           '/admin/launcher-downloads',
           '/admin/player-ipv4-groups',
           '/admin/update-logs'
-        ]
-      }, 200, origin);
+          ]
+        }, 200, origin);
+      }
+      return privateJson({ error: 'Not found' }, 404, origin);
     } catch (error) {
       return json({ error: error.message }, 500, origin);
     }

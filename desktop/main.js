@@ -40,7 +40,7 @@ import {
 } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
-import { inspectLauncherProof, writeLauncherProof } from '../src/launcherProof.js';
+import { inspectLauncherProof, launcherProofPath, writeLauncherProof } from '../src/launcherProof.js';
 import { fetchSocialState, sendSocialAction } from '../src/socialClient.js';
 import { legalConsentStatus, recordLegalConsent } from '../src/legalConsent.js';
 import { selectLauncherArtifact, validateLauncherUpdateManifest } from '../src/launcherUpdateManifest.js';
@@ -50,7 +50,8 @@ import {
   releaseTarget,
   releaseTargetFeedUrl,
   releaseTargetObjectKey,
-  releaseTargetOutDir
+  releaseTargetOutDir,
+  workerServiceBaseUrl
 } from '../src/releaseTargets.js';
 import {
   buildWindowsMinecraftProcessSnapshotPowerShell,
@@ -218,6 +219,9 @@ let serverTransferState = { running: false, lines: [], lastResult: null, error: 
 let uploadState = { running: false, total: 0, completed: 0, current: '', lines: [], lastResult: null, error: null, verification: null };
 let launcherDeployState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let adminToken = '';
+let adminTokenExpiresAt = 0;
+let adminTokenBaseUrl = '';
+const adminLoginPromises = new Map();
 let developerSession = null;
 const latestReleaseCache = new Map();
 const launcherProofRefreshes = new Map();
@@ -226,6 +230,7 @@ const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
+const REMOTE_ADMIN_LOGIN_TIMEOUT_MS = 15_000;
 const DEVELOPER_SECRET_KEYS = ['curseforgeApiKey', 'serverSshPassword', 'launcherProofSecret', 'githubToken', 'r2AccountId', 'r2AccessKeyId', 'r2SecretAccessKey'];
 const OPERATION_LINES_MAX = 120;
 const OPERATION_LINE_MAX_CHARS = 900;
@@ -1219,6 +1224,10 @@ function configForPack(baseConfig, packValue = 'stable') {
     packId: target.packId,
     instanceDir,
     latestUrl,
+    launcherProof: {
+      ...baseConfig.launcherProof,
+      channel: isDeveloperMode() ? 'developer' : 'player'
+    },
     minecraftLauncher: {
       ...baseConfig.minecraftLauncher,
       profileId: target.profileId,
@@ -1426,6 +1435,105 @@ function mergeConfig(defaults, stored) {
   return merged;
 }
 
+function isPtbReleaseFeedUrl(value = '') {
+  try {
+    return /\/ptb\/latest\.json$/i.test(new URL(String(value || '').trim()).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizedWorkerControlConfig(config = {}) {
+  const normalized = {
+    ...config,
+    curseforge: { ...(config.curseforge || {}) },
+    sync: { ...(config.sync || {}) },
+    packs: {
+      ...(config.packs || {}),
+      ptb: { ...(config.packs?.ptb || {}) }
+    },
+    developer: { ...(config.developer || {}) },
+    launcherUpdate: { ...(config.launcherUpdate || {}) },
+    launcherProof: { ...(config.launcherProof || {}) },
+    social: { ...(config.social || {}) },
+    minecraftLauncher: { ...(config.minecraftLauncher || {}) },
+    playCommand: { ...(config.playCommand || {}) }
+  };
+  let changed = false;
+
+  const normalizeBase = (section, key) => {
+    const current = String(normalized[section]?.[key] || '').trim();
+    if (!current) return;
+    const next = workerServiceBaseUrl(current);
+    if (next && next !== current) {
+      normalized[section][key] = next;
+      changed = true;
+    }
+  };
+  normalizeBase('sync', 'baseUrl');
+  normalizeBase('developer', 'adminBaseUrl');
+  normalizeBase('launcherProof', 'baseUrl');
+  normalizeBase('social', 'baseUrl');
+
+  const launcherLatest = String(normalized.launcherUpdate.latestUrl || '').trim();
+  if (launcherLatest && /\/launcher\/latest\.json$/i.test((() => {
+    try { return new URL(launcherLatest).pathname; } catch { return ''; }
+  })())) {
+    const base = workerServiceBaseUrl(launcherLatest);
+    const next = base ? new URL('launcher/latest.json', base).toString() : launcherLatest;
+    if (next !== launcherLatest) {
+      normalized.launcherUpdate.latestUrl = next;
+      changed = true;
+    }
+  }
+
+  const proxyBase = String(normalized.curseforge.proxyBaseUrl || '').trim();
+  if (proxyBase) {
+    try {
+      const proxyUrl = new URL(proxyBase);
+      if (/\/ptb\/cf\/?$/i.test(proxyUrl.pathname)) {
+        proxyUrl.pathname = proxyUrl.pathname.replace(/\/ptb\/cf\/?$/i, '/cf/');
+        normalized.curseforge.proxyBaseUrl = proxyUrl.toString();
+        changed = true;
+      }
+    } catch {}
+  }
+
+  const ptbFeed = String(normalized.packs.ptb.latestUrl || '').trim();
+  const stableFeedWasPtb = isDeveloperMode()
+    && isPtbReleaseFeedUrl(normalized.latestUrl)
+    && (!ptbFeed || String(normalized.latestUrl).trim() === ptbFeed);
+  if (stableFeedWasPtb) {
+    const stableBase = workerServiceBaseUrl(normalized.latestUrl);
+    if (stableBase) {
+      normalized.latestUrl = new URL('latest.json', stableBase).toString();
+      changed = true;
+    }
+    const contaminatedInstanceDir = String(normalized.instanceDir || '').trim();
+    const ptbInstanceDir = String(normalized.packs.ptb.instanceDir || '').trim();
+    if (
+      contaminatedInstanceDir
+      && (samePath(contaminatedInstanceDir, ptbInstanceDir) || samePath(contaminatedInstanceDir, defaultPtbInstanceDir()))
+    ) {
+      normalized.instanceDir = defaultDeveloperInstanceDir();
+      if (!normalized.playCommand.cwd || samePath(normalized.playCommand.cwd, contaminatedInstanceDir)) {
+        normalized.playCommand.cwd = normalized.instanceDir;
+      }
+      changed = true;
+    }
+    if (normalized.minecraftLauncher.profileId === releaseTarget('ptb').profileId) {
+      normalized.minecraftLauncher.profileId = releaseTarget('stable').profileId;
+      changed = true;
+    }
+    if (normalized.minecraftLauncher.profileName === releaseTarget('ptb').profileName) {
+      normalized.minecraftLauncher.profileName = releaseTarget('stable').profileName;
+      changed = true;
+    }
+  }
+
+  return { config: normalized, changed };
+}
+
 function samePath(left = '', right = '') {
   if (!left || !right) return false;
   return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
@@ -1483,8 +1591,10 @@ async function loadConfig() {
     return defaults;
   }
   const stored = await readJsonFile(file);
-  const config = mergeConfig(defaults, stored);
-  let changed = false;
+  let config = mergeConfig(defaults, stored);
+  const normalizedWorkerConfig = normalizedWorkerControlConfig(config);
+  config = normalizedWorkerConfig.config;
+  let changed = normalizedWorkerConfig.changed;
   if (!trustedMinecraftOpenCommandAllowed() && String(stored.minecraftLauncher?.openCommand || '').trim()) {
     changed = true;
   }
@@ -1577,7 +1687,7 @@ async function loadConfig() {
 
 async function saveConfig(nextConfig) {
   const current = await loadConfig();
-  const merged = {
+  let merged = {
     ...current,
     ...nextConfig,
     curseforge: { ...current.curseforge, ...nextConfig.curseforge },
@@ -1604,6 +1714,7 @@ async function saveConfig(nextConfig) {
     merged.serverTransfer.sourceDir
   );
   merged.developer.defaultOutDir = resolveReleaseOutDir(merged.developer?.defaultOutDir);
+  merged = normalizedWorkerControlConfig(merged).config;
   if (merged.instanceDir) {
     merged.playCommand = {
       ...merged.playCommand,
@@ -1810,8 +1921,48 @@ function launcherProofIdentity(identity = {}) {
   };
 }
 
-function launcherProofAuthToken() {
-  return developerAdminSessionAllowed() ? adminToken : '';
+function clearRemoteAdminToken(expectedBaseUrl = '', expectedToken = '') {
+  if (expectedBaseUrl && adminTokenBaseUrl !== expectedBaseUrl) return;
+  if (expectedToken && adminToken !== expectedToken) return;
+  adminToken = '';
+  adminTokenExpiresAt = 0;
+  adminTokenBaseUrl = '';
+}
+
+async function launcherProofAuthToken(config = {}) {
+  if (!developerAdminSessionAllowed()) return '';
+  const adminBase = workerServiceBaseUrl(config.developer?.adminBaseUrl || config.sync?.baseUrl);
+  const proofBase = workerServiceBaseUrl(config.launcherProof?.baseUrl || config.sync?.baseUrl || config.developer?.adminBaseUrl);
+  if (adminBase && proofBase && adminBase !== proofBase) {
+    throw new Error('Developer launcher proof URL must use the same Worker origin and base path as developer admin login.');
+  }
+  return ensureRemoteAdminToken(config);
+}
+
+function isLauncherProofAuthenticationError(error) {
+  return /developer launcher proof requires developer authentication|unauthorized|\b401\b|invalid (?:admin )?token/i.test(error?.message || String(error || ''));
+}
+
+async function writeLauncherProofWithDeveloperAuth({ config = {}, ...options } = {}) {
+  const developerAuthRequired = developerAdminSessionAllowed();
+  const writeWithCurrentToken = async () => writeLauncherProof({
+    config,
+    ...options,
+    authToken: developerAuthRequired ? await launcherProofAuthToken(config) : ''
+  });
+  const requireTrustedDeveloperProof = (proof) => {
+    if (developerAuthRequired && (!proof?.trusted || !proof?.token)) {
+      throw new Error(proof?.error || 'Developer launcher proof signing did not return a trusted token.');
+    }
+    return proof;
+  };
+  try {
+    return requireTrustedDeveloperProof(await writeWithCurrentToken());
+  } catch (error) {
+    if (!developerAuthRequired || !isLauncherProofAuthenticationError(error)) throw error;
+    clearRemoteAdminToken(workerServiceBaseUrl(config.developer?.adminBaseUrl || config.sync?.baseUrl));
+    return requireTrustedDeveloperProof(await writeWithCurrentToken());
+  }
 }
 
 function runtimeIdentity(identity = {}) {
@@ -1852,16 +2003,18 @@ async function clearUnavailableMinecraftUsername(username = '', message = 'That 
 async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null } = {}) {
   const proofIdentity = launcherProofIdentity(runtimeIdentity(identity));
   try {
-    return await writeLauncherProof({
+    return await writeLauncherProofWithDeveloperAuth({
       config,
       identity: proofIdentity,
       latest,
-      installed,
-      authToken: launcherProofAuthToken()
+      installed
     });
   } catch (error) {
     if (!isLauncherProofRegistrationError(error)) {
       throw error;
+    }
+    if (developerAdminSessionAllowed()) {
+      throw new Error('Authenticated developer launcher proof was rejected by the Worker registration gate. Player identity was not changed; update the Worker before retrying developer Play.');
     }
     const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
     if (!username) {
@@ -1880,41 +2033,46 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
       throw new Error(`Launcher proof registration refresh failed: ${refreshError.message || refreshError}`);
     }
     const refreshedIdentity = runtimeIdentity(await loadIdentity());
-    return writeLauncherProof({
+    return writeLauncherProofWithDeveloperAuth({
       config,
       identity: launcherProofIdentity(refreshedIdentity),
       latest,
-      installed,
-      authToken: launcherProofAuthToken()
+      installed
     });
   }
 }
 
-async function currentOrWriteRegisteredLauncherProof({
+async function writeSerializedRegisteredLauncherProof({
   config = {},
   identity = {},
   latest = null,
   installed = null,
   minValidityMs = 2 * 60 * 1000
 } = {}) {
-  const current = await inspectLauncherProof({
+  const expectedIdentity = launcherProofIdentity(runtimeIdentity(identity));
+  const inspectExpectedProof = () => inspectLauncherProof({
     config,
-    identity,
+    identity: expectedIdentity,
     latest,
     installed,
     minValidityMs
   });
-  if (current.usable) {
-    return { ...current, reused: true };
-  }
-
-  const key = path.resolve(config.instanceDir || '').toLowerCase();
-  const running = launcherProofRefreshes.get(key);
-  if (running) return running;
-  const refresh = writeRegisteredLauncherProof({ config, identity, latest, installed })
-    .finally(() => launcherProofRefreshes.delete(key));
+  const resolvedProofFile = path.resolve(launcherProofPath(config.instanceDir || '', expectedIdentity));
+  const key = process.platform === 'win32' ? resolvedProofFile.toLowerCase() : resolvedProofFile;
+  const previous = launcherProofRefreshes.get(key);
+  const refresh = (async () => {
+    if (previous) await previous.catch(() => {});
+    return writeRegisteredLauncherProof({ config, identity, latest, installed });
+  })().finally(() => {
+    if (launcherProofRefreshes.get(key) === refresh) launcherProofRefreshes.delete(key);
+  });
   launcherProofRefreshes.set(key, refresh);
-  return refresh;
+  const result = await refresh;
+  const verified = await inspectExpectedProof();
+  if (!verified.usable) {
+    throw new Error(`Launcher proof changed before it could be used: ${verified.reason || 'proof no longer matches this launch'}.`);
+  }
+  return { ...result, ...verified, reused: false };
 }
 
 async function socialRequestContext() {
@@ -1928,7 +2086,7 @@ async function socialRequestContext() {
   try {
     installed = await readInstalledPack(config);
   } catch {}
-  const proof = await writeRegisteredLauncherProof({ config, identity, latest, installed });
+  const proof = await writeSerializedRegisteredLauncherProof({ config, identity, latest, installed });
   if (!proof?.trusted || !proof?.token) {
     throw new Error('A valid AHT Launcher session is required before friends can load.');
   }
@@ -2046,9 +2204,15 @@ async function registerMinecraftUsername(username, options = {}) {
   const config = await loadConfig();
   const identity = await loadIdentity();
   const base = accountBaseUrl(config);
-  let remote = { skipped: true, reason: 'sync URL is not configured' };
+  const developerLocalOnly = isDeveloperMode();
+  let remote = {
+    skipped: true,
+    reason: developerLocalOnly
+      ? 'developer launcher identity stays local and uses authenticated developer proof'
+      : 'sync URL is not configured'
+  };
 
-  if (base) {
+  if (base && !developerLocalOnly) {
     const url = new URL('api/users/register', base.endsWith('/') ? base : `${base}/`);
     const registrationPayload = {
       username: normalizedUsername,
@@ -2999,7 +3163,7 @@ async function runUpdate(forceRepair = false, options = {}) {
     if (config.minecraftLauncher?.enabled !== false) {
       try {
         latestAfterInstall = await readLatest(config);
-        const launcherProof = await writeRegisteredLauncherProof({
+        const launcherProof = await writeSerializedRegisteredLauncherProof({
           config: launcherConfig,
           latest: latestAfterInstall,
           installed: result.installed,
@@ -4234,7 +4398,7 @@ function workerBaseUrlFromLatest(value = '') {
   if (!latestUrl) {
     return '';
   }
-  return new URL('.', latestUrl).toString();
+  return workerServiceBaseUrl(latestUrl);
 }
 
 function parseWorkerUrl(output = '') {
@@ -6445,6 +6609,18 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
   };
 }
 
+function remoteAdminBaseUrl(config = {}) {
+  return workerServiceBaseUrl(config.developer?.adminBaseUrl || config.sync?.baseUrl);
+}
+
+function remoteAdminLoginTimeoutMs() {
+  if (process.env.AHT_TEST_HOOKS === '1') {
+    const testTimeout = Number(process.env.AHT_TEST_REMOTE_ADMIN_TIMEOUT_MS || 0);
+    if (Number.isFinite(testTimeout) && testTimeout > 0) return Math.max(50, Math.floor(testTimeout));
+  }
+  return REMOTE_ADMIN_LOGIN_TIMEOUT_MS;
+}
+
 async function remoteAdminLogin(config, username = '', password = '') {
   const credentials = await loadDeveloperCredentials();
   const loginUsername = String(username || credentials.username || '').trim();
@@ -6452,58 +6628,105 @@ async function remoteAdminLogin(config, username = '', password = '') {
   if (!loginUsername || !loginPassword) {
     return { ok: false, error: 'Developer credentials are not configured on this machine' };
   }
-  const base = config.developer?.adminBaseUrl || config.sync?.baseUrl;
+  const base = remoteAdminBaseUrl(config);
   if (!base) {
     return { ok: false, error: 'Developer admin URL is not configured' };
   }
   const url = new URL('admin/login', base.endsWith('/') ? base : `${base}/`);
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: loginUsername, password: loginPassword })
-  });
+  const timeoutMs = remoteAdminLoginTimeoutMs();
+  let response = null;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+      signal: globalThis.AbortSignal?.timeout?.(timeoutMs)
+    });
+  } catch (error) {
+    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+    return {
+      ok: false,
+      error: timedOut
+        ? `Worker admin login timed out after ${timeoutMs} ms`
+        : `Worker admin login request failed: ${error.message || error}`
+    };
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     return { ok: false, error: body.error || `${response.status} ${response.statusText}` };
   }
-  adminToken = body.token || '';
-  return { ok: Boolean(adminToken), expiresAt: body.expiresAt || '', error: adminToken ? '' : 'Worker did not return a token' };
+  const token = String(body.token || '');
+  const expiresAt = Date.parse(body.expiresAt || '');
+  const responseFields = Object.keys(body || {}).sort().slice(0, 8).join(', ') || 'none';
+  if (!token) {
+    return {
+      ok: false,
+      expiresAt: body.expiresAt || '',
+      error: `Worker admin login response from ${url.pathname} did not include a token (response fields: ${responseFields}). Check the Worker API base URL.`
+    };
+  }
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + 30_000) {
+    return {
+      ok: false,
+      expiresAt: body.expiresAt || '',
+      error: `Worker admin login response from ${url.pathname} did not include a valid future expiresAt value.`
+    };
+  }
+  adminToken = token;
+  adminTokenExpiresAt = expiresAt;
+  adminTokenBaseUrl = base;
+  return { ok: true, token, baseUrl: base, expiresAt: body.expiresAt, error: '' };
 }
 
-async function ensureRemoteAdminToken(config) {
-  if (adminToken) {
-    return;
+async function ensureRemoteAdminToken(config, { username = '', password = '', force = false } = {}) {
+  const base = remoteAdminBaseUrl(config);
+  if (!base) throw new Error('Worker admin login failed: Developer admin URL is not configured');
+  if (!force && adminToken && adminTokenBaseUrl === base && adminTokenExpiresAt > Date.now() + 30_000) {
+    return adminToken;
   }
-  const result = await remoteAdminLogin(config);
-  if (!result.ok) {
-    throw new Error(`Worker admin login failed: ${result.error}`);
-  }
+  if (force) clearRemoteAdminToken(base);
+  const running = adminLoginPromises.get(base);
+  if (running) return running;
+  const loginPromise = (async () => {
+      const result = await remoteAdminLogin(config, username, password);
+      if (!result.ok) {
+        throw new Error(`Worker admin login failed: ${result.error}`);
+      }
+      return result.token;
+    })().finally(() => {
+      if (adminLoginPromises.get(base) === loginPromise) adminLoginPromises.delete(base);
+    });
+  adminLoginPromises.set(base, loginPromise);
+  return loginPromise;
 }
 
 async function adminFetch(config, route, options = {}) {
   assertDeveloperAuthenticated();
-  const base = config.developer?.adminBaseUrl || config.sync?.baseUrl;
+  const base = remoteAdminBaseUrl(config);
   if (!base) {
     throw new Error('Developer admin URL is not configured');
   }
-  if (!route.replace(/^\/+/, '').startsWith('admin/login')) {
-    await ensureRemoteAdminToken(config);
-  }
+  const loginRoute = route.replace(/^\/+/, '').startsWith('admin/login');
+  let requestToken = loginRoute ? '' : await ensureRemoteAdminToken(config);
   const url = new URL(route.replace(/^\/+/, ''), base.endsWith('/') ? base : `${base}/`);
-  const fetchWithCurrentToken = async () => {
+  const fetchWithToken = async (token = '') => {
     const headers = { ...(options.headers || {}) };
-    if (adminToken) {
-      headers.Authorization = `Bearer ${adminToken}`;
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
-    const response = await fetch(url, { ...options, headers });
+    const response = await fetch(url, {
+      ...options,
+      headers,
+      signal: options.signal || globalThis.AbortSignal?.timeout?.(30_000)
+    });
     const body = await response.json().catch(() => ({}));
     return { response, body };
   };
-  let { response, body } = await fetchWithCurrentToken();
-  if (response.status === 401 && !route.replace(/^\/+/, '').startsWith('admin/login')) {
-    adminToken = '';
-    await ensureRemoteAdminToken(config);
-    ({ response, body } = await fetchWithCurrentToken());
+  let { response, body } = await fetchWithToken(requestToken);
+  if (response.status === 401 && !loginRoute) {
+    clearRemoteAdminToken(base, requestToken);
+    requestToken = await ensureRemoteAdminToken(config);
+    ({ response, body } = await fetchWithToken(requestToken));
   }
   if (!response.ok) {
     throw new Error(body.error || `${response.status} ${response.statusText}`);
@@ -7270,7 +7493,7 @@ ipcMain.handle('play:start', diagnosticIpc('play:start', async (_event, payload 
   }
 
   const identity = await identityPayload(launcherConfig);
-  const launcherProofPromise = currentOrWriteRegisteredLauncherProof({
+  const launcherProofPromise = writeSerializedRegisteredLauncherProof({
     config: launcherConfig,
     latest: launchLatest,
     installed,
@@ -7490,38 +7713,41 @@ ipcMain.handle('dev:login', async (_event, { username, password }) => {
   const credentials = await loadDeveloperCredentials();
   if (!developerCredentialsConfigured(credentials)) {
     developerSession = null;
-    adminToken = '';
+    clearRemoteAdminToken();
     throw new Error('Developer credentials are not configured on this machine. Set AHT_DEVELOPER_PASSWORD or create developer.credentials.json in the app data folder.');
   }
   const normalizedUsername = String(username || '').trim();
   if (normalizedUsername !== credentials.username || password !== credentials.password) {
     developerSession = null;
-    adminToken = '';
+    clearRemoteAdminToken();
     throw new Error('Invalid username or password');
   }
   const expiresAt = Date.now() + DEVELOPER_SESSION_MS;
   developerSession = { username: normalizedUsername, expiresAt };
-  adminToken = '';
+  clearRemoteAdminToken();
   const config = await loadConfig();
-  const base = config.developer?.adminBaseUrl || config.sync?.baseUrl;
+  const base = workerServiceBaseUrl(config.developer?.adminBaseUrl || config.sync?.baseUrl);
   const skipRemote = process.env.AHT_SKIP_REMOTE_DEVELOPER_LOGIN === '1';
-  const remotePending = Boolean(base && !skipRemote);
-  if (remotePending) {
-    remoteAdminLogin(config, normalizedUsername, password)
-      .then((remote) => {
-        if (!remote.ok) console.warn(`Worker admin login failed after local developer login: ${remote.error || 'unknown error'}`);
-      })
-      .catch((error) => {
-        console.warn(`Worker admin login failed after local developer login: ${error.message || error}`);
-      });
+  const remoteRequested = Boolean(base && !skipRemote);
+  let remote = null;
+  if (remoteRequested) {
+    try {
+      await ensureRemoteAdminToken(config, { username: normalizedUsername, password, force: true });
+      remote = { ok: true, expiresAt: new Date(adminTokenExpiresAt).toISOString(), error: '' };
+    } catch (error) {
+      remote = { ok: false, expiresAt: '', error: error.message || String(error) };
+      console.warn(`Worker admin login failed after local developer login: ${remote.error}`);
+    }
   }
   return {
     ok: true,
     expiresAt: new Date(expiresAt).toISOString(),
-    remoteAuthenticated: false,
-    remotePending,
-    remoteExpiresAt: '',
-    remoteError: base || skipRemote ? '' : 'Developer admin URL is not configured'
+    remoteAuthenticated: Boolean(remote?.ok),
+    remotePending: false,
+    remoteExpiresAt: remote?.expiresAt || '',
+    remoteError: remoteRequested
+      ? (remote?.error || '')
+      : (base || skipRemote ? '' : 'Developer admin URL is not configured')
   };
 });
 ipcMain.handle('dev:summary', async () => adminFetch(await loadConfig(), 'admin/summary'));

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import worker from '../cloudflare/curseforge-proxy-worker.js';
 
 const objects = new Map();
@@ -371,6 +372,25 @@ if (unauthDeveloperChannelAliasResponse.status !== 401) {
   throw new Error(`Expected unauthenticated developer channel alias rejection, got ${unauthDeveloperChannelAliasResponse.status}`);
 }
 
+const workerIndexResponse = await worker.fetch(new Request('https://packs.example.com/'), env, {});
+const workerIndex = await workerIndexResponse.json();
+if (workerIndexResponse.status !== 200 || !Array.isArray(workerIndex.endpoints)) {
+  throw new Error(`Worker discovery root changed unexpectedly: ${workerIndexResponse.status} ${JSON.stringify(workerIndex)}`);
+}
+const poisonedAdminRoute = await worker.fetch(new Request('https://packs.example.com/ptb/admin/login', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ username: 'admin', password: 'secret' })
+}), env, {});
+const poisonedProofRoute = await worker.fetch(new Request('https://packs.example.com/ptb/api/launcher-proof', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ minecraftUsername: 'TestRig', installId: 'install-b' })
+}), env, {});
+if (poisonedAdminRoute.status !== 404 || poisonedProofRoute.status !== 404) {
+  throw new Error(`Unknown PTB-prefixed control routes must fail closed: ${poisonedAdminRoute.status}/${poisonedProofRoute.status}`);
+}
+
 const login = await jsonRequest('/admin/login', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -400,7 +420,7 @@ const developerLauncherProof = await jsonRequest('/api/launcher-proof', {
   headers: { 'Content-Type': 'application/json', ...auth },
   body: JSON.stringify({
     minecraftUsername: 'TestRig',
-    installId: 'install-b',
+    installId: 'developer-install-not-registered',
     launcherChannel: 'developer',
     developerClient: true,
     developerClientBypass: true,
@@ -413,8 +433,34 @@ if (
   developerLauncherProof.payload.launcherChannel !== 'developer'
   || !developerLauncherProof.payload.developerClientBypass
   || !developerLauncherProof.payload.modIntegrityBypass
+  || developerLauncherProof.payload.installId !== 'developer-install-not-registered'
 ) {
   throw new Error(`Authenticated developer proof did not include bypass flags: ${JSON.stringify(developerLauncherProof)}`);
+}
+const developerSocialResponse = await worker.fetch(new Request('https://worker.test/api/social', {
+  headers: { Authorization: `Bearer ${developerLauncherProof.token}` }
+}), env, {});
+const developerSocial = await developerSocialResponse.json();
+if (developerSocialResponse.status !== 200 || developerSocial.username !== 'TestRig') {
+  throw new Error(`Signed developer proof was rejected by the downstream Worker proof verifier: ${developerSocialResponse.status} ${JSON.stringify(developerSocial)}`);
+}
+const wrongKidHeader = { alg: 'HS256', typ: 'AHT-LAUNCHER-PROOF', kid: 'wrong-key-id' };
+const wrongKidInput = `${Buffer.from(JSON.stringify(wrongKidHeader)).toString('base64url')}.${Buffer.from(JSON.stringify(developerLauncherProof.payload)).toString('base64url')}`;
+const wrongKidToken = `${wrongKidInput}.${crypto.createHmac('sha256', env.LAUNCHER_PROOF_SECRET).update(wrongKidInput).digest('base64url')}`;
+const wrongKidSocialResponse = await worker.fetch(new Request('https://worker.test/api/social', {
+  headers: { Authorization: `Bearer ${wrongKidToken}` }
+}), env, {});
+if (wrongKidSocialResponse.status !== 401) {
+  throw new Error(`Downstream Worker proof verifier accepted the wrong anti-cheat key ID: ${wrongKidSocialResponse.status}`);
+}
+const wrongConfiguredKidResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ minecraftUsername: 'TestRig', installId: 'install-b' })
+}), { ...env, LAUNCHER_PROOF_KEY_ID: 'wrong-key-id' }, {});
+const wrongConfiguredKid = await wrongConfiguredKidResponse.json();
+if (wrongConfiguredKidResponse.status !== 500 || !/LAUNCHER_PROOF_KEY_ID/i.test(wrongConfiguredKid.error || '')) {
+  throw new Error(`Worker issued a proof with a key ID rejected by anti-cheat: ${wrongConfiguredKidResponse.status} ${JSON.stringify(wrongConfiguredKid)}`);
 }
 const emptyLogs = await jsonRequest('/api/update-logs?limit=3');
 if (emptyLogs.logs.length !== 0) {
@@ -460,4 +506,4 @@ if (!changeEvent?.ip || changeEvent.event.changes.counts.changed !== 2 || change
   throw new Error(`Local change event lost detail: ${JSON.stringify(changeEvent)}`);
 }
 
-console.log(JSON.stringify({ registration, launcherDownloads: allDownloadRecords, playerIpv4Groups, launcherProof: { source: launcherProof.source, trusted: launcherProof.trusted, tokenParts: launcherProof.token.split('.').length }, developerLauncherProof: { bypass: developerLauncherProof.payload.modIntegrityBypass, channel: developerLauncherProof.payload.launcherChannel }, publishedLog, publicLogs, summary, events }, null, 2));
+console.log(JSON.stringify({ registration, launcherDownloads: allDownloadRecords, playerIpv4Groups, launcherProof: { source: launcherProof.source, trusted: launcherProof.trusted, tokenParts: launcherProof.token.split('.').length }, developerLauncherProof: { bypass: developerLauncherProof.payload.modIntegrityBypass, channel: developerLauncherProof.payload.launcherChannel, downstreamVerified: developerSocialResponse.status === 200 }, publishedLog, publicLogs, summary, events }, null, 2));

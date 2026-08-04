@@ -1743,7 +1743,9 @@ function workerBaseFromFeedUrl(value = "") {
   const feed = normalizePlayerFeedUrl(value);
   if (!/^https?:\/\//i.test(feed)) return "";
   try {
-    return new URL(".", feed).toString();
+    const normalized = new URL(feed);
+    normalized.pathname = normalized.pathname.replace(/\/ptb\/latest\.json$/i, "/latest.json");
+    return new URL(".", normalized).toString();
   } catch {
     return "";
   }
@@ -2962,7 +2964,7 @@ async function scanLauncherBuilds() {
   setLauncherUpdateStatus("warn", "Checking GitHub", "Looking at workflow", "Checking the configured GitHub Actions release workflow.");
   try {
     await saveDeveloperSecrets();
-    await window.aht.saveSettings(serializeSettings());
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     const result = await window.aht.devCheckLauncherWorkflow({
       githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
       githubBranch: inputValue(els.githubBranchInput, "main"),
@@ -3023,7 +3025,7 @@ async function publishLauncherUpdate() {
   setUnavailable(els.publishLauncherUpdateButton, true);
   try {
     await saveDeveloperSecrets();
-    await window.aht.saveSettings(serializeSettings());
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     const payload = {
       githubToken: inputValue(els.githubTokenInput, ""),
       publishToR2: true
@@ -4018,7 +4020,7 @@ if (els.saveAdminUrlButton) {
   els.saveAdminUrlButton.addEventListener("click", async () => {
     try {
       await saveDeveloperSecrets();
-      await window.aht.saveSettings(serializeSettings());
+      await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
       setDevLog("Saved");
       showToast("Admin URL saved", "Developer configuration was updated.", "success");
     } catch (error) {
@@ -4146,7 +4148,7 @@ if (els.pickClientModpackDirButton) {
     const folder = await window.aht.selectFolder(els.clientModpackDirInput.value.trim() || currentStatus?.config?.developer?.clientModpackDir || "");
     if (folder) {
       els.clientModpackDirInput.value = folder;
-      await window.aht.saveSettings(serializeSettings()).catch(() => {});
+      await window.aht.saveSettings(serializeSettings(), activeSidebarPack).catch(() => {});
     }
   });
 }
@@ -4155,7 +4157,7 @@ if (els.pickPtbClientModpackDirButton) {
     const folder = await window.aht.selectFolder(inputValue(els.ptbClientModpackDirInput, currentStatus?.config?.developer?.ptbClientModpackDir || ""));
     if (folder) {
       setInputValue(els.ptbClientModpackDirInput, folder, { force: true });
-      await window.aht.saveSettings(serializeSettings()).catch(() => {});
+      await window.aht.saveSettings(serializeSettings(), activeSidebarPack).catch(() => {});
       invalidateReleaseValidation("PTB source selected", "Create ZIP will package and upload this folder to the isolated PTB track.", "ptb");
     }
   });
@@ -4187,7 +4189,7 @@ async function buildClientZipFromSelectedFolder() {
   setUnavailable(els.buildClientZipButton, true);
   setClientZipStatus("warn", "Creating ZIP", sourceDir);
   try {
-    await window.aht.saveSettings(serializeSettings());
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     const result = await window.aht.devBuildClientZip({
       sourceDir,
       version,
@@ -4228,7 +4230,7 @@ async function buildPtbClientZipFromSelectedFolder() {
   setUnavailable(els.buildPtbClientZipButton, true);
   setReleaseCheck("warn", "Creating PTB ZIP", "Reading the configured client", sourceDir, "ptb");
   try {
-    await window.aht.saveSettings(serializeSettings());
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     const result = await window.aht.devBuildClientZip({
       sourceDir,
       version,
@@ -4305,7 +4307,7 @@ async function writeDefaultsFromDeveloperFeed() {
   setReleaseBusy(true);
   try {
     await saveDeveloperSecrets();
-    await window.aht.saveSettings(serializeSettings());
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     setReleaseCheck("warn", "Writing defaults", "Player feed selected", "Saving app.defaults.json for fresh installs.");
     const result = await writePlayerDefaultsForCurrentFeed();
     const count = result?.written?.length || 0;
@@ -4337,7 +4339,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
   if (!keepBusy) setReleaseBusy(true);
   try {
     await saveDeveloperSecrets();
-    await window.aht.saveSettings(serializeSettings());
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     setReleaseCheck("warn", "Cloud setup", "Checking Cloudflare account", "A browser login opens only if Wrangler is not already signed in.");
     const login = await window.aht.devCloudLogin({
       releaseBucket: releaseBucketName(),
@@ -4371,7 +4373,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
     });
     if (deploy.latestUrl) {
       setInputValue(els.playerFeedUrlInput, deploy.latestUrl);
-      await window.aht.saveSettings(serializeSettings());
+      await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
       await writePlayerDefaultsForCurrentFeed({ cacheOnlyMode: setupCacheOnlyMode }).catch(() => null);
     }
     setDevLog({ cloudAccount: login.summary || login.output || '', login, buckets, secrets, deploy });
@@ -4430,7 +4432,7 @@ async function publishSelectedRelease(target = "stable") {
   let r2Result = null;
   try {
     await saveDeveloperSecrets();
-    await window.aht.saveSettings(serializeSettings());
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     if (!/^https?:\/\//i.test(releaseFeedUrl(target))) {
       await setupCloudForDeveloper({ keepBusy: true });
     }

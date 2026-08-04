@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 10130);
@@ -338,11 +339,7 @@ const server = http.createServer((request, response) => {
       }
       response.statusCode = 200;
       response.setHeader('Content-Type', 'application/json; charset=utf-8');
-      response.end(JSON.stringify({
-        token: 'player-update-play-proof-token',
-        payload,
-        signature: { alg: 'HS256', kid: 'smoke', value: 'smoke-signature' }
-      }));
+      response.end(JSON.stringify(workerLauncherProofFixture(payload, { signature: 'smoke-signature' })));
     });
     return;
   }

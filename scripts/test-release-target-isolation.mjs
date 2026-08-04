@@ -9,7 +9,8 @@ import {
   releaseTarget,
   releaseTargetFeedUrl,
   releaseTargetObjectKey,
-  releaseTargetOutDir
+  releaseTargetOutDir,
+  workerServiceBaseUrl
 } from '../src/releaseTargets.js';
 
 function assert(condition, message) {
@@ -122,6 +123,10 @@ assert(ptb.outDir === path.join(baseOutDir, 'ptb'), `PTB output was not isolated
 assert(stable.outDir === baseOutDir, `Stable output path changed: ${stable.outDir}`);
 assert(stable.feedUrl === 'https://launcher.example/latest.json', `Stable feed changed: ${stable.feedUrl}`);
 assert(ptb.feedUrl === 'https://launcher.example/ptb/latest.json', `PTB feed is not isolated: ${ptb.feedUrl}`);
+assert(workerServiceBaseUrl(stable.feedUrl) === 'https://launcher.example/', 'Stable feed did not resolve to the Worker service root.');
+assert(workerServiceBaseUrl(ptb.feedUrl) === 'https://launcher.example/', 'PTB feed incorrectly resolved APIs under the PTB release prefix.');
+assert(workerServiceBaseUrl('https://launcher.example/ptb/') === 'https://launcher.example/', 'Poisoned PTB API base was not repaired.');
+assert(workerServiceBaseUrl('https://launcher.example/ptb/launcher/latest.json') === 'https://launcher.example/', 'Poisoned PTB launcher-update URL was not repaired.');
 assert(releaseTargetObjectKey('latest.json', 'stable') === 'latest.json', 'Stable R2 key changed.');
 assert(releaseTargetObjectKey('latest.json', 'ptb') === 'ptb/latest.json', 'PTB R2 key is not isolated.');
 assert(releaseTargetObjectKey(stable.result.latest.zip.path, 'stable').startsWith('packs/'), 'Stable pack key changed.');

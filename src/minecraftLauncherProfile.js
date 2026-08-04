@@ -230,7 +230,7 @@ function javaArgsFor({ config = {}, latest = null, installed = null, rootDir = '
   const args = [];
   args.push(`-Xmx${ram}m`, '-Xms512m');
   if (config.launcherProof?.enabled !== false && gameDir) {
-    args.push(...launcherProofJavaArgs(launcherProofPath(gameDir)));
+    args.push(...launcherProofJavaArgs(launcherProofPath(gameDir, config.launcherProof?.channel || 'player')));
   }
   if (gameDir) {
     args.push(

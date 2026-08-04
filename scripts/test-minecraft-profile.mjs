@@ -175,6 +175,25 @@ if (!ramProfile.javaArgs.includes('-Xmx8192m') || !ramProfile.javaArgs.includes(
 if (ramProfile.lastUsed !== selectedStableLastUsed) {
   throw new Error(`Non-Play profile refresh changed lastUsed from ${selectedStableLastUsed} to ${ramProfile.lastUsed}.`);
 }
+const developerProofProfileId = 'a-hard-time-developer-proof-path';
+await ensureMinecraftLauncherProfile({
+  config: {
+    ...config,
+    launcherProof: { enabled: true, channel: 'developer' },
+    minecraftLauncher: {
+      ...config.minecraftLauncher,
+      profileId: developerProofProfileId,
+      profileName: 'A Hard Time Developer Proof Path'
+    }
+  },
+  latest,
+  installed: null
+});
+const developerProofProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+const developerProofProfile = developerProofProfiles.profiles[developerProofProfileId];
+if (!developerProofProfile?.javaArgs?.includes('launcher-proof.developer.json')) {
+  throw new Error(`Developer Minecraft profile did not use the isolated developer proof file: ${JSON.stringify(developerProofProfile)}`);
+}
 const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
 const ptbConfig = {
   ...config,

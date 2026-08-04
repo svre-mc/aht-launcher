@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
+import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 10010);
@@ -297,11 +298,7 @@ const server = http.createServer((request, response) => {
       }
       response.statusCode = 200;
       response.setHeader('Content-Type', 'application/json; charset=utf-8');
-      response.end(JSON.stringify({
-        token: 'smoke-launcher-proof-token',
-        payload,
-        signature: { alg: 'HS256', kid: 'smoke', value: 'smoke-signature' }
-      }));
+      response.end(JSON.stringify(workerLauncherProofFixture(payload, { signature: 'smoke-signature' })));
     });
     return;
   }
@@ -499,8 +496,12 @@ try {
     if (curseForgePlayDurationMs >= 5000) {
       throw new Error(`Prepared CurseForge Play took too long (${curseForgePlayDurationMs}ms).`);
     }
-    if (launcherProofRequests !== 1) {
-      throw new Error(`Prepared Play requested another launcher proof instead of reusing the valid proof (${launcherProofRequests} requests).`);
+    if (launcherProofRequests !== 2) {
+      throw new Error(`Each Play must request a fresh one-time launcher proof; expected 2 requests, got ${launcherProofRequests}.`);
+    }
+    const curseForgeProof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+    if (!curseForgeProof.payload?.launchId || curseForgeProof.payload.launchId === proof.payload?.launchId) {
+      throw new Error(`Second Play reused the first one-time launchId: ${JSON.stringify({ first: proof.payload?.launchId, second: curseForgeProof.payload?.launchId })}`);
     }
     const spawnCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
     curseForgePlayResult = {
@@ -584,7 +585,17 @@ try {
     if (retryCapture.captureCount !== 2) {
       throw new Error(`A later legitimate Play click did not spawn exactly one more launcher: ${JSON.stringify(retryCapture)}`);
     }
+    const retryProof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+    if (
+      launcherProofRequests !== 3
+      || !retryProof.payload?.launchId
+      || retryProof.payload.launchId === curseForgeProof.payload.launchId
+      || retryProof.payload.launchId === proof.payload?.launchId
+    ) {
+      throw new Error(`Later Play did not receive a third distinct one-time launchId: ${JSON.stringify({ requests: launcherProofRequests, first: proof.payload?.launchId, second: curseForgeProof.payload?.launchId, third: retryProof.payload?.launchId })}`);
+    }
     curseForgePlayResult.durationMs = curseForgePlayDurationMs;
+    curseForgePlayResult.distinctLaunchIds = 3;
   }
 
   console.log(JSON.stringify({
@@ -598,6 +609,7 @@ try {
     curseForgeLaunchKind: curseForgePlayResult?.result?.kind || '',
     curseForgePlayDurationMs: curseForgePlayResult?.durationMs || 0,
     launcherProofRequests,
+    distinctLaunchIds: curseForgePlayResult?.distinctLaunchIds || 1,
     proofSource: proof.source,
     integrity: {
       source: persistedIntegrity.source,
