@@ -83,6 +83,9 @@ jobs:
       - name: Test platform build config
         run: npm run test:platform-builds
 
+      - name: Test professional launch diagnostics
+        run: npm run test:launch-diagnostics
+
       - name: Show macOS signing mode
         if: matrix.id == 'macos'
         run: |

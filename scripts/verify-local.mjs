@@ -11,6 +11,7 @@ const pureChecks = [
   ['test:social-worker'],
   ['test:legal-consent'],
   ['test:launcher-proof'],
+  ['test:launch-diagnostics'],
   ['test:launcher-update-manifest'],
   ['test:github-workflow'],
   ['test:release-targets'],

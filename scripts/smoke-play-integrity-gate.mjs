@@ -374,6 +374,65 @@ try {
     throw new Error(`Full Play integrity scan did not establish a fingerprint: ${JSON.stringify(persistedIntegrity)}`);
   }
 
+  const launchLogsDir = path.join(instanceDir, 'logs', 'launcher');
+  const firstFailureReports = fs.readdirSync(launchLogsDir).filter((name) => /^AHT-Launch-.*-FAILED-.*\.txt$/i.test(name));
+  if (firstFailureReports.length !== 1) {
+    throw new Error(`Direct failed Play did not write exactly one timestamped report: ${JSON.stringify(firstFailureReports)}`);
+  }
+  const firstFailureText = fs.readFileSync(path.join(launchLogsDir, firstFailureReports[0]), 'utf8');
+  for (const expected of ['Result: FAILED', 'LIKELY CAUSE', 'LAUNCH PROCESS', 'REQUIREMENTS', 'PC AND RUNTIME', 'Repair required. 1 mod file issue found']) {
+    if (!firstFailureText.includes(expected)) {
+      throw new Error(`Failed Play report is missing ${expected}: ${firstFailureText.slice(0, 1200)}`);
+    }
+  }
+  if (firstFailureText.trimStart().startsWith('{') || firstFailureText.includes('process.versions')) {
+    throw new Error('Failed Play report regressed to a raw diagnostic dump.');
+  }
+  const copiedFailure = await evaluate(client, `
+    window.aht.copyErrorReport({ title: 'Launch failed', context: 'play:start', packKey: 'stable' })
+  `);
+  if (!copiedFailure?.copied || copiedFailure.chars < 1000 || copiedFailure.fileName !== firstFailureReports[0]) {
+    throw new Error(`Failed Play report was not copied from the saved attempt: ${JSON.stringify(copiedFailure)}`);
+  }
+
+  const failureClickStarted = await evaluate(client, `(() => {
+    const button = document.querySelector('#playButton');
+    button.click();
+    return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
+  })()`);
+  if (failureClickStarted.text !== 'Preparing...' || failureClickStarted.ariaBusy !== 'true') {
+    throw new Error(`Failed Play UI did not enter Preparing state: ${JSON.stringify(failureClickStarted)}`);
+  }
+  const failureUi = await waitFor(client, `(() => {
+    const button = document.querySelector('#playButton');
+    const toast = [...document.querySelectorAll('#toastStack .toast.error')]
+      .find((item) => /Launch failed/i.test(item.textContent));
+    const copy = toast?.querySelector('button.toast-copy-action');
+    return button.getAttribute('aria-busy') === 'false'
+      && button.getAttribute('aria-disabled') === 'true'
+      && button.textContent.trim() === 'Play'
+      && copy?.textContent.trim() === 'Click here to copy'
+      ? { toast: toast.textContent.trim(), copyButtons: toast.querySelectorAll('button.toast-copy-action').length }
+      : false;
+  })()`, 'professional failed Play toast');
+  if (failureUi.copyButtons !== 1) {
+    throw new Error(`Failed Play toast did not expose exactly one copy action: ${JSON.stringify(failureUi)}`);
+  }
+  await evaluate(client, `(() => {
+    const toast = [...document.querySelectorAll('#toastStack .toast.error')]
+      .find((item) => /Launch failed/i.test(item.textContent));
+    toast.querySelector('button.toast-copy-action').click();
+    return true;
+  })()`);
+  await waitFor(client, `
+    [...document.querySelectorAll('#toastStack .toast.success')]
+      .some((toast) => /Launch report copied/i.test(toast.textContent) && /Paste it into your support message/i.test(toast.textContent))
+  `, 'copy-success toast');
+  const uiFailureReports = fs.readdirSync(launchLogsDir).filter((name) => /^AHT-Launch-.*-FAILED-.*\.txt$/i.test(name));
+  if (uiFailureReports.length !== 2) {
+    throw new Error(`UI failed Play did not create its own timestamped report: ${JSON.stringify(uiFailureReports)}`);
+  }
+
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
   await fsp.rm(fakeLauncherMarker, { force: true });
   const cleanPlayResult = await evaluate(client, `
@@ -404,6 +463,9 @@ try {
   if (cleanStatus.integrity?.counts?.corrupted !== 0) {
     throw new Error(`Clean install still reported corrupted files: ${JSON.stringify(cleanStatus.integrity)}`);
   }
+  await evaluate(client, `document.querySelector('#gameTileButton')?.click(); true`);
+  await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'
+    && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'`, 'repaired Play button refresh');
   const cleanProfiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
   const cleanProfile = cleanProfiles.profiles?.['a-hard-time-dregora'];
   const detectedJavaPath = cleanStatus.java8Runtime?.path || '';

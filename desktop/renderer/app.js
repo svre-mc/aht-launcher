@@ -887,9 +887,10 @@ async function copyErrorReportFromToast(payload = {}) {
   if (!window.aht?.copyErrorReport) return;
   try {
     const result = await window.aht.copyErrorReport(payload);
-    showToast("Error details copied", `${result.chars || 0} characters copied. Send that text with the screenshot.`, "success", { durationMs: 4200, disableDiagnostics: true });
+    const file = result.fileName ? ` Saved as ${result.fileName}.` : "";
+    showToast("Launch report copied", `${result.chars || 0} characters copied.${file} Paste it into your support message.`, "success", { durationMs: 5200, disableDiagnostics: true });
   } catch {
-    showToast("Copy failed", "Open Downloads and copy the visible log text instead.", "warn", { durationMs: 4200, disableDiagnostics: true });
+    showToast("Copy failed", "Open the AHT instance logs\\launcher folder and send the newest AHT-Launch text file.", "warn", { durationMs: 5200, disableDiagnostics: true });
   }
 }
 
@@ -2088,14 +2089,11 @@ function showToast(title, detail = "", type = "info", options = {}) {
   }
   const diagnosticEnabled = type === "error" && !options.disableDiagnostics;
   if (diagnosticEnabled) {
-    toast.classList.add("is-clickable");
-    toast.setAttribute("role", "button");
-    toast.setAttribute("tabindex", "0");
-    toast.title = "Click to copy the full AHT Launcher error report";
+    toast.classList.add("has-copy-action");
     const action = document.createElement("button");
     action.type = "button";
     action.className = "toast-copy-action";
-    action.textContent = "Copy full error details";
+    action.textContent = options.copyLabel || "Click here to copy";
     body.appendChild(action);
     const copy = (event) => {
       event.preventDefault();
@@ -2104,13 +2102,10 @@ function showToast(title, detail = "", type = "info", options = {}) {
         title,
         detail,
         message: detail,
-        context: options.context || "renderer-toast"
+        context: options.context || "renderer-toast",
+        packKey: options.packKey || activeSidebarPack
       });
     };
-    toast.addEventListener("click", copy);
-    toast.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") copy(event);
-    });
     action.addEventListener("click", copy);
   }
   toast.appendChild(body);
@@ -3854,12 +3849,13 @@ if (els.downloadsUpdateIconButton) {
 }
 els.playButton.addEventListener("click", async () => {
   if (playBusy || isUnavailable(els.playButton)) return;
-  const requestedPackName = activeSidebarPack === "ptb" ? "A Hard Time PTB" : "A Hard Time";
+  const requestedPackKey = activeSidebarPack;
+  const requestedPackName = requestedPackKey === "ptb" ? "A Hard Time PTB" : "A Hard Time";
   setPlayBusy(true);
   setLog(`Preparing ${requestedPackName} and Minecraft Launcher...`);
   showToast("Preparing Minecraft Launcher", `Selecting the exact ${requestedPackName} installation.`, "info");
   try {
-    const result = await window.aht.play(activeSidebarPack);
+    const result = await window.aht.play(requestedPackKey);
     const profileName = result?.minecraftProfile?.profileName || requestedPackName;
     showToast(
       "Minecraft Launcher opened",
@@ -3869,7 +3865,11 @@ els.playButton.addEventListener("click", async () => {
   } catch (error) {
     const message = playerSafeErrorMessage(error);
     setLog(message);
-    showToast("Launch failed", message, "error");
+    showToast("Launch failed", message, "error", {
+      context: "play:start",
+      packKey: requestedPackKey,
+      copyLabel: "Click here to copy"
+    });
     void refresh().then(() => setLog(message)).catch(() => {});
   } finally {
     setPlayBusy(false);
@@ -3947,7 +3947,8 @@ if (els.copyLaunchDiagnosticsButton) {
     try {
       const result = await window.aht.copyErrorReport({
         title: "AHT launch diagnostics",
-        context: "settings-java"
+        context: "settings-java",
+        packKey: activeSidebarPack
       });
       const copiedChars = Math.max(0, Number(result?.chars) || 0);
       showToast(

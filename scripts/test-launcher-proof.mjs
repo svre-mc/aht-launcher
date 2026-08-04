@@ -349,7 +349,7 @@ if (!/function writeSerializedRegisteredLauncherProof[\s\S]*?const expectedIdent
 if (!/launcherProofPath\(config\.instanceDir \|\| '', expectedIdentity\)/m.test(desktopMain)) {
   throw new Error('In-flight proof refreshes are not isolated by the channel-specific proof path.');
 }
-if (!/ipcMain\.handle\('play:start'[\s\S]*?const launcherProofPromise = writeSerializedRegisteredLauncherProof\(/m.test(desktopMain)) {
+if (!/ipcMain\.handle\('play:start', launchDiagnosticIpc\([\s\S]*?const launcherProofPromise = runLaunchStep\([\s\S]*?'launcher-proof'[\s\S]*?writeSerializedRegisteredLauncherProof\(/m.test(desktopMain)) {
   throw new Error('Play does not force a serialized fresh one-time launcher proof.');
 }
 if (/function writeSerializedRegisteredLauncherProof[\s\S]*?if \(current\.usable\)/m.test(desktopMain)) {

@@ -54,6 +54,18 @@ function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
+function launchReportsFor(instancePath) {
+  const directory = path.join(instancePath, 'logs', 'launcher');
+  if (!fs.existsSync(directory)) return [];
+  return fs.readdirSync(directory)
+    .filter((name) => /^AHT-Launch-.*\.txt$/i.test(name))
+    .sort()
+    .map((name) => ({
+      name,
+      text: fs.readFileSync(path.join(directory, name), 'utf8')
+    }));
+}
+
 function makeResourcePackBuffer() {
   const zip = new AdmZip();
   zip.addFile('pack.mcmeta', Buffer.from(JSON.stringify({ pack: { pack_format: 3, description: 'AHT smoke resource pack' } }, null, 2)));
@@ -523,10 +535,20 @@ try {
   if (!proof.trusted || proof.source !== 'worker' || !Array.isArray(proof.javaProperties) || !proof.javaProperties.some((arg) => arg.startsWith('-Daht.launcher.proofFile='))) {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
   }
+  const stableReportsAfterFirstPlay = launchReportsFor(instanceDir);
+  if (
+    stableReportsAfterFirstPlay.length !== 1
+    || !stableReportsAfterFirstPlay[0].text.includes('Result: HANDOFF CONFIRMED')
+    || !stableReportsAfterFirstPlay[0].text.includes('Pack: A Hard Time 7.7.7 (stable)')
+    || !stableReportsAfterFirstPlay[0].text.includes(`Instance: ${instanceDir}`)
+  ) {
+    throw new Error(`Stable Play did not write one exact-instance professional launch report: ${JSON.stringify(stableReportsAfterFirstPlay)}`);
+  }
 
   const stableAfterFirstPlay = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
   const stableFirstLastUsed = stableAfterFirstPlay.profiles?.['a-hard-time-dregora']?.lastUsed;
   await fsp.cp(instanceDir, ptbInstanceDir, { recursive: true });
+  await fsp.rm(path.join(ptbInstanceDir, 'logs', 'launcher'), { recursive: true, force: true });
   const ptbInstalledPath = path.join(ptbInstanceDir, '.aht-launcher', 'installed.json');
   const ptbInstalled = JSON.parse(fs.readFileSync(ptbInstalledPath, 'utf8'));
   ptbInstalled.packId = 'a-hard-time-ptb';
@@ -572,6 +594,16 @@ try {
   ) {
     throw new Error(`Installed PTB Play did not prepare every launcher root with the exact PTB instance and Java: ${JSON.stringify({ afterPtbProfiles, syncedAfterPtbProfiles })}`);
   }
+  const ptbReportsAfterPlay = launchReportsFor(ptbInstanceDir);
+  if (
+    ptbReportsAfterPlay.length !== 1
+    || !ptbReportsAfterPlay[0].text.includes('Result: HANDOFF CONFIRMED')
+    || !ptbReportsAfterPlay[0].text.includes('Pack: A Hard Time PTB 7.7.7 (ptb)')
+    || !ptbReportsAfterPlay[0].text.includes(`Instance: ${ptbInstanceDir}`)
+    || launchReportsFor(instanceDir).length !== 1
+  ) {
+    throw new Error(`PTB Play launch report was not isolated to the exact PTB instance: ${JSON.stringify({ stable: launchReportsFor(instanceDir), ptb: ptbReportsAfterPlay })}`);
+  }
 
   await fsp.rm(fakeLauncherMarker, { force: true });
   await evaluate(client, `document.querySelector('#gameTileButton')?.click(); true`);
@@ -612,6 +644,14 @@ try {
   ) {
     throw new Error(`Installed stable to PTB to stable reversal did not restore every exact stable instance: ${JSON.stringify({ finalProfiles, syncedFinalProfiles })}`);
   }
+  const finalStableReports = launchReportsFor(instanceDir);
+  if (
+    finalStableReports.length !== 2
+    || finalStableReports.some((report) => !report.text.includes('Pack: A Hard Time 7.7.7 (stable)'))
+    || launchReportsFor(ptbInstanceDir).length !== 1
+  ) {
+    throw new Error(`Stable/PTB report isolation changed after switching back to stable: ${JSON.stringify({ stable: finalStableReports, ptb: launchReportsFor(ptbInstanceDir) })}`);
+  }
 
   console.log(JSON.stringify({
     ok: true,
@@ -633,6 +673,10 @@ try {
       stableGameDir: finalStableProfile.gameDir,
       ptbGameDir: ptbProfile.gameDir,
       javaDir: finalStableProfile.javaDir
+    },
+    launchReports: {
+      stable: finalStableReports.map((report) => report.name),
+      ptb: ptbReportsAfterPlay.map((report) => report.name)
     },
     proofSource: proof.source
   }, null, 2));
