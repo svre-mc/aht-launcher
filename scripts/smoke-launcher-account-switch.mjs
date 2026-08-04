@@ -14,6 +14,8 @@ const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
 const registrations = [];
+const launcherUpdateEvents = [];
+let rejectFirstLauncherUpdate = true;
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -114,8 +116,8 @@ async function waitFor(client, expression, label, attempts = 160) {
 await writeJson(path.join(mcRoot, 'launcher_accounts.json'), {
   activeAccountLocalId: 'active',
   accounts: {
-    old: { type: 'Xbox', minecraftProfile: { name: 'OldAHTUser' } },
-    active: { type: 'Xbox', minecraftProfile: { name: 'StunningWolf22' } }
+    old: { type: 'Xbox', minecraftProfile: { id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'OldAHTUser' } },
+    active: { type: 'Xbox', minecraftProfile: { id: '0123456789abcdef0123456789abcdef', name: 'StunningWolf22' } }
   }
 });
 await writeJson(path.join(userData, 'launcher.config.json'), {
@@ -152,7 +154,26 @@ const server = http.createServer(async (request, response) => {
     registrations.push(body);
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify({ ok: true, username: body.username, key: `accounts/usernames/${String(body.username).toLowerCase()}.json` }));
+    response.end(JSON.stringify({ ok: true, username: body.username, minecraftUuid: body.minecraftUuid, key: `accounts/usernames/${String(body.username).toLowerCase()}.json` }));
+    return;
+  }
+  if (url.pathname === '/api/events' && request.method === 'POST') {
+    const body = JSON.parse(await new Promise((resolve) => {
+      let text = '';
+      request.on('data', (chunk) => { text += chunk; });
+      request.on('end', () => resolve(text || '{}'));
+    }));
+    launcherUpdateEvents.push(body);
+    if (rejectFirstLauncherUpdate) {
+      rejectFirstLauncherUpdate = false;
+      response.statusCode = 503;
+      response.setHeader('Content-Type', 'application/json; charset=utf-8');
+      response.end(JSON.stringify({ error: 'Temporary launcher update telemetry failure' }));
+      return;
+    }
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify({ ok: true, launcherUpdateKey: `launcher-updates/${body.appVersion}.json`, accountRefreshed: true }));
     return;
   }
   response.statusCode = 200;
@@ -163,7 +184,12 @@ await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
+  env: {
+    ...process.env,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
+    ELECTRON_ENABLE_LOGGING: '0'
+  },
   stdio: 'ignore',
   windowsHide: true
 });
@@ -182,6 +208,7 @@ try {
       return {
         playerLabel: document.querySelector('#playerLabelView').textContent,
         minecraftUsername: status.identity.minecraftUsername,
+        minecraftUuid: status.identity.minecraftUuid,
         mode: status.identity.usernameRegistrationMode,
         detected: status.identity.minecraftLauncherDetectedUsername,
         warning: status.identity.minecraftUsernameSyncWarning || '',
@@ -189,18 +216,52 @@ try {
       };
     })()
   `);
-  if (proof.minecraftUsername !== 'StunningWolf22' || proof.mode !== 'minecraft-launcher' || proof.warning) {
+  if (
+    proof.minecraftUsername !== 'StunningWolf22'
+    || proof.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
+    || proof.mode !== 'minecraft-launcher'
+    || proof.warning
+  ) {
     throw new Error(`Active Minecraft Launcher account did not replace old AHT username: ${JSON.stringify(proof)}`);
   }
-  if (registrations.length !== 1 || registrations[0].username !== 'StunningWolf22' || registrations[0].installId !== 'same-install') {
+  if (
+    registrations.length !== 1
+    || registrations[0].username !== 'StunningWolf22'
+    || registrations[0].installId !== 'same-install'
+    || registrations[0].minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
+  ) {
     throw new Error(`Expected one Worker registration for StunningWolf22: ${JSON.stringify(registrations)}`);
+  }
+
+  for (let attempt = 0; attempt < 80 && launcherUpdateEvents.length < 1; attempt += 1) {
+    await sleep(100);
+  }
+  await sleep(200);
+  await evaluate(client, 'Promise.all([window.aht.getStatus(), window.aht.getStatus()])');
+  for (let attempt = 0; attempt < 80 && launcherUpdateEvents.length < 2; attempt += 1) {
+    await sleep(100);
+  }
+  const reportedIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
+  const updateEvent = launcherUpdateEvents[1];
+  if (
+    launcherUpdateEvents.length !== 2
+    || updateEvent?.event?.type !== 'launcher_update_completed'
+    || updateEvent?.minecraftUsername !== 'StunningWolf22'
+    || updateEvent?.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
+    || !Array.isArray(reportedIdentity.reportedLauncherVersions)
+    || !reportedIdentity.reportedLauncherVersions.includes(updateEvent.appVersion)
+    || reportedIdentity.lastReportedLauncherVersion !== updateEvent.appVersion
+  ) {
+    throw new Error(`Launcher update history did not retry once and persist after a transient failure: ${JSON.stringify({ launcherUpdateEvents, reportedIdentity })}`);
   }
 
   console.log(JSON.stringify({
     ok: true,
     root,
     proof,
-    registrations
+    registrations,
+    launcherUpdateEvent: updateEvent,
+    reportedLauncherVersions: reportedIdentity.reportedLauncherVersions
   }, null, 2));
 } finally {
   if (client) {

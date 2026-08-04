@@ -160,6 +160,10 @@ await writeJson(defaultsPath, {
     cwd: instanceDir
   }
 });
+await writeJson(path.join(userData, 'installer-java8-selection.json'), {
+  schemaVersion: 1,
+  allowManagedJava8: true
+});
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
@@ -168,11 +172,13 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: 'amd64',
     AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
-    AHT_TEST_DIALOG_ECHO_DEFAULT_PATH: '1'
+    AHT_TEST_DIALOG_ECHO_DEFAULT_PATH: '1',
+    AHT_TEST_OPEN_PATH_ECHO: '1'
   },
   stdio: 'ignore',
   windowsHide: true
@@ -188,6 +194,18 @@ try {
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.config?.latestUrl === ${JSON.stringify(latestPath)} ? status : false)
   `, 'local default config');
+  if (!fs.existsSync(path.join(userData, 'launcher.config.json'))) {
+    throw new Error(`Test launcher config escaped the isolated user-data directory: ${userData}`);
+  }
+  const consumedJavaSelection = JSON.parse(await fsp.readFile(path.join(userData, 'installer-java8-selection.json'), 'utf8'));
+  if (
+    status.config?.minecraftLauncher?.java8InstallOverride !== true
+    || status.java8Runtime?.installOverride !== true
+    || consumedJavaSelection.allowManagedJava8 !== true
+    || !consumedJavaSelection.consumedAt
+  ) {
+    throw new Error(`Installer Java 8 selection was not consumed exactly once by the regular launcher: ${JSON.stringify({ config: status.config?.minecraftLauncher, java8Runtime: status.java8Runtime, consumedJavaSelection })}`);
+  }
 
   const folderLabel = await evaluate(client, `
     (() => {
@@ -224,96 +242,47 @@ try {
     throw new Error(`Modpack folder Browse did not pass the listed folder path to the native dialog: ${JSON.stringify(browseProof)}`);
   }
 
-  const java8InitialProof = await evaluate(client, `
+  const openPathProof = await evaluate(client, `
+    Promise.all([
+      window.aht.openPath(${JSON.stringify(instanceDir)}),
+      window.aht.openPath('   ')
+    ]).then(([opened, empty]) => ({ opened, empty }))
+  `);
+  if (
+    openPathProof?.opened?.ok !== true
+    || openPathProof.opened.opened !== true
+    || openPathProof.opened.captured !== true
+    || path.resolve(openPathProof.opened.target) !== path.resolve(instanceDir)
+    || openPathProof?.empty?.ok !== false
+    || openPathProof.empty.opened !== false
+    || openPathProof.empty.target !== ''
+    || openPathProof.empty.error !== 'Choose a folder first.'
+  ) {
+    throw new Error(`Open-folder IPC did not return the normalized, captured contract: ${JSON.stringify(openPathProof)}`);
+  }
+
+  const java8SettingsProof = await evaluate(client, `
     (() => {
       activateTab('settings');
-      const input = document.querySelector('#java8InstallInput');
-      const card = document.querySelector('#java8RuntimeCard');
+      const serialized = serializeSettings().minecraftLauncher;
       return {
-        checked: input?.checked,
-        disabled: input?.disabled,
-        cardHidden: card?.hidden,
-        cardTechnical: card?.classList?.contains('player-technical'),
-        diagnosticsHidden: document.querySelector('#copyLaunchDiagnosticsButton')?.hidden,
-        diagnosticsTechnical: document.querySelector('#copyLaunchDiagnosticsButton')?.classList?.contains('player-technical'),
-        title: document.querySelector('#java8RuntimeTitle')?.textContent || '',
-        detail: document.querySelector('#java8RuntimeDetail')?.textContent || '',
-        warningHidden: document.querySelector('#java8MemoryWarning')?.hidden
+        cardPresent: Boolean(document.querySelector('#java8RuntimeCard')),
+        inputPresent: Boolean(document.querySelector('#java8InstallInput')),
+        diagnosticsPresent: Boolean(document.querySelector('#copyLaunchDiagnosticsButton')),
+        serializesOverride: Object.prototype.hasOwnProperty.call(serialized, 'java8InstallOverride'),
+        bodyMentionsReadyJava: /Compatible Java 8 is ready|AHT-managed Java 8 is ready/i.test(document.body.textContent)
       };
     })()
   `);
   if (
     status.java8Runtime?.usable !== true
-    || java8InitialProof.checked !== false
-    || java8InitialProof.disabled !== false
-    || java8InitialProof.cardHidden
-    || java8InitialProof.cardTechnical
-    || java8InitialProof.diagnosticsHidden
-    || java8InitialProof.diagnosticsTechnical
-    || !/Java 8 is ready/i.test(java8InitialProof.title)
-    || !java8InitialProof.detail.includes(status.java8Runtime.path)
-    || java8InitialProof.warningHidden !== true
+    || java8SettingsProof.cardPresent
+    || java8SettingsProof.inputPresent
+    || java8SettingsProof.diagnosticsPresent
+    || java8SettingsProof.serializesOverride
+    || java8SettingsProof.bodyMentionsReadyJava
   ) {
-    throw new Error(`Usable Java 8 did not render as a visible, automatically unchecked runtime: ${JSON.stringify({ java8InitialProof, java8Runtime: status.java8Runtime, javaPath })}`);
-  }
-
-  const java8MissingProof = await evaluate(client, `
-    (async () => {
-      const base = await window.aht.getStatus();
-      const missing = {
-        ...base,
-        config: {
-          ...base.config,
-          minecraftLauncher: {
-            ...base.config.minecraftLauncher,
-            java8InstallOverride: null
-          }
-        },
-        java8Runtime: {
-          usable: false,
-          path: '',
-          version: '',
-          vendor: '',
-          arch: '',
-          managed: false,
-          installSupported: true,
-          recommendedInstall: true,
-          effectiveInstallSelected: true,
-          installSelected: true,
-          installOverride: null,
-          memoryWarning: 'Allocated RAM smoke warning.',
-          reason: 'SECRET_RAW_RUNTIME_ERROR',
-          rejectedReason: 'SECRET_RAW_RUNTIME_ERROR'
-        }
-      };
-      renderStatus(missing);
-      const input = document.querySelector('#java8InstallInput');
-      const autoChecked = input.checked;
-      input.click();
-      renderStatus({ ...missing, java8Runtime: { ...missing.java8Runtime } });
-      return {
-        autoChecked,
-        checkedAfterRefresh: input.checked,
-        serializedOverride: serializeSettings().minecraftLauncher.java8InstallOverride,
-        title: document.querySelector('#java8RuntimeTitle')?.textContent || '',
-        detail: document.querySelector('#java8RuntimeDetail')?.textContent || '',
-        warning: document.querySelector('#java8MemoryWarning')?.textContent || '',
-        warningHidden: document.querySelector('#java8MemoryWarning')?.hidden,
-        bodyContainsRawError: document.body.textContent.includes('SECRET_RAW_RUNTIME_ERROR')
-      };
-    })()
-  `);
-  if (
-    java8MissingProof.autoChecked !== true
-    || java8MissingProof.checkedAfterRefresh !== false
-    || java8MissingProof.serializedOverride !== false
-    || !/setup is disabled/i.test(java8MissingProof.title)
-    || !/Enable the AHT-managed runtime/i.test(java8MissingProof.detail)
-    || java8MissingProof.warning !== 'Allocated RAM smoke warning.'
-    || java8MissingProof.warningHidden !== false
-    || java8MissingProof.bodyContainsRawError
-  ) {
-    throw new Error(`Missing-Java auto-selection, dirty refresh, or sanitized status rendering failed: ${JSON.stringify(java8MissingProof)}`);
+    throw new Error(`Java 8 runtime details leaked back into Game Settings: ${JSON.stringify({ java8SettingsProof, java8Runtime: status.java8Runtime })}`);
   }
 
   const saveResult = await evaluate(client, `
@@ -360,10 +329,8 @@ try {
       profileId: saveResult.minecraftProfile?.profileId,
       rootDir: saveResult.minecraftProfile?.rootDir
     },
-    java8: {
-      initial: java8InitialProof,
-      missing: java8MissingProof
-    }
+    java8SettingsProof,
+    installerJava8Selection: consumedJavaSelection
   }, null, 2));
 } finally {
   if (client) {

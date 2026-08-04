@@ -121,6 +121,7 @@
           <div class="launch-actions">
             <button id="updateButton" class="button primary is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-download" aria-hidden="true"></span>Update</button>
             <button id="playButton" class="button strong is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-play" aria-hidden="true"></span>Play</button>
+            <button id="copyLatestLaunchReportButton" class="launch-report-action" type="button" hidden>Copy latest launch report</button>
           </div>
         </section>
 
@@ -157,25 +158,13 @@
               </div>
               <button id="settingsAutoSetupButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
             </div>
-            <div id="java8RuntimeCard" class="java-runtime-card warn">
-              <div class="java-runtime-copy">
-                <span id="java8RuntimeState" class="java-runtime-state">Java 8 runtime</span>
-                <strong id="java8RuntimeTitle">Checking this device</strong>
-                <p id="java8RuntimeDetail">Looking for a usable 64-bit Java 8 runtime for Minecraft Forge 1.12.2.</p>
-                <p id="java8MemoryWarning" class="java-runtime-memory-warning" hidden></p>
-              </div>
-              <div class="java-runtime-actions">
-                <label class="switch java-runtime-switch"><input id="java8InstallInput" type="checkbox" aria-describedby="java8RuntimeDetail java8MemoryWarning"><span></span>AHT-managed Adoptium Java 8 (64-bit)</label>
-                <button id="copyLaunchDiagnosticsButton" class="button compact" type="button">Copy launch diagnostics</button>
-              </div>
-            </div>
             <div class="form-grid">
               <label class="span-2 player-technical" hidden>Latest Feed <span class="browse"><input id="latestUrlInput" type="text"><button id="pickLatestButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label class="player-technical" hidden>CurseForge Proxy <input id="proxyUrlInput" type="url"></label>
               <label class="player-technical" hidden>Sync URL <input id="syncUrlInput" type="url"></label>
               <label class="player-technical" hidden>Player Label <input id="playerLabelInput" type="text"></label>
-              <label class="span-2">Modpack Folder <span class="browse"><input id="instanceInput" type="text"><button id="pickInstanceButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
-              <label class="span-2">Minecraft Launcher Folder <span class="browse"><input id="minecraftRootInput" type="text"><button id="pickMinecraftRootButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label class="span-2">Modpack Folder <span class="browse path-actions"><input id="instanceInput" type="text"><button id="openInstancePathButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Open</button><button id="pickInstanceButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label class="span-2">Minecraft Launcher Folder <span class="browse path-actions"><input id="minecraftRootInput" type="text"><button id="openMinecraftRootPathButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Open</button><button id="pickMinecraftRootButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label>Launcher Profile Name <input id="minecraftProfileNameInput" type="text"></label>
               <label class="memory-slider span-2">
                 <span>Allocated RAM <output id="minecraftMemoryOutput">6 GB</output></span>
@@ -226,13 +215,6 @@
             <button class="dev-tab" type="button" data-dev-target="updateLogTools">Update Logs</button>
             <button class="dev-tab" type="button" data-dev-target="playerDataTools">Player Data</button>
           </nav>
-
-          <section class="dev-strip" aria-label="Dashboard totals">
-            <div><span>Launcher Downloads</span><button id="downloadCount" class="metric-value" type="button" data-event-filter="all">-</button></div>
-            <div><span>Unique IPv4</span><button id="uniqueIpv4Count" class="metric-value" type="button" data-event-filter="ips">-</button></div>
-            <div><span>Shared IPv4</span><button id="sharedIpv4Count" class="metric-value" type="button" data-event-filter="shared">-</button></div>
-            <div><span>IPv4 Unavailable</span><button id="ipv4UnavailableCount" class="metric-value" type="button" data-event-filter="unavailable">-</button></div>
-          </section>
 
           <section id="releaseTools" class="dev-section" data-dev-panel>
             <div class="dev-section-head">
@@ -402,41 +384,43 @@
             <div id="developerUpdateLogsList" class="developer-update-log-list"></div>
           </section>
 
-          <section id="playerDataTools" class="dev-data-grid" data-dev-panel hidden>
-            <section class="dev-section">
-              <div class="dev-section-head">
-                <h2>Launcher Download History</h2>
-                <div class="dev-actions">
-                  <span id="eventFilterLabel" class="quiet-label">All downloads</span>
-                  <button id="loadDashboardButton" class="button compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Reload History</button>
-                </div>
+          <section id="playerDataTools" class="dev-section player-data-section" data-dev-panel hidden>
+            <div class="dev-section-head player-data-head">
+              <div>
+                <h2>Player Data</h2>
+                <nav class="player-data-tabs" aria-label="Player data views">
+                  <button id="playerDownloadsTab" class="player-data-tab active" type="button" data-player-data-view="downloads">Downloads</button>
+                  <button id="playerRecordsTab" class="player-data-tab" type="button" data-player-data-view="players">Players</button>
+                  <button id="playerLauncherUpdatesTab" class="player-data-tab" type="button" data-player-data-view="updates">Launcher Updates</button>
+                </nav>
               </div>
-              <div class="event-table-head">
-                <span>Time</span><span>Download</span><span>Player(s)</span><span>IPv4</span><span>Platform</span><span>Version</span><span>File</span>
+              <button id="loadDashboardButton" class="button compact" type="button"><span class="button-icon icon-activity" aria-hidden="true"></span>Reload</button>
+            </div>
+            <div id="playerDownloadsPanel" class="player-data-panel">
+              <div class="event-table-head launcher-download-table">
+                <span>Date</span><span>IPv4</span><span>Platform</span><span>Version</span><span>File</span>
               </div>
-              <div id="eventsList" class="events data-events">
-                <div class="empty-state">Log in and load the append-only launcher download history.</div>
+              <div id="playerDownloadsList" class="events data-events launcher-download-table">
+                <div class="empty-state">No installer downloads found.</div>
               </div>
-            </section>
-
-            <section class="dev-section">
-              <div class="dev-section-head">
-                <h2>Selected Download</h2>
-                <span class="quiet-label">Raw data</span>
+            </div>
+            <div id="playerRecordsPanel" class="player-data-panel" hidden>
+              <div class="event-table-head player-download-table">
+                <span>Registered</span><span>User</span><span>IPv4</span><span>MC UUID</span><span>Platform</span>
               </div>
-              <div id="eventDetails" class="event-detail" hidden>
-                <div class="event-detail-head">
-                  <div>
-                    <span id="eventDetailType">Event</span>
-                    <strong id="eventDetailTitle">Select an event</strong>
-                  </div>
-                  <span id="eventDetailTime" class="detail-time">-</span>
-                </div>
-                <div id="eventDetailMeta" class="detail-grid"></div>
-                <div id="eventDetailChanges" class="path-groups"></div>
+              <div id="playerRecordsList" class="events data-events player-download-table">
+                <div class="empty-state">No players found.</div>
               </div>
-              <pre id="devLog" class="log dev-raw-log"></pre>
-            </section>
+            </div>
+            <div id="playerLauncherUpdatesPanel" class="player-data-panel" hidden>
+              <div class="event-table-head player-update-table">
+                <span>Date</span><span>User</span><span>IPv4</span><span>MC UUID</span><span>Platform</span><span>Version</span>
+              </div>
+              <div id="playerLauncherUpdatesList" class="events data-events player-update-table">
+                <div class="empty-state">No launcher updates found.</div>
+              </div>
+            </div>
+            <pre id="devLog" hidden></pre>
           </section>
         </section>
       </section>

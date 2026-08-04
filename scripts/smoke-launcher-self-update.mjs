@@ -227,6 +227,7 @@ let child = spawn(electronBin, electronArgs, {
   env: {
     ...process.env,
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     AHT_APP_DEFAULTS: appDefaultsPath,
     AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE: '1',
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
@@ -382,6 +383,7 @@ try {
     env: {
       ...process.env,
       AHT_TEST_HOOKS: '1',
+      AHT_TEST_USER_DATA: userData,
       AHT_APP_DEFAULTS: appDefaultsPath,
       AHT_TEST_REMOTE_DEBUG_PORT: String(guardPort),
       AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,

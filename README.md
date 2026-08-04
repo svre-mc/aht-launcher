@@ -1,6 +1,6 @@
 # A Hard Time Launcher
 
-A Hard Time Launcher installs and updates the A Hard Time Minecraft modpack with a CurseForge-style pack import flow. The launcher creates its own managed Minecraft instance, downloads required files from the hosted update feed, and opens the official Minecraft Launcher with the A Hard Time profile selected.
+A Hard Time Launcher installs and updates the A Hard Time Minecraft modpack with a CurseForge-style pack import flow. The launcher creates its own managed Minecraft instance, downloads required files from the hosted update feed, and opens the CurseForge Minecraft Launcher when available, with the official Minecraft Launcher as a fallback.
 
 ## Downloads
 
@@ -35,7 +35,7 @@ The player app:
 - Records managed file hashes for install, scan, and repair.
 - Ignores player edits under `config/` for local-change checks.
 - Checks managed `mods/` before Play and blocks launch when a required mod is missing or corrupted.
-- Opens the official Minecraft Launcher with the A Hard Time profile selected; the player clicks Play inside Minecraft Launcher.
+- Opens the CurseForge Minecraft Launcher first with the exact A Hard Time profile selected, then falls back to the official Minecraft Launcher only when CurseForge is unavailable.
 
 ## Launcher Updates
 

@@ -272,6 +272,54 @@ function pushMinecraftUsername(usernames, value = '') {
   return false;
 }
 
+function normalizeMinecraftProfileUuid(value = '') {
+  const compact = String(value || '').trim().replace(/[{}-]/g, '').toLowerCase();
+  if (!/^[a-f0-9]{32}$/.test(compact) || /^0{32}$/.test(compact)) return '';
+  return [
+    compact.slice(0, 8),
+    compact.slice(8, 12),
+    compact.slice(12, 16),
+    compact.slice(16, 20),
+    compact.slice(20)
+  ].join('-');
+}
+
+function pushMinecraftAuthProfile(authProfiles, usernames, minecraftUuids, usernameValue = '', uuidValue = '') {
+  const username = String(usernameValue || '').trim();
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) return false;
+  pushMinecraftUsername(usernames, username);
+  const minecraftUuid = normalizeMinecraftProfileUuid(uuidValue);
+  const existing = authProfiles.find((profile) => profile.username.toLowerCase() === username.toLowerCase());
+  if (!existing) {
+    authProfiles.push({ username, minecraftUuid });
+  } else if (!existing.minecraftUuid && minecraftUuid) {
+    existing.minecraftUuid = minecraftUuid;
+  }
+  if (minecraftUuid && !minecraftUuids.includes(minecraftUuid)) minecraftUuids.push(minecraftUuid);
+  return true;
+}
+
+function orderedLegacyMinecraftProfiles(account = {}, selectedProfileId = '') {
+  const source = account?.profiles && typeof account.profiles === 'object' ? account.profiles : {};
+  const entries = Array.isArray(source)
+    ? source.map((profile, index) => [String(profile?.id || profile?.uuid || index), profile])
+    : Object.entries(source);
+  const ordered = [
+    ...entries.filter(([id]) => id === selectedProfileId),
+    ...entries.filter(([id]) => id !== selectedProfileId)
+  ];
+  if (!ordered.length) {
+    return [{
+      username: account?.displayName || account?.username || '',
+      minecraftUuid: account?.id || account?.uuid || ''
+    }];
+  }
+  return ordered.map(([id, profile]) => ({
+    username: profile?.displayName || profile?.name || account?.displayName || account?.username || '',
+    minecraftUuid: profile?.id || profile?.uuid || id
+  }));
+}
+
 function orderedLauncherAccounts(accounts = {}) {
   const accountMap = accounts?.accounts && typeof accounts.accounts === 'object' ? accounts.accounts : {};
   const entries = Array.isArray(accountMap)
@@ -302,7 +350,16 @@ export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
     ...(options.extraRoots || [])
   ].filter(Boolean));
   if (!roots.length) {
-    return { signedIn: false, accountCount: 0, files: [], usernames: [], preferredUsername: '' };
+    return {
+      signedIn: false,
+      accountCount: 0,
+      files: [],
+      usernames: [],
+      minecraftUuids: [],
+      profiles: [],
+      preferredUsername: '',
+      preferredMinecraftUuid: ''
+    };
   }
   const candidates = [
     'launcher_accounts.json',
@@ -313,6 +370,8 @@ export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
   ];
   const files = [];
   const usernames = [];
+  const minecraftUuids = [];
+  const authProfiles = [];
   let accountCount = 0;
   for (const root of roots) {
     for (const name of candidates) {
@@ -330,9 +389,12 @@ export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
           const accountItems = orderedLauncherAccounts(accounts);
           accountCount += accountItems.length;
           for (const account of accountItems) {
-            pushMinecraftUsername(
+            pushMinecraftAuthProfile(
+              authProfiles,
               usernames,
-              account?.minecraftProfile?.name || account?.displayName || account?.username
+              minecraftUuids,
+              account?.minecraftProfile?.name || account?.displayName || account?.username,
+              account?.minecraftProfile?.id || account?.minecraftProfile?.uuid
             );
           }
         } catch {}
@@ -340,23 +402,36 @@ export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
         try {
           const profiles = await readJsonFile(file);
           const accountItems = orderedLegacyProfilesAccounts(profiles);
+          const selectedProfileId = String(profiles?.selectedUser?.profile || '');
           accountCount += accountItems.length;
           for (const account of accountItems) {
-            pushMinecraftUsername(
-              usernames,
-              account?.displayName || account?.username || account?.profiles?.[0]?.displayName
-            );
+            for (const profile of orderedLegacyMinecraftProfiles(account, selectedProfileId)) {
+              pushMinecraftAuthProfile(
+                authProfiles,
+                usernames,
+                minecraftUuids,
+                profile.username,
+                profile.minecraftUuid
+              );
+            }
           }
         } catch {}
       }
     }
   }
+  const preferredUsername = usernames[0] || '';
+  const preferredProfile = authProfiles.find(
+    (profile) => profile.username.toLowerCase() === preferredUsername.toLowerCase()
+  ) || null;
   return {
     signedIn: accountCount > 0 || files.some((name) => String(name).includes('launcher_msa_credentials')),
     accountCount,
     files,
     usernames,
-    preferredUsername: usernames[0] || ''
+    minecraftUuids,
+    profiles: authProfiles,
+    preferredUsername,
+    preferredMinecraftUuid: preferredProfile?.minecraftUuid || ''
   };
 }
 
@@ -855,7 +930,10 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
     accountCount: auth.accountCount,
     accountFiles: auth.files,
     accountUsernames: auth.usernames,
-    preferredMinecraftUsername: auth.preferredUsername
+    accountMinecraftUuids: auth.minecraftUuids,
+    accountMinecraftProfiles: auth.profiles,
+    preferredMinecraftUsername: auth.preferredUsername,
+    preferredMinecraftUuid: auth.preferredMinecraftUuid
   };
 }
 

@@ -137,7 +137,7 @@ function configureTestRemoteDebugPort() {
 
 function configureTestUserDataPath() {
   if (process.env.AHT_TEST_HOOKS !== '1') return;
-  const rawPath = String(process.env.AHT_TEST_USER_DATA || '').trim();
+  const rawPath = String(process.env.AHT_TEST_USER_DATA || explicitUserDataDirArg() || '').trim();
   if (!rawPath) return;
   const resolvedPath = path.resolve(rawPath);
   app.setPath('userData', resolvedPath);
@@ -236,6 +236,7 @@ const adminLoginPromises = new Map();
 let developerSession = null;
 const latestReleaseCache = new Map();
 const launcherProofRefreshes = new Map();
+const launcherVersionTelemetryInFlight = new Map();
 const LATEST_RELEASE_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
 const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 
@@ -438,8 +439,25 @@ function minecraftSignalsForLaunch(diagnostic = null, attempt = {}) {
       return false;
     }
   };
+  const baselineRoots = Array.isArray(attempt?.minecraftSignalBaseline?.roots)
+    ? attempt.minecraftSignalBaseline.roots
+    : [];
+  const signalsAfterBaseline = (root) => {
+    const current = Array.isArray(root?.launcherLog?.signals) ? root.launcherLog.signals : [];
+    if (!baselineRoots.length) return current;
+    const baselineRoot = baselineRoots.find((candidate) => samePath(candidate?.rootDir || '', root?.rootDir || ''));
+    const baseline = Array.isArray(baselineRoot?.launcherLog?.signals) ? baselineRoot.launcherLog.signals : [];
+    const remaining = new Map();
+    for (const line of baseline) remaining.set(line, (remaining.get(line) || 0) + 1);
+    return current.filter((line) => {
+      const count = remaining.get(line) || 0;
+      if (!count) return true;
+      remaining.set(line, count - 1);
+      return false;
+    });
+  };
   const recordsForRoots = (selectedRoots) => selectedRoots
-    .flatMap((root, rootIndex) => (root?.launcherLog?.signals || []).map((line) => ({
+    .flatMap((root, rootIndex) => signalsAfterBaseline(root).map((line) => ({
       line,
       modifiedAt: root.launcherLog?.modifiedAt || '',
       source: isEffectiveRoot(root) ? 'Configured Minecraft root' : `Fallback Minecraft root ${rootIndex + 1}`
@@ -494,9 +512,11 @@ function markFailedLaunchRequirement(attempt) {
   const failed = [...(attempt?.steps || [])].reverse().find((step) => step.status === 'FAIL');
   if (!failed) return;
   const requirementByStep = {
+    'legal-consent': 'legal',
     'load-config': 'instance',
     'installed-manifest': 'installed',
     'release-feed': 'releaseFeed',
+    'launcher-version': 'launcherVersion',
     integrity: 'integrity',
     'java-profile-check': 'java8',
     'launcher-proof': 'launcherProof',
@@ -603,23 +623,59 @@ async function minecraftInstanceSignalsForLaunch(instanceDir = '', attempt = {})
   const cutoff = Number.isFinite(startMs)
     ? startMs - (diagnosticSnapshot ? 24 * 60 * 60 * 1000 : 2 * 60 * 1000)
     : Date.now() - 24 * 60 * 60 * 1000;
+  const snapshot = await minecraftInstanceSignalDiagnostic(root);
+  const baselineFiles = Array.isArray(attempt?.minecraftInstanceSignalBaseline?.files)
+    ? attempt.minecraftInstanceSignalBaseline.files
+    : [];
+  const signals = [];
+  for (const candidate of snapshot.files) {
+    if (candidate.mtimeMs < cutoff) continue;
+    const baseline = baselineFiles.find((item) => samePath(item?.file || '', candidate.file));
+    let lines = [...candidate.signals];
+    if (baseline) {
+      if (candidate.size === baseline.size && candidate.mtimeMs <= baseline.mtimeMs) continue;
+      if (candidate.size >= baseline.size) {
+        const remaining = new Map();
+        for (const line of baseline.signals || []) remaining.set(line, (remaining.get(line) || 0) + 1);
+        lines = lines.filter((line) => {
+          const count = remaining.get(line) || 0;
+          if (!count) return true;
+          remaining.set(line, count - 1);
+          return false;
+        });
+      }
+    }
+    if (!lines.length) continue;
+    signals.push(`${candidate.label} (${candidate.modifiedAt}):`);
+    signals.push(...lines);
+  }
+  return signals.slice(-18);
+}
+
+async function minecraftInstanceSignalDiagnostic(instanceDir = '') {
+  const root = String(instanceDir || '').trim();
+  if (!root || !(await pathExists(root))) return { rootDir: root, files: [] };
   const latestLog = await newestDiagnosticFile(path.join(root, 'logs'), (name) => name.toLowerCase() === 'latest.log');
   const crashReport = await newestDiagnosticFile(path.join(root, 'crash-reports'), (name) => name.toLowerCase().endsWith('.txt'));
   const fatalJvm = await newestDiagnosticFile(root, (name) => /^hs_err_pid\d+\.log$/i.test(name));
-  const signals = [];
+  const files = [];
   for (const [label, candidate, limit] of [
     ['Minecraft latest.log', latestLog, 10],
     ['Minecraft crash report', crashReport, 12],
     ['Java fatal-error log', fatalJvm, 12]
   ]) {
-    if (!candidate || candidate.stat.mtimeMs < cutoff) continue;
+    if (!candidate) continue;
     const { text } = await readFileTail(candidate.file, 160 * 1024).catch(() => ({ text: '' }));
-    const lines = diagnosticSignalLines(text, limit);
-    if (!lines.length) continue;
-    signals.push(`${label} (${candidate.stat.mtime.toISOString()}):`);
-    signals.push(...lines);
+    files.push({
+      label,
+      file: candidate.file,
+      size: candidate.stat.size,
+      mtimeMs: candidate.stat.mtimeMs,
+      modifiedAt: candidate.stat.mtime.toISOString(),
+      signals: diagnosticSignalLines(text, limit)
+    });
   }
-  return signals.slice(-18);
+  return { rootDir: root, files };
 }
 
 async function minecraftRootLaunchDiagnostic(rootDir = '') {
@@ -1073,6 +1129,43 @@ function identityPath() {
   return path.join(app.getPath('userData'), 'identity.json');
 }
 
+function installerJava8SelectionPath() {
+  return path.join(app.getPath('userData'), 'installer-java8-selection.json');
+}
+
+async function readPendingInstallerJava8Selection() {
+  if (isDeveloperMode()) return null;
+  const file = installerJava8SelectionPath();
+  if (!(await pathExists(file))) return null;
+  try {
+    const selection = await readJsonFile(file);
+    if (
+      Number(selection?.schemaVersion) !== 1
+      || selection?.consumedAt
+      || typeof selection?.allowManagedJava8 !== 'boolean'
+    ) {
+      return null;
+    }
+    return { file, selection, allowManagedJava8: selection.allowManagedJava8 };
+  } catch (error) {
+    console.warn(`Unable to read the installer Java 8 selection: ${error.message || error}`);
+    return null;
+  }
+}
+
+async function markInstallerJava8SelectionConsumed(pending = null) {
+  if (!pending?.file || !pending?.selection) return;
+  try {
+    await writeJsonFile(pending.file, {
+      ...pending.selection,
+      consumedAt: new Date().toISOString(),
+      consumedByLauncherVersion: app.getVersion()
+    });
+  } catch (error) {
+    console.warn(`Unable to mark the installer Java 8 selection as consumed: ${error.message || error}`);
+  }
+}
+
 function legalConsentPath() {
   return path.join(app.getPath('userData'), 'legal-consent.json');
 }
@@ -1399,7 +1492,7 @@ function isCurseForgeInstanceDir(value = '') {
 
 function isCurseForgeMinecraftRoot(value = '') {
   const normalized = String(value || '').replace(/\\/g, '/').toLowerCase();
-  return normalized.includes('/curseforge/minecraft/install');
+  return /\/curseforge\/minecraft\/install(?:\/|$)/.test(normalized);
 }
 
 function isOldLauncherInstanceDir(value = '') {
@@ -1580,6 +1673,96 @@ function localMinecraftLauncherCandidates() {
   ])];
 }
 
+function uniqueCurrentPlatformPaths(paths = []) {
+  const seen = new Set();
+  const result = [];
+  for (const candidate of paths) {
+    const text = String(candidate || '').trim();
+    if (!text) continue;
+    const normalized = path.normalize(text);
+    const key = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function curseForgeInstallRootFromMinecraftRoot(value = '') {
+  const rootDir = String(value || '').trim();
+  if (!rootDir) return '';
+  const normalized = path.normalize(rootDir);
+  const normalizedForMatch = normalized.replace(/\\/g, '/');
+  const instanceMatch = normalizedForMatch.match(/^(.*)\/instances\/[^/]+$/i);
+  if (instanceMatch?.[1]) {
+    return path.join(path.normalize(instanceMatch[1]), 'Install');
+  }
+  if (/\/install$/i.test(normalizedForMatch)) {
+    return normalized;
+  }
+  return path.join(normalized, 'Install');
+}
+
+function collectCurseForgeMinecraftRoots(value, key = '', roots = []) {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return roots;
+    if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+      try {
+        collectCurseForgeMinecraftRoots(JSON.parse(text), key, roots);
+      } catch {}
+      return roots;
+    }
+    if (/minecraft[-_ ]?root|minecraft[-_ ]?dir|minecraft[-_ ]?path/i.test(key)) {
+      const installRoot = curseForgeInstallRootFromMinecraftRoot(text);
+      if (installRoot) roots.push(installRoot);
+    }
+    return roots;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectCurseForgeMinecraftRoots(item, key, roots);
+    return roots;
+  }
+  if (value && typeof value === 'object') {
+    for (const [childKey, childValue] of Object.entries(value)) {
+      collectCurseForgeMinecraftRoots(childValue, childKey, roots);
+    }
+  }
+  return roots;
+}
+
+function curseForgeStorageFileCandidates() {
+  if (process.env.AHT_TEST_HOOKS === '1') {
+    const testStorageFile = String(process.env.AHT_TEST_CURSEFORGE_STORAGE_FILE || '').trim();
+    return testStorageFile ? [path.resolve(testStorageFile)] : [];
+  }
+  const home = app.getPath('home');
+  if (process.platform === 'darwin') {
+    return uniqueCurrentPlatformPaths([
+      path.join(home, 'Library', 'Application Support', 'CurseForge', 'storage.json'),
+      path.join(home, 'Library', 'Application Support', 'curseforge', 'storage.json')
+    ]);
+  }
+  if (process.platform !== 'win32') return [];
+  return uniqueCurrentPlatformPaths([
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'CurseForge', 'storage.json') : '',
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'curseforge', 'storage.json') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'CurseForge', 'storage.json') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'curseforge', 'storage.json') : ''
+  ]);
+}
+
+function curseForgeStorageMinecraftRootCandidates() {
+  const roots = [];
+  for (const file of curseForgeStorageFileCandidates()) {
+    try {
+      if (!fsSync.existsSync(file)) continue;
+      collectCurseForgeMinecraftRoots(JSON.parse(fsSync.readFileSync(file, 'utf8')), '', roots);
+    } catch {}
+  }
+  return uniqueCurrentPlatformPaths(roots);
+}
+
 function localCurseForgeMinecraftRoots(config = {}) {
   const home = app.getPath('home');
   const documents = app.getPath('documents');
@@ -1587,29 +1770,84 @@ function localCurseForgeMinecraftRoots(config = {}) {
     config.minecraftLauncher?.rootDir,
     ...(Array.isArray(config.minecraftLauncher?.syncRoots) ? config.minecraftLauncher.syncRoots : [])
   ];
-  return [...new Set([
+  const staticRoots = process.platform === 'darwin'
+    ? [
+        path.join(home, 'curseforge', 'minecraft', 'Install'),
+        path.join(home, 'CurseForge', 'minecraft', 'Install'),
+        path.join(documents, 'CurseForge', 'minecraft', 'Install'),
+        path.join(documents, 'curseforge', 'minecraft', 'Install'),
+        path.join(home, 'Library', 'Application Support', 'CurseForge', 'minecraft', 'Install'),
+        path.join(home, 'Library', 'Application Support', 'curseforge', 'minecraft', 'Install')
+      ]
+    : [
+        path.join(home, 'curseforge', 'minecraft', 'Install'),
+        path.join(home, 'CurseForge', 'minecraft', 'Install'),
+        path.join(documents, 'CurseForge', 'minecraft', 'Install'),
+        path.join(documents, 'curseforge', 'minecraft', 'Install'),
+        process.env.APPDATA ? path.join(process.env.APPDATA, 'CurseForge', 'minecraft', 'Install') : '',
+        process.env.APPDATA ? path.join(process.env.APPDATA, 'curseforge', 'minecraft', 'Install') : '',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'CurseForge', 'minecraft', 'Install') : '',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'curseforge', 'minecraft', 'Install') : ''
+      ];
+  const detectedRoots = [
     process.env.AHT_TEST_HOOKS === '1' ? process.env.AHT_TEST_CURSEFORGE_MINECRAFT_ROOT : '',
-    ...configuredRoots.filter(isCurseForgeMinecraftRoot),
-    path.join(home, 'curseforge', 'minecraft', 'Install'),
-    path.join(documents, 'CurseForge', 'minecraft', 'Install'),
-    process.env.APPDATA ? path.join(process.env.APPDATA, 'CurseForge', 'minecraft', 'Install') : '',
-    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'CurseForge', 'minecraft', 'Install') : ''
-  ].filter(Boolean).map((item) => path.resolve(item)))];
+    ...curseForgeStorageMinecraftRootCandidates(),
+    ...configuredRoots.filter(isCurseForgeMinecraftRoot)
+  ];
+  if (process.env.AHT_TEST_HOOKS !== '1') detectedRoots.push(...staticRoots);
+  return uniqueCurrentPlatformPaths(detectedRoots);
 }
 
 async function firstExistingCurseForgeMinecraftRoot(config = {}) {
-  if (process.platform !== 'win32') return '';
+  if (!['win32', 'darwin'].includes(process.platform)) return '';
   for (const rootDir of localCurseForgeMinecraftRoots(config)) {
     try {
       const stat = await fs.stat(rootDir);
-      if (stat.isDirectory() && await pathExists(path.join(rootDir, 'minecraft.exe'))) {
+      if (!stat.isDirectory()) continue;
+      if (process.platform === 'win32' && await pathExists(path.join(rootDir, 'minecraft.exe'))) {
         return rootDir;
+      }
+      if (process.platform === 'darwin') {
+        for (const marker of ['launcher_profiles.json', 'versions', 'libraries']) {
+          if (await pathExists(path.join(rootDir, marker))) return rootDir;
+        }
       }
     } catch {
       // Continue to the next known CurseForge storage root.
     }
   }
   return '';
+}
+
+async function existingMinecraftLauncherFallbackRoots(config = {}, primaryRoot = '') {
+  const configuredRoot = String(config.minecraftLauncher?.rootDir || '').trim();
+  const explicitRoots = Array.isArray(config.minecraftLauncher?.syncRoots)
+    ? config.minecraftLauncher.syncRoots
+    : [];
+  const normalRoots = minecraftRootCandidates(process.platform, {
+    ...process.env,
+    HOME: process.env.HOME || app.getPath('home'),
+    USERPROFILE: process.env.USERPROFILE || app.getPath('home')
+  });
+  const knownCurseForgeRoots = localCurseForgeMinecraftRoots(config);
+  const candidates = uniqueCurrentPlatformPaths([
+    configuredRoot,
+    ...explicitRoots,
+    defaultMinecraftRoot(),
+    ...normalRoots
+  ]);
+  const roots = [];
+  for (const candidate of candidates) {
+    if (primaryRoot && samePath(candidate, primaryRoot)) continue;
+    if (knownCurseForgeRoots.some((rootDir) => samePath(rootDir, candidate))) continue;
+    const requiredFallback = Boolean(
+      (configuredRoot && samePath(candidate, configuredRoot))
+      || samePath(candidate, defaultMinecraftRoot())
+      || explicitRoots.some((rootDir) => samePath(rootDir, candidate))
+    );
+    if (requiredFallback || await pathExists(candidate)) roots.push(candidate);
+  }
+  return uniqueCurrentPlatformPaths(roots);
 }
 
 async function minecraftLauncherRuntimeConfig(config = {}) {
@@ -1624,24 +1862,17 @@ async function minecraftLauncherRuntimeConfig(config = {}) {
       }
     }
     : config;
-  const configuredRoot = String(safeConfig.minecraftLauncher?.rootDir || '').trim();
-  const forcedTestRoot = process.env.AHT_TEST_HOOKS === '1'
-    ? String(process.env.AHT_TEST_CURSEFORGE_MINECRAFT_ROOT || '').trim()
-    : '';
-  const canAutoSelectCurseForge = Boolean(forcedTestRoot)
-    || !configuredRoot
-    || samePath(configuredRoot, defaultMinecraftRoot())
-    || isCurseForgeMinecraftRoot(configuredRoot);
-  if (!canAutoSelectCurseForge) return safeConfig;
   const curseForgeRoot = await firstExistingCurseForgeMinecraftRoot(safeConfig);
   if (!curseForgeRoot) return safeConfig;
+  const fallbackRoots = await existingMinecraftLauncherFallbackRoots(safeConfig, curseForgeRoot);
   return {
     ...safeConfig,
     minecraftLauncher: {
       ...(safeConfig.minecraftLauncher || {}),
       rootDir: curseForgeRoot,
+      runtimeCurseForgeRoot: curseForgeRoot,
       syncDefaultRoots: false,
-      syncRoots: []
+      syncRoots: fallbackRoots
     }
   };
 }
@@ -1859,6 +2090,26 @@ function packagedDefaultFiles() {
   return [...new Set(files.map((file) => path.resolve(file)))];
 }
 
+function configMigrationBackupPrefix(file) {
+  return `${path.basename(file)}.aht-before-curseforge-`;
+}
+
+async function backupConfigBeforeCurseForgeMigration(file) {
+  if (!(await pathExists(file))) return '';
+  const dir = path.dirname(file);
+  const prefix = configMigrationBackupPrefix(file);
+  try {
+    const existing = (await fs.readdir(dir))
+      .filter((entry) => entry.startsWith(prefix) && entry.endsWith('.bak'))
+      .sort();
+    if (existing.length) return path.join(dir, existing[0]);
+  } catch {}
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, '');
+  const backupFile = path.join(dir, `${prefix}${timestamp}.bak`);
+  await fs.copyFile(file, backupFile, fsSync.constants.COPYFILE_EXCL);
+  return backupFile;
+}
+
 async function packagedDefaults() {
   const defaults = defaultConfig();
   let configured = defaults;
@@ -1882,8 +2133,17 @@ async function packagedDefaults() {
   if (!configured.latestUrl && localReleaseLatest) {
     configured.latestUrl = localReleaseLatest;
   }
-  const detectedMinecraftRoot = await firstExistingMinecraftLauncherRoot(localMinecraftLauncherCandidates());
-  if (detectedMinecraftRoot && (!configured.minecraftLauncher?.rootDir || configured.minecraftLauncher.rootDir === defaults.minecraftLauncher.rootDir)) {
+  const detectedCurseForgeRoot = await firstExistingCurseForgeMinecraftRoot(configured);
+  const detectedMinecraftRoot = detectedCurseForgeRoot
+    || await firstExistingMinecraftLauncherRoot(localMinecraftLauncherCandidates());
+  if (
+    detectedMinecraftRoot
+    && (
+      detectedCurseForgeRoot
+      || !configured.minecraftLauncher?.rootDir
+      || configured.minecraftLauncher.rootDir === defaults.minecraftLauncher.rootDir
+    )
+  ) {
     configured.minecraftLauncher.rootDir = detectedMinecraftRoot;
   }
   if (!configured.playCommand?.cwd || configured.playCommand.cwd === defaults.playCommand.cwd) {
@@ -1895,9 +2155,17 @@ async function packagedDefaults() {
 async function loadConfig() {
   const file = configPath();
   const defaults = await packagedDefaults();
+  const installerJava8Selection = await readPendingInstallerJava8Selection();
   if (!(await pathExists(file))) {
+    if (installerJava8Selection) {
+      defaults.minecraftLauncher = {
+        ...defaults.minecraftLauncher,
+        java8InstallOverride: installerJava8Selection.allowManagedJava8
+      };
+    }
     await ensureDir(defaults.instanceDir);
     await writeJsonFile(file, configForStorage(defaults));
+    await markInstallerJava8SelectionConsumed(installerJava8Selection);
     return defaults;
   }
   const stored = await readJsonFile(file);
@@ -1933,12 +2201,28 @@ async function loadConfig() {
     config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir;
     changed = true;
   }
-  if (!isDeveloperMode() && isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir) && !isCurseForgeMinecraftRoot(defaults.minecraftLauncher?.rootDir)) {
-    config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir || defaultMinecraftRoot();
-    changed = true;
+  const preferredCurseForgeRoot = await firstExistingCurseForgeMinecraftRoot(config);
+  if (preferredCurseForgeRoot && !samePath(config.minecraftLauncher?.rootDir, preferredCurseForgeRoot)) {
+    try {
+      await backupConfigBeforeCurseForgeMigration(file);
+      config.minecraftLauncher = {
+        ...config.minecraftLauncher,
+        rootDir: preferredCurseForgeRoot
+      };
+      changed = true;
+    } catch (error) {
+      console.warn(`Unable to back up launcher settings before selecting CurseForge: ${error.message || error}`);
+    }
   }
   if (!Number.isFinite(Number(stored.minecraftLauncher?.memoryMb)) || Number(stored.minecraftLauncher?.memoryMb) < 6144) {
     config.minecraftLauncher.memoryMb = 6144;
+    changed = true;
+  }
+  if (installerJava8Selection) {
+    config.minecraftLauncher = {
+      ...config.minecraftLauncher,
+      java8InstallOverride: installerJava8Selection.allowManagedJava8
+    };
     changed = true;
   }
   if (isDeveloperMode()) {
@@ -1992,6 +2276,7 @@ async function loadConfig() {
   if (changed) {
     await writeJsonFile(file, configForStorage(config));
   }
+  await markInstallerJava8SelectionConsumed(installerJava8Selection);
   return config;
 }
 
@@ -2333,6 +2618,7 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
     try {
       await registerMinecraftUsername(username, {
         mode: identity.usernameRegistrationMode || 'proof-refresh',
+        minecraftUuid: identity.minecraftUuid || identity.minecraftUUID || '',
         skipLauncherAuthSync: true
       });
     } catch (refreshError) {
@@ -2439,19 +2725,33 @@ async function identityPayload(config = null) {
         USERPROFILE: process.env.USERPROFILE || app.getPath('home')
       }).filter((root) => !samePath(root, config.minecraftLauncher.rootDir))
     });
-    if (auth.preferredUsername && auth.preferredUsername !== nextIdentity.minecraftUsername) {
+    const detectedUsername = normalizeMinecraftUsername(auth.preferredUsername);
+    const detectedMinecraftUuid = normalizeMinecraftUuid(auth.preferredMinecraftUuid);
+    const currentUsername = normalizeMinecraftUsername(nextIdentity.minecraftUsername);
+    const currentMinecraftUuid = normalizeMinecraftUuid(nextIdentity.minecraftUuid || nextIdentity.minecraftUUID);
+    const sameUsername = Boolean(detectedUsername && currentUsername.toLowerCase() === detectedUsername.toLowerCase());
+    const uuidConflict = Boolean(sameUsername && detectedMinecraftUuid && currentMinecraftUuid && detectedMinecraftUuid !== currentMinecraftUuid);
+    if (uuidConflict) {
+      nextIdentity = {
+        ...nextIdentity,
+        minecraftLauncherDetectedUsername: detectedUsername,
+        minecraftUsernameSyncWarning: 'Minecraft account UUID does not match the saved launcher identity.'
+      };
+      await writeJsonFile(identityPath(), nextIdentity);
+    } else if (detectedUsername && (!sameUsername || (detectedMinecraftUuid && !currentMinecraftUuid))) {
       try {
-        const registered = await registerMinecraftUsername(auth.preferredUsername, {
-          mode: 'minecraft-launcher',
+        const registered = await registerMinecraftUsername(detectedUsername, {
+          mode: sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher',
+          minecraftUuid: detectedMinecraftUuid,
           skipLauncherAuthSync: true
         });
         nextIdentity = await loadIdentity();
         nextIdentity.minecraftUsernameSyncWarning = '';
-        nextIdentity.minecraftLauncherDetectedUsername = registered.username || auth.preferredUsername;
+        nextIdentity.minecraftLauncherDetectedUsername = registered.username || detectedUsername;
       } catch (error) {
         nextIdentity = {
           ...nextIdentity,
-          minecraftLauncherDetectedUsername: auth.preferredUsername,
+          minecraftLauncherDetectedUsername: detectedUsername,
           minecraftUsernameSyncWarning: error.message || String(error)
         };
         await writeJsonFile(identityPath(), nextIdentity);
@@ -2470,6 +2770,18 @@ function normalizeMinecraftUsername(username) {
   return String(username || '').trim();
 }
 
+function normalizeMinecraftUuid(value = '') {
+  const compact = String(value || '').trim().replace(/[{}-]/g, '').toLowerCase();
+  if (!/^[a-f0-9]{32}$/.test(compact) || /^0{32}$/.test(compact)) return '';
+  return [
+    compact.slice(0, 8),
+    compact.slice(8, 12),
+    compact.slice(12, 16),
+    compact.slice(16, 20),
+    compact.slice(20)
+  ].join('-');
+}
+
 function assertMinecraftUsername(username) {
   if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) {
     throw new Error('Enter a valid Minecraft username.');
@@ -2478,6 +2790,35 @@ function assertMinecraftUsername(username) {
 
 function accountBaseUrl(config) {
   return config.sync?.baseUrl || config.developer?.adminBaseUrl || '';
+}
+
+function accountRecoveryCredentialPath(config = {}, username = '') {
+  const normalizedUsername = normalizeMinecraftUsername(username).toLowerCase();
+  if (!/^[a-z0-9_]{3,16}$/.test(normalizedUsername)) {
+    throw new Error('A valid Minecraft username is required for launcher recovery.');
+  }
+  return path.join(config.instanceDir || defaultInstanceDir(), '.aht-launcher', 'account-recovery', `${normalizedUsername}.json`);
+}
+
+async function accountRecoverySecret(config = {}, username = '') {
+  const file = accountRecoveryCredentialPath(config, username);
+  const existing = await readJsonFile(file).catch(() => null);
+  const existingSecret = String(existing?.secret || '').trim();
+  if (
+    Number(existing?.schemaVersion) === 1
+    && normalizeMinecraftUsername(existing?.username).toLowerCase() === normalizeMinecraftUsername(username).toLowerCase()
+    && /^[A-Za-z0-9_-]{32,200}$/.test(existingSecret)
+  ) {
+    return existingSecret;
+  }
+  const secret = crypto.randomBytes(32).toString('base64url');
+  await writeJsonFile(file, {
+    schemaVersion: 1,
+    username: normalizeMinecraftUsername(username),
+    secret,
+    createdAt: new Date().toISOString()
+  });
+  return secret;
 }
 
 function minecraftUsernameMatchesAuth(auth = {}, username = '') {
@@ -2513,6 +2854,19 @@ async function registerMinecraftUsername(username, options = {}) {
   assertMinecraftUsername(normalizedUsername);
   const config = await loadConfig();
   const identity = await loadIdentity();
+  const suppliedMinecraftUuidText = String(options.minecraftUuid || '').trim();
+  const suppliedMinecraftUuid = normalizeMinecraftUuid(suppliedMinecraftUuidText);
+  if (suppliedMinecraftUuidText && !suppliedMinecraftUuid) {
+    throw new Error('Minecraft UUID is invalid.');
+  }
+  const sameSavedUsername = normalizeMinecraftUsername(identity.minecraftUsername).toLowerCase() === normalizedUsername.toLowerCase();
+  const savedMinecraftUuid = sameSavedUsername
+    ? normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID)
+    : '';
+  if (savedMinecraftUuid && suppliedMinecraftUuid && savedMinecraftUuid !== suppliedMinecraftUuid) {
+    throw new Error('Minecraft account UUID does not match the saved launcher identity.');
+  }
+  const minecraftUuid = suppliedMinecraftUuid || savedMinecraftUuid;
   const base = accountBaseUrl(config);
   const developerLocalOnly = isDeveloperMode();
   let remote = {
@@ -2524,8 +2878,11 @@ async function registerMinecraftUsername(username, options = {}) {
 
   if (base && !developerLocalOnly) {
     const url = new URL('api/users/register', base.endsWith('/') ? base : `${base}/`);
+    const recoverySecret = await accountRecoverySecret(config, normalizedUsername);
     const registrationPayload = {
       username: normalizedUsername,
+      minecraftUuid,
+      accountRecoverySecret: recoverySecret,
       installId: identity.installId,
       appVersion: app.getVersion(),
       platform: process.platform,
@@ -2563,12 +2920,21 @@ async function registerMinecraftUsername(username, options = {}) {
     }
   }
 
+  const remoteMinecraftUuidText = String(remote.minecraftUuid || '').trim();
+  const remoteMinecraftUuid = normalizeMinecraftUuid(remoteMinecraftUuidText);
+  if (remoteMinecraftUuidText && !remoteMinecraftUuid) {
+    throw new Error('The player service returned an invalid Minecraft UUID.');
+  }
+  if (remoteMinecraftUuid && minecraftUuid && remoteMinecraftUuid !== minecraftUuid) {
+    throw new Error('Minecraft UUID does not match this registered player.');
+  }
   const nextIdentity = {
     ...identity,
     minecraftUsername: remote.username || normalizedUsername,
+    minecraftUuid: remoteMinecraftUuid || minecraftUuid,
     usernameRegisteredAt: identity.usernameRegisteredAt || new Date().toISOString(),
     usernameRegistrationMode: options.mode || (remote.recovered ? 'minecraft-launcher-recovery' : (remote.skipped ? 'local' : 'worker')),
-    minecraftLauncherDetectedUsername: (options.mode === 'minecraft-launcher' || remote.recovered) ? normalizedUsername : identity.minecraftLauncherDetectedUsername || '',
+    minecraftLauncherDetectedUsername: (String(options.mode || '').startsWith('minecraft-launcher') || remote.recovered) ? normalizedUsername : identity.minecraftLauncherDetectedUsername || '',
     minecraftUsernameUnavailable: '',
     minecraftUsernameSyncWarning: ''
   };
@@ -2576,8 +2942,75 @@ async function registerMinecraftUsername(username, options = {}) {
   return {
     ok: true,
     username: nextIdentity.minecraftUsername,
+    minecraftUuid: nextIdentity.minecraftUuid || '',
     remote
   };
+}
+
+function launcherVersionWasReported(identity = {}, version = '') {
+  const reportedVersions = Array.isArray(identity.reportedLauncherVersions)
+    ? identity.reportedLauncherVersions.map((item) => String(item || '').trim())
+    : [];
+  return reportedVersions.includes(String(version || '').trim());
+}
+
+async function reportCurrentLauncherVersion(config = {}, identity = {}) {
+  if (isDeveloperMode()) return { skipped: true, reason: 'developer launcher' };
+  const version = String(app.getVersion() || '').trim();
+  const installId = String(identity.installId || '').trim();
+  const minecraftUsername = normalizeMinecraftUsername(identity.minecraftUsername);
+  if (!version || !installId || !minecraftUsername || launcherVersionWasReported(identity, version)) {
+    return { skipped: true, reason: 'launcher version already reported or player identity is incomplete' };
+  }
+  const previousVersion = String(identity.lastReportedLauncherVersion || '').trim();
+  const result = await sendLauncherEvent(config, runtimeIdentity(identity), {
+    type: 'launcher_update_completed',
+    version,
+    toVersion: version,
+    fromVersion: previousVersion
+  });
+  if (!result?.launcherUpdateKey) {
+    return { skipped: true, reason: 'player data service does not support launcher update records yet' };
+  }
+
+  const current = await loadIdentity();
+  if (
+    String(current.installId || '').trim() !== installId
+    || normalizeMinecraftUsername(current.minecraftUsername).toLowerCase() !== minecraftUsername.toLowerCase()
+  ) {
+    return { skipped: true, reason: 'player identity changed before launcher update confirmation' };
+  }
+  const reportedLauncherVersions = [...new Set([
+    ...(Array.isArray(current.reportedLauncherVersions) ? current.reportedLauncherVersions : []),
+    version
+  ].map((item) => String(item || '').trim()).filter(Boolean))].slice(-20);
+  await writeJsonFile(identityPath(), {
+    ...current,
+    reportedLauncherVersions,
+    lastReportedLauncherVersion: version,
+    launcherVersionReportedAt: new Date().toISOString()
+  });
+  return { ok: true, version, launcherUpdateKey: result.launcherUpdateKey };
+}
+
+function queueCurrentLauncherVersionReport(config = {}, identity = {}) {
+  if (isDeveloperMode()) return null;
+  const version = String(app.getVersion() || '').trim();
+  const installId = String(identity.installId || '').trim();
+  const minecraftUsername = normalizeMinecraftUsername(identity.minecraftUsername).toLowerCase();
+  if (!version || !installId || !minecraftUsername || launcherVersionWasReported(identity, version)) return null;
+  const key = `${installId}\0${minecraftUsername}\0${version}`;
+  if (launcherVersionTelemetryInFlight.has(key)) return launcherVersionTelemetryInFlight.get(key);
+  const report = reportCurrentLauncherVersion(config, identity).catch((error) => {
+    console.warn(`Launcher update history could not be recorded: ${error.message || error}`);
+    return { ok: false, error: error.message || String(error) };
+  }).finally(() => {
+    if (launcherVersionTelemetryInFlight.get(key) === report) {
+      launcherVersionTelemetryInFlight.delete(key);
+    }
+  });
+  launcherVersionTelemetryInFlight.set(key, report);
+  return report;
 }
 
 function validateLatestReleaseFeed(latest, source = 'latest.json') {
@@ -2987,7 +3420,7 @@ function evaluateLaunchState(config, latest, latestError, installed, minecraftPr
       playConfigured,
       launchReady: false,
       launchMode: 'minecraftLauncher',
-      launchBlockedReason: 'A usable 64-bit Java 8 runtime was not found. Enable the Adoptium Java 8 download in Launcher Settings, then run Update.'
+      launchBlockedReason: 'A usable 64-bit Java 8 runtime was not found. Rerun the AHT installer with Adoptium Java 8 selected, then run Update.'
     };
   }
 
@@ -3323,6 +3756,7 @@ async function getStatus(configOverride = null, packValue = 'stable') {
   const config = configForPack(baseConfig, target.id);
   const launcherConfig = await minecraftLauncherRuntimeConfig(config);
   const identity = await identityPayload(launcherConfig);
+  queueCurrentLauncherVersionReport(config, identity);
   let latest = null;
   let latestError = null;
   let updateLogs = [];
@@ -7057,7 +7491,8 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
   const capturePath = process.env.AHT_TEST_HOOKS === '1'
     ? String(process.env.AHT_TEST_MINECRAFT_SPAWN_CAPTURE_PATH || '').trim()
     : '';
-  if (capturePath && path.basename(String(command || '')).toLowerCase() === 'minecraft.exe') {
+  const captureImage = path.basename(String(command || '')).toLowerCase();
+  if (capturePath && ['minecraft.exe', 'minecraftlauncher.exe'].includes(captureImage)) {
     fsSync.mkdirSync(path.dirname(capturePath), { recursive: true });
     let captureCount = 1;
     try {
@@ -7532,7 +7967,7 @@ async function openMacMinecraftLauncher(cwd, env) {
       continue;
     }
     try {
-      return await openMacApplication([appPath], cwd, env);
+      return await openMacApplication([appPath, '--args', '--workDir', cwd], cwd, env);
     } catch (error) {
       lastError = error;
     }
@@ -7544,7 +7979,7 @@ async function openMacMinecraftLauncher(cwd, env) {
     ['-a', 'Minecraft']
   ]) {
     try {
-      return await openMacApplication(args, cwd, env);
+      return await openMacApplication([...args, '--args', '--workDir', cwd], cwd, env);
     } catch (error) {
       lastError = error;
     }
@@ -7589,34 +8024,54 @@ async function openMinecraftLauncher(config, options = {}) {
   }
 
   if (process.platform === 'win32') {
+    const candidateErrors = [];
+    const preferredCurseForgeRoot = String(launcherConfig.minecraftLauncher?.runtimeCurseForgeRoot || '').trim();
+    const usingCurseForgeRoot = Boolean(
+      (preferredCurseForgeRoot && samePath(cwd, preferredCurseForgeRoot))
+      || isCurseForgeMinecraftRoot(cwd)
+    );
     const rootLauncher = cwd ? path.join(cwd, 'minecraft.exe') : '';
     if (rootLauncher && await pathExists(rootLauncher)) {
       const homePage = await setMinecraftLauncherHomePage(cwd);
       if (!homePage.ok) {
         console.warn(`Unable to set Minecraft Launcher home page: ${homePage.reason || 'unknown error'}`);
       }
-      const result = await confirmWindowsMinecraftLauncherActivation(
-        await spawnDetachedGui(rootLauncher, ['--workDir', cwd], cwd, env),
-        { kind: 'root', executablePath: rootLauncher, sessionId: options.sessionId }
-      );
-      return {
-        ...result,
-        kind: isCurseForgeMinecraftRoot(cwd) ? 'curseforge' : 'configured-root',
-        rootDir: cwd,
-        homePagePrepared: Boolean(homePage.ok)
-      };
+      const target = { kind: 'root', executablePath: rootLauncher, sessionId: options.sessionId };
+      try {
+        const result = await confirmWindowsMinecraftLauncherActivation(
+          await spawnDetachedGui(rootLauncher, ['--workDir', cwd], cwd, env),
+          target
+        );
+        return {
+          ...result,
+          kind: usingCurseForgeRoot ? 'curseforge' : 'configured-root',
+          rootDir: cwd,
+          homePagePrepared: Boolean(homePage.ok)
+        };
+      } catch (error) {
+        const snapshot = await windowsMinecraftLauncherProcessSnapshot();
+        const lingering = snapshot.records.filter((record) => windowsLauncherRecordMatchesTarget(record, {
+          ...target,
+          sessionId: target.sessionId ?? snapshot.currentSessionId
+        }));
+        if (lingering.length) {
+          throw new Error(`Minecraft Launcher started from ${rootLauncher} but did not present a usable window. Close or repair that installation before trying again.`);
+        }
+        candidateErrors.push(`${rootLauncher}: ${error.message || error}`);
+      }
     }
     const candidates = windowsDesktopMinecraftLauncherCandidates();
-    const candidateErrors = [];
+    const desktopArgs = ['--workDir', cwd];
     for (const candidate of candidates) {
       if (await pathExists(candidate)) {
         try {
           return {
             ...(await confirmWindowsMinecraftLauncherActivation(
-              await spawnDetachedGui(candidate, [], cwd, env),
+              await spawnDetachedGui(candidate, desktopArgs, cwd, env),
               { kind: 'desktop', executablePath: candidate, sessionId: options.sessionId }
             )),
-            kind: 'desktop'
+            kind: 'desktop',
+            rootDir: cwd
           };
         } catch (error) {
           const snapshot = await windowsMinecraftLauncherProcessSnapshot();
@@ -7691,7 +8146,16 @@ function focusMainWindow() {
 }
 
 ipcMain.handle('diagnostics:copyErrorReport', async (_event, payload = {}) => copyErrorDiagnosticReport(payload));
-ipcMain.handle('status:get', async (_event, payload = {}) => getStatus(null, payload?.packKey || payload || 'stable'));
+let testStatusFailuresRemaining = process.env.AHT_TEST_HOOKS === '1'
+  ? Math.max(0, Number.parseInt(process.env.AHT_TEST_STATUS_FAILURE_COUNT || '0', 10) || 0)
+  : 0;
+ipcMain.handle('status:get', async (_event, payload = {}) => {
+  if (process.env.AHT_TEST_HOOKS === '1' && testStatusFailuresRemaining > 0) {
+    testStatusFailuresRemaining -= 1;
+    throw new Error('Test-only initial status failure.');
+  }
+  return getStatus(null, payload?.packKey || payload || 'stable');
+});
 ipcMain.handle('settings:save', async (_event, payload = {}) => {
   if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'config')) {
     return saveSettings(payload.config || {}, payload.packKey || 'stable');
@@ -7763,6 +8227,20 @@ ipcMain.handle('changes:sync', async (_event, payload = {}) => {
 });
 ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, attempt) => {
   const target = releaseTarget(payload?.packKey || payload || 'stable');
+  await runLaunchStep(
+    attempt,
+    'legal-consent',
+    'Verify Terms and Privacy consent',
+    async () => {
+      const status = await launcherLegalStatus();
+      if (status.required) {
+        throw new Error('Review and accept the current Terms and Privacy notice before playing.');
+      }
+      return status;
+    },
+    'Current consent is recorded.'
+  );
+  setLaunchRequirement(attempt, 'legal', 'PASS', 'Current consent is recorded.');
   const config = await runLaunchStep(
     attempt,
     'load-config',
@@ -7787,7 +8265,47 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   );
   attempt.minecraftRoot = launcherConfig.minecraftLauncher?.rootDir || '';
   attempt.runtimeConfig = launcherConfig;
+  attempt.minecraftSignalBaseline = await runLaunchStep(
+    attempt,
+    'launcher-log-baseline',
+    'Snapshot existing Minecraft Launcher errors',
+    async () => minecraftLaunchDiagnostic(launcherConfig).catch((error) => ({ roots: [], snapshotError: error?.message || String(error) })),
+    (value) => value.snapshotError
+      ? { status: 'WARN', detail: 'Existing launcher errors could not be separated; launch checks will continue.' }
+      : 'Existing launcher errors were separated from this Play attempt.'
+  );
+  attempt.minecraftInstanceSignalBaseline = await runLaunchStep(
+    attempt,
+    'instance-log-baseline',
+    'Snapshot existing Minecraft crash files',
+    async () => minecraftInstanceSignalDiagnostic(config.instanceDir).catch((error) => ({ files: [], snapshotError: error?.message || String(error) })),
+    (value) => value.snapshotError
+      ? { status: 'WARN', detail: 'Existing instance crash files could not be separated; launch checks will continue.' }
+      : 'Existing instance crash files were separated from this Play attempt.'
+  );
   const developerClientBypass = developerClientBypassAllowed();
+
+  const launcherUpdate = await runLaunchStep(
+    attempt,
+    'launcher-version',
+    'Check the AHT Launcher version',
+    async () => readLauncherUpdate(config),
+    (value) => value?.updateRequired
+      ? { status: 'FAIL', detail: `Launcher ${value.latestVersion || 'update'} must be installed before Play.` }
+      : { status: value?.error ? 'WARN' : 'PASS', detail: value?.error || `Launcher ${app.getVersion()} is current.` }
+  );
+  const launcherVersionReady = !launcherUpdate?.updateRequired;
+  setLaunchRequirement(
+    attempt,
+    'launcherVersion',
+    launcherVersionReady ? (launcherUpdate?.error ? 'WARN' : 'PASS') : 'FAIL',
+    launcherVersionReady
+      ? (launcherUpdate?.error || `Launcher ${app.getVersion()} is current.`)
+      : `Install launcher ${launcherUpdate.latestVersion || 'update'}, then restart AHT Launcher.`
+  );
+  if (!launcherVersionReady) {
+    throw new Error(`AHT Launcher ${launcherUpdate.latestVersion || 'update'} must be installed before Play.`);
+  }
 
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   const installed = await runLaunchStep(
@@ -8109,7 +8627,36 @@ ipcMain.handle('dialog:folder', async (_event, defaultPath = '') => {
   const result = await dialog.showOpenDialog(mainWindow, options);
   return result.canceled ? '' : result.filePaths[0];
 });
-ipcMain.handle('shell:openPath', async (_event, target) => shell.openPath(target));
+ipcMain.handle('shell:openPath', async (_event, target) => {
+  const requested = String(target || '').trim();
+  if (!requested) {
+    return {
+      ok: false,
+      opened: false,
+      target: '',
+      error: 'Choose a folder first.',
+      captured: false
+    };
+  }
+  const resolved = path.resolve(requested);
+  if (process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_OPEN_PATH_ECHO === '1') {
+    return {
+      ok: true,
+      opened: true,
+      target: resolved,
+      error: '',
+      captured: true
+    };
+  }
+  const error = String(await shell.openPath(resolved) || '').trim();
+  return {
+    ok: !error,
+    opened: !error,
+    target: resolved,
+    error,
+    captured: false
+  };
+});
 ipcMain.handle('setup:recommend', async () => setupForRenderer(await setupRecommendations()));
 ipcMain.handle('setup:apply', async () => applyRecommendedSetup());
 ipcMain.handle('dev:buildClientZip', diagnosticIpc('dev:buildClientZip', async (_event, payload = {}) => {
@@ -8279,6 +8826,20 @@ ipcMain.handle('dev:launcherDownloads', async (_event, payload = {}) => {
 ipcMain.handle('dev:playerIpv4Groups', async () => {
   assertDeveloperAuthenticated();
   return adminFetch(await loadConfig(), 'admin/player-ipv4-groups');
+});
+ipcMain.handle('dev:playerRecords', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const limit = Math.max(1, Math.min(Number(payload.limit || 250), 250));
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (payload.cursor) params.set('cursor', String(payload.cursor));
+  return adminFetch(await loadConfig(), `admin/player-records?${params.toString()}`);
+});
+ipcMain.handle('dev:launcherUpdates', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const limit = Math.max(1, Math.min(Number(payload.limit || 250), 250));
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (payload.cursor) params.set('cursor', String(payload.cursor));
+  return adminFetch(await loadConfig(), `admin/launcher-updates?${params.toString()}`);
 });
 ipcMain.handle('dev:updateLogs', async (_event, limit = 20) => adminFetch(await loadConfig(), `admin/update-logs?limit=${limit}`));
 ipcMain.handle('dev:publishUpdateLog', diagnosticIpc('dev:publishUpdateLog', async (_event, payload) => {

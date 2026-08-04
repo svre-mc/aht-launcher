@@ -265,7 +265,51 @@ const server = http.createServer(async (request, response) => {
       sendJson(401, { error: 'Unauthorized' });
       return;
     }
-    sendJson(200, { downloads: [{ id: 'download-1', platformKey: 'windows-x64' }], cursor: '', hasMore: false, appendOnly: true });
+    sendJson(200, {
+      downloads: [
+        { id: 'download-2', receivedAt: '2026-08-03T16:15:00.000Z', ipv4: '', platformKey: 'macos-arm64', platform: 'Mac', launcherVersion: '0.1.83', fileName: 'AHT-Launcher-macOS-arm64-0.1.83.dmg' },
+        { id: 'download-1', receivedAt: '2026-08-03T15:15:00.000Z', ipv4: '203.0.113.30', platformKey: 'windows-x64', platform: 'Windows', launcherVersion: '0.1.83', fileName: 'AHT-Launcher-Windows-10-11-0.1.83.exe' }
+      ],
+      cursor: '',
+      hasMore: false,
+      appendOnly: true
+    });
+    return;
+  }
+  if (url.pathname === '/admin/player-records') {
+    if (request.headers.authorization !== 'Bearer fresh-token') {
+      sendJson(401, { error: 'Unauthorized' });
+      return;
+    }
+    const cursor = url.searchParams.get('cursor') || '';
+    if (!cursor) {
+      sendJson(200, {
+        players: [{ receivedAt: '2026-08-03T14:15:00.000Z', minecraftUsername: 'PlayerOne', minecraftUuid: '0123456789abcdef0123456789abcdef', ipv4: '203.0.113.10', platform: 'Windows 10/11' }],
+        cursor: 'player-page-2',
+        hasMore: true,
+        currentOnly: true
+      });
+    } else {
+      sendJson(200, {
+        players: [{ receivedAt: '2026-08-02T10:30:00.000Z', minecraftUsername: 'PlayerTwo', minecraftUuid: 'fedcba0987654321fedcba0987654321', ipv4: '198.51.100.44', platform: 'macOS Intel' }],
+        cursor: '',
+        hasMore: false,
+        currentOnly: true
+      });
+    }
+    return;
+  }
+  if (url.pathname === '/admin/launcher-updates') {
+    if (request.headers.authorization !== 'Bearer fresh-token') {
+      sendJson(401, { error: 'Unauthorized' });
+      return;
+    }
+    sendJson(200, {
+      updates: [{ receivedAt: '2026-08-03T15:00:00.000Z', minecraftUsername: 'PlayerOne', minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef', ipv4: '203.0.113.10', platform: 'win32', launcherVersion: '0.1.83' }],
+      cursor: '',
+      hasMore: false,
+      appendOnly: true
+    });
     return;
   }
   if (url.pathname === '/admin/player-ipv4-groups') {
@@ -328,6 +372,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_DEVELOPER_USERNAME: 'admin',
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     AHT_TEST_REMOTE_ADMIN_TIMEOUT_MS: '120',
     SystemDrive: root,
     ELECTRON_ENABLE_LOGGING: '0'
@@ -369,10 +414,11 @@ try {
     (async () => {
       const login = await window.aht.devLogin({ username: 'admin', password: 'test-dev-password' });
       const social = await window.aht.socialList();
-      const downloads = await window.aht.devLauncherDownloads({ limit: 250 });
-      const playerIpv4Groups = await window.aht.devPlayerIpv4Groups();
+      const launcherDownloads = await window.aht.devLauncherDownloads({ limit: 250 });
+      const players = await window.aht.devPlayerRecords({ limit: 250 });
+      const launcherUpdates = await window.aht.devLauncherUpdates({ limit: 250 });
       const updateLogs = await window.aht.devUpdateLogs(20);
-      return { login, social, downloads, playerIpv4Groups, updateLogs };
+      return { login, social, launcherDownloads, players, launcherUpdates, updateLogs };
     })()
   `);
   if (!proof.login?.remoteAuthenticated || proof.login?.remotePending) {
@@ -381,11 +427,14 @@ try {
   if (!proof.social?.available || proof.social?.username !== 'DevSmoke') {
     throw new Error(`Immediate developer proof/social request failed: ${JSON.stringify(proof.social)}`);
   }
-  if (proof.downloads?.downloads?.[0]?.id !== 'download-1' || proof.downloads?.appendOnly !== true) {
-    throw new Error(`Developer download history did not load read-only data: ${JSON.stringify(proof.downloads)}`);
+  if (proof.launcherDownloads?.downloads?.length !== 2 || proof.launcherDownloads?.downloads?.[0]?.id !== 'download-2') {
+    throw new Error(`Developer installer download history did not load append-only data: ${JSON.stringify(proof.launcherDownloads)}`);
   }
-  if (!Array.isArray(proof.playerIpv4Groups?.groups)) {
-    throw new Error(`Developer player IPv4 groups did not load: ${JSON.stringify(proof.playerIpv4Groups)}`);
+  if (proof.players?.players?.[0]?.minecraftUsername !== 'PlayerOne' || proof.players?.currentOnly !== true) {
+    throw new Error(`Developer player history did not load canonical read-only data: ${JSON.stringify(proof.players)}`);
+  }
+  if (proof.launcherUpdates?.updates?.[0]?.launcherVersion !== '0.1.83' || proof.launcherUpdates?.appendOnly !== true) {
+    throw new Error(`Developer launcher update history did not load read-only data: ${JSON.stringify(proof.launcherUpdates)}`);
   }
   if (proof.updateLogs?.logs?.[0]?.title !== 'Auth Refresh Works' || proof.updateLogs?.logs?.[0]?.image?.url !== 'https://packs.example.com/update-media/auth.webp' || proof.updateLogs?.logs?.[0]?.media?.type !== 'youtube') {
     throw new Error(`Developer update logs were not returned after auth refresh: ${JSON.stringify(proof)}`);
@@ -413,6 +462,73 @@ try {
   if (updateLogAuthHeaders.join('|') !== 'Bearer fresh-token') {
     throw new Error(`Expected update logs to use the refreshed token, got ${JSON.stringify(updateLogAuthHeaders)}`);
   }
+
+  await evaluate(client, 'loadPlayerDownloadHistory()');
+  const playerDataUi = await waitFor(client, `
+    (() => {
+      const downloadRows = [...document.querySelectorAll('#playerDownloadsList .event')];
+      const playerRows = [...document.querySelectorAll('#playerRecordsList .event')];
+      const updateRows = [...document.querySelectorAll('#playerLauncherUpdatesList .event')];
+      if (downloadRows.length !== 2 || playerRows.length !== 2 || updateRows.length !== 1) return false;
+      document.querySelector('#playerLauncherUpdatesTab').click();
+      const sectionText = document.querySelector('#playerDataTools').textContent;
+      return {
+        downloadHeaders: [...document.querySelectorAll('#playerDownloadsPanel .event-table-head span')].map((item) => item.textContent.trim()),
+        playerHeaders: [...document.querySelectorAll('#playerRecordsPanel .event-table-head span')].map((item) => item.textContent.trim()),
+        updateHeaders: [...document.querySelectorAll('#playerLauncherUpdatesPanel .event-table-head span')].map((item) => item.textContent.trim()),
+        downloadRows: downloadRows.map((row) => [...row.children].map((item) => item.textContent.trim())),
+        playerRows: playerRows.map((row) => [...row.children].map((item) => item.textContent.trim())),
+        updateRows: updateRows.map((row) => [...row.children].map((item) => item.textContent.trim())),
+        downloadsHidden: document.querySelector('#playerDownloadsPanel').hidden,
+        playersHidden: document.querySelector('#playerRecordsPanel').hidden,
+        updatesHidden: document.querySelector('#playerLauncherUpdatesPanel').hidden,
+        hasSelectedDownload: /Selected Download|Raw data|Shared IPv4|IPv4 source|platform key/i.test(sectionText)
+      };
+    })()
+  `, 'compact paginated Player Data UI');
+  const expectedDownloadHeaders = ['Date', 'IPv4', 'Platform', 'Version', 'File'];
+  const expectedPlayerHeaders = ['Date', 'User', 'IPv4', 'MC UUID', 'Platform'];
+  const expectedRegisteredHeaders = ['Registered', 'User', 'IPv4', 'MC UUID', 'Platform'];
+  if (
+    JSON.stringify(playerDataUi.downloadHeaders) !== JSON.stringify(expectedDownloadHeaders)
+    || JSON.stringify(playerDataUi.playerHeaders) !== JSON.stringify(expectedRegisteredHeaders)
+    || JSON.stringify(playerDataUi.updateHeaders) !== JSON.stringify([...expectedPlayerHeaders, 'Version'])
+    || playerDataUi.downloadRows[0]?.[1] !== '—'
+    || playerDataUi.downloadRows[0]?.[2] !== 'Mac'
+    || playerDataUi.downloadRows[0]?.[3] !== '0.1.83'
+    || playerDataUi.downloadRows[0]?.[4] !== 'AHT-Launcher-macOS-arm64-0.1.83.dmg'
+    || playerDataUi.downloadRows[1]?.[2] !== 'Windows'
+    || playerDataUi.playerRows[0]?.[1] !== 'PlayerOne'
+    || playerDataUi.playerRows[0]?.[3] !== '01234567-89ab-cdef-0123-456789abcdef'
+    || playerDataUi.playerRows[0]?.[4] !== 'Windows'
+    || playerDataUi.playerRows[1]?.[4] !== 'Mac'
+    || playerDataUi.updateRows[0]?.[5] !== '0.1.83'
+    || !playerDataUi.downloadsHidden
+    || !playerDataUi.playersHidden
+    || playerDataUi.updatesHidden
+    || playerDataUi.hasSelectedDownload
+  ) {
+    throw new Error(`Player Data UI is not compact and professional: ${JSON.stringify(playerDataUi)}`);
+  }
+  await evaluate(client, `(() => {
+    developerAuthenticated = true;
+    document.body.classList.remove('dev-locked');
+    document.querySelector('#developerLoginScreen').hidden = true;
+    document.querySelector('#developerConsole').hidden = false;
+    document.querySelector('#developerSessionStatus').textContent = 'Session active';
+    document.querySelector('#toastStack').replaceChildren();
+    activateTab('developer');
+    activateDeveloperSection('playerDataTools');
+    document.querySelector('#playerDownloadsTab').click();
+    return true;
+  })()`);
+  const playerDataScreenshotPath = path.join(root, 'player-downloads.png');
+  const playerDataScreenshot = await client.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  await fsp.writeFile(playerDataScreenshotPath, Buffer.from(playerDataScreenshot.data, 'base64'));
+  await evaluate(client, "document.querySelector('#playerRecordsTab').click()");
+  const playerRecordsScreenshotPath = path.join(root, 'player-records.png');
+  const playerRecordsScreenshot = await client.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  await fsp.writeFile(playerRecordsScreenshotPath, Buffer.from(playerRecordsScreenshot.data, 'base64'));
   const badControlRoutes = requestPaths.filter((item) => /\/ptb\/(?:admin|api)\//.test(item));
   if (badControlRoutes.length) {
     throw new Error(`Developer requests still used PTB-prefixed Worker control routes: ${JSON.stringify(badControlRoutes)}`);
@@ -534,6 +650,9 @@ try {
     migratedStableInstanceDir: migratedConfig.instanceDir,
     preservedPtbInstanceDir: migratedConfig.packs.ptb.instanceDir,
     playerdataPreserved: true,
+    playerDataUi,
+    playerDataScreenshotPath,
+    playerRecordsScreenshotPath,
     title: proof.updateLogs.logs[0].title,
     media: proof.updateLogs.logs[0].media?.type || '',
     image: proof.updateLogs.logs[0].image?.url || ''

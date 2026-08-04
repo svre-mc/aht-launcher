@@ -25,6 +25,7 @@ const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
 const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64']);
 const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
+const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/';
 const ACCOUNT_USERNAME_PREFIX = 'accounts/usernames/';
 const ACCOUNT_IPV4_PREFIX = 'accounts/ipv4/';
 
@@ -67,34 +68,53 @@ function ipv4FromHeader(value = '') {
   return '';
 }
 
+function normalizePlatform(value = '') {
+  const platform = String(value || '').trim().toLowerCase();
+  if (platform === 'win32' || platform === 'win64' || platform.includes('windows')) return 'Windows';
+  if (platform === 'darwin' || platform === 'mac' || platform.startsWith('macos') || platform.includes('mac os')) return 'Mac';
+  return '';
+}
+
+function normalizeMinecraftUuid(value = '') {
+  const compact = String(value || '').trim().replace(/[{}-]/g, '').toLowerCase();
+  if (!/^[a-f0-9]{32}$/.test(compact) || /^0{32}$/.test(compact)) return '';
+  return [
+    compact.slice(0, 8),
+    compact.slice(8, 12),
+    compact.slice(12, 16),
+    compact.slice(16, 20),
+    compact.slice(20)
+  ].join('-');
+}
+
 function requestIpv4(request) {
   const connecting = request.headers.get('CF-Connecting-IP') || '';
   const connectingV6 = request.headers.get('CF-Connecting-IPv6') || '';
   const pseudo = request.headers.get('CF-Pseudo-IPv4') || '';
-  const forwarded = request.headers.get('X-Forwarded-For') || '';
+  if (connectingV6) {
+    return { ipv4: '', source: 'ipv6-only', available: false, pseudo: true };
+  }
   const connectingIpv4 = ipv4FromHeader(connecting);
   if (connectingIpv4) {
     return {
       ipv4: connectingIpv4,
-      source: connectingV6 ? 'cloudflare-pseudo' : 'cloudflare-connecting-ip',
+      source: 'cloudflare-connecting-ip',
       available: true,
-      pseudo: Boolean(connectingV6)
+      pseudo: false
     };
-  }
-  const pseudoIpv4 = ipv4FromHeader(pseudo);
-  if (pseudoIpv4) {
-    return { ipv4: pseudoIpv4, source: 'cloudflare-pseudo', available: true, pseudo: true };
-  }
-  const forwardedIpv4 = ipv4FromHeader(forwarded);
-  if (forwardedIpv4) {
-    return { ipv4: forwardedIpv4, source: 'forwarded-for', available: true, pseudo: false };
   }
   return {
     ipv4: '',
-    source: connecting.includes(':') || connectingV6 ? 'ipv6-only' : 'unavailable',
+    source: connecting.includes(':') || pseudo ? 'ipv6-only' : 'unavailable',
     available: false,
-    pseudo: false
+    pseudo: Boolean(pseudo)
   };
+}
+
+function nativeIpv4FromRecord(record = {}) {
+  const source = String(record.ipv4Source || '').toLowerCase();
+  if (record.pseudoIpv4 || source.includes('pseudo') || source === 'forwarded-for') return '';
+  return ipv4FromHeader(record.ipv4 || record.ip || '');
 }
 
 function launcherDownloadKey(receivedAt = new Date().toISOString(), id = crypto.randomUUID()) {
@@ -282,15 +302,19 @@ async function recordLauncherInstallerDownload(request, env, platformKey, manife
   const receivedAt = new Date().toISOString();
   const downloadId = crypto.randomUUID();
   const ip = requestIpv4(request);
+  const platform = normalizePlatform(artifact?.label || platformKey);
   const record = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     type: 'launcher_installer_download',
     downloadId,
     receivedAt,
     launcherVersion: cleanString(manifest?.version || '', 80),
     platformKey,
-    platformLabel: cleanString(artifact?.label || platformKey, 120),
+    platform,
+    platformLabel: platform,
     fileName: cleanString(artifact?.fileName || '', 260),
+    minecraftUsername: '',
+    minecraftUuid: '',
     ipv4: ip.ipv4,
     ip: ip.ipv4,
     ipv4Source: ip.source,
@@ -399,6 +423,57 @@ async function launcherProofToken(payload, env) {
   };
 }
 
+async function launcherProofSigningSelfTest(env) {
+  const issuedAtMs = Date.now();
+  const payload = {
+    protocol: 'aht-launcher-proof-v1',
+    schemaVersion: 1,
+    launchId: 'launcher-proof-status-self-test',
+    issuedAt: new Date(issuedAtMs).toISOString(),
+    expiresAt: new Date(issuedAtMs + 60 * 1000).toISOString(),
+    packId: cleanString(env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora', 80),
+    minecraftUsername: 'AHTProofCheck',
+    installId: 'launcher-proof-status-self-test',
+    launcherChannel: 'developer',
+    developerClient: true,
+    developerClientBypass: true,
+    modIntegrityBypass: true
+  };
+  const signed = await launcherProofToken(payload, env);
+  const request = new Request('https://launcher-proof-self-test.invalid/', {
+    headers: { Authorization: `Bearer ${signed.token}` }
+  });
+  const verified = await verifyLauncherProofRequest(request, env);
+  return Boolean(
+    verified.ok
+    && verified.payload?.launchId === payload.launchId
+    && verified.payload?.minecraftUsername === payload.minecraftUsername
+    && verified.payload?.installId === payload.installId
+  );
+}
+
+async function launcherProofStatus(env, origin) {
+  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET || env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD;
+  const dedicatedConfigured = Boolean(env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET);
+  const keyId = cleanString(env.LAUNCHER_PROOF_KEY_ID || 'aht-launcher-proof-v1', 120);
+  const configured = Boolean(secret);
+  let signingVerified = false;
+  if (configured && keyId === 'aht-launcher-proof-v1') {
+    try {
+      signingVerified = await launcherProofSigningSelfTest(env);
+    } catch {
+      signingVerified = false;
+    }
+  }
+  return privateJson({
+    ok: dedicatedConfigured && keyId === 'aht-launcher-proof-v1' && signingVerified,
+    configured,
+    dedicatedConfigured,
+    keyId,
+    signingVerified
+  }, 200, origin);
+}
+
 async function createToken(username, env) {
   const expiresAt = Date.now() + 1000 * 60 * 60 * 12;
   const payload = base64UrlJson({ username, expiresAt });
@@ -456,7 +531,7 @@ function accountIpv4Key(ipv4, username) {
 async function indexAccountIpv4(env, record) {
   const ipv4 = ipv4FromHeader(record.ipv4 || record.ip || '');
   const username = normalizeMinecraftUsername(record.username);
-  if (!ipv4 || !username) return;
+  if (!ipv4 || !username || record.pseudoIpv4) return;
   const key = accountIpv4Key(ipv4, username);
   const existing = await env.AHT_DATA.get(key);
   const previous = existing ? await existing.json().catch(() => null) : null;
@@ -464,6 +539,8 @@ async function indexAccountIpv4(env, record) {
     ipv4,
     username,
     normalizedUsername: username.toLowerCase(),
+    minecraftUuid: normalizeMinecraftUuid(record.minecraftUuid) || normalizeMinecraftUuid(previous?.minecraftUuid),
+    platform: normalizePlatform(record.platform || previous?.platform),
     ipv4Source: record.ipv4Source || previous?.ipv4Source || 'legacy',
     pseudoIpv4: Boolean(record.pseudoIpv4 || previous?.pseudoIpv4),
     firstSeenAt: previous?.firstSeenAt || record.createdAt || record.updatedAt || new Date().toISOString(),
@@ -487,13 +564,40 @@ async function registerUser(request, env, origin) {
   if (!installId) {
     return json({ error: 'Install ID is required' }, 400, origin);
   }
+  const suppliedMinecraftUuid = cleanString(body.minecraftUuid || body.mcUuid || '', 80);
+  const minecraftUuid = normalizeMinecraftUuid(suppliedMinecraftUuid);
+  if (suppliedMinecraftUuid && !minecraftUuid) {
+    return json({ error: 'Minecraft UUID is invalid.' }, 400, origin);
+  }
+  const accountRecoverySecret = cleanString(body.accountRecoverySecret || '', 200);
+  if (accountRecoverySecret && !/^[A-Za-z0-9_-]{32,200}$/.test(accountRecoverySecret)) {
+    return json({ error: 'Launcher recovery credential is invalid.' }, 400, origin);
+  }
+  const accountRecoveryVerifier = accountRecoverySecret ? await sha256Hex(accountRecoverySecret) : '';
 
   const key = minecraftUsernameKey(username);
   const existing = await env.AHT_DATA.get(key);
   const existingRecord = existing ? await existing.json().catch(() => null) : null;
+  const existingMinecraftUuid = normalizeMinecraftUuid(existingRecord?.minecraftUuid);
+  if (existingMinecraftUuid && minecraftUuid && existingMinecraftUuid !== minecraftUuid) {
+    return json({ error: 'Minecraft UUID does not match this registered player.' }, 409, origin);
+  }
+  const installChanged = Boolean(existingRecord && existingRecord.installId && existingRecord.installId !== installId);
   const recoveryRequested = Boolean(body.recoverExistingUsername && body.minecraftAccountMatched);
-  const recovered = Boolean(existingRecord && existingRecord.installId && existingRecord.installId !== installId && recoveryRequested);
-  if (existingRecord && existingRecord.installId && existingRecord.installId !== installId && !recovered) {
+  const storedRecoveryVerifier = cleanString(existingRecord?.accountRecoveryVerifier || '', 80);
+  const secureRecoveryMatched = Boolean(
+    storedRecoveryVerifier
+    && accountRecoveryVerifier
+    && storedRecoveryVerifier === accountRecoveryVerifier
+  );
+  const recovered = Boolean(installChanged && recoveryRequested && secureRecoveryMatched);
+  if (installChanged && recoveryRequested && !secureRecoveryMatched) {
+    return json({ error: 'Secure launcher recovery could not be verified for this username.' }, 409, origin);
+  }
+  if (recovered && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)) {
+    return json({ error: 'Minecraft UUID is required and must match this registered player before launcher recovery.' }, 409, origin);
+  }
+  if (installChanged && !recovered) {
     return json({ error: 'That username is not available.' }, 409, origin);
   }
   if (existing && !existingRecord) {
@@ -503,14 +607,20 @@ async function registerUser(request, env, origin) {
   const now = new Date().toISOString();
   const clientIp = requestIpv4(request);
   const previousInstallIds = Array.isArray(existingRecord?.previousInstallIds) ? existingRecord.previousInstallIds : [];
+  const incomingPlatform = normalizePlatform(body.platform);
+  const existingPlatform = normalizePlatform(existingRecord?.platform);
   const record = {
-    username,
+    schemaVersion: 2,
+    username: existingRecord?.username || username,
     normalizedUsername: username.toLowerCase(),
+    minecraftUuid: minecraftUuid || existingMinecraftUuid,
+    accountRecoveryVerifier: accountRecoveryVerifier || storedRecoveryVerifier,
     installId,
-    packId: body.packId || '',
-    appVersion: body.appVersion || '',
-    platform: body.platform || '',
-    arch: body.arch || '',
+    packId: cleanString(body.packId || existingRecord?.packId || '', 120),
+    appVersion: cleanString(body.appVersion || existingRecord?.appVersion || '', 80),
+    platform: incomingPlatform || existingPlatform,
+    platformRaw: cleanString(body.platform || existingRecord?.platformRaw || '', 80),
+    arch: cleanString(body.arch || existingRecord?.arch || '', 40),
     createdAt: existingRecord?.createdAt || now,
     updatedAt: now,
     recoveredAt: recovered ? now : existingRecord?.recoveredAt || '',
@@ -519,15 +629,16 @@ async function registerUser(request, env, origin) {
     ipv4: clientIp.ipv4,
     ip: clientIp.ipv4,
     ipv4Source: clientIp.source,
+    ipv4Available: clientIp.available,
     pseudoIpv4: clientIp.pseudo,
-    userAgent: request.headers.get('User-Agent') || '',
+    userAgent: cleanString(request.headers.get('User-Agent') || '', 600),
     country: request.cf?.country || ''
   };
   await env.AHT_DATA.put(key, JSON.stringify(record), {
     httpMetadata: { contentType: 'application/json' }
   });
   await indexAccountIpv4(env, record);
-  return json({ ok: true, username, key, recovered }, 200, origin);
+  return json({ ok: true, username, minecraftUuid: record.minecraftUuid, key, recovered }, 200, origin);
 }
 
 function cleanText(value, maxLength) {
@@ -964,6 +1075,103 @@ async function publishUpdateLog(request, env, origin) {
   return json({ ok: true, key, log }, 200, origin);
 }
 
+function launcherTelemetryEventType(body = {}) {
+  return cleanString(body?.event?.type || '', 80).toLowerCase();
+}
+
+async function refreshCanonicalAccountFromLauncherUpdate(env, body, clientIp, receivedAt) {
+  const username = normalizeMinecraftUsername(body.minecraftUsername);
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) {
+    return { ok: false, status: 400, error: 'A registered Minecraft username is required for launcher update telemetry.' };
+  }
+  const installId = cleanString(body.installId || '', 200);
+  if (!installId) {
+    return { ok: false, status: 400, error: 'Install ID is required for launcher update telemetry.' };
+  }
+  const key = minecraftUsernameKey(username);
+  const item = await env.AHT_DATA.get(key);
+  const existing = item ? await item.json().catch(() => null) : null;
+  if (!existing || cleanString(existing.installId || '', 200) !== installId) {
+    return { ok: false, status: 403, error: 'Launcher update identity does not match the registered player.' };
+  }
+
+  const suppliedMinecraftUuid = cleanString(body.minecraftUuid || body.mcUuid || '', 80);
+  const incomingMinecraftUuid = normalizeMinecraftUuid(suppliedMinecraftUuid);
+  const existingMinecraftUuid = normalizeMinecraftUuid(existing.minecraftUuid);
+  if (suppliedMinecraftUuid && !incomingMinecraftUuid) {
+    return { ok: false, status: 400, error: 'Minecraft UUID is invalid.' };
+  }
+  if (existingMinecraftUuid && incomingMinecraftUuid && existingMinecraftUuid !== incomingMinecraftUuid) {
+    return { ok: false, status: 409, error: 'Minecraft UUID does not match this registered player.' };
+  }
+
+  const incomingPlatform = normalizePlatform(body.platform);
+  const existingPlatform = normalizePlatform(existing.platform);
+  const launcherVersion = cleanString(body.appVersion || body.event?.toVersion || body.event?.version || '', 80);
+  if (!launcherVersion) {
+    return { ok: false, status: 400, error: 'Launcher version is required for launcher update telemetry.' };
+  }
+  const record = {
+    ...existing,
+    schemaVersion: Math.max(2, Number(existing.schemaVersion || 0)),
+    username: existing.username || username,
+    normalizedUsername: username.toLowerCase(),
+    minecraftUuid: incomingMinecraftUuid || existingMinecraftUuid,
+    appVersion: launcherVersion,
+    platform: incomingPlatform || existingPlatform,
+    platformRaw: cleanString(body.platform || existing.platformRaw || '', 80),
+    arch: cleanString(body.arch || existing.arch || '', 40),
+    updatedAt: receivedAt,
+    ipv4: clientIp.ipv4,
+    ip: clientIp.ipv4,
+    ipv4Source: clientIp.source,
+    ipv4Available: clientIp.available,
+    pseudoIpv4: clientIp.pseudo,
+    userAgent: cleanString(body.userAgent || existing.userAgent || '', 600),
+    country: cleanString(body.country || existing.country || '', 8)
+  };
+  await env.AHT_DATA.put(key, JSON.stringify(record), {
+    httpMetadata: { contentType: 'application/json' }
+  });
+  await indexAccountIpv4(env, record);
+  return { ok: true, key, record };
+}
+
+async function recordLauncherUpdate(env, body, account, clientIp, receivedAt) {
+  const launcherVersion = cleanString(body.appVersion || body.event?.toVersion || body.event?.version || '', 80);
+  if (!launcherVersion) {
+    return { ok: false, status: 400, error: 'Launcher version is required for launcher update telemetry.' };
+  }
+  const updateId = (await sha256Hex([
+    String(account.normalizedUsername || account.username || '').toLowerCase(),
+    String(account.installId || ''),
+    launcherVersion
+  ].join('\0'))).slice(0, 40);
+  const key = `${LAUNCHER_UPDATE_PREFIX}${updateId}.json`;
+  const previousItem = await env.AHT_DATA.get(key);
+  const previous = previousItem ? await previousItem.json().catch(() => null) : null;
+  const record = {
+    schemaVersion: 1,
+    type: 'launcher_update_completed',
+    updateId,
+    receivedAt: previous?.receivedAt || receivedAt,
+    lastReceivedAt: receivedAt,
+    minecraftUsername: cleanString(account.username || body.minecraftUsername || '', 16),
+    minecraftUuid: normalizeMinecraftUuid(account.minecraftUuid),
+    ipv4: clientIp.ipv4,
+    ipv4Source: clientIp.source,
+    ipv4Available: clientIp.available,
+    pseudoIpv4: clientIp.pseudo,
+    platform: normalizePlatform(account.platform || body.platform),
+    launcherVersion,
+    previousLauncherVersion: cleanString(body.event?.fromVersion || body.event?.previousVersion || '', 80)
+  };
+  await env.AHT_DATA.put(key, JSON.stringify(record), {
+    httpMetadata: { contentType: 'application/json' }
+  });
+  return { ok: true, key, record };
+}
+
 async function writeEvent(request, env, origin) {
   if (!env.AHT_DATA) {
     return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
@@ -978,21 +1186,41 @@ async function writeEvent(request, env, origin) {
   const receivedAt = new Date().toISOString();
   const day = receivedAt.slice(0, 10);
   const clientIp = requestIpv4(request);
+  let accountRefresh = null;
+  let launcherUpdate = null;
+  if (launcherTelemetryEventType(body) === 'launcher_update_completed') {
+    accountRefresh = await refreshCanonicalAccountFromLauncherUpdate(env, body, clientIp, receivedAt);
+    if (!accountRefresh.ok) {
+      return privateJson({ error: accountRefresh.error }, accountRefresh.status, origin);
+    }
+    launcherUpdate = await recordLauncherUpdate(env, body, accountRefresh.record, clientIp, receivedAt);
+    if (!launcherUpdate.ok) {
+      return privateJson({ error: launcherUpdate.error }, launcherUpdate.status, origin);
+    }
+  }
   const record = {
     ...body,
+    minecraftUuid: normalizeMinecraftUuid(body.minecraftUuid || body.mcUuid),
+    platform: normalizePlatform(body.platform),
     receivedAt,
     ipv4: clientIp.ipv4,
     ip: clientIp.ipv4,
     ipv4Source: clientIp.source,
+    ipv4Available: clientIp.available,
     pseudoIpv4: clientIp.pseudo,
-    userAgent: request.headers.get('User-Agent') || '',
+    userAgent: cleanString(request.headers.get('User-Agent') || '', 600),
     country: request.cf?.country || ''
   };
   const key = `telemetry/events/${day}/${receivedAt}-${crypto.randomUUID()}.json`;
   await env.AHT_DATA.put(key, JSON.stringify(record), {
     httpMetadata: { contentType: 'application/json' }
   });
-  return json({ ok: true, key }, 200, origin);
+  return json({
+    ok: true,
+    key,
+    accountRefreshed: Boolean(accountRefresh?.ok),
+    launcherUpdateKey: launcherUpdate?.key || ''
+  }, 200, origin);
 }
 
 async function login(request, env, origin) {
@@ -1039,6 +1267,62 @@ async function readR2JsonObjects(env, objects = []) {
   return records.filter(Boolean);
 }
 
+function launcherDownloadAdminRecord(item = {}) {
+  const ipv4 = nativeIpv4FromRecord(item);
+  const platform = normalizePlatform(item.platform || item.platformLabel || item.platformKey);
+  return {
+    schemaVersion: Number(item.schemaVersion || 1),
+    type: 'launcher_installer_download',
+    downloadId: cleanString(item.downloadId || '', 120),
+    receivedAt: cleanString(item.receivedAt || '', 80),
+    minecraftUsername: '',
+    minecraftUuid: '',
+    ipv4,
+    ip: ipv4,
+    ipv4Source: ipv4 ? cleanString(item.ipv4Source || 'legacy', 80) : (item.pseudoIpv4 ? 'ipv6-only' : cleanString(item.ipv4Source || 'unavailable', 80)),
+    ipv4Available: Boolean(ipv4),
+    pseudoIpv4: Boolean(item.pseudoIpv4),
+    platform,
+    platformLabel: platform,
+    platformKey: cleanString(item.platformKey || '', 80),
+    launcherVersion: cleanString(item.launcherVersion || '', 80),
+    fileName: cleanString(item.fileName || '', 260)
+  };
+}
+
+function launcherUpdateAdminRecord(item = {}) {
+  const ipv4 = nativeIpv4FromRecord(item);
+  return {
+    type: 'launcher_update_completed',
+    updateId: cleanString(item.updateId || '', 120),
+    receivedAt: cleanString(item.receivedAt || item.lastReceivedAt || '', 80),
+    minecraftUsername: cleanString(item.minecraftUsername || item.username || '', 16),
+    minecraftUuid: normalizeMinecraftUuid(item.minecraftUuid),
+    ipv4,
+    platform: normalizePlatform(item.platform),
+    launcherVersion: cleanString(item.launcherVersion || item.appVersion || '', 80),
+    previousLauncherVersion: cleanString(item.previousLauncherVersion || '', 80)
+  };
+}
+
+function isSyntheticReadinessAccount(item = {}) {
+  return item.synthetic === true
+    || item.recordKind === 'production-readiness-proof'
+    || item.installId === 'aht-production-readiness-proof';
+}
+
+function playerAdminRecord(item = {}) {
+  const ipv4 = nativeIpv4FromRecord(item);
+  return {
+    receivedAt: cleanString(item.createdAt || item.updatedAt || '', 80),
+    minecraftUsername: cleanString(item.username || item.minecraftUsername || '', 16),
+    minecraftUuid: normalizeMinecraftUuid(item.minecraftUuid),
+    ipv4,
+    platform: normalizePlatform(item.platform),
+    launcherVersion: cleanString(item.appVersion || item.launcherVersion || '', 80)
+  };
+}
+
 async function listLauncherDownloads(env, request, origin) {
   if (!env.AHT_DATA) {
     return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
@@ -1054,12 +1338,64 @@ async function listLauncherDownloads(env, request, origin) {
   const listed = await env.AHT_DATA.list(options);
   const downloads = (await readR2JsonObjects(env, listed.objects || []))
     .filter((item) => item.type === 'launcher_installer_download')
+    .map(launcherDownloadAdminRecord)
     .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')));
   return privateJson({
     downloads,
     cursor: listed.truncated ? listed.cursor || '' : '',
     hasMore: Boolean(listed.truncated),
     appendOnly: true
+  }, 200, origin);
+}
+
+async function listLauncherUpdates(env, request, origin) {
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+  }
+  if (!(await verifyToken(request, env))) {
+    return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  const url = new URL(request.url);
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
+  const cursor = cleanString(url.searchParams.get('cursor') || '', 1000);
+  const options = { prefix: LAUNCHER_UPDATE_PREFIX, limit };
+  if (cursor) options.cursor = cursor;
+  const listed = await env.AHT_DATA.list(options);
+  const updates = (await readR2JsonObjects(env, listed.objects || []))
+    .filter((item) => item.type === 'launcher_update_completed')
+    .map(launcherUpdateAdminRecord)
+    .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')));
+  return privateJson({
+    updates,
+    cursor: listed.truncated ? listed.cursor || '' : '',
+    hasMore: Boolean(listed.truncated),
+    appendOnly: true
+  }, 200, origin);
+}
+
+async function listPlayerRecords(env, request, origin) {
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+  }
+  if (!(await verifyToken(request, env))) {
+    return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  const url = new URL(request.url);
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
+  const cursor = cleanString(url.searchParams.get('cursor') || '', 1000);
+  const options = { prefix: ACCOUNT_USERNAME_PREFIX, limit };
+  if (cursor) options.cursor = cursor;
+  const listed = await env.AHT_DATA.list(options);
+  const players = (await readR2JsonObjects(env, listed.objects || []))
+    .filter((item) => !isSyntheticReadinessAccount(item))
+    .map(playerAdminRecord)
+    .filter((item) => item.minecraftUsername)
+    .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')));
+  return privateJson({
+    players,
+    cursor: listed.truncated ? listed.cursor || '' : '',
+    hasMore: Boolean(listed.truncated),
+    currentOnly: true
   }, 200, origin);
 }
 
@@ -1088,19 +1424,18 @@ async function listPlayerIpv4Groups(env, request, origin) {
   if (!(await verifyToken(request, env))) {
     return privateJson({ error: 'Unauthorized' }, 401, origin);
   }
-  const indexedAccounts = await listAllR2Json(env, ACCOUNT_IPV4_PREFIX);
-  const legacyAccounts = await listAllR2Json(env, ACCOUNT_USERNAME_PREFIX);
-  const accounts = [...indexedAccounts, ...legacyAccounts];
+  const accounts = (await listAllR2Json(env, ACCOUNT_USERNAME_PREFIX))
+    .filter((item) => !isSyntheticReadinessAccount(item));
   const groups = new Map();
   for (const account of accounts) {
-    const ipv4 = ipv4FromHeader(account.ipv4 || account.ip || '');
+    const ipv4 = nativeIpv4FromRecord(account);
     const username = cleanString(account.username || '', 16);
     if (!ipv4 || !username) continue;
     if (!groups.has(ipv4)) {
       groups.set(ipv4, {
         ipv4,
         ipv4Source: account.ipv4Source || 'legacy',
-        pseudoIpv4: Boolean(account.pseudoIpv4),
+        pseudoIpv4: false,
         players: [],
         lastSeenAt: ''
       });
@@ -1122,7 +1457,8 @@ async function listPlayerIpv4Groups(env, request, origin) {
     groups: result,
     sharedGroups: result.filter((group) => group.shared),
     uniqueIpv4: result.length,
-    sharedIpv4: result.filter((group) => group.shared).length
+    sharedIpv4: result.filter((group) => group.shared).length,
+    currentOnly: true
   }, 200, origin);
 }
 
@@ -1180,6 +1516,9 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/users/register') {
         return await registerUser(request, env, origin);
       }
+      if (request.method === 'GET' && url.pathname === '/api/launcher-proof/status') {
+        return await launcherProofStatus(env, origin);
+      }
       if (request.method === 'POST' && url.pathname === '/api/launcher-proof') {
         return await createLauncherProof(request, env, origin);
       }
@@ -1210,6 +1549,12 @@ export default {
       if (request.method === 'GET' && url.pathname === '/admin/launcher-downloads') {
         return await listLauncherDownloads(env, request, origin);
       }
+      if (request.method === 'GET' && url.pathname === '/admin/launcher-updates') {
+        return await listLauncherUpdates(env, request, origin);
+      }
+      if (request.method === 'GET' && url.pathname === '/admin/player-records') {
+        return await listPlayerRecords(env, request, origin);
+      }
       if (request.method === 'GET' && url.pathname === '/admin/player-ipv4-groups') {
         return await listPlayerIpv4Groups(env, request, origin);
       }
@@ -1238,6 +1583,7 @@ export default {
           '/cf/mods/{projectId}/files/{fileId}/download-url',
           '/api/events',
           '/api/users/register',
+          '/api/launcher-proof/status',
           '/api/launcher-proof',
           '/api/social',
           '/api/social/actions',
@@ -1247,6 +1593,8 @@ export default {
           '/admin/summary',
           '/admin/events',
           '/admin/launcher-downloads',
+          '/admin/launcher-updates',
+          '/admin/player-records',
           '/admin/player-ipv4-groups',
           '/admin/update-logs'
           ]

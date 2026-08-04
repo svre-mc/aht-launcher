@@ -486,26 +486,41 @@ if (!window.aht) {
     devLauncherDownloads: async () => ({
       downloads: [
         {
-          type: "launcher_installer_download",
-          downloadId: "download-a",
-          receivedAt: "2026-07-17T18:20:12Z",
+          receivedAt: "2026-08-02T18:20:12Z",
           ipv4: "203.0.113.42",
-          ipv4Source: "cloudflare-connecting-ip",
-          platformKey: "windows-x64",
-          platformLabel: "Windows 10/11",
-          launcherVersion: "0.1.75",
-          fileName: "AHT-Launcher-Windows-10-11-0.1.75.exe"
+          platform: "Windows"
         }
       ],
       cursor: "",
-      hasMore: false,
-      appendOnly: true
+      hasMore: false
     }),
-    devPlayerIpv4Groups: async () => ({
-      groups: [{ ipv4: "203.0.113.42", players: ["auSavant", "TestRig"], playerCount: 2, shared: true }],
-      sharedGroups: [{ ipv4: "203.0.113.42", players: ["auSavant", "TestRig"], playerCount: 2, shared: true }],
-      uniqueIpv4: 1,
-      sharedIpv4: 1
+    devPlayerRecords: async () => ({
+      players: [
+        {
+          receivedAt: "2026-07-17T18:20:12Z",
+          ipv4: "203.0.113.42",
+          minecraftUsername: "auSavant",
+          minecraftUuid: "6f3bb6d1-7a4e-4f4f-9f8f-5a9a7f01dafe",
+          platform: "Windows",
+          launcherVersion: "0.1.82"
+        }
+      ],
+      cursor: "",
+      hasMore: false
+    }),
+    devLauncherUpdates: async () => ({
+      updates: [
+        {
+          receivedAt: "2026-08-03T18:20:12Z",
+          ipv4: "203.0.113.42",
+          minecraftUsername: "auSavant",
+          minecraftUuid: "6f3bb6d1-7a4e-4f4f-9f8f-5a9a7f01dafe",
+          platform: "Windows",
+          launcherVersion: "0.1.82"
+        }
+      ],
+      cursor: "",
+      hasMore: false
     })
   };
   if (!bootDeveloperMode) {
@@ -600,6 +615,7 @@ const els = {
   log: $("#log"),
   updateButton: $("#updateButton"),
   playButton: $("#playButton"),
+  copyLatestLaunchReportButton: $("#copyLatestLaunchReportButton"),
   scanButton: $("#scanButton"),
   repairPromptOverlay: $("#repairPromptOverlay"),
   repairPromptSummary: $("#repairPromptSummary"),
@@ -619,16 +635,11 @@ const els = {
   playerLabelInput: $("#playerLabelInput"),
   instanceInput: $("#instanceInput"),
   minecraftRootInput: $("#minecraftRootInput"),
+  openInstancePathButton: $("#openInstancePathButton"),
+  openMinecraftRootPathButton: $("#openMinecraftRootPathButton"),
   minecraftProfileNameInput: $("#minecraftProfileNameInput"),
   minecraftMemoryInput: $("#minecraftMemoryInput"),
   minecraftMemoryOutput: $("#minecraftMemoryOutput"),
-  java8RuntimeCard: $("#java8RuntimeCard"),
-  java8RuntimeState: $("#java8RuntimeState"),
-  java8RuntimeTitle: $("#java8RuntimeTitle"),
-  java8RuntimeDetail: $("#java8RuntimeDetail"),
-  java8MemoryWarning: $("#java8MemoryWarning"),
-  java8InstallInput: $("#java8InstallInput"),
-  copyLaunchDiagnosticsButton: $("#copyLaunchDiagnosticsButton"),
   playCommandInput: $("#playCommandInput"),
   playArgsInput: $("#playArgsInput"),
   platformTargetView: $("#platformTargetView"),
@@ -758,20 +769,14 @@ const els = {
   releaseCheckState: $("#releaseCheckState"),
   releaseCheckTitle: $("#releaseCheckTitle"),
   releaseCheckDetail: $("#releaseCheckDetail"),
-  eventDetails: $("#eventDetails"),
-  eventDetailType: $("#eventDetailType"),
-  eventDetailTitle: $("#eventDetailTitle"),
-  eventDetailTime: $("#eventDetailTime"),
-  eventDetailMeta: $("#eventDetailMeta"),
-  eventDetailChanges: $("#eventDetailChanges"),
   devLog: $("#devLog"),
-  downloadCount: $("#downloadCount"),
-  uniqueIpv4Count: $("#uniqueIpv4Count"),
-  sharedIpv4Count: $("#sharedIpv4Count"),
-  ipv4UnavailableCount: $("#ipv4UnavailableCount"),
-  metricButtons: [...document.querySelectorAll(".metric-value[data-event-filter]")],
-  eventFilterLabel: $("#eventFilterLabel"),
-  eventsList: $("#eventsList"),
+  playerDataTabs: [...document.querySelectorAll(".player-data-tab[data-player-data-view]")],
+  playerDownloadsPanel: $("#playerDownloadsPanel"),
+  playerRecordsPanel: $("#playerRecordsPanel"),
+  playerLauncherUpdatesPanel: $("#playerLauncherUpdatesPanel"),
+  playerDownloadsList: $("#playerDownloadsList"),
+  playerRecordsList: $("#playerRecordsList"),
+  playerLauncherUpdatesList: $("#playerLauncherUpdatesList"),
   toastStack: $("#toastStack")
 };
 
@@ -792,9 +797,10 @@ let playBusy = false;
 const packStatusCache = new Map();
 const releaseValidationByTarget = new Map();
 let developerAuthenticated = false;
-let allDashboardEvents = [];
-let activeEventFilter = "all";
-let playerIpv4Groups = [];
+let playerDownloadRecords = [];
+let canonicalPlayerRecords = [];
+let launcherUpdateRecords = [];
+let activePlayerDataView = "downloads";
 let playerDataLoaded = false;
 let playerDataLoading = false;
 let uploadPoll = null;
@@ -810,8 +816,6 @@ let friendsRefreshTimer = null;
 let friendsRequestId = 0;
 const friendsActionRefreshTimers = new Set();
 let currentLegalState = null;
-let java8InstallOverrideDraft = null;
-let java8InstallOverrideDirty = false;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
 
@@ -849,7 +853,7 @@ function appendLog(text) {
 }
 
 function setDevLog(value) {
-  els.eventDetails.hidden = true;
+  if (!els.devLog) return;
   setTextContentBounded(els.devLog, stringifyLogValue(value, DEV_LOG_TEXT_LIMIT), DEV_LOG_TEXT_LIMIT);
 }
 
@@ -1637,89 +1641,6 @@ function setMemoryValue(mb) {
     els.minecraftMemoryOutput.value = formatMemory(rounded);
     els.minecraftMemoryOutput.textContent = formatMemory(rounded);
   }
-}
-
-function java8InstallOverrideFromStatus(status = currentStatus) {
-  const configValue = status?.config?.minecraftLauncher?.java8InstallOverride;
-  if (typeof configValue === "boolean") return configValue;
-  const runtimeValue = status?.java8Runtime?.installOverride;
-  return typeof runtimeValue === "boolean" ? runtimeValue : null;
-}
-
-function java8InstallSelected(runtime = {}, override = null) {
-  if (typeof runtime.effectiveInstallSelected === "boolean") return runtime.effectiveInstallSelected;
-  if (typeof runtime.installSelected === "boolean") return runtime.installSelected;
-  if (typeof override === "boolean") return override;
-  return !runtime.usable && runtime.installSupported !== false;
-}
-
-function java8RuntimeText(value = "", limit = 420) {
-  return String(value || "").replace(/[\r\n\t]+/g, " ").trim().slice(0, limit);
-}
-
-function renderJava8Runtime(status = currentStatus) {
-  if (!els.java8RuntimeCard || !els.java8InstallInput) return;
-  const runtime = status?.java8Runtime;
-  if (!runtime) {
-    els.java8RuntimeCard.className = "java-runtime-card warn";
-    els.java8RuntimeState.textContent = "Java 8 runtime";
-    els.java8RuntimeTitle.textContent = "Checking this device";
-    els.java8RuntimeDetail.textContent = "Looking for a usable 64-bit Java 8 runtime for Minecraft Forge 1.12.2.";
-    els.java8MemoryWarning.textContent = "";
-    els.java8MemoryWarning.hidden = true;
-    els.java8InstallInput.disabled = true;
-    return;
-  }
-
-  const override = java8InstallOverrideFromStatus(status);
-  const selected = java8InstallOverrideDirty
-    ? Boolean(java8InstallOverrideDraft)
-    : java8InstallSelected(runtime, override);
-  if (!java8InstallOverrideDirty) {
-    java8InstallOverrideDraft = override;
-    els.java8InstallInput.checked = selected;
-  }
-  els.java8InstallInput.disabled = runtime.installSupported === false;
-
-  const runtimeParts = [runtime.vendor, runtime.version, runtime.arch]
-    .map((value) => java8RuntimeText(value, 80))
-    .filter(Boolean);
-  const runtimePath = java8RuntimeText(runtime.path);
-  let state = "warn";
-  let stateText = "Java 8 setup";
-  let title = "Java 8 setup required";
-  let detail = "No usable 64-bit Java 8 runtime was detected.";
-
-  if (runtime.usable) {
-    state = "ok";
-    stateText = "Java 8 ready";
-    title = runtime.managed ? "AHT-managed Java 8 is ready" : "Compatible Java 8 is ready";
-    detail = runtimeParts.length ? runtimeParts.join(" | ") : "A usable 64-bit Java 8 runtime was detected.";
-    if (runtimePath) detail += ` | ${runtimePath}`;
-    if (selected && !runtime.managed) detail += " AHT-managed Java 8 is selected for the next Update.";
-  } else if (runtime.installSupported === false) {
-    state = "bad";
-    stateText = "Java 8 unavailable";
-    title = "Automatic Java 8 install is unavailable";
-    detail = "Install a compatible 64-bit Java 8 runtime manually before launching A Hard Time.";
-  } else if (selected) {
-    stateText = "Java 8 selected";
-    title = "AHT-managed Java 8 will be installed";
-    detail = "No usable 64-bit Java 8 was found. Run Update to download and validate Adoptium Java 8 automatically.";
-  } else {
-    state = "bad";
-    stateText = "Java 8 required";
-    title = "Java 8 setup is disabled";
-    detail = "No usable 64-bit Java 8 was found. Enable the AHT-managed runtime, save Settings, then run Update.";
-  }
-
-  els.java8RuntimeCard.className = `java-runtime-card ${state}`;
-  els.java8RuntimeState.textContent = stateText;
-  els.java8RuntimeTitle.textContent = title;
-  els.java8RuntimeDetail.textContent = detail;
-  const memoryWarning = java8RuntimeText(runtime.memoryWarning, 500);
-  els.java8MemoryWarning.textContent = memoryWarning;
-  els.java8MemoryWarning.hidden = !memoryWarning;
 }
 
 function developerOutDir() {
@@ -2515,13 +2436,6 @@ function shortDateTime(value) {
   });
 }
 
-function eventTypeLabel(type = "") {
-  if (type === "launcher_download") return "Installer";
-  if (type === "unique_ipv4") return "Unique IPv4";
-  if (type === "shared_ipv4") return "Shared IPv4";
-  return String(type || "-").replaceAll("_", " ");
-}
-
 function setPlayBusy(busy) {
   playBusy = Boolean(busy);
   if (!els.playButton) return;
@@ -2533,246 +2447,94 @@ function setPlayBusy(busy) {
   }
 }
 
-function eventTitle(item) {
-  const label = eventTypeLabel(item.event?.type);
-  return label === "-" ? "Unknown event" : label.replace(/\b\w/g, (letter) => letter.toUpperCase());
+function normalizePlayerPlatform(value = "") {
+  const platform = String(value || "").trim().toLowerCase();
+  if (platform.includes("win")) return "Windows";
+  if (platform.includes("mac") || platform.includes("darwin") || platform.includes("osx")) return "Mac";
+  return "—";
 }
 
-function eventVersion(item) {
-  return item.launcherVersion || item.event?.version || "-";
+function displayMinecraftUuid(value = "") {
+  const compact = String(value || "").trim().replaceAll("-", "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(compact)) return "—";
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
 }
 
-function eventMeta(item) {
-  const parts = [];
-  if (item.playerLabel) parts.push(item.playerLabel);
-  if (item.ip) parts.push(item.ip);
-  if (item.platform) parts.push(item.platform);
-  return parts.join(" | ") || "-";
-}
-
-function eventSummary(item) {
-  const type = item.event?.type || "-";
-  if (type === "unique_ipv4" || type === "shared_ipv4") return item.event?.summary || "-";
-  return item.fileName || item.event?.summary || "-";
-}
-
-function eventFilterTitle(filter) {
-  if (filter === "ips") return "Unique IPv4";
-  if (filter === "shared") return "Shared IPv4 players";
-  if (filter === "unavailable") return "IPv4 unavailable";
-  return "All downloads";
-}
-
-function groupForIpv4(ipv4) {
-  return playerIpv4Groups.find((group) => group.ipv4 === ipv4) || null;
-}
-
-function dashboardDownload(item) {
-  const ip = String(item.ipv4 || item.ip || "").trim();
-  const playerGroup = groupForIpv4(ip);
-  const players = Array.isArray(playerGroup?.players) ? playerGroup.players : [];
+function playerDataRecord(item = {}) {
   return {
-    ...item,
-    receivedAt: item.receivedAt || "",
-    ip,
-    playerLabel: players.length ? players.join(", ") : "Unregistered",
-    platform: item.platformLabel || item.platformKey || "-",
-    launcherVersion: item.launcherVersion || "-",
-    fileName: item.fileName || "-",
-    event: {
-      type: "launcher_download",
-      summary: item.fileName || "-",
-      players,
-      ipv4Source: item.ipv4Source || (ip ? "legacy" : "unavailable"),
-      pseudoIpv4: Boolean(item.pseudoIpv4)
-    }
+    receivedAt: String(item.receivedAt || item.createdAt || item.updatedAt || ""),
+    username: String(item.minecraftUsername || item.username || "").trim() || "—",
+    ipv4: String(item.ipv4 || "").trim() || "—",
+    minecraftUuid: displayMinecraftUuid(item.minecraftUuid),
+    platform: normalizePlayerPlatform(item.platform || item.platformLabel || item.platformKey),
+    launcherVersion: String(item.launcherVersion || item.appVersion || "").trim() || "—",
+    fileName: String(item.fileName || "").trim() || "—"
   };
 }
 
-function buildUniqueIpRows(events) {
-  const groups = new Map();
-  for (const item of events) {
-    const ip = item.ip || "";
-    if (!ip) continue;
-    if (!groups.has(ip)) {
-      groups.set(ip, {
-        ip,
-        events: [],
-        players: new Set(),
-        platforms: new Set()
-      });
-    }
-    const group = groups.get(ip);
-    group.events.push(item);
-    if (item.playerLabel) group.players.add(item.playerLabel);
-    if (item.platform) group.platforms.add(item.platform);
-  }
-  return [...groups.values()].map((group) => {
-    const sorted = [...group.events].sort((a, b) => String(b.receivedAt || "").localeCompare(String(a.receivedAt || "")));
-    const players = [...group.players];
-    const platforms = [...group.platforms];
-    return {
-      receivedAt: sorted[0]?.receivedAt || "",
-      ip: group.ip,
-      playerLabel: players.length ? players.join(", ") : "Unregistered",
-      platform: platforms.join(", ") || "-",
-      launcherVersion: [...new Set(group.events.map((entry) => eventVersion(entry)))].join(", "),
-      fileName: `${group.events.length} download${group.events.length === 1 ? "" : "s"}`,
-      event: {
-        type: "unique_ipv4",
-        summary: `${group.events.length} launcher download${group.events.length === 1 ? "" : "s"}`,
-        eventCount: group.events.length,
-        players,
-        platforms,
-        events: sorted
-      }
-    };
-  }).sort((a, b) => String(b.receivedAt || "").localeCompare(String(a.receivedAt || "")));
-}
-
-function buildSharedIpv4Rows() {
-  return playerIpv4Groups
-    .filter((group) => group.shared || Number(group.playerCount || 0) > 1)
-    .map((group) => {
-      const downloads = allDashboardEvents.filter((item) => item.ip === group.ipv4);
-      return {
-        receivedAt: group.lastSeenAt || downloads[0]?.receivedAt || "",
-        ip: group.ipv4,
-        playerLabel: (group.players || []).join(", "),
-        platform: [...new Set(downloads.map((entry) => entry.platform).filter(Boolean))].join(", ") || "-",
-        launcherVersion: [...new Set(downloads.map((entry) => eventVersion(entry)).filter(Boolean))].join(", ") || "-",
-        fileName: `${downloads.length} download${downloads.length === 1 ? "" : "s"}`,
-        event: {
-          type: "shared_ipv4",
-          summary: `${group.playerCount || group.players?.length || 0} registered players share this IPv4`,
-          players: group.players || [],
-          ipv4Source: group.ipv4Source || "legacy",
-          pseudoIpv4: Boolean(group.pseudoIpv4),
-          events: downloads
-        }
-      };
-    })
-    .sort((left, right) => (right.event.players.length - left.event.players.length)
-      || String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
-}
-
-function dashboardItemsForFilter(filter) {
-  if (filter === "ips") {
-    return buildUniqueIpRows(allDashboardEvents);
-  }
-  if (filter === "shared") return buildSharedIpv4Rows();
-  if (filter === "unavailable") return allDashboardEvents.filter((item) => !item.ip);
-  return allDashboardEvents;
-}
-
-function renderDashboardEvents(filter = activeEventFilter) {
-  activeEventFilter = filter;
-  els.eventFilterLabel.textContent = eventFilterTitle(filter);
-  els.metricButtons.forEach((button) => {
-    button.classList.toggle("active", button.dataset.eventFilter === filter);
-  });
-  const items = dashboardItemsForFilter(filter);
-  els.eventsList.innerHTML = "";
-  els.eventDetails.hidden = true;
-  setTextContentBounded(els.devLog, "", DEV_LOG_TEXT_LIMIT);
-  if (items.length === 0) {
+function renderPlayerDataRows(list, records = [], kind = "players", emptyText = "No records found.") {
+  if (!list) return;
+  list.innerHTML = "";
+  if (!records.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = allDashboardEvents.length
-      ? `No ${eventFilterTitle(filter).toLowerCase()} found.`
-      : "Load the permanent launcher download history.";
-    els.eventsList.appendChild(empty);
+    empty.textContent = emptyText;
+    list.appendChild(empty);
     return;
   }
-  const rows = document.createDocumentFragment();
-  for (const [index, event] of items.entries()) {
-    const row = document.createElement("button");
-    row.className = index === 0 ? "event active" : "event";
-    row.type = "button";
-    const time = document.createElement("span");
-    const type = document.createElement("strong");
-    const player = document.createElement("span");
-    const ip = document.createElement("span");
-    const platform = document.createElement("span");
-    const version = document.createElement("span");
-    const summaryCell = document.createElement("span");
-    time.textContent = shortDateTime(event.receivedAt);
-    type.textContent = eventTypeLabel(event.event?.type);
-    player.textContent = event.playerLabel || "Unregistered";
-    ip.textContent = event.ip || "-";
-    platform.textContent = event.platform || "-";
-    version.textContent = eventVersion(event);
-    summaryCell.textContent = eventSummary(event);
-    row.title = eventMeta(event);
-    row.addEventListener("click", () => {
-      [...els.eventsList.querySelectorAll(".event")].forEach((item) => item.classList.remove("active"));
-      row.classList.add("active");
-      renderEventDetails(event);
-    });
-    row.append(time, type, player, ip, platform, version, summaryCell);
-    rows.appendChild(row);
+  const fragment = document.createDocumentFragment();
+  for (const record of records) {
+    const row = document.createElement("div");
+    row.className = "event";
+    const values = kind === "downloads"
+      ? [shortDateTime(record.receivedAt), record.ipv4, record.platform, record.launcherVersion, record.fileName]
+      : [shortDateTime(record.receivedAt), record.username, record.ipv4, record.minecraftUuid, record.platform];
+    if (kind === "updates") values.push(record.launcherVersion);
+    for (const value of values) {
+      const cell = document.createElement("span");
+      cell.textContent = value;
+      row.appendChild(cell);
+    }
+    fragment.appendChild(row);
   }
-  els.eventsList.appendChild(rows);
-  renderEventDetails(items[0]);
+  list.appendChild(fragment);
 }
 
-function renderEventDetails(item) {
-  els.eventDetails.hidden = false;
-  els.eventDetailType.textContent = eventTypeLabel(item.event?.type);
-  els.eventDetailTitle.textContent = item.playerLabel || shortId(item.installId);
-  els.eventDetailTime.textContent = shortDateTime(item.receivedAt);
-  els.eventDetailMeta.innerHTML = "";
-  const meta = [
-    ["Registered player(s)", item.playerLabel || "Unregistered"],
-    ["IPv4", item.ip || "Unavailable"],
-    ["IPv4 source", item.event?.ipv4Source || "-"],
-    ["Platform", item.platform || "-"],
-    ["Launcher version", eventVersion(item)],
-    ["File", item.fileName || eventSummary(item)]
-  ];
-  for (const [label, value] of meta) {
-    const card = document.createElement("div");
-    const key = document.createElement("span");
-    const val = document.createElement("strong");
-    key.textContent = label;
-    val.textContent = value;
-    card.title = value;
-    card.append(key, val);
-    els.eventDetailMeta.appendChild(card);
-  }
-  els.eventDetailChanges.innerHTML = "";
-  const relatedDownloads = Array.isArray(item.event?.events) ? item.event.events : [];
-  if (relatedDownloads.length) {
-    const group = document.createElement("section");
-    const title = document.createElement("h3");
-    const list = document.createElement("ul");
-    title.textContent = "Related downloads";
-    for (const entry of relatedDownloads.slice(0, 25)) {
-      const itemNode = document.createElement("li");
-      itemNode.textContent = `${shortDateTime(entry.receivedAt)} | ${entry.fileName || eventSummary(entry)}`;
-      itemNode.title = itemNode.textContent;
-      list.appendChild(itemNode);
-    }
-    if (relatedDownloads.length > 25) {
-      const more = document.createElement("li");
-      more.textContent = `+${relatedDownloads.length - 25} more`;
-      more.className = "muted-path";
-      list.appendChild(more);
-    }
-    group.append(title, list);
-    els.eventDetailChanges.appendChild(group);
-  }
-  const lines = [
-    `${eventTitle(item)} | ${shortDateTime(item.receivedAt)}`,
-    `Registered player(s): ${item.playerLabel || "Unregistered"}`,
-    `IPv4: ${item.ip || "Unavailable"}`,
-    `IPv4 source: ${item.event?.ipv4Source || "-"}`,
-    `Platform: ${item.platform || "-"}`,
-    `Launcher version: ${eventVersion(item)}`,
-    `File: ${item.fileName || eventSummary(item)}`
-  ];
-  lines.push("", JSON.stringify(item, null, 2));
-  setTextContentBounded(els.devLog, lines.join("\n"), DEV_LOG_TEXT_LIMIT);
+function playerDataFailureSummary(results = []) {
+  const labels = ["Downloads", "Players", "Launcher updates"];
+  return results
+    .map((result, index) => {
+      if (result.status !== "rejected") return "";
+      const message = cleanErrorMessage(result.reason).replace(/\s+/g, " ").trim();
+      return `${labels[index]}: ${(message || "unavailable").slice(0, 160)}`;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+function activatePlayerDataView(view = "downloads") {
+  activePlayerDataView = ["downloads", "players", "updates"].includes(view) ? view : "downloads";
+  els.playerDataTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.playerDataView === activePlayerDataView));
+  if (els.playerDownloadsPanel) els.playerDownloadsPanel.hidden = activePlayerDataView !== "downloads";
+  if (els.playerRecordsPanel) els.playerRecordsPanel.hidden = activePlayerDataView !== "players";
+  if (els.playerLauncherUpdatesPanel) els.playerLauncherUpdatesPanel.hidden = activePlayerDataView !== "updates";
+}
+
+async function loadAllPlayerDataPages(fetchPage, property) {
+  const records = [];
+  const seenCursors = new Set();
+  let cursor = "";
+  do {
+    const page = await fetchPage({ limit: 250, cursor });
+    if (Array.isArray(page?.[property])) records.push(...page[property]);
+    const nextCursor = page?.hasMore ? String(page.cursor || "") : "";
+    if (!nextCursor) break;
+    if (seenCursors.has(nextCursor)) throw new Error("Player data pagination returned a repeated cursor.");
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  } while (true);
+  return records;
 }
 
 async function loadPlayerDownloadHistory() {
@@ -2781,41 +2543,39 @@ async function loadPlayerDownloadHistory() {
   setUnavailable(els.loadDashboardButton, true);
   const originalMarkup = els.loadDashboardButton.innerHTML;
   try {
-    const groupResult = await window.aht.devPlayerIpv4Groups();
-    playerIpv4Groups = Array.isArray(groupResult?.groups) ? groupResult.groups : [];
-
-    const downloads = [];
-    const seenCursors = new Set();
-    let cursor = "";
-    do {
-      const page = await window.aht.devLauncherDownloads({ limit: 250, cursor });
-      if (Array.isArray(page?.downloads)) downloads.push(...page.downloads);
-      els.loadDashboardButton.textContent = `Loading ${downloads.length}`;
-      const nextCursor = page?.hasMore ? String(page.cursor || "") : "";
-      if (!nextCursor) break;
-      if (seenCursors.has(nextCursor)) throw new Error("Download history pagination returned a repeated cursor.");
-      seenCursors.add(nextCursor);
-      cursor = nextCursor;
-      await new Promise((resolve) => requestAnimationFrame(resolve));
-    } while (true);
-
-    allDashboardEvents = downloads
-      .map(dashboardDownload)
+    els.loadDashboardButton.textContent = "Loading";
+    const [downloadsResult, playersResult, updatesResult] = await Promise.allSettled([
+      loadAllPlayerDataPages((payload) => window.aht.devLauncherDownloads(payload), "downloads"),
+      loadAllPlayerDataPages((payload) => window.aht.devPlayerRecords(payload), "players"),
+      loadAllPlayerDataPages((payload) => window.aht.devLauncherUpdates(payload), "updates")
+    ]);
+    const historyResults = [downloadsResult, playersResult, updatesResult];
+    const failureSummary = playerDataFailureSummary(historyResults);
+    if (historyResults.every((result) => result.status === "rejected")) throw new Error(failureSummary);
+    playerDownloadRecords = (downloadsResult.status === "fulfilled" ? downloadsResult.value : [])
+      .map(playerDataRecord)
       .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
-    const uniqueIpv4 = new Set(allDashboardEvents.map((item) => item.ip).filter(Boolean));
-    const sharedIpv4 = playerIpv4Groups.filter((group) => group.shared || Number(group.playerCount || 0) > 1);
-    const unavailable = allDashboardEvents.filter((item) => !item.ip);
-    els.downloadCount.textContent = String(allDashboardEvents.length);
-    els.uniqueIpv4Count.textContent = String(uniqueIpv4.size);
-    els.sharedIpv4Count.textContent = String(sharedIpv4.length);
-    els.ipv4UnavailableCount.textContent = String(unavailable.length);
+    canonicalPlayerRecords = (playersResult.status === "fulfilled" ? playersResult.value : [])
+      .map(playerDataRecord)
+      .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
+    launcherUpdateRecords = (updatesResult.status === "fulfilled" ? updatesResult.value : [])
+      .map(playerDataRecord)
+      .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
+    renderPlayerDataRows(els.playerDownloadsList, playerDownloadRecords, "downloads", "No installer downloads found.");
+    renderPlayerDataRows(els.playerRecordsList, canonicalPlayerRecords, "players", "No players found.");
+    renderPlayerDataRows(els.playerLauncherUpdatesList, launcherUpdateRecords, "updates", "No launcher updates found.");
     playerDataLoaded = true;
-    renderDashboardEvents(activeEventFilter);
-    showToast("Download history loaded", `${allDashboardEvents.length} permanent launcher downloads loaded.`, "success");
+    activatePlayerDataView(activePlayerDataView);
+    if (historyResults.some((result) => result.status === "rejected")) {
+      setDevLog(failureSummary);
+      showToast("Player data partially loaded", failureSummary, "warn");
+    } else {
+      showToast("Player data loaded", `${playerDownloadRecords.length} downloads, ${canonicalPlayerRecords.length} players, ${launcherUpdateRecords.length} launcher updates.`, "success");
+    }
   } catch (error) {
     const message = cleanErrorMessage(error);
     setDevLog(message);
-    showToast("Download history failed", message, "error");
+    showToast("Player data failed", message, "error");
   } finally {
     playerDataLoading = false;
     els.loadDashboardButton.innerHTML = originalMarkup;
@@ -3211,10 +2971,7 @@ function serializeSettings() {
       enabled: els.minecraftProfileEnabledInput.checked,
       rootDir: els.minecraftRootInput.value.trim(),
       profileName: els.minecraftProfileNameInput.value.trim(),
-      memoryMb: Number(els.minecraftMemoryInput.value || 6144),
-      java8InstallOverride: java8InstallOverrideDirty
-        ? java8InstallOverrideDraft
-        : java8InstallOverrideFromStatus()
+      memoryMb: Number(els.minecraftMemoryInput.value || 6144)
     },
     playCommand: {
       command: els.playCommandInput.value.trim(),
@@ -3261,7 +3018,6 @@ function fillSettings(status) {
   setInputValue(els.minecraftRootInput, config.minecraftLauncher?.rootDir || status.minecraftProfile?.rootDir || "");
   setInputValue(els.minecraftProfileNameInput, config.minecraftLauncher?.profileName || status.minecraftProfile?.profileName || "");
   setMemoryValue(config.minecraftLauncher?.memoryMb || 6144);
-  renderJava8Runtime(status);
   setInputValue(els.playCommandInput, config.playCommand?.command || "");
   setInputValue(els.playArgsInput, Array.isArray(config.playCommand?.args) ? config.playCommand.args.join(" ") : "");
   els.minecraftProfileEnabledInput.checked = config.minecraftLauncher?.enabled !== false;
@@ -3443,7 +3199,7 @@ function renderStatus(status) {
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
   setUnavailable(els.updateButton, launcherUpdateRequired || Boolean(status.updateBlockedReason) || !status.latest || !status.updateRequired || updateRunning);
-  setUnavailable(els.playButton, playBusy || launcherUpdateRequired || !status.launchReady || updateRunning);
+  setUnavailable(els.playButton, playBusy || updateRunning);
   setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
   els.updateButton.title = status.updateBlockedReason || (status.updateRequired ? "Update pack" : "No update available.");
   els.playButton.title = playBusy
@@ -3732,9 +3488,8 @@ async function scanFilesForRepair() {
     setUnavailable(els.scanButton, false);
     if (currentStatus) {
       const updateRunning = Boolean(lastUpdateState?.running);
-      const repairNeeded = (lastIntegrityScan?.counts?.corrupted || 0) > 0 || (lastIntegrityScan?.counts?.managed === 0 && Boolean(currentStatus.installed));
       setUnavailable(els.updateButton, Boolean(currentStatus.updateBlockedReason) || !currentStatus.latest || !currentStatus.updateRequired || updateRunning);
-      setUnavailable(els.playButton, playBusy || !currentStatus.launchReady || updateRunning || repairNeeded);
+      setUnavailable(els.playButton, playBusy || updateRunning);
     }
     if (scanCompleted) {
       const scanLog = currentLogText();
@@ -3744,8 +3499,27 @@ async function scanFilesForRepair() {
   }
 }
 
+async function openFolderPath(target = "", label = "Folder") {
+  const resolvedTarget = String(target || "").trim();
+  if (!resolvedTarget) {
+    showToast(`${label} unavailable`, "Choose a folder first.", "warn");
+    return false;
+  }
+  try {
+    const result = await window.aht.openPath(resolvedTarget);
+    const error = typeof result === "string" ? result : String(result?.error || "");
+    if (error || result?.ok === false) {
+      throw new Error(error || `${label} could not be opened.`);
+    }
+    return true;
+  } catch (error) {
+    showToast(`${label} could not be opened`, cleanErrorMessage(error), "error");
+    return false;
+  }
+}
+
 async function openCurrentInstance() {
-  if (currentStatus?.config?.instanceDir) await window.aht.openPath(currentStatus.config.instanceDir);
+  return openFolderPath(currentStatus?.config?.instanceDir || "", "Modpack folder");
 }
 
 async function applyRecommendedSetup() {
@@ -3851,6 +3625,7 @@ els.playButton.addEventListener("click", async () => {
   if (playBusy || isUnavailable(els.playButton)) return;
   const requestedPackKey = activeSidebarPack;
   const requestedPackName = requestedPackKey === "ptb" ? "A Hard Time PTB" : "A Hard Time";
+  if (els.copyLatestLaunchReportButton) els.copyLatestLaunchReportButton.hidden = true;
   setPlayBusy(true);
   setLog(`Preparing ${requestedPackName} and Minecraft Launcher...`);
   showToast("Preparing Minecraft Launcher", `Selecting the exact ${requestedPackName} installation.`, "info");
@@ -3862,6 +3637,10 @@ els.playButton.addEventListener("click", async () => {
       `${profileName} is prepared for launch. Click Play inside Minecraft Launcher.`,
       "success"
     );
+    if (els.copyLatestLaunchReportButton) {
+      els.copyLatestLaunchReportButton.hidden = false;
+      els.copyLatestLaunchReportButton.dataset.packKey = requestedPackKey;
+    }
   } catch (error) {
     const message = playerSafeErrorMessage(error);
     setLog(message);
@@ -3875,9 +3654,27 @@ els.playButton.addEventListener("click", async () => {
     setPlayBusy(false);
     if (currentStatus) {
       renderStatus(currentStatus);
+    } else {
+      setUnavailable(els.playButton, Boolean(lastUpdateState?.running));
+      els.playButton.title = "Run the launch checks and create a support report if anything fails.";
     }
   }
 });
+if (els.copyLatestLaunchReportButton) {
+  els.copyLatestLaunchReportButton.addEventListener("click", async () => {
+    if (isUnavailable(els.copyLatestLaunchReportButton)) return;
+    setUnavailable(els.copyLatestLaunchReportButton, true);
+    try {
+      await copyErrorReportFromToast({
+        title: "Launch diagnostics",
+        context: "play:start",
+        packKey: els.copyLatestLaunchReportButton.dataset.packKey || activeSidebarPack
+      });
+    } finally {
+      setUnavailable(els.copyLatestLaunchReportButton, false);
+    }
+  });
+}
 if (els.openInstanceFromPlayerButton) {
   els.openInstanceFromPlayerButton.addEventListener("click", () => openCurrentInstance());
 }
@@ -3926,42 +3723,24 @@ if (els.pickInstanceButton) {
     if (folder) els.instanceInput.value = folder;
   });
 }
+if (els.openInstancePathButton) {
+  els.openInstancePathButton.addEventListener("click", () => openFolderPath(
+    els.instanceInput.value.trim() || currentStatus?.config?.instanceDir || "",
+    "Modpack folder"
+  ));
+}
+if (els.openMinecraftRootPathButton) {
+  els.openMinecraftRootPathButton.addEventListener("click", () => openFolderPath(
+    els.minecraftRootInput.value.trim() || currentStatus?.config?.minecraftLauncher?.rootDir || "",
+    "Minecraft Launcher folder"
+  ));
+}
 els.pickMinecraftRootButton.addEventListener("click", async () => {
   const folder = await window.aht.selectFolder(els.minecraftRootInput.value.trim() || currentStatus?.config?.minecraftLauncher?.rootDir || "");
   if (folder) els.minecraftRootInput.value = folder;
 });
 if (els.minecraftMemoryInput) {
   els.minecraftMemoryInput.addEventListener("input", () => setMemoryValue(els.minecraftMemoryInput.value));
-}
-if (els.java8InstallInput) {
-  els.java8InstallInput.addEventListener("change", () => {
-    java8InstallOverrideDraft = Boolean(els.java8InstallInput.checked);
-    java8InstallOverrideDirty = true;
-    renderJava8Runtime(currentStatus);
-  });
-}
-if (els.copyLaunchDiagnosticsButton) {
-  els.copyLaunchDiagnosticsButton.addEventListener("click", async () => {
-    if (isUnavailable(els.copyLaunchDiagnosticsButton)) return;
-    setUnavailable(els.copyLaunchDiagnosticsButton, true);
-    try {
-      const result = await window.aht.copyErrorReport({
-        title: "AHT launch diagnostics",
-        context: "settings-java",
-        packKey: activeSidebarPack
-      });
-      const copiedChars = Math.max(0, Number(result?.chars) || 0);
-      showToast(
-        "Launch diagnostics copied",
-        copiedChars ? `${copiedChars} characters copied. Paste them into your support message.` : "Paste the copied report into your support message.",
-        "success"
-      );
-    } catch {
-      showToast("Copy failed", "Try again, then copy the visible Downloads log if the problem continues.", "warn");
-    } finally {
-      setUnavailable(els.copyLaunchDiagnosticsButton, false);
-    }
-  });
 }
 els.pickLatestButton.addEventListener("click", async () => {
   const file = await window.aht.selectJson();
@@ -4000,8 +3779,6 @@ els.saveSettingsButton.addEventListener("click", async () => {
   try {
     await saveDeveloperSecrets({ quiet: false });
     const result = await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
-    java8InstallOverrideDirty = false;
-    java8InstallOverrideDraft = null;
     await refresh();
     if (result?.profileUpdated) {
       showToast("Settings saved", "Minecraft Launcher profile was updated.", "success");
@@ -4115,11 +3892,11 @@ els.scanLauncherBuildsButton.addEventListener("click", () => scanLauncherBuilds(
 els.publishLauncherUpdateButton.addEventListener("click", () => publishLauncherUpdate());
 els.planServerTransferButton.addEventListener("click", () => planServerTransfer().catch(() => {}));
 els.uploadServerFilesButton.addEventListener("click", () => uploadServerFiles().catch(() => {}));
-els.loadDashboardButton.addEventListener("click", () => loadPlayerDownloadHistory());
-els.metricButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    renderDashboardEvents(button.dataset.eventFilter || "all");
-  });
+if (els.loadDashboardButton) {
+  els.loadDashboardButton.addEventListener("click", () => loadPlayerDownloadHistory());
+}
+els.playerDataTabs.forEach((tab) => {
+  tab.addEventListener("click", () => activatePlayerDataView(tab.dataset.playerDataView));
 });
 els.pickZipButton.addEventListener("click", async () => {
   const file = await window.aht.selectZip();
@@ -4569,11 +4346,18 @@ els.bucketInput.addEventListener("input", () => {
   updateReleaseUploadState();
 });
 
-refresh().then(() => loadLegalGate()).catch((error) => {
+void loadLegalGate();
+refresh().catch((error) => {
   const message = cleanErrorMessage(error);
   setBadge("Error", "bad");
   setLog(message);
-  showToast("Launcher error", message, "error");
+  setUnavailable(els.playButton, false);
+  els.playButton.title = "Run the launch checks and create a support report if anything fails.";
+  showToast("Launcher error", message, "error", {
+    context: "play:start",
+    packKey: activeSidebarPack,
+    copyLabel: "Click here to copy"
+  });
 });
 
 window.addEventListener("focus", () => {

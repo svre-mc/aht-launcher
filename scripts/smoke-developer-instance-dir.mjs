@@ -126,7 +126,12 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
 
 const child = spawn(electronBin, electronArgs, {
   cwd: process.cwd(),
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
+  env: {
+    ...process.env,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
+    ELECTRON_ENABLE_LOGGING: '0'
+  },
   stdio: 'ignore',
   windowsHide: true
 });

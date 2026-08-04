@@ -1,3 +1,10 @@
+export function launcherTelemetryPlatform(value = '') {
+  const platform = String(value || '').trim().toLowerCase();
+  if (platform === 'win32' || platform === 'win64' || platform.includes('windows')) return 'Windows';
+  if (platform === 'darwin' || platform === 'mac' || platform.startsWith('macos') || platform.includes('mac os')) return 'Mac';
+  return '';
+}
+
 export async function sendLauncherEvent(config, identity, event) {
   const baseUrl = config.sync?.baseUrl || config.developer?.adminBaseUrl || '';
   if (!baseUrl || config.sync?.enabled === false) {
@@ -10,8 +17,9 @@ export async function sendLauncherEvent(config, identity, event) {
     installId: identity.installId,
     playerLabel: identity.minecraftUsername || config.sync?.playerLabel || '',
     minecraftUsername: identity.minecraftUsername || '',
+    minecraftUuid: identity.minecraftUuid || identity.minecraftUUID || '',
     appVersion: identity.appVersion,
-    platform: identity.platform,
+    platform: launcherTelemetryPlatform(identity.platform),
     arch: identity.arch,
     packId: config.packId,
     event

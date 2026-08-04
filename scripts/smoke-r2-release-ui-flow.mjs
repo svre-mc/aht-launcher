@@ -320,6 +320,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_DEVELOPER_USERNAME: 'admin',
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     AHT_TEST_GITHUB_API_BASE: `${workerEndpoint}/github-api`,
     AHT_TEST_GITHUB_UPLOADS_BASE: `${workerEndpoint}/github-uploads`,
 

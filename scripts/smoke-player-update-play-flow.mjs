@@ -367,6 +367,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,

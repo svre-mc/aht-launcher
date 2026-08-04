@@ -93,6 +93,8 @@ try {
   await writeFile(instanceDir, 'mods/unapproved-extra.jar', 'remove me');
   await writeFile(instanceDir, 'mods/OpenTerrainGenerator/runtime/generated.dat', 'runtime data');
   await writeFile(instanceDir, 'saves/Player World/level.dat', 'world data');
+  await writeFile(instanceDir, 'logs/launcher/AHT-Launch-preserve.txt', 'launch diagnosis');
+  await writeFile(instanceDir, '.aht-launcher/account-recovery/player.json', 'secure recovery credential');
 
   await writeFile(sourceDir, 'mods/change.jar', 'change-v2');
   await writeFile(sourceDir, 'mods/add.jar', 'add-v2');
@@ -170,6 +172,8 @@ try {
   assert(await fileText(instanceDir, 'config/jei/bookmarks.ini') === 'player-bookmarks\n', 'JEI bookmarks were overwritten');
   assert(await fileText(instanceDir, 'mods/OpenTerrainGenerator/runtime/generated.dat') === 'runtime data', 'OpenTerrainGenerator runtime data was not preserved');
   assert(await fileText(instanceDir, 'saves/Player World/level.dat') === 'world data', 'player save was not preserved');
+  assert(await fileText(instanceDir, 'logs/launcher/AHT-Launch-preserve.txt') === 'launch diagnosis', 'AHT launch report history was not preserved by the delta swap');
+  assert(await fileText(instanceDir, '.aht-launcher/account-recovery/player.json') === 'secure recovery credential', 'launcher account recovery credential was not preserved by the delta swap');
 
   const installed = await readJsonFile(path.join(instanceDir, '.aht-launcher', 'installed.json'));
   assert(installed.version === '2.8.101' && installed.updateMode === 'delta', 'installed state did not record the delta target');

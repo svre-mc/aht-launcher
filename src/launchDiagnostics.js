@@ -7,9 +7,11 @@ export const LAUNCH_LOG_FILE_PREFIX = 'AHT-Launch-';
 export const LAUNCH_LOG_RETENTION = 30;
 
 const REQUIREMENTS = [
+  ['legal', 'Terms and Privacy consent'],
   ['instance', 'AHT instance folder'],
   ['installed', 'Installed AHT manifest'],
   ['releaseFeed', 'AHT release service'],
+  ['launcherVersion', 'AHT Launcher version'],
   ['integrity', 'Managed modpack files'],
   ['java8', '64-bit Java 8'],
   ['minecraftProfile', 'AHT Minecraft profile'],
@@ -159,11 +161,13 @@ function diagnoseFailedRequirement(attempt) {
   if (!failed) return null;
   const [key] = failed;
   const diagnoses = {
+    legal: ['The current Terms and Privacy notice has not been accepted.', ['Review the agreement shown by AHT Launcher.', 'Accept it before trying Play again.']],
     instance: ['The selected AHT instance folder is missing or unavailable.', ['Run Update in the AHT Launcher to restore the selected instance.', 'Do not delete saves or playerdata.']],
     installed: ['The AHT installation is incomplete or its installed manifest cannot be read.', ['Run Update or Repair in the AHT Launcher.', 'Keep the launcher open until verification completes.']],
     releaseFeed: ['The AHT release service is not configured or could not be checked.', ['Check the internet connection and try again.', 'Allow A Hard Time Launcher through firewall or security software if needed.']],
     integrity: ['One or more managed AHT files are missing or damaged.', ['Run Repair in the AHT Launcher.', 'Do not manually delete saves, playerdata, or configuration folders.']],
-    java8: ['A usable 64-bit Java 8 runtime was not detected.', ['Enable AHT-managed Adoptium Java 8 in Launcher Settings.', 'Run Update once, then try Play again.']],
+    launcherVersion: ['This AHT Launcher version is out of date.', ['Install the available AHT Launcher update.', 'Restart AHT Launcher, then try Play again.']],
+    java8: ['A usable 64-bit Java 8 runtime was not detected.', ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']],
     minecraftProfile: ['The exact AHT Minecraft Launcher profile is missing or incomplete.', ['Close Minecraft Launcher.', 'Run Update or Repair in the AHT Launcher.']],
     minecraftRuntime: ['Required Minecraft 1.12.2 or Forge files are missing or incomplete.', ['Close Minecraft Launcher.', 'Run Update or Repair in the AHT Launcher.']],
     launcherProof: ['A valid AHT launcher session proof is not available.', ['Check the internet connection and Minecraft username.', 'Try Play again to request a fresh proof.']],
@@ -185,7 +189,7 @@ function diagnoseMinecraftSignals(attempt) {
   if (/UnsupportedClassVersionError|Usage:\s*javaw|not a supported Java|Java version mismatch/i.test(signals)) {
     return {
       cause: 'Minecraft was started with an incompatible Java runtime.',
-      actions: ['Open Launcher Settings and enable AHT-managed Adoptium Java 8.', 'Run Update once, then try Play again.']
+      actions: ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']
     };
   }
   if (/OutOfMemoryError|Could not reserve enough space|insufficient memory/i.test(signals)) {
@@ -217,7 +221,7 @@ export function diagnoseLaunchFailure(attempt) {
       cause: 'The AHT Launcher completed its handoff to a verified Minecraft Launcher window.',
       actions: [
         'If Minecraft later exits after you click Play in the Minecraft Launcher, send this report together with the displayed exit code.',
-        'Use Copy launch diagnostics again after the exit so the latest Mojang Launcher signals are included.'
+        'After Minecraft exits, use Copy latest launch report in AHT Launcher so the newest Minecraft Launcher signals are included.'
       ]
     };
   }
@@ -268,7 +272,7 @@ export function diagnoseLaunchFailure(attempt) {
   if (key === 'java-profile-check' || /Java 8|javaw|64-bit Java/i.test(message)) {
     return {
       cause: 'A usable 64-bit Java 8 runtime was not available to the Minecraft profile.',
-      actions: ['Open Launcher Settings and enable AHT-managed Adoptium Java 8.', 'Run Update once, then try Play again.']
+      actions: ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']
     };
   }
   if (key === 'launcher-proof' || /proof|registered to this launcher/i.test(message)) {

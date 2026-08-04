@@ -298,9 +298,6 @@ try {
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#accountOverlay')", 'player DOM');
   const status = await waitFor(client, "window.aht.getStatus().then((status) => status.latest?.version === '9.9.9' ? status : false)", 'layout latest feed');
-  if (/curseforge[\\/]+minecraft[\\/]+install/i.test(String(status.config?.minecraftLauncher?.rootDir || ''))) {
-    throw new Error(`Player layout should not show a CurseForge Minecraft Launcher root by default: ${JSON.stringify(status.config?.minecraftLauncher)}`);
-  }
   const minecraftProfileProof = await waitFor(client, `
     (() => {
       const proof = {

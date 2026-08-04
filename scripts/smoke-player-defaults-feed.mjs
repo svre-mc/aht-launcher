@@ -15,7 +15,12 @@ const electronBin = smokeExe || (process.platform === 'win32'
   : path.resolve('node_modules', '.bin', 'electron'));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-defaults-'));
 const userData = path.join(root, 'userData');
+const fakeHome = path.join(root, 'home');
+const fakeAppData = path.join(root, 'appdata');
+const fakeLocalAppData = path.join(root, 'localappdata');
+const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const minecraftRoot = path.join(root, '.minecraft');
+const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const packagedDefaults = smokeExe ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
 const defaultsPath = packagedDefaults || tempDefaults;
@@ -132,7 +137,15 @@ const latest = {
   }
 };
 
+await fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true });
 await fsp.mkdir(minecraftRoot, { recursive: true });
+if (process.platform === 'win32') {
+  await fsp.mkdir(curseForgeRoot, { recursive: true });
+  await fsp.writeFile(path.join(curseForgeRoot, 'minecraft.exe'), 'CurseForge Minecraft Launcher fixture', 'utf8');
+  await writeJson(curseForgeStorageFile, {
+    'minecraft-settings': JSON.stringify({ minecraftRoot: path.dirname(curseForgeRoot) })
+  });
+}
 
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
@@ -183,8 +196,15 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    APPDATA: fakeAppData,
+    LOCALAPPDATA: fakeLocalAppData,
+    HOME: fakeHome,
+    USERPROFILE: fakeHome,
     AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
-    ELECTRON_ENABLE_LOGGING: '0'
+    ELECTRON_ENABLE_LOGGING: '0',
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
+    AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile
   },
   stdio: 'ignore',
   windowsHide: true
@@ -224,11 +244,12 @@ try {
     throw new Error(`Fresh player honored an unsafe persisted Minecraft shell command: ${JSON.stringify(status.config.minecraftLauncher)}`);
   }
   const launcherRoot = String(status.config.minecraftLauncher?.rootDir || '');
-  if (path.resolve(launcherRoot) !== path.resolve(minecraftRoot)) {
-    throw new Error(`Fresh player did not keep the isolated Minecraft Launcher root: ${JSON.stringify({ launcherRoot, minecraftRoot, config: status.config.minecraftLauncher })}`);
+  const expectedLauncherRoot = process.platform === 'win32' ? curseForgeRoot : minecraftRoot;
+  if (path.resolve(launcherRoot) !== path.resolve(expectedLauncherRoot)) {
+    throw new Error(`Fresh player did not select the preferred isolated Minecraft Launcher root: ${JSON.stringify({ launcherRoot, expectedLauncherRoot, config: status.config.minecraftLauncher })}`);
   }
-  if (/curseforge[\\/]+minecraft[\\/]+install/i.test(launcherRoot)) {
-    throw new Error(`Fresh player should prefer the normal Minecraft Launcher root over CurseForge: ${JSON.stringify(status.config.minecraftLauncher)}`);
+  if (process.platform === 'win32' && !/curseforge[\\/]+minecraft[\\/]+install/i.test(launcherRoot)) {
+    throw new Error(`Fresh player did not prefer the detected CurseForge Minecraft Launcher root: ${JSON.stringify(status.config.minecraftLauncher)}`);
   }
   const savedConfig = JSON.parse(fs.readFileSync(path.join(userData, 'launcher.config.json'), 'utf8'));
   if (savedConfig.latestUrl !== `${workerEndpoint}/latest.json`) {
@@ -240,8 +261,13 @@ try {
     throw new Error(`Saved first-run config persisted a legacy instance path: ${JSON.stringify({ leakedSavedInstanceFragments, savedConfig })}`);
   }
   const savedLauncherRoot = String(savedConfig.minecraftLauncher?.rootDir || '');
-  if (/curseforge[\\/]+minecraft[\\/]+install/i.test(savedLauncherRoot)) {
-    throw new Error(`Saved first-run config persisted a CurseForge launcher root: ${JSON.stringify(savedConfig.minecraftLauncher)}`);
+  if (path.resolve(savedLauncherRoot) !== path.resolve(expectedLauncherRoot)) {
+    throw new Error(`Saved first-run config did not persist the preferred Minecraft Launcher root: ${JSON.stringify(savedConfig.minecraftLauncher)}`);
+  }
+  const firstRunBackups = fs.readdirSync(userData)
+    .filter((entry) => entry.startsWith('launcher.config.json.aht-before-curseforge-') && entry.endsWith('.bak'));
+  if (firstRunBackups.length) {
+    throw new Error(`Fresh config unexpectedly created a migration backup: ${JSON.stringify(firstRunBackups)}`);
   }
   if (savedConfig.minecraftLauncher?.openCommand || savedConfig.minecraftLauncher?.openArgs?.length) {
     throw new Error(`Saved first-run config persisted an unsafe Minecraft shell command: ${JSON.stringify(savedConfig.minecraftLauncher)}`);

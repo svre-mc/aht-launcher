@@ -16,6 +16,9 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
+const fakeHome = path.join(root, 'home');
+const fakeAppData = path.join(root, 'appdata');
+const fakeLocalAppData = path.join(root, 'localappdata');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -196,6 +199,7 @@ await writeJson(defaultsPath, {
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 6144,
+    syncDefaultRoots: false,
     autoImportAccount: false,
     openCommand: process.execPath,
     openArgs: ['-e', '']
@@ -266,13 +270,19 @@ const server = http.createServer((request, response) => {
   response.end(Buffer.from('ok'));
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
+await fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true });
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    APPDATA: fakeAppData,
+    LOCALAPPDATA: fakeLocalAppData,
+    HOME: fakeHome,
+    USERPROFILE: fakeHome,
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',

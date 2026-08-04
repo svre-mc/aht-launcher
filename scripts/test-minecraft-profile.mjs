@@ -787,26 +787,42 @@ await fs.mkdir(macAuthRoot, { recursive: true });
 await fs.writeFile(path.join(macAuthRoot, 'launcher_accounts.json'), JSON.stringify({
   activeAccountLocalId: 'active',
   accounts: {
-    backup: { type: 'Xbox', minecraftProfile: { name: 'BackupMac' } },
-    active: { type: 'Xbox', minecraftProfile: { name: 'MacUser' } }
+    backup: { type: 'Xbox', minecraftProfile: { id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'BackupMac' } },
+    active: { type: 'Xbox', minecraftProfile: { id: '1234567890abcdef1234567890abcdef', name: 'MacUser' } }
   }
 }));
 const macAuth = await inspectMinecraftLauncherAuth(macAuthRoot);
-if (!macAuth.signedIn || macAuth.preferredUsername !== 'MacUser' || macAuth.accountCount !== 2) {
+if (
+  !macAuth.signedIn
+  || macAuth.preferredUsername !== 'MacUser'
+  || macAuth.preferredMinecraftUuid !== '12345678-90ab-cdef-1234-567890abcdef'
+  || macAuth.profiles[0]?.username !== 'MacUser'
+  || macAuth.accountCount !== 2
+) {
   throw new Error(`Expected active macOS launcher account, got ${JSON.stringify(macAuth)}`);
 }
 
 const macLegacyAuthRoot = path.join(root, 'mac-launcher-legacy-auth');
 await fs.mkdir(macLegacyAuthRoot, { recursive: true });
 await fs.writeFile(path.join(macLegacyAuthRoot, 'launcher_profiles.json'), JSON.stringify({
-  selectedUser: { account: 'legacy-active' },
+  selectedUser: { account: 'legacy-active', profile: 'fedcba0987654321fedcba0987654321' },
   authenticationDatabase: {
     other: { displayName: 'OtherMac' },
-    'legacy-active': { displayName: 'LegacyMac' }
+    'legacy-active': {
+      displayName: 'LegacyMac',
+      profiles: {
+        fedcba0987654321fedcba0987654321: { displayName: 'LegacyMac' }
+      }
+    }
   }
 }));
 const legacyAuth = await inspectMinecraftLauncherAuth('', { extraRoots: [macLegacyAuthRoot] });
-if (!legacyAuth.signedIn || legacyAuth.preferredUsername !== 'LegacyMac' || legacyAuth.accountCount !== 2) {
+if (
+  !legacyAuth.signedIn
+  || legacyAuth.preferredUsername !== 'LegacyMac'
+  || legacyAuth.preferredMinecraftUuid !== 'fedcba09-8765-4321-fedc-ba0987654321'
+  || legacyAuth.accountCount !== 2
+) {
   throw new Error(`Expected legacy macOS launcher account, got ${JSON.stringify(legacyAuth)}`);
 }
 
@@ -836,8 +852,8 @@ if (!homePageResult.ok || !homePageResult.changed || updatedLauncherUiSettings.l
 await fs.writeFile(path.join(curseForgeRoot, 'launcher_accounts.json'), JSON.stringify({
   activeAccountLocalId: 'active',
   accounts: {
-    backup: { type: 'Xbox', minecraftProfile: { name: 'BackupUser' } },
-    active: { type: 'Xbox', minecraftProfile: { name: 'ActiveUser' } }
+    backup: { type: 'Xbox', minecraftProfile: { id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', name: 'BackupUser' } },
+    active: { type: 'Xbox', minecraftProfile: { id: '0123456789abcdef0123456789abcdef', name: 'ActiveUser' } }
   }
 }));
 const curseForgeConfig = {
@@ -856,6 +872,9 @@ if (!curseForgeProfile.accountReuseAvailable || curseForgeProfile.accountCount !
 }
 if (curseForgeProfile.preferredMinecraftUsername !== 'ActiveUser') {
   throw new Error(`Expected active launcher account username, got ${curseForgeProfile.preferredMinecraftUsername}`);
+}
+if (curseForgeProfile.preferredMinecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef') {
+  throw new Error(`Expected active launcher account UUID, got ${curseForgeProfile.preferredMinecraftUuid}`);
 }
 const curseForgeProfiles = JSON.parse(await fs.readFile(path.join(curseForgeRoot, 'launcher_profiles.json'), 'utf8'));
 const curseForgeProfileJson = curseForgeProfiles.profiles['a-hard-time-dregora'];

@@ -314,7 +314,9 @@ const PLAYER_PRESERVED_DIRS = [
   'shaderpacks',
   'journeymap',
   'schematics',
-  'replay_videos'
+  'replay_videos',
+  'logs/launcher',
+  '.aht-launcher/account-recovery'
 ];
 const PLAYER_PRESERVED_FILES = [
   'servers.dat',

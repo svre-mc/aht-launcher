@@ -14,6 +14,10 @@ const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
 const requests = [];
+const recoverySecrets = new Map([
+  ['takenuser_1', 'TakenUser_secure_launcher_credential_000000000001'],
+  ['disabledprof', 'DisabledProf_secure_launcher_credential_0000000001']
+]);
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -138,7 +142,13 @@ const server = http.createServer(async (request, response) => {
     requests.push(body);
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     const duplicateUsernames = new Set(['takenuser_1', 'disabledprof']);
-    if (duplicateUsernames.has(String(body.username || '').toLowerCase()) && !(body.recoverExistingUsername && body.minecraftAccountMatched)) {
+    const normalizedUsername = String(body.username || '').toLowerCase();
+    const secureRecovery = Boolean(
+      body.recoverExistingUsername
+      && body.minecraftAccountMatched
+      && body.accountRecoverySecret === recoverySecrets.get(normalizedUsername)
+    );
+    if (duplicateUsernames.has(normalizedUsername) && !secureRecovery) {
       response.statusCode = 409;
       response.end(JSON.stringify({ error: 'That username is not available.' }));
       return;
@@ -167,7 +177,12 @@ await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
+  env: {
+    ...process.env,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
+    ELECTRON_ENABLE_LOGGING: '0'
+  },
   stdio: 'ignore',
   windowsHide: true
 });
@@ -234,6 +249,12 @@ try {
       }
     }
   });
+  await writeJson(path.join(instanceDir, '.aht-launcher', 'account-recovery', 'takenuser_1.json'), {
+    schemaVersion: 1,
+    username: 'TakenUser_1',
+    secret: recoverySecrets.get('takenuser_1'),
+    createdAt: '2026-08-03T00:00:00.000Z'
+  });
   const configPath = path.join(userData, 'launcher.config.json');
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   config.minecraftLauncher = {
@@ -261,6 +282,12 @@ try {
         minecraftProfile: { name: 'DisabledProf' }
       }
     }
+  });
+  await writeJson(path.join(instanceDir, '.aht-launcher', 'account-recovery', 'disabledprof.json'), {
+    schemaVersion: 1,
+    username: 'DisabledProf',
+    secret: recoverySecrets.get('disabledprof'),
+    createdAt: '2026-08-03T00:00:00.000Z'
   });
   config.minecraftLauncher = {
     ...config.minecraftLauncher,

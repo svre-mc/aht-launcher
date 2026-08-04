@@ -172,6 +172,8 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd()
@@ -246,8 +248,8 @@ try {
   if (!notInstalledProof.updateRequired || notInstalledProof.launchReady || !/Install the pack before playing/i.test(notInstalledProof.launchBlockedReason || '')) {
     throw new Error(`Developer not-installed modpack status should require Update before Play: ${JSON.stringify(notInstalledProof)}`);
   }
-  if (notInstalledProof.updateDisabled || !notInstalledProof.playDisabled) {
-    throw new Error(`Developer not-installed modpack should enable Update and keep Play disabled: ${JSON.stringify(notInstalledProof)}`);
+  if (notInstalledProof.updateDisabled || notInstalledProof.playDisabled) {
+    throw new Error(`Developer not-installed modpack should keep Play clickable so the failed attempt can create a support report: ${JSON.stringify(notInstalledProof)}`);
   }
 
   console.log(JSON.stringify({

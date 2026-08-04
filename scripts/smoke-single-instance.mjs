@@ -26,7 +26,12 @@ function sleep(ms) {
 function spawnApp(debugPort) {
   return spawn(electronBin, argsFor(debugPort), {
     cwd: electronCwd,
-    env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
+    env: {
+      ...process.env,
+      AHT_TEST_HOOKS: '1',
+      AHT_TEST_USER_DATA: userData,
+      ELECTRON_ENABLE_LOGGING: '0'
+    },
     stdio: 'ignore',
     windowsHide: true
   });

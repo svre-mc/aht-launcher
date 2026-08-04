@@ -133,6 +133,8 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
     AHT_DEVELOPER_USERNAME: 'admin',

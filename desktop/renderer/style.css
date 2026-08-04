@@ -935,6 +935,33 @@ h2 {
   min-width: 0;
 }
 
+.launch-report-action {
+  grid-column: 1 / -1;
+  justify-self: end;
+  appearance: none;
+  margin: -2px 2px 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--amber);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.launch-report-action:hover,
+.launch-report-action:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
+.launch-report-action.is-disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.7;
+}
+
 .summary-grid,
 .developer-grid,
 .form-grid {
@@ -1689,6 +1716,10 @@ textarea:focus {
   gap: 8px;
 }
 
+.browse.path-actions {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
 .settings-row,
 .button-row {
   display: flex;
@@ -2241,6 +2272,47 @@ body.dev-mode.dev-locked #developerLoginScreen {
   gap: 14px;
 }
 
+.player-data-section {
+  width: 100%;
+}
+
+.player-data-head {
+  align-items: end;
+}
+
+.player-data-tabs {
+  display: flex;
+  gap: 0;
+  margin-top: 12px;
+}
+
+.player-data-tab {
+  appearance: none;
+  min-height: 34px;
+  padding: 7px 12px;
+  border: 1px solid #2b3135;
+  background: #0c0f11;
+  color: #8f999e;
+  font: 700 12px var(--mono);
+  cursor: pointer;
+}
+
+.player-data-tab + .player-data-tab {
+  border-left: 0;
+}
+
+.player-data-tab:hover,
+.player-data-tab:focus-visible,
+.player-data-tab.active {
+  color: #f4f0e6;
+  border-bottom-color: #87b8d8;
+  background: #13191c;
+}
+
+.player-data-panel[hidden] {
+  display: none;
+}
+
 .update-log-fields {
   margin-bottom: 12px;
 }
@@ -2283,6 +2355,21 @@ body.dev-mode.dev-locked #developerLoginScreen {
   gap: 10px;
 }
 
+.event-table-head.player-download-table,
+.data-events.player-download-table .event {
+  grid-template-columns: 145px minmax(130px, 0.9fr) 138px minmax(245px, 1.35fr) 90px;
+}
+
+.event-table-head.launcher-download-table,
+.data-events.launcher-download-table .event {
+  grid-template-columns: 145px 138px 90px 92px minmax(250px, 1fr);
+}
+
+.event-table-head.player-update-table,
+.data-events.player-update-table .event {
+  grid-template-columns: 145px minmax(130px, 0.9fr) 138px minmax(245px, 1.35fr) 90px 92px;
+}
+
 .event-table-head {
   padding: 8px 10px;
   border: 1px solid #2b3135;
@@ -2300,6 +2387,20 @@ body.dev-mode.dev-locked #developerLoginScreen {
   overflow-y: scroll;
   overscroll-behavior: contain;
   font-size: 12px;
+}
+
+.player-data-panel .data-events {
+  min-height: 360px;
+  overflow-x: hidden;
+}
+
+.player-data-panel .data-events .event {
+  cursor: default;
+}
+
+.player-data-panel .data-events .event:hover {
+  border-color: #2b3135;
+  background: #0c0f11;
 }
 
 .data-events .event {
@@ -3331,6 +3432,21 @@ body.dev-mode .toast {
   body.dev-mode .event-table-head,
   body.dev-mode .data-events .event {
     grid-template-columns: 96px 118px minmax(90px, 1fr) 112px 72px 74px minmax(120px, 1fr);
+  }
+
+  body.dev-mode .event-table-head.player-download-table,
+  body.dev-mode .data-events.player-download-table .event {
+    grid-template-columns: 120px minmax(110px, 0.85fr) 120px minmax(220px, 1.35fr) 76px;
+  }
+
+  body.dev-mode .event-table-head.launcher-download-table,
+  body.dev-mode .data-events.launcher-download-table .event {
+    grid-template-columns: 120px 120px 76px 82px minmax(210px, 1fr);
+  }
+
+  body.dev-mode .event-table-head.player-update-table,
+  body.dev-mode .data-events.player-update-table .event {
+    grid-template-columns: 120px minmax(110px, 0.85fr) 120px minmax(220px, 1.35fr) 76px 82px;
   }
 }
 .modal-icon-button {

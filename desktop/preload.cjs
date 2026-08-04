@@ -67,6 +67,8 @@ const developerApi = {
   devEvents: (limit) => ipcRenderer.invoke('dev:events', limit),
   devLauncherDownloads: (payload) => ipcRenderer.invoke('dev:launcherDownloads', payload || {}),
   devPlayerIpv4Groups: () => ipcRenderer.invoke('dev:playerIpv4Groups'),
+  devPlayerRecords: (payload) => ipcRenderer.invoke('dev:playerRecords', payload || {}),
+  devLauncherUpdates: (payload) => ipcRenderer.invoke('dev:launcherUpdates', payload || {}),
   devUpdateLogs: (limit) => ipcRenderer.invoke('dev:updateLogs', limit),
   devPublishUpdateLog: (payload) => ipcRenderer.invoke('dev:publishUpdateLog', payload)
 };

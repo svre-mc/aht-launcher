@@ -20,6 +20,8 @@ const verifyLocalScript = fs.readFileSync(new URL('../scripts/verify-local.mjs',
 const smokePlayerDefaults = fs.readFileSync(new URL('../scripts/smoke-player-defaults-feed.mjs', import.meta.url), 'utf8');
 const smokePlayerLayout = fs.readFileSync(new URL('../scripts/smoke-player-layout.mjs', import.meta.url), 'utf8');
 const smokePlayerUpdatePlay = fs.readFileSync(new URL('../scripts/smoke-player-update-play-flow.mjs', import.meta.url), 'utf8');
+const smokePlayIntegrityGate = fs.readFileSync(new URL('../scripts/smoke-play-integrity-gate.mjs', import.meta.url), 'utf8');
+const smokeCloseDuringUpdate = fs.readFileSync(new URL('../scripts/smoke-close-during-update.mjs', import.meta.url), 'utf8');
 const smokeLauncherSelfUpdate = fs.readFileSync(new URL('../scripts/smoke-launcher-self-update.mjs', import.meta.url), 'utf8');
 const checkProductionReadiness = fs.readFileSync(new URL('../scripts/check-production-readiness.mjs', import.meta.url), 'utf8');
 const prepareLauncherUpdateScript = fs.readFileSync(new URL('../scripts/prepare-launcher-update.mjs', import.meta.url), 'utf8');
@@ -34,6 +36,14 @@ const legalConsentSource = fs.readFileSync(new URL('../src/legalConsent.js', imp
 const legalPanelSmoke = fs.readFileSync(new URL('../scripts/smoke-legal-consent-panel.mjs', import.meta.url), 'utf8');
 const termsText = fs.readFileSync(new URL('../legal/TERMS_OF_SERVICE.txt', import.meta.url), 'utf8');
 const privacyText = fs.readFileSync(new URL('../legal/PRIVACY_POLICY.txt', import.meta.url), 'utf8');
+const electronSmokeIsolationFailures = fs.readdirSync(new URL('./', import.meta.url))
+  .filter((name) => name.endsWith('.mjs') && name !== 'test-platform-build-configs.mjs')
+  .map((name) => ({ name, source: fs.readFileSync(new URL(name, import.meta.url), 'utf8') }))
+  .filter(({ source }) => source.includes('--user-data-dir') && (
+    !source.includes("AHT_TEST_HOOKS: '1'")
+    || !source.includes('AHT_TEST_USER_DATA: userData')
+  ))
+  .map(({ name }) => name);
 const packageScripts = packageJson.scripts || {};
 const playerDefaultsStart = desktopMain.indexOf('function playerDefaultsForCloud');
 const playerDefaultsEnd = desktopMain.indexOf('function playerDefaultsTargets');
@@ -130,9 +140,14 @@ assert(!windowsInstallerInclude.includes('"--developer"'), 'Public Windows insta
 assert(preloadScript.includes("selectFolder: (defaultPath = '') => ipcRenderer.invoke('dialog:folder', defaultPath)"), 'Folder picker preload API must accept a starting folder path.');
 assert(preloadScript.includes('function developerApiAllowed()') && preloadScript.includes("new URLSearchParams(window.location.search || '').get('mode') === 'developer'"), 'Preload developer APIs must be gated by the main-controlled developer window mode.');
 assert(preloadScript.includes('const developerApi = {') && preloadScript.includes('if (developerApiAllowed())'), 'Preload must keep developer IPC methods out of the default player API.');
-assert(preloadScript.includes("devLauncherDownloads: (payload) => ipcRenderer.invoke('dev:launcherDownloads'") && preloadScript.includes("devPlayerIpv4Groups: () => ipcRenderer.invoke('dev:playerIpv4Groups'"), 'Developer preload must expose permanent launcher-download history and IPv4 grouping only through developer IPC.');
-assert(workerSource.includes("const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/'") && workerSource.includes("const ACCOUNT_IPV4_PREFIX = 'accounts/ipv4/'") && workerSource.includes("'/admin/launcher-downloads'") && workerSource.includes("'/admin/player-ipv4-groups'"), 'Worker must keep launcher downloads and username-to-IPv4 associations in dedicated append-only histories.');
-assert(rendererApp.includes('while (true)') && rendererApp.includes('devLauncherDownloads({ limit: 250, cursor })') && rendererApp.includes('Download history pagination returned a repeated cursor'), 'Developer Player Data must page through the complete launcher download history safely.');
+assert(preloadScript.includes("devPlayerRecords: (payload) => ipcRenderer.invoke('dev:playerRecords'") && preloadScript.includes("devLauncherUpdates: (payload) => ipcRenderer.invoke('dev:launcherUpdates'"), 'Developer preload must expose current player records and launcher-update history only through developer IPC.');
+assert(workerSource.includes("const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/'") && workerSource.includes("'/admin/player-records'") && workerSource.includes("'/admin/launcher-updates'") && workerSource.includes('currentOnly: true'), 'Worker must expose canonical current players and dedicated launcher updates without historical IP joins.');
+assert(desktopMain.includes('preferredMinecraftUuid') && desktopMain.includes('minecraftUuid: detectedMinecraftUuid') && desktopMain.includes("type: 'launcher_update_completed'") && desktopMain.includes('result?.launcherUpdateKey'), 'Regular launcher identity must capture the active Minecraft UUID and record each confirmed launcher version through the dedicated update contract.');
+assert(workerSource.includes('recovered && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)') && desktopMain.includes('launcherVersionTelemetryInFlight.delete(key)'), 'Account recovery must require the stored Minecraft UUID, and transient launcher-update telemetry failures must be retryable in the same launcher process.');
+assert(rendererApp.includes('loadAllPlayerDataPages') && rendererApp.includes('window.aht.devLauncherDownloads(payload)') && rendererApp.includes('window.aht.devPlayerRecords(payload)') && rendererApp.includes('window.aht.devLauncherUpdates(payload)') && rendererApp.includes('Player data pagination returned a repeated cursor.'), 'Developer Player Data must safely page through installer downloads, canonical players, and launcher updates.');
+assert(rendererHtml.includes('id="playerDownloadsTab"') && rendererHtml.includes('id="playerRecordsTab"') && rendererHtml.includes('id="playerLauncherUpdatesTab"') && !rendererHtml.includes('Selected Download') && !rendererHtml.includes('Raw data') && !rendererApp.includes('JSON.stringify(item, null, 2)'), 'Player Data must use compact Downloads/Players/Launcher Updates tabs without a raw selected-record panel.');
+assert(rendererHtml.includes('<span>Date</span><span>IPv4</span><span>Platform</span><span>Version</span><span>File</span>') && rendererHtml.includes('<span>Registered</span><span>User</span><span>IPv4</span><span>MC UUID</span><span>Platform</span>') && rendererApp.includes('if (platform.includes("win")) return "Windows"') && rendererApp.includes('return "Mac";'), 'Player Data must keep anonymous installer downloads separate from professional verified-player fields and use short platform names.');
+assert(rendererApp.includes('function playerDataFailureSummary') && rendererApp.includes('setDevLog(failureSummary)') && rendererApp.includes('showToast("Player data partially loaded", failureSummary'), 'Mixed Player Data rollout failures must name each unavailable endpoint while leaving Reload available.');
 assert(rendererCss.includes('max-height: min(68vh, 760px)') && rendererCss.includes('overflow-y: scroll'), 'Developer launcher download history must remain fully scrollable.');
 assert(preloadScript.includes("devSaveServerTransfer: (payload) => ipcRenderer.invoke('dev:saveServerTransfer'"), 'Server folder settings must have a dedicated persistence IPC.');
 assert(desktopMain.includes('async function persistServerTransferSettings') && rendererApp.includes('await saveServerTransferSettings();') && rendererApp.includes('await planServerTransfer();'), 'Selecting a server folder must persist it and immediately produce an upload plan.');
@@ -168,6 +183,8 @@ for (const installedPlayerCheck of [
 
 assert(rendererApp.includes('window.aht.selectFolder(els.instanceInput.value.trim() || currentStatus?.config?.instanceDir || "")'), 'Modpack Folder Browse must open at the folder path currently listed in Game Settings.');
 assert(!rendererApp.includes('els.pickInstanceButton.addEventListener("click", async () => {\n    const folder = await window.aht.selectFolder();'), 'Modpack Folder Browse must not call selectFolder without a default path.');
+assert(rendererHtml.includes('id="openInstancePathButton"') && rendererHtml.includes('id="openMinecraftRootPathButton"') && rendererApp.includes('async function openFolderPath') && rendererApp.includes('result?.error'), 'Game Settings must provide professional Open controls for both exact folder paths and surface native open failures.');
+assert(rendererApp.includes('setUnavailable(els.playButton, playBusy || updateRunning)') && !rendererApp.includes('setUnavailable(els.playButton, playBusy || launcherUpdateRequired || !status.launchReady'), 'Blocked Play must remain clickable so main-process launch diagnostics can write a timestamped report and expose the copy action.');
 assert(!rendererApp.includes('Config error'), 'Renderer must not show the technical Config error label in player or developer UI.');
 assert(!rendererApp.includes('packageTarget') && !rendererApp.includes('build - ${platformProfile'), 'Renderer settings subtitle must not expose package/build target jargon in the player UI.');
 assert(!rendererApp.includes('server owner') && !desktopMain.includes('server owner'), 'Player-facing update/feed messages must not use internal server-owner wording.');
@@ -322,6 +339,7 @@ assert(checkProductionReadiness.includes('function nextRequiredStep') && checkPr
 assert(!checkProductionReadiness.includes("console.log('Next required step: run Developer > Setup Cloud after Cloudflare login, then re-run this check.');"), 'Production readiness must not always print the cloud setup next step for unrelated blockers.');
 assert(checkProductionReadiness.includes('live launcher update feed matches local version') && checkProductionReadiness.includes('liveLauncherVersion === localLauncherVersion'), 'Production readiness must block when the hosted launcher update feed is older than the local package version.');
 assert(checkProductionReadiness.includes('live launcher Windows download matches local artifact') && checkProductionReadiness.includes('localWindowsLauncherArtifact') && checkProductionReadiness.includes('liveWindowsSha === localWindowsSha') && checkProductionReadiness.includes('liveWindowsSize === localWindowsSize'), 'Production readiness must block when the hosted Windows launcher download hash/size differs from the local artifact.');
+assert(checkProductionReadiness.includes('api/launcher-proof/status') && checkProductionReadiness.includes('json.dedicatedConfigured === true') && checkProductionReadiness.includes('json.signingVerified === true') && workerSource.includes('const dedicatedConfigured = Boolean(env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET)') && !checkProductionReadiness.includes('AHTProofCheck') && !checkProductionReadiness.includes('api/users/register'), 'Production readiness must require the Worker read-only dedicated launcher-proof signing self-test without creating synthetic player records.');
 assert(checkProductionReadiness.includes('stalePackFeed && staleLauncherFeed') && checkProductionReadiness.includes('publish an exact AHT client ZIP release and a launcher update'), 'Production readiness must report both stale pack and launcher feed blockers when both are present.');
 assert(checkProductionReadiness.includes("from './validate-launcher-update-manifest.mjs'") && checkProductionReadiness.includes('function validateLauncherDownloads') && checkProductionReadiness.includes('validateLauncherUpdateManifest(manifest') && checkProductionReadiness.includes('live launcher update feed has Windows and macOS downloads'), 'Production readiness must use the reusable strict launcher manifest validator for live launcher update feeds.');
 assert(checkProductionReadiness.includes("names.includes('live launcher update feed has Windows and macOS downloads')"), 'Production readiness next-step guidance must route missing launcher downloads to a launcher update publish.');
@@ -344,6 +362,7 @@ assert(desktopMain.includes('updateBlockedReason') && rendererApp.includes('stat
 assert(smokePlayerUpdatePlay.includes('Legacy feed should be blocked before player install') && smokePlayerUpdatePlay.includes('Legacy feed started downloading pack files before being blocked'), 'Fresh-player smoke must prove legacy feeds are blocked before download.');
 assert(smokePlayerUpdatePlay.includes('function waitForCleanScanUiReset') && smokePlayerUpdatePlay.includes('clean scan UI reset after update') && smokePlayerUpdatePlay.includes("document.querySelector('#scanButton')?.click()") && smokePlayerUpdatePlay.includes("document.querySelector('#sidebarProgress')") && smokePlayerUpdatePlay.includes("last.badge === 'Ready' && last.diff === 'Clean' && last.progressHidden && !last.scanDisabled && !last.playDisabled"), 'Fresh-player smoke must prove a clean Scan returns the UI to Ready/Clean with progress hidden and buttons enabled.');
 assert(!installerSource.includes("from './clientModpackZip.js'") && installerSource.includes("from './clientPackFormat.js'"), 'Player installer must import full-client ZIP constants from packaged runtime source, not developer-only clientModpackZip.');
+assert(installerSource.includes("'logs/launcher'") && installerSource.includes("'.aht-launcher/account-recovery'"), 'Full and delta install swaps must preserve AHT launch reports and secure account-recovery credentials.');
 assert(checkProductionReadiness.includes('function forbiddenRuntimeImportHits') && checkProductionReadiness.includes('src/installer.js') && checkProductionReadiness.includes('clientModpackZip.js') && checkProductionReadiness.includes('includes required player runtime modules') && checkProductionReadiness.includes('src/clientPackFormat.js'), 'Production readiness must catch packaged ASAR runtime imports of missing developer-only modules.');
 const verifyScripts = [...verifyLocalScript.matchAll(/\['([^']+)'\]/g)].map((match) => match[1]);
 const missingVerifyScripts = verifyScripts.filter((name) => !packageScripts[name]);
@@ -415,6 +434,7 @@ assert(desktopMain.includes("'/Applications/Minecraft.app'"), 'macOS opener must
 assert(desktopMain.includes("'/Applications/Minecraft Launcher.app'"), 'macOS opener must try the legacy Minecraft Launcher.app path.');
 assert(desktopMain.includes("['-b', 'com.mojang.minecraftlauncher']") && desktopMain.includes("['-b', 'com.microsoft.minecraftlauncher']"), 'macOS opener must try Mojang and Microsoft Minecraft Launcher bundle IDs.');
 assert(desktopMain.includes("['-a', 'Minecraft']") && desktopMain.includes("['-a', 'Minecraft Launcher']"), 'macOS opener must fall back to both Minecraft app names.');
+assert(desktopMain.includes("[appPath, '--args', '--workDir', cwd]") && desktopMain.includes("[...args, '--args', '--workDir', cwd]"), 'macOS Minecraft Launcher routes must receive the detected launcher workDir.');
 assert(desktopMain.includes('async function existingLaunchCwd'), 'Minecraft Launcher opener must sanitize missing configured cwd before spawning.');
 assert(desktopMain.includes('const cwd = await existingLaunchCwd(requestedCwd);'), 'Minecraft Launcher opener must use a verified existing cwd.');
 assert(desktopMain.includes('async function openWindowsStoreMinecraftLauncher('), 'Windows Store Minecraft Launcher opener must be isolated.');
@@ -423,7 +443,31 @@ assert(desktopMain.includes('openWindowsStoreMinecraftLauncher(cwd, env, options
 assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = null)'), 'Launcher must gather all synced Minecraft profile roots before installing loaders.');
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');
 assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update and Play must install Forge into synced launcher roots.');
-assert(desktopMain.includes('function isCurseForgeMinecraftRoot') && desktopMain.includes('Number(a.fallback) - Number(b.fallback)') && desktopMain.includes("isCurseForgeMinecraftRoot(config.minecraftLauncher?.rootDir)"), 'Regular player setup must prefer normal Minecraft Launcher roots and migrate old CurseForge launcher roots.');
+assert(desktopMain.includes('process.env.AHT_TEST_USER_DATA || explicitUserDataDirArg()'), 'Launcher smoke hooks must honor an explicit --user-data-dir before reading or writing config.');
+assert(electronSmokeIsolationFailures.length === 0, `Electron smokes with --user-data-dir must force that exact isolated test path: ${electronSmokeIsolationFailures.join(', ')}`);
+assert(desktopMain.includes('function curseForgeStorageMinecraftRootCandidates()') && desktopMain.includes("'CurseForge', 'storage.json'"), 'Launcher must discover the configured CurseForge Minecraft root from storage.json.');
+assert(desktopMain.includes('const curseForgeRoot = await firstExistingCurseForgeMinecraftRoot(safeConfig);') && !desktopMain.includes('canAutoSelectCurseForge'), 'A valid CurseForge root must override stale regular and developer launcher roots.');
+assert(desktopMain.includes('runtimeCurseForgeRoot: curseForgeRoot') && desktopMain.includes('existingMinecraftLauncherFallbackRoots(safeConfig, curseForgeRoot)'), 'CurseForge-first Play must retain synchronized official fallback profile roots.');
+assert(desktopMain.includes("const desktopArgs = ['--workDir', cwd];"), 'Desktop Minecraft Launcher fallback must always receive the verified configured workDir without a command shell.');
+assert(desktopMain.includes("['minecraft.exe', 'minecraftlauncher.exe'].includes(captureImage)"), 'Windows handoff smoke capture must cover both root-local and desktop Minecraft Launcher executables.');
+assert(desktopMain.includes("'launcher-log-baseline'") && desktopMain.includes('signalsAfterBaseline') && desktopMain.includes('attempt.minecraftSignalBaseline'), 'Launch diagnostics must subtract pre-existing Minecraft Launcher errors from the current Play attempt.');
+assert(desktopMain.includes("'instance-log-baseline'") && desktopMain.includes('minecraftInstanceSignalDiagnostic') && desktopMain.includes('attempt.minecraftInstanceSignalBaseline') && smokePlayIntegrityGate.includes('stale.previous.Attempt') && smokePlayIntegrityGate.includes('current.attempt.Signal'), 'Launch diagnostics must subtract pre-existing instance latest.log/crash-report signals while retaining signals appended by the current attempt.');
+assert(
+  smokePlayIntegrityGate.includes("const desktopLauncherPath = path.join(fakeLocalAppData, 'Programs', 'Minecraft Launcher', 'MinecraftLauncher.exe');")
+  && smokePlayIntegrityGate.includes("desktopFallbackPlayResult.result?.kind !== 'desktop'")
+  && smokePlayIntegrityGate.includes("JSON.stringify(['--workDir', mcRoot])")
+  && smokePlayIntegrityGate.includes("fsp.rm(path.join(mcRoot, 'minecraft.exe'), { force: true })")
+  && smokePlayIntegrityGate.includes("'ProgramFiles(x86)': fakeProgramFilesX86"),
+  'Play smoke must behaviorally cover an isolated desktop MinecraftLauncher.exe fallback for a configured non-CurseForge root with no root-local launcher.'
+);
+assert(
+  ['APPDATA: fakeAppData', 'LOCALAPPDATA: fakeLocalAppData', 'HOME: fakeHome', 'USERPROFILE: fakeHome']
+    .every((fragment) => smokeCloseDuringUpdate.includes(fragment))
+  && smokeCloseDuringUpdate.includes('syncDefaultRoots: false'),
+  'Close-during-update smoke must never inherit or synchronize real host Minecraft profile roots.'
+);
+assert(desktopMain.includes('backupConfigBeforeCurseForgeMigration(file)') && desktopMain.includes('fsSync.constants.COPYFILE_EXCL'), 'Persisted CurseForge root self-heal must make a one-time rollback backup first.');
+assert(desktopMain.includes("process.env.AHT_TEST_OPEN_PATH_ECHO === '1'") && desktopMain.includes("ipcMain.handle('shell:openPath'") && desktopMain.includes('captured: true'), 'Open-folder IPC must expose a deterministic captured test contract without opening the OS shell.');
 assert(desktopMain.includes('const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();') && !desktopMain.includes("if (!rootDir || config.minecraftLauncher?.enabled === false)"), 'Minecraft account recovery must still inspect signed-in launcher accounts when the profile toggle is disabled or stale.');
 const forgeInstaller = fs.readFileSync(new URL('../src/forgeInstaller.js', import.meta.url), 'utf8');
 const minecraftLauncherProfileSource = fs.readFileSync(new URL('../src/minecraftLauncherProfile.js', import.meta.url), 'utf8');
@@ -474,11 +518,25 @@ assert(
 );
 assert(
   packagedPlayerDefaults.minecraftLauncher?.java8InstallOverride === null
-  && rendererHtml.includes('id="java8InstallInput"')
-  && rendererHtml.includes('AHT-managed Adoptium Java 8 (64-bit)')
-  && rendererApp.includes('java8InstallOverride: java8InstallOverrideDirty')
-  && rendererApp.includes('effectiveInstallSelected'),
-  'Player defaults and Settings must expose the nullable, detection-driven managed Java 8 checkbox contract.'
+  && windowsInstallerInclude.includes('Install Adoptium Java 8 if needed')
+  && windowsInstallerInclude.includes('Function AhtDetectJava8')
+  && windowsInstallerInclude.includes('Function AhtProbeJava8Executable')
+  && windowsInstallerInclude.includes('ReadEnvStr $8 "JAVA8_HOME"')
+  && windowsInstallerInclude.includes('ReadEnvStr $8 "JAVA_HOME"')
+  && windowsInstallerInclude.includes('Function AhtProbeJava8Path')
+  && windowsInstallerInclude.includes('${StrTok} $8 "$6" ";" "$4" "1"')
+  && windowsInstallerInclude.includes('$PROGRAMFILES64\\Microsoft')
+  && windowsInstallerInclude.includes('$PROGRAMFILES64\\Zulu')
+  && windowsInstallerInclude.includes('$PROGRAMFILES64\\BellSoft')
+  && windowsInstallerInclude.includes('$AhtJava8Found == "1"')
+  && windowsInstallerInclude.includes('installer-java8-selection.json')
+  && desktopMain.includes('readPendingInstallerJava8Selection')
+  && desktopMain.includes('markInstallerJava8SelectionConsumed')
+  && desktopMain.includes('java8InstallOverride: installerJava8Selection.allowManagedJava8')
+  && !rendererHtml.includes('id="java8InstallInput"')
+  && !rendererHtml.includes('id="java8RuntimeCard"')
+  && !rendererApp.includes('renderJava8Runtime'),
+  'The Windows installer must own the detection-driven Java 8 checkbox, while Game Settings stays free of Java runtime status UI.'
 );
 assert(
   minecraftLauncherProfileSource.includes('export async function ensureMinecraftLauncherAssets')

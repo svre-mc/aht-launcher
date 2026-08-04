@@ -192,7 +192,12 @@ await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
+  env: {
+    ...process.env,
+    AHT_TEST_HOOKS: '1',
+    AHT_TEST_USER_DATA: userData,
+    ELECTRON_ENABLE_LOGGING: '0'
+  },
   stdio: 'ignore',
   windowsHide: true
 });

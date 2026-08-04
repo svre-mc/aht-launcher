@@ -138,6 +138,7 @@ async function runDeveloperApp(port, task) {
       AHT_ALLOW_DEVELOPER: '1',
       AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
       AHT_TEST_HOOKS: '1',
+      AHT_TEST_USER_DATA: userData,
       AHT_DEVELOPER_VAULT_DIR: vaultDir,
       AHT_DEVELOPER_USERNAME: 'admin',
       AHT_DEVELOPER_PASSWORD: 'test-dev-password',

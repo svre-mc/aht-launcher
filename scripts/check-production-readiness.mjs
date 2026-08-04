@@ -419,43 +419,14 @@ function liveLauncherProofStatus(baseUrl) {
   }
   const script = [
     'const base = process.argv[1];',
-    'const username = "AHTProofCheck";',
-    'const installId = "aht-production-readiness-proof";',
-    'async function post(path, body) {',
-    '  const response = await fetch(new URL(path, base), {',
-    '    method: "POST",',
-    '    headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": "AHT production readiness" },',
-    '    body: JSON.stringify(body)',
+    '(async () => {',
+    '  const response = await fetch(new URL("api/launcher-proof/status", base), {',
+    '    method: "GET",',
+    '    headers: { Accept: "application/json", "User-Agent": "AHT production readiness" }',
     '  });',
     '  const json = await response.json().catch(async () => ({ error: await response.text().catch(() => "") }));',
-    '  return { response, json };',
-    '}',
-    '(async () => {',
-    '  const registration = await post("api/users/register", { username, installId, platform: process.platform, arch: process.arch, packId: "a-hard-time-dregora", appVersion: "readiness" });',
-    '  if (!registration.response.ok) throw new Error(`register ${registration.response.status}: ${registration.json.error || "failed"}`);',
-    '  const proof = await post("api/launcher-proof", {',
-    '    protocol: "aht-launcher-proof-v1",',
-    '    schemaVersion: 1,',
-    '    launchId: `readiness-${Date.now()}`,',
-    '    packId: "a-hard-time-dregora",',
-    '    packVersion: "readiness",',
-    '    latestVersion: "readiness",',
-    '    installedVersion: "readiness",',
-    '    minecraftUsername: username,',
-    '    installId,',
-    '    appVersion: "readiness",',
-    '    platform: process.platform,',
-    '    arch: process.arch,',
-    '    launcherChannel: "player",',
-    '    developerClient: false,',
-    '    developerClientBypass: false,',
-    '    modIntegrityBypass: false,',
-    '    instanceDirHash: "0".repeat(64),',
-    '    minecraft: { version: "1.12.2", modLoaders: [{ id: "forge-14.23.5.2860", primary: true }] }',
-    '  });',
-    '  const tokenParts = String(proof.json.token || "").split(".").length;',
-    '  const ok = proof.response.ok && proof.json.trusted === true && proof.json.source === "worker" && tokenParts === 3;',
-    '  console.log(JSON.stringify({ ok, status: proof.response.status, source: proof.json.source || "", trusted: Boolean(proof.json.trusted), tokenParts, error: proof.json.error || "" }));',
+    '  const ok = response.ok && json.ok === true && json.configured === true && json.dedicatedConfigured === true && json.keyId === "aht-launcher-proof-v1" && json.signingVerified === true;',
+    '  console.log(JSON.stringify({ ok, status: response.status, configured: Boolean(json.configured), dedicatedConfigured: json.dedicatedConfigured === true, keyId: json.keyId || "", signingVerified: json.signingVerified === true, error: json.error || "" }));',
     '  if (!ok) process.exitCode = 1;',
     '})().catch((error) => { console.log(JSON.stringify({ ok: false, status: 0, error: error.message || String(error) })); process.exitCode = 1; });'
   ].join('\n');
@@ -469,8 +440,8 @@ function liveLauncherProofStatus(baseUrl) {
     return {
       ok: Boolean(parsed.ok),
       detail: parsed.ok
-        ? `signed by ${parsed.source}; token parts ${parsed.tokenParts}`
-        : `${parsed.status || 0}: ${parsed.error || 'launcher proof signing failed'}`
+        ? `dedicated key ${parsed.keyId}; in-memory signing verified`
+        : `${parsed.status || 0}: ${parsed.error || (!parsed.dedicatedConfigured ? 'dedicated launcher proof secret is not configured' : 'launcher proof signing self-test failed')}`
     };
   } catch {
     return { ok: false, detail: commandDetail(`${result.stdout || ''}${result.stderr || ''}`, 'launcher proof request failed') };

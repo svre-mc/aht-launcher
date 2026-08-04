@@ -139,6 +139,10 @@ await fs.writeFile(path.join(installDir, 'replay_videos', 'run.mcpr'), 'replay d
 await fs.writeFile(path.join(installDir, 'servers.dat'), 'player server list', 'utf8');
 await fs.writeFile(path.join(installDir, 'servers.dat_old'), 'player old server list', 'utf8');
 await fs.writeFile(path.join(installDir, 'config', 'jei', 'bookmarks.ini'), 'player-bookmarks\n', 'utf8');
+await fs.mkdir(path.join(installDir, 'logs', 'launcher'), { recursive: true });
+await fs.writeFile(path.join(installDir, 'logs', 'launcher', 'AHT-Launch-preserve.txt'), 'launch diagnosis', 'utf8');
+await fs.mkdir(path.join(installDir, '.aht-launcher', 'account-recovery'), { recursive: true });
+await fs.writeFile(path.join(installDir, '.aht-launcher', 'account-recovery', 'player.json'), 'secure recovery credential', 'utf8');
 const staleSiblingStaging = path.join(root, '.install.aht-staging-crashed');
 const staleSiblingBackup = path.join(root, '.install.aht-backup-crashed');
 await fs.mkdir(staleSiblingStaging, { recursive: true });
@@ -189,6 +193,8 @@ assert(await fs.readFile(path.join(installDir, 'replay_videos', 'run.mcpr'), 'ut
 assert(await fs.readFile(path.join(installDir, 'servers.dat'), 'utf8') === 'player server list', 'server list was not preserved during clean repair');
 assert(await fs.readFile(path.join(installDir, 'servers.dat_old'), 'utf8') === 'player old server list', 'old server list was not preserved during clean repair');
 assert(await fs.readFile(path.join(installDir, 'config', 'jei', 'bookmarks.ini'), 'utf8') === 'player-bookmarks\n', 'JEI bookmarks were not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, 'logs', 'launcher', 'AHT-Launch-preserve.txt'), 'utf8') === 'launch diagnosis', 'AHT launch report history was not preserved during clean repair');
+assert(await fs.readFile(path.join(installDir, '.aht-launcher', 'account-recovery', 'player.json'), 'utf8') === 'secure recovery credential', 'launcher account recovery credential was not preserved during clean repair');
 const stateDownloads = await fs.readdir(path.join(installDir, '.aht-launcher', 'downloads'));
 assert(stateDownloads.some((name) => name.endsWith('.zip')), 'current pack ZIP cache was not carried into the clean install');
 const cachedPackPath = path.join(installDir, '.aht-launcher', 'downloads', stateDownloads.find((name) => name.endsWith('.zip')));
