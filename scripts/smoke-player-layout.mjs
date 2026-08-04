@@ -171,6 +171,12 @@ async function assertLayout(client, label) {
       const workspaceWidth = workspace?.clientWidth || 0;
       const contentWidthLimit = Math.min(1440, Math.max(0, workspaceWidth - 60));
       const oversizedContent = responsiveContent.filter((item) => item.width > contentWidthLimit + 2);
+      const launchStrip = document.querySelector('.launch-strip');
+      const workspaceRect = workspace?.getBoundingClientRect();
+      const launchRect = launchStrip?.getBoundingClientRect();
+      const launchBottomGap = workspaceRect && launchRect && visible(launchStrip)
+        ? Math.round(workspaceRect.bottom - launchRect.bottom)
+        : null;
       const visibleDeveloperText = !document.querySelector('#developerConsole')?.hidden && document.body.innerText.includes('Developer Console');
       return {
         label: ${JSON.stringify(label)},
@@ -182,6 +188,7 @@ async function assertLayout(client, label) {
         contentWidthLimit,
         responsiveContent,
         oversizedContent,
+        launchBottomGap,
         visibleDeveloperText,
         bodyText: document.body.innerText.slice(0, 1000)
       };
@@ -192,6 +199,7 @@ async function assertLayout(client, label) {
   if (report.clippedButtons.length) failures.push(`clipped buttons: ${JSON.stringify(report.clippedButtons.slice(0, 5))}`);
   if (report.critical.length) failures.push(`critical elements outside viewport: ${JSON.stringify(report.critical.slice(0, 5))}`);
   if (report.oversizedContent.length) failures.push(`responsive content exceeds its max width: ${JSON.stringify(report.oversizedContent.slice(0, 5))}`);
+  if (report.activeView === 'player' && report.launchBottomGap !== null && report.launchBottomGap > 24) failures.push(`launch strip is floating above the workspace bottom: ${report.launchBottomGap}px`);
   if (report.visibleDeveloperText) failures.push('developer console visible in player UI');
   if (/NSIS|DMG app|package target|build -/i.test(report.bodyText)) failures.push('technical package/build wording visible in player UI');
   if (/CurseForge|fallback cache|Exact AHT client ZIP/i.test(report.bodyText)) failures.push('technical release-source wording visible in player UI');
