@@ -133,6 +133,13 @@ if (process.platform === 'win32') {
   if (!script.includes('Get-Process -Id $processId -ErrorAction SilentlyContinue')) {
     throw new Error('Production snapshot does not distinguish an exited PID from a still-running unreadable process.');
   }
+  const targetedScript = buildWindowsMinecraftProcessSnapshotPowerShell({
+    includeStoreRoots: false,
+    processNames: ['minecraft.exe']
+  });
+  if (targetedScript.includes('Get-AppxPackage') || !targetedScript.includes("$names = @('minecraft')")) {
+    throw new Error('Targeted desktop/root snapshot did not remove Store lookup and unrelated launcher process scans.');
+  }
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   const captured = await new Promise((resolve, reject) => {
     const child = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {

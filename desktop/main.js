@@ -7631,7 +7631,7 @@ function registerTestWindowsLauncherProcess(executablePath) {
   writeTestWindowsProcessState(state);
 }
 
-async function windowsMinecraftLauncherProcessSnapshot() {
+async function windowsMinecraftLauncherProcessSnapshot(options = {}) {
   if (process.platform !== 'win32') return { currentSessionId: -1, packageRoots: [], records: [] };
   const testState = readTestWindowsProcessState();
   if (testState) {
@@ -7646,7 +7646,10 @@ async function windowsMinecraftLauncherProcessSnapshot() {
     '-NoProfile',
     '-NonInteractive',
     '-EncodedCommand',
-    encodedPowerShell(buildWindowsMinecraftProcessSnapshotPowerShell())
+    encodedPowerShell(buildWindowsMinecraftProcessSnapshotPowerShell({
+      includeStoreRoots: options.includeStoreRoots !== false,
+      processNames: options.processNames
+    }))
   ], { timeoutMs: 20_000 });
   const parsed = JSON.parse(String(result.stdout || '').trim() || '{}');
   return {
@@ -7877,8 +7880,15 @@ async function confirmWindowsMinecraftLauncherActivation(result, target = {}, ti
   let stableIdentity = '';
   let stableSince = 0;
   let lastSeen = [];
+  const targetProcessName = target.kind === 'root' || target.kind === 'desktop'
+    ? path.basename(String(target.executablePath || '')).replace(/\.exe$/i, '')
+    : '';
+  const snapshotOptions = {
+    includeStoreRoots: target.kind === 'store',
+    processNames: targetProcessName ? [targetProcessName] : undefined
+  };
   while (Date.now() < deadline) {
-    const snapshot = await windowsMinecraftLauncherProcessSnapshot();
+    const snapshot = await windowsMinecraftLauncherProcessSnapshot(snapshotOptions);
     const scopedTarget = {
       ...target,
       sessionId: target.sessionId ?? snapshot.currentSessionId,
@@ -7891,9 +7901,9 @@ async function confirmWindowsMinecraftLauncherActivation(result, target = {}, ti
       if (identity !== stableIdentity) {
         stableIdentity = identity;
         stableSince = Date.now();
-      } else if (Date.now() - stableSince >= 750) {
+      } else if (Date.now() - stableSince >= 250) {
         const focusResult = await focusWindowsMinecraftLauncher(candidate);
-        const focusReadback = await windowsMinecraftLauncherProcessSnapshot();
+        const focusReadback = await windowsMinecraftLauncherProcessSnapshot(snapshotOptions);
         const focusedCandidate = focusReadback.records.find((current) => windowsLauncherRecordIdentity(current) === windowsLauncherRecordIdentity(candidate));
         const visibleAndFocused = Boolean(
           focusResult.focused
@@ -7924,7 +7934,7 @@ async function confirmWindowsMinecraftLauncherActivation(result, target = {}, ti
       stableIdentity = '';
       stableSince = 0;
     }
-    await sleep(250);
+    await sleep(125);
   }
   const detail = lastSeen.length ? ` Found ${lastSeen.map(launcherRecordLabel).join('; ')}, but it did not present a responsive window.` : '';
   throw new Error(`Minecraft Launcher did not open a usable window.${detail} Repair or reinstall Minecraft Launcher, then click Play again.`);

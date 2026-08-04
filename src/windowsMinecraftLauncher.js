@@ -91,11 +91,25 @@ export function windowsLauncherTaskkillArgs(record = {}) {
   return ['/PID', String(normalized.pid)];
 }
 
-export function buildWindowsMinecraftProcessSnapshotPowerShell() {
-  const processNames = WINDOWS_MINECRAFT_LAUNCHER_IMAGES
-    .map((image) => path.win32.basename(image, '.exe'))
+export function buildWindowsMinecraftProcessSnapshotPowerShell(options = {}) {
+  const requestedProcessNames = Array.isArray(options.processNames) && options.processNames.length
+    ? options.processNames
+    : WINDOWS_MINECRAFT_LAUNCHER_IMAGES;
+  const processNames = requestedProcessNames
+    .map((image) => path.win32.basename(String(image || ''), '.exe'))
+    .filter(Boolean)
+    .filter((name, index, all) => all.findIndex((candidate) => candidate.toLowerCase() === name.toLowerCase()) === index)
     .map((name) => `'${name.replaceAll("'", "''")}'`)
     .join(',');
+  const packageRootLines = options.includeStoreRoots === false
+    ? ['$packageRoots = @()']
+    : [
+      '$packageRoots = @()',
+      "foreach ($package in @(Get-AppxPackage -Name 'Microsoft.4297127D64EC6' -ErrorAction SilentlyContinue)) {",
+      '  if ($package.InstallLocation) { $packageRoots += [System.IO.Path]::GetFullPath([string]$package.InstallLocation) }',
+      '}',
+      '$packageRoots = @($packageRoots | Sort-Object -Unique)'
+    ];
   return [
     "$ErrorActionPreference = 'Stop'",
     "$ProgressPreference = 'SilentlyContinue'",
@@ -112,11 +126,7 @@ export function buildWindowsMinecraftProcessSnapshotPowerShell() {
     '}',
     "'@",
     '$currentSessionId = (Get-Process -Id $PID).SessionId',
-    '$packageRoots = @()',
-    "foreach ($package in @(Get-AppxPackage -Name 'Microsoft.4297127D64EC6' -ErrorAction SilentlyContinue)) {",
-    '  if ($package.InstallLocation) { $packageRoots += [System.IO.Path]::GetFullPath([string]$package.InstallLocation) }',
-    '}',
-    '$packageRoots = @($packageRoots | Sort-Object -Unique)',
+    ...packageRootLines,
     `$names = @(${processNames})`,
     '$foregroundHandle = [AhtWindowProbe]::GetForegroundWindow()',
     '$records = @()',

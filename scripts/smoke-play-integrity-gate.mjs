@@ -483,12 +483,15 @@ try {
   }
   const failureUi = await waitFor(client, `(() => {
     const button = document.querySelector('#playButton');
+    const reportAction = document.querySelector('#copyLatestLaunchReportButton');
     const toast = [...document.querySelectorAll('#toastStack .toast.error')]
       .find((item) => /Launch failed/i.test(item.textContent));
     const copy = toast?.querySelector('button.toast-copy-action');
     return button.getAttribute('aria-busy') === 'false'
       && button.getAttribute('aria-disabled') === 'false'
       && button.textContent.trim() === 'Play'
+      && reportAction?.hidden === false
+      && reportAction.textContent.trim() === 'Copy latest launch report'
       && copy?.textContent.trim() === 'Click here to copy'
       ? { toast: toast.textContent.trim(), copyButtons: toast.querySelectorAll('button.toast-copy-action').length }
       : false;

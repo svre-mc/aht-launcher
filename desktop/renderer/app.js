@@ -3644,6 +3644,13 @@ els.playButton.addEventListener("click", async () => {
   } catch (error) {
     const message = playerSafeErrorMessage(error);
     setLog(message);
+    if (els.copyLatestLaunchReportButton) {
+      // Keep the report action available after a failed handoff as well as
+      // after a successful one. The saved report is the useful artifact
+      // support needs for either outcome.
+      els.copyLatestLaunchReportButton.hidden = false;
+      els.copyLatestLaunchReportButton.dataset.packKey = requestedPackKey;
+    }
     showToast("Launch failed", message, "error", {
       context: "play:start",
       packKey: requestedPackKey,
