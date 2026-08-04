@@ -792,8 +792,13 @@ async function manualLaunchDiagnostic(payload = {}) {
     } else {
       setLaunchRequirement(attempt, 'minecraftRuntime', 'WARN', 'Forge assets and libraries are fully verified during Play or Update.');
     }
-    const proofFile = launcherProofPath(config.instanceDir, config.launcherProof?.channel || 'player');
-    const proofExists = await pathExists(proofFile);
+    const proofFile = launcherProofPath(
+      config.instanceDir,
+      config.launcherProof?.channel || 'player',
+      config.launcherProof?.proofDir ? { proofDir: config.launcherProof.proofDir } : {}
+    );
+    const legacyProofFile = launcherProofPath(config.instanceDir, config.launcherProof?.channel || 'player');
+    const proofExists = (await pathExists(proofFile)) || (await pathExists(legacyProofFile));
     setLaunchRequirement(
       attempt,
       'launcherProof',
@@ -942,6 +947,10 @@ if (launchMode === 'developer') {
   if (!explicitUserDataDir) {
     app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher-developer'));
   }
+} else if (!explicitUserDataDir) {
+  // Keep the player identity/config location independent of the installer
+  // product name. This is the directory that survives launcher upgrades.
+  app.setPath('userData', path.join(app.getPath('appData'), 'aht-launcher'));
 }
 
 if (process.platform === 'win32') {
@@ -1851,7 +1860,16 @@ async function existingMinecraftLauncherFallbackRoots(config = {}, primaryRoot =
 }
 
 async function minecraftLauncherRuntimeConfig(config = {}) {
-  if (trustedMinecraftOpenCommandAllowed() && config.minecraftLauncher?.openCommand) return config;
+  const stableProofDir = path.join(app.getPath('userData'), '.aht-launcher');
+  if (trustedMinecraftOpenCommandAllowed() && config.minecraftLauncher?.openCommand) {
+    return {
+      ...config,
+      launcherProof: {
+        ...(config.launcherProof || {}),
+        proofDir: stableProofDir
+      }
+    };
+  }
   const safeConfig = config.minecraftLauncher?.openCommand
     ? {
       ...config,
@@ -1863,10 +1881,22 @@ async function minecraftLauncherRuntimeConfig(config = {}) {
     }
     : config;
   const curseForgeRoot = await firstExistingCurseForgeMinecraftRoot(safeConfig);
-  if (!curseForgeRoot) return safeConfig;
+  if (!curseForgeRoot) {
+    return {
+      ...safeConfig,
+      launcherProof: {
+        ...(safeConfig.launcherProof || {}),
+        proofDir: stableProofDir
+      }
+    };
+  }
   const fallbackRoots = await existingMinecraftLauncherFallbackRoots(safeConfig, curseForgeRoot);
   return {
     ...safeConfig,
+    launcherProof: {
+      ...(safeConfig.launcherProof || {}),
+      proofDir: stableProofDir
+    },
     minecraftLauncher: {
       ...(safeConfig.minecraftLauncher || {}),
       rootDir: curseForgeRoot,
@@ -2485,15 +2515,47 @@ async function applyRecommendedSetup() {
 
 async function loadIdentity() {
   const file = identityPath();
-  if (!(await pathExists(file))) {
-    const identity = {
-      installId: crypto.randomUUID(),
-      createdAt: new Date().toISOString()
-    };
-    await writeJsonFile(file, identity);
-    return identity;
+  const readIdentityCandidate = async (candidate) => {
+    if (!candidate || samePath(candidate, file) || !(await pathExists(candidate))) return null;
+    try {
+      const value = await readJsonFile(candidate);
+      return value && typeof value === 'object' && String(value.installId || '').trim() ? value : null;
+    } catch {
+      return null;
+    }
+  };
+  const legacyUserDataNames = isDeveloperMode()
+    ? ['aht-launcher-developer', 'A Hard Time Launcher Developer']
+    : ['A Hard Time Launcher Windows', 'A Hard Time Launcher', 'aht-launcher-stable'];
+  const legacyCandidates = legacyUserDataNames.map((name) => path.join(app.getPath('appData'), name, 'identity.json'));
+  let currentIdentity = null;
+  if (await pathExists(file)) {
+    try {
+      const identity = await readJsonFile(file);
+      if (identity && typeof identity === 'object' && String(identity.installId || '').trim()) {
+        currentIdentity = identity;
+        if (normalizeMinecraftUsername(identity.minecraftUsername)) return identity;
+      }
+    } catch {
+      // A corrupt identity is never overwritten; a legacy identity may still
+      // provide a safe, explicit migration source below.
+    }
   }
-  return readJsonFile(file);
+  for (const candidate of legacyCandidates) {
+    const migrated = await readIdentityCandidate(candidate);
+    if (migrated) {
+      const identity = currentIdentity ? { ...currentIdentity, ...migrated } : migrated;
+      await writeJsonFile(file, identity);
+      return identity;
+    }
+  }
+  if (currentIdentity) return currentIdentity;
+  const identity = {
+    installId: crypto.randomUUID(),
+    createdAt: new Date().toISOString()
+  };
+  await writeJsonFile(file, identity);
+  return identity;
 }
 
 function developerClientBypassAllowed() {
@@ -2653,7 +2715,10 @@ async function writeSerializedRegisteredLauncherProof({
     installed,
     minValidityMs
   });
-  const resolvedProofFile = path.resolve(launcherProofPath(config.instanceDir || '', expectedIdentity));
+  const legacyProofFile = launcherProofPath(config.instanceDir || '', expectedIdentity);
+  const resolvedProofFile = path.resolve(config.launcherProof?.proofDir
+    ? launcherProofPath(config.instanceDir || '', expectedIdentity, { proofDir: config.launcherProof.proofDir })
+    : legacyProofFile);
   const key = process.platform === 'win32' ? resolvedProofFile.toLowerCase() : resolvedProofFile;
   const previous = launcherProofRefreshes.get(key);
   const refresh = (async () => {
@@ -2672,7 +2737,7 @@ async function writeSerializedRegisteredLauncherProof({
 }
 
 async function socialRequestContext() {
-  const config = await loadConfig();
+  const config = await minecraftLauncherRuntimeConfig(await loadConfig());
   const identity = await identityPayload(config);
   let latest = null;
   let installed = null;
@@ -2797,19 +2862,34 @@ function accountRecoveryCredentialPath(config = {}, username = '') {
   if (!/^[a-z0-9_]{3,16}$/.test(normalizedUsername)) {
     throw new Error('A valid Minecraft username is required for launcher recovery.');
   }
-  return path.join(config.instanceDir || defaultInstanceDir(), '.aht-launcher', 'account-recovery', `${normalizedUsername}.json`);
+  // Account recovery is launcher identity, not pack data. Keep it outside the
+  // instance so pack moves, PTB/stable switches, and installer updates cannot
+  // strand a legitimate player's registration credential.
+  return path.join(app.getPath('userData'), 'account-recovery', `${normalizedUsername}.json`);
 }
 
 async function accountRecoverySecret(config = {}, username = '') {
   const file = accountRecoveryCredentialPath(config, username);
-  const existing = await readJsonFile(file).catch(() => null);
-  const existingSecret = String(existing?.secret || '').trim();
-  if (
-    Number(existing?.schemaVersion) === 1
-    && normalizeMinecraftUsername(existing?.username).toLowerCase() === normalizeMinecraftUsername(username).toLowerCase()
-    && /^[A-Za-z0-9_-]{32,200}$/.test(existingSecret)
-  ) {
-    return existingSecret;
+  const normalizedUsername = normalizeMinecraftUsername(username).toLowerCase();
+  const legacyFiles = [
+    path.join(config.instanceDir || defaultInstanceDir(), '.aht-launcher', 'account-recovery', `${normalizedUsername}.json`),
+    path.join(defaultPlayerInstanceDir(), '.aht-launcher', 'account-recovery', `${normalizedUsername}.json`),
+    path.join(defaultPtbInstanceDir(), '.aht-launcher', 'account-recovery', `${normalizedUsername}.json`)
+  ];
+  const candidates = [...new Set([file, ...legacyFiles].map((candidate) => path.resolve(candidate)))];
+  for (const candidate of candidates) {
+    const existing = await readJsonFile(candidate).catch(() => null);
+    const existingSecret = String(existing?.secret || '').trim();
+    if (
+      Number(existing?.schemaVersion) === 1
+      && normalizeMinecraftUsername(existing?.username).toLowerCase() === normalizedUsername
+      && /^[A-Za-z0-9_-]{32,200}$/.test(existingSecret)
+    ) {
+      if (!samePath(candidate, file)) {
+        await writeJsonFile(file, { ...existing, migratedAt: new Date().toISOString() });
+      }
+      return existingSecret;
+    }
   }
   const secret = crypto.randomBytes(32).toString('base64url');
   await writeJsonFile(file, {

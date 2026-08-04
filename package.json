@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.83",
+  "version": "0.1.84",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -77,6 +77,7 @@
     "dist:regular:macos": "electron-builder --config build/electron-builder.macos.cjs --mac --publish never",
     "pack": "electron-builder --dir",
     "test:launcher-proof": "node scripts/test-launcher-proof.mjs",
+    "test:launcher-proof-update-stability": "node scripts/test-launcher-proof-update-stability.mjs",
     "test:launch-diagnostics": "node scripts/test-launch-diagnostics.mjs",
     "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
   },

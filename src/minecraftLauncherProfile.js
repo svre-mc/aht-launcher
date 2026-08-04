@@ -232,7 +232,11 @@ function javaArgsFor({ config = {}, latest = null, installed = null, rootDir = '
   const args = [];
   args.push(`-Xmx${ram}m`, '-Xms512m');
   if (config.launcherProof?.enabled !== false && gameDir) {
-    args.push(...launcherProofJavaArgs(launcherProofPath(gameDir, config.launcherProof?.channel || 'player')));
+    args.push(...launcherProofJavaArgs(launcherProofPath(
+      gameDir,
+      config.launcherProof?.channel || 'player',
+      config.launcherProof?.proofDir ? { proofDir: config.launcherProof.proofDir } : {}
+    )));
   }
   if (gameDir) {
     args.push(

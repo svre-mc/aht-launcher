@@ -126,11 +126,20 @@ function launcherProofChannel(identityOrChannel = 'player') {
   return cleanString(value || 'player', 32).toLowerCase() === 'developer' ? 'developer' : 'player';
 }
 
-export function launcherProofPath(instanceDir = '', identityOrChannel = 'player') {
+export function launcherProofPath(instanceDir = '', identityOrChannel = 'player', options = {}) {
   const fileName = launcherProofChannel(identityOrChannel) === 'developer'
     ? DEVELOPER_LAUNCHER_PROOF_FILE_NAME
     : LAUNCHER_PROOF_FILE_NAME;
-  return path.join(instanceDir, '.aht-launcher', fileName);
+  const proofDir = String(options?.proofDir || '').trim();
+  return path.join(proofDir || path.join(instanceDir, '.aht-launcher'), fileName);
+}
+
+function launcherProofFiles(config = {}, identity = {}) {
+  const instanceProof = launcherProofPath(config.instanceDir || '', identity);
+  const configuredProof = config.launcherProof?.proofDir
+    ? launcherProofPath(config.instanceDir || '', identity, { proofDir: config.launcherProof.proofDir })
+    : instanceProof;
+  return [...new Set([configuredProof, instanceProof].map((file) => path.resolve(file)))];
 }
 
 export function launcherProofJavaArgs(proofFile = '') {
@@ -154,9 +163,16 @@ export async function inspectLauncherProof({
     return { enabled: false, usable: true, trusted: false, source: 'disabled', reason: '' };
   }
 
-  const proofFile = launcherProofPath(config.instanceDir || '', identity);
+  const proofFiles = launcherProofFiles(config, identity);
+  let proofFile = proofFiles[0];
+  for (const candidate of proofFiles) {
+    if (await pathExists(candidate)) {
+      proofFile = candidate;
+      break;
+    }
+  }
   if (!(await pathExists(proofFile))) {
-    return { enabled: true, usable: false, trusted: false, proofFile, reason: 'missing proof file' };
+    return { enabled: true, usable: false, trusted: false, proofFile, proofFiles, reason: 'missing proof file' };
   }
 
   let proof = null;
@@ -168,6 +184,7 @@ export async function inspectLauncherProof({
       usable: false,
       trusted: false,
       proofFile,
+      proofFiles,
       reason: `unreadable proof file: ${error.message || error}`
     };
   }
@@ -211,6 +228,7 @@ export async function inspectLauncherProof({
     enabled: true,
     usable: reasons.length === 0,
     proofFile: path.resolve(proofFile),
+    proofFiles,
     reason: reasons.join(', ')
   };
 }
@@ -360,7 +378,8 @@ export async function writeLauncherProof({ config = {}, identity = {}, latest = 
   if (config.launcherProof?.enabled === false) {
     return { enabled: false };
   }
-  const proofFile = launcherProofPath(config.instanceDir || '', identity);
+  const proofFiles = launcherProofFiles(config, identity);
+  const proofFile = proofFiles[0];
   const payload = buildLauncherProofPayload({ config, identity, latest, installed });
   let proof = null;
   let remoteError = '';
@@ -388,5 +407,16 @@ export async function writeLauncherProof({ config = {}, identity = {}, latest = 
     generatedAt: new Date().toISOString()
   };
   await writeJsonFile(proofFile, fileProof);
+  // Keep the pack-local copy as a compatibility mirror for older profiles and
+  // client reporters. The canonical copy lives in launcher user-data so an
+  // Electron installer update cannot orphan the proof path.
+  for (const compatibilityFile of proofFiles.slice(1)) {
+    if (compatibilityFile === proofFile) continue;
+    await writeJsonFile(compatibilityFile, {
+      ...fileProof,
+      proofFile: compatibilityFile,
+      javaProperties: launcherProofJavaArgs(compatibilityFile)
+    }).catch(() => {});
+  }
   return fileProof;
 }
