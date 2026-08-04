@@ -807,7 +807,18 @@ export async function resolveMinecraftProfileJavaPath(profile = {}, plan = {}, o
     const forced = await ensureManagedJava8Runtime(plan, { ...options, forceDownloadJava: true });
     if (forced) return forced;
   }
-  const detected = await detectJava8Runtime(profile, { ...options, refresh: true });
+  const explicitJavaPath = String(profile.javaPath || options.javaPath || '').trim();
+  if (explicitJavaPath && explicitJavaPath !== 'java' && path.isAbsolute(explicitJavaPath)) {
+    const configured = await inspectJavaRuntime(explicitJavaPath, {
+      ...options,
+      refresh: options.refreshJava === true
+    });
+    if (configured.usable) return configured.javaPath;
+  }
+  const detected = await detectJava8Runtime(profile, {
+    ...options,
+    refresh: true
+  });
   if (detected.usable) {
     return detected.javaPath;
   }
@@ -1196,7 +1207,10 @@ export async function minecraftJavaExecutable(javaPath = '') {
 
 export async function preflightJava8Runtime(javaPath = '', memoryMb = 4096, options = {}) {
   const executable = await forgeInstallerJavaExecutable(javaPath);
-  const inspected = await inspectJavaRuntime(executable, { ...options, refresh: true });
+  const inspected = await inspectJavaRuntime(executable, {
+    ...options,
+    refresh: options.reuseCachedProbe !== true
+  });
   if (!inspected.usable) {
     throw new Error(inspected.reason || 'The selected Java runtime is not a usable 64-bit Java 8 executable.');
   }

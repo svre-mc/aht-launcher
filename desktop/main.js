@@ -32,7 +32,6 @@ import {
   setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
 import {
-  clearJavaRuntimeDetectionCache,
   detectJava8Runtime,
   installForgeLoader,
   minecraftJavaExecutable,
@@ -3360,7 +3359,8 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
   }
   const javaRuntime = await preflightJava8Runtime(
     selectedJavaPath,
-    config.minecraftLauncher?.memoryMb || DEFAULT_MINECRAFT_MEMORY_MB
+    config.minecraftLauncher?.memoryMb || DEFAULT_MINECRAFT_MEMORY_MB,
+    { reuseCachedProbe: true }
   );
   if (operationState) {
     appendOperationLine(
@@ -3374,7 +3374,6 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
       java8InstallOverride: null
     }
   });
-  clearJavaRuntimeDetectionCache();
   const profileConfig = selectedJavaPath
     ? {
       ...config,
@@ -7903,16 +7902,11 @@ async function confirmWindowsMinecraftLauncherActivation(result, target = {}, ti
         stableSince = Date.now();
       } else if (Date.now() - stableSince >= 250) {
         const focusResult = await focusWindowsMinecraftLauncher(candidate);
-        const focusReadback = await windowsMinecraftLauncherProcessSnapshot(snapshotOptions);
-        const focusedCandidate = focusReadback.records.find((current) => windowsLauncherRecordIdentity(current) === windowsLauncherRecordIdentity(candidate));
         const visibleAndFocused = Boolean(
           focusResult.focused
           && focusResult.visible
           && !focusResult.minimized
           && Number(focusResult.foregroundPid) === candidate.pid
-          && focusedCandidate?.windowVisible
-          && !focusedCandidate?.windowMinimized
-          && focusedCandidate?.foreground
         );
         if (!visibleAndFocused) {
           throw new Error('Minecraft Launcher opened, but Windows did not make its window visible and active. Close Minecraft Launcher and click Play again.');
