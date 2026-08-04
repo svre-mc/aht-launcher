@@ -918,6 +918,24 @@ function launcherSocialView(state) {
   return view;
 }
 
+function mergeSocialPresence(previous, next) {
+  if (!previous || !Array.isArray(previous.friends)) return next;
+  const previousByUsername = new Map(previous.friends.map((friend) => [
+    String(friend?.username || '').toLowerCase(), friend
+  ]));
+  return {
+    ...next,
+    friends: next.friends.map((friend) => {
+      const old = previousByUsername.get(friend.username.toLowerCase());
+      if (!old) return friend;
+      const merged = { ...friend };
+      if (friend.online && !friend.onlineSince && old.onlineSince) merged.onlineSince = old.onlineSince;
+      if (!friend.online && !friend.lastSeenAt && old.lastSeenAt) merged.lastSeenAt = old.lastSeenAt;
+      return merged;
+    })
+  };
+}
+
 async function readSocialState(env, username) {
   if (!env.AHT_DATA) return null;
   const object = await env.AHT_DATA.get(socialStateKey(username));
@@ -1021,7 +1039,9 @@ async function synchronizeServerSocial(request, env, origin) {
   for (const candidate of snapshots) {
     const snapshot = normalizeServerSocialSnapshot(candidate);
     if (!snapshot) continue;
-    await env.AHT_DATA.put(socialStateKey(snapshot.username), JSON.stringify(snapshot), {
+    const previous = await readSocialState(env, snapshot.username);
+    const merged = mergeSocialPresence(previous, snapshot);
+    await env.AHT_DATA.put(socialStateKey(snapshot.username), JSON.stringify(merged), {
       httpMetadata: { contentType: 'application/json' }
     });
     storedSnapshots += 1;
