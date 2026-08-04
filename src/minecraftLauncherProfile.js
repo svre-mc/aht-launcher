@@ -14,6 +14,8 @@ import {
 import { launcherProofJavaArgs, launcherProofPath } from './launcherProof.js';
 import { findInstalledForgeVersion } from './forgeInstaller.js';
 
+const MIN_MINECRAFT_MEMORY_MB = 4096;
+
 export function defaultMinecraftRoot(platform = process.platform, env = process.env) {
   if (platform === 'win32') {
     const home = env.USERPROFILE || env.HOME || os.homedir();
@@ -211,11 +213,11 @@ function memoryMbFor(config = {}, latest = null, installed = null) {
   const recommended = Number(latest?.minecraft?.recommendedRam || installed?.minecraft?.recommendedRam);
   const value = Number.isFinite(configured)
     ? configured
-    : (Number.isFinite(recommended) ? recommended : 6144);
+    : (Number.isFinite(recommended) ? recommended : MIN_MINECRAFT_MEMORY_MB);
   if (!Number.isFinite(value)) {
-    return 6144;
+    return MIN_MINECRAFT_MEMORY_MB;
   }
-  return Math.max(6144, Math.min(32768, Math.round(value / 512) * 512));
+  return Math.max(MIN_MINECRAFT_MEMORY_MB, Math.min(32768, Math.round(value / 512) * 512));
 }
 
 async function backupInvalidJson(file = '') {

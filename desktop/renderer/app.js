@@ -3,6 +3,7 @@ const launchParams = new URLSearchParams(window.location.search);
 const bootDeveloperMode = launchParams.get("mode") === "developer";
 const LOG_TEXT_LIMIT = 24_000;
 const DEV_LOG_TEXT_LIMIT = 60_000;
+const DEFAULT_MEMORY_MB = 4096;
 
 function truncateLogText(text = "", limit = LOG_TEXT_LIMIT) {
   const value = String(text ?? "");
@@ -52,7 +53,7 @@ if (!window.aht) {
         rootDir: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft",
         profileId: "a-hard-time-dregora",
         profileName: "A Hard Time",
-        memoryMb: 6144,
+        memoryMb: DEFAULT_MEMORY_MB,
         java8InstallOverride: null
       },
       playCommand: { command: "", args: [] }
@@ -100,7 +101,7 @@ if (!window.aht) {
       installOverride: null,
       totalMemoryMb: 16384,
       freeMemoryMb: 8192,
-      configuredMemoryMb: 6144,
+      configuredMemoryMb: DEFAULT_MEMORY_MB,
       memoryWarning: ""
     },
     setup: {
@@ -151,7 +152,7 @@ if (!window.aht) {
       rootDir: "",
       profileId: "a-hard-time",
       profileName: "A Hard Time",
-      memoryMb: 6144,
+      memoryMb: DEFAULT_MEMORY_MB,
       java8InstallOverride: null
     };
     mockStatus.minecraftProfile = {
@@ -642,7 +643,6 @@ const els = {
   minecraftMemoryOutput: $("#minecraftMemoryOutput"),
   playCommandInput: $("#playCommandInput"),
   playArgsInput: $("#playArgsInput"),
-  platformTargetView: $("#platformTargetView"),
   minecraftProfileEnabledInput: $("#minecraftProfileEnabledInput"),
   syncEnabledInput: $("#syncEnabledInput"),
   sendChangesInput: $("#sendChangesInput"),
@@ -1492,6 +1492,12 @@ function setSettingsFeed(state, label, title, detail) {
   els.settingsFeedTitle.textContent = title;
   els.settingsFeedDetail.textContent = detail;
 }
+
+function packInstallState(status = currentStatus) {
+  if (!status?.installed?.version) return { state: "bad", label: "Uninstalled" };
+  if (status.updateRequired) return { state: "warn", label: "Outdated" };
+  return { state: "ok", label: "Updated" };
+}
 function isFirstPublishPending(status = currentStatus) {
   const error = String(status?.latestError || "");
   return Boolean(
@@ -1624,16 +1630,16 @@ function setInputValue(input, value, options = {}) {
 }
 
 function formatMemory(mb) {
-  const value = Number(mb || 6144);
-  const rounded = Math.max(6144, Math.min(32768, Math.round(value / 512) * 512));
+  const value = Number(mb || DEFAULT_MEMORY_MB);
+  const rounded = Math.max(DEFAULT_MEMORY_MB, Math.min(32768, Math.round(value / 512) * 512));
   return Number.isInteger(rounded / 1024) ? `${rounded / 1024} GB` : `${(rounded / 1024).toFixed(1)} GB`;
 }
 
 function setMemoryValue(mb) {
   if (!els.minecraftMemoryInput) return;
-  const value = Number(mb || 6144);
+  const value = Number(mb || DEFAULT_MEMORY_MB);
   const rounded = Math.max(
-    Number(els.minecraftMemoryInput.min || 6144),
+    Number(els.minecraftMemoryInput.min || DEFAULT_MEMORY_MB),
     Math.min(Number(els.minecraftMemoryInput.max || 16384), Math.round(value / 512) * 512)
   );
   els.minecraftMemoryInput.value = String(rounded);
@@ -2971,7 +2977,7 @@ function serializeSettings() {
       enabled: els.minecraftProfileEnabledInput.checked,
       rootDir: els.minecraftRootInput.value.trim(),
       profileName: els.minecraftProfileNameInput.value.trim(),
-      memoryMb: Number(els.minecraftMemoryInput.value || 6144)
+      memoryMb: Number(els.minecraftMemoryInput.value || DEFAULT_MEMORY_MB)
     },
     playCommand: {
       command: els.playCommandInput.value.trim(),
@@ -3017,7 +3023,7 @@ function fillSettings(status) {
   setInputValue(els.instanceInput, config.instanceDir || "");
   setInputValue(els.minecraftRootInput, config.minecraftLauncher?.rootDir || status.minecraftProfile?.rootDir || "");
   setInputValue(els.minecraftProfileNameInput, config.minecraftLauncher?.profileName || status.minecraftProfile?.profileName || "");
-  setMemoryValue(config.minecraftLauncher?.memoryMb || 6144);
+  setMemoryValue(config.minecraftLauncher?.memoryMb || DEFAULT_MEMORY_MB);
   setInputValue(els.playCommandInput, config.playCommand?.command || "");
   setInputValue(els.playArgsInput, Array.isArray(config.playCommand?.args) ? config.playCommand.args.join(" ") : "");
   els.minecraftProfileEnabledInput.checked = config.minecraftLauncher?.enabled !== false;
@@ -3102,11 +3108,6 @@ function renderStatus(status) {
   const installedVersion = status.installed?.version || null;
   const configured = Boolean(status.config.latestUrl);
   const installedLabel = installedVersion ? `v.${installedVersion}` : "Not Installed";
-  const platformProfile = status.platformProfile || {};
-  if (els.platformTargetView) {
-    const platformName = platformProfile.displayName || "This device";
-    els.platformTargetView.textContent = `${platformName} install and Minecraft Launcher profile settings.`;
-  }
   els.versionLine.textContent = installedLabel;
   if (els.launcherVersionLabel) els.launcherVersionLabel.textContent = launcherVersion;
   els.installedVersion.textContent = installedVersion || "Not Installed";
@@ -3152,14 +3153,13 @@ function renderStatus(status) {
     );
   } else if (status.latest) {
     const fullClientZip = status.latest.installMode === "full-client-zip" || status.latest.zipFormat === "aht-full-client-zip";
+    const installState = packInstallState(status);
     if (!status.developerMode && status.updateBlockedReason) {
-      setSettingsFeed("warn", "Update unavailable", "Waiting for verified package", status.updateBlockedReason);
+      setSettingsFeed(installState.state, "Latest Release", `${displayPackName(status.latest.name || "Pack")} ${latestVersion}`, installState.label);
     } else {
       const modCount = status.latest.curseforge?.fileCount;
-      const detail = status.developerMode
-        ? `${fullClientZip ? "Exact AHT client ZIP" : (Number.isFinite(modCount) ? `${modCount} CurseForge files` : "CurseForge manifest ready")}; ${fullClientZip ? "no CurseForge fallback needed" : (status.latest.cacheManifest ? "fallback cache listed" : "no fallback cache listed")}.`
-        : "Verified AHT package ready.";
-      setSettingsFeed("ok", "Feed connected", `${displayPackName(status.latest.name || "Pack")} ${latestVersion}`, detail);
+      const technicalDetail = `${fullClientZip ? "Exact AHT client ZIP" : (Number.isFinite(modCount) ? `${modCount} CurseForge files` : "CurseForge manifest ready")}; ${fullClientZip ? "no CurseForge fallback needed" : (status.latest.cacheManifest ? "fallback cache listed" : "no fallback cache listed")}.`;
+      setSettingsFeed(installState.state, "Latest Release", `${displayPackName(status.latest.name || "Pack")} ${latestVersion}`, status.developerMode ? `${installState.label}; ${technicalDetail}` : installState.label);
     }
   } else {
     setSettingsFeed("warn", "Feed pending", "Waiting for latest.json", "Save settings or test the feed.");
@@ -3759,10 +3759,10 @@ els.testFeedButton.addEventListener("click", async () => {
     const modCount = result.latest?.curseforgeFileCount;
     const detail = currentStatus?.developerMode
       ? `${fullClientZip ? "Exact AHT client ZIP" : (Number.isFinite(modCount) ? `${modCount} CurseForge files` : "CurseForge manifest ready")}; ${fullClientZip ? "no CurseForge fallback needed" : (result.latest?.hasCacheManifest ? "fallback cache available" : "fallback cache not listed")}.`
-      : "Verified AHT package ready.";
+      : packInstallState(currentStatus).label;
     setSettingsFeed(
-      "ok",
-      "Feed connected",
+      packInstallState(currentStatus).state,
+      "Latest Release",
       `${displayPackName(result.latest?.name || "Pack")} ${result.latest?.version || ""}`.trim(),
       detail
     );

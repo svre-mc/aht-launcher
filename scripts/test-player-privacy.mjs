@@ -321,7 +321,8 @@ try {
   if (settingsProof.statusBadge === 'Config error') {
     throw new Error(`Player settings showed Config error: ${JSON.stringify(settingsProof)}`);
   }
-  if (!settingsProof.settingsFeedText.includes('A Hard Time 9.9.9') || settingsProof.settingsFeedText.includes('Dregora') || !settingsProof.settingsFeedText.includes('Verified AHT package ready.')) {
+  const normalizedFeedText = settingsProof.settingsFeedText.toLowerCase();
+  if (!settingsProof.settingsFeedText.includes('A Hard Time 9.9.9') || settingsProof.settingsFeedText.includes('Dregora') || !normalizedFeedText.includes('latest release') || !normalizedFeedText.includes('uninstalled')) {
     throw new Error(`Player settings did not sanitize the public pack display name: ${JSON.stringify(settingsProof.settingsFeedText)}`);
   }
 

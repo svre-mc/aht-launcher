@@ -1194,13 +1194,13 @@ export async function minecraftJavaExecutable(javaPath = '') {
   return path.resolve(configured);
 }
 
-export async function preflightJava8Runtime(javaPath = '', memoryMb = 6144, options = {}) {
+export async function preflightJava8Runtime(javaPath = '', memoryMb = 4096, options = {}) {
   const executable = await forgeInstallerJavaExecutable(javaPath);
   const inspected = await inspectJavaRuntime(executable, { ...options, refresh: true });
   if (!inspected.usable) {
     throw new Error(inspected.reason || 'The selected Java runtime is not a usable 64-bit Java 8 executable.');
   }
-  const heapMb = Math.max(1024, Math.floor(Number(memoryMb) || 6144));
+  const heapMb = Math.max(1024, Math.floor(Number(memoryMb) || 4096));
   if (typeof options.javaHeapProbe === 'function') {
     await options.javaHeapProbe(executable, heapMb, inspected);
     return { ...inspected, heapMb, heapReady: true };

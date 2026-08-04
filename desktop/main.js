@@ -92,6 +92,7 @@ import {
 } from '../src/utils.js';
 
 const DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS = ['mods', 'scripts', 'config', 'ForgeEssentials'];
+const DEFAULT_MINECRAFT_MEMORY_MB = 4096;
 const LAUNCHER_WORKFLOW_DEFAULTS = {
   repo: 'svre-mc/aht-launcher',
   branch: 'main',
@@ -1570,7 +1571,7 @@ function defaultConfig() {
       rootDir: defaultMinecraftRoot(),
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
-      memoryMb: 6144,
+      memoryMb: DEFAULT_MINECRAFT_MEMORY_MB,
       java8InstallOverride: null
     },
     playCommand: {
@@ -2214,8 +2215,8 @@ async function loadConfig() {
       console.warn(`Unable to back up launcher settings before selecting CurseForge: ${error.message || error}`);
     }
   }
-  if (!Number.isFinite(Number(stored.minecraftLauncher?.memoryMb)) || Number(stored.minecraftLauncher?.memoryMb) < 6144) {
-    config.minecraftLauncher.memoryMb = 6144;
+  if (!Number.isFinite(Number(stored.minecraftLauncher?.memoryMb)) || Number(stored.minecraftLauncher?.memoryMb) < DEFAULT_MINECRAFT_MEMORY_MB) {
+    config.minecraftLauncher.memoryMb = DEFAULT_MINECRAFT_MEMORY_MB;
     changed = true;
   }
   if (installerJava8Selection) {
@@ -3359,7 +3360,7 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
   }
   const javaRuntime = await preflightJava8Runtime(
     selectedJavaPath,
-    config.minecraftLauncher?.memoryMb || 6144
+    config.minecraftLauncher?.memoryMb || DEFAULT_MINECRAFT_MEMORY_MB
   );
   if (operationState) {
     appendOperationLine(
@@ -5483,7 +5484,7 @@ function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '', cac
       enabled: true,
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
-      memoryMb: 6144,
+      memoryMb: DEFAULT_MINECRAFT_MEMORY_MB,
       java8InstallOverride: null
     }
   };

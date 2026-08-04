@@ -171,6 +171,11 @@ async function assertLayout(client, label) {
       const workspaceWidth = workspace?.clientWidth || 0;
       const contentWidthLimit = Math.max(0, workspaceWidth - 60);
       const oversizedContent = responsiveContent.filter((item) => item.width > contentWidthLimit + 2);
+      const settingsPanel = document.querySelector('.settings-panel');
+      const settingsPanelRect = settingsPanel?.getBoundingClientRect();
+      const settingsWidthShortfall = document.querySelector('.view.active')?.id === 'settings' && settingsPanelRect && visible(settingsPanel)
+        ? Math.round(contentWidthLimit - settingsPanelRect.width)
+        : null;
       const heroPanel = document.querySelector('.hero-panel');
       const newsGrid = document.querySelector('.news-grid');
       const heroRect = heroPanel?.getBoundingClientRect();
@@ -195,6 +200,7 @@ async function assertLayout(client, label) {
         contentWidthLimit,
         responsiveContent,
         oversizedContent,
+        settingsWidthShortfall,
         newsBottomGap,
         launchBottomGap,
         visibleDeveloperText,
@@ -207,6 +213,7 @@ async function assertLayout(client, label) {
   if (report.clippedButtons.length) failures.push(`clipped buttons: ${JSON.stringify(report.clippedButtons.slice(0, 5))}`);
   if (report.critical.length) failures.push(`critical elements outside viewport: ${JSON.stringify(report.critical.slice(0, 5))}`);
   if (report.oversizedContent.length) failures.push(`responsive content exceeds its max width: ${JSON.stringify(report.oversizedContent.slice(0, 5))}`);
+  if (report.settingsWidthShortfall !== null && report.settingsWidthShortfall > 2) failures.push(`settings panel does not fill the responsive content width: ${report.settingsWidthShortfall}px short`);
   if (report.activeView === 'player' && report.newsBottomGap !== null && report.newsBottomGap > 8) failures.push(`news cards are floating above the hero bottom: ${report.newsBottomGap}px`);
   if (report.activeView === 'player' && report.launchBottomGap !== null && report.launchBottomGap > 24) failures.push(`launch strip is floating above the workspace bottom: ${report.launchBottomGap}px`);
   if (report.visibleDeveloperText) failures.push('developer console visible in player UI');
