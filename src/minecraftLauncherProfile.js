@@ -836,6 +836,47 @@ async function readProfiles(file) {
   return readRepairableJsonFile(file, {});
 }
 
+async function prepareMinecraftLauncherQuickPlay(rootDir = '', profileId = '') {
+  const normalizedRoot = String(rootDir || '').trim();
+  const normalizedProfileId = String(profileId || '').trim();
+  const quickPlayFile = path.join(normalizedRoot, 'launcher_quick_play.json');
+  const accountsFile = path.join(normalizedRoot, 'launcher_accounts.json');
+  if (!normalizedRoot || !normalizedProfileId || !(await pathExists(quickPlayFile)) || !(await pathExists(accountsFile))) {
+    return { ok: true, changed: false, skipped: true, quickPlayFile };
+  }
+
+  const quickPlay = await readRepairableJsonFile(quickPlayFile, null);
+  const accounts = await readRepairableJsonFile(accountsFile, null);
+  const activeAccountLocalId = String(accounts?.activeAccountLocalId || '').trim();
+  const activeAccount = activeAccountLocalId ? accounts?.accounts?.[activeAccountLocalId] : null;
+  const remoteAccountId = String(activeAccount?.remoteId || '').trim();
+  if (!quickPlay || typeof quickPlay !== 'object' || !remoteAccountId) {
+    return { ok: true, changed: false, skipped: true, quickPlayFile, reason: 'active Minecraft account is unavailable' };
+  }
+
+  const quickPlayData = quickPlay.quickPlayData && typeof quickPlay.quickPlayData === 'object'
+    ? quickPlay.quickPlayData
+    : {};
+  const existing = Array.isArray(quickPlayData[remoteAccountId]) ? quickPlayData[remoteAccountId] : [];
+  const next = existing.filter((entry) => String(entry?.javaInstance?.configId || '') !== normalizedProfileId);
+  next.unshift({
+    epochLastPlayedTimeMs: Date.now(),
+    id: normalizedProfileId,
+    javaInstance: { configId: normalizedProfileId },
+    source: 'Java'
+  });
+  quickPlay.quickPlayData = quickPlayData;
+  quickPlay.quickPlayData[remoteAccountId] = next;
+  await writeJsonFile(quickPlayFile, quickPlay);
+  return {
+    ok: true,
+    changed: true,
+    quickPlayFile,
+    remoteAccountId,
+    profileId: normalizedProfileId
+  };
+}
+
 export async function setMinecraftLauncherHomePage(rootDir = '') {
   const file = path.join(String(rootDir || ''), 'launcher_ui_state.json');
   if (!rootDir || !(await pathExists(file))) {
@@ -1010,6 +1051,9 @@ function updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable,
   if (selectForPlay && legacySelectionSchema) {
     profiles.selectedProfile = state.profileId;
   }
+  if (selectForPlay && !legacySelectionSchema) {
+    profiles.selectedProfile = state.profileId;
+  }
 }
 
 async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = {}) {
@@ -1052,21 +1096,19 @@ async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = 
     delete profiles.profiles['a-hard-time'];
   }
   if (selectForPlay) {
-    // Mojang 3.x selects the newest pre-launch profile. Reinsert it last just
-    // as CurseForge does; the helper below removes only AHT-owned legacy
-    // selectedProfile state while preserving unrelated launcher state.
+    // Keep both selection signals aligned: modern launchers use recent-profile
+    // state while older launchers still honor selectedProfile.
     delete profiles.profiles[state.profileId];
   }
   profiles.profiles[state.profileId] = next;
   updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable, selectForPlay });
   await writeJsonFile(state.profilesPath, profiles);
+  const quickPlay = selectForPlay
+    ? await prepareMinecraftLauncherQuickPlay(state.rootDir, state.profileId)
+    : { ok: true, changed: false, skipped: true };
   const written = await readProfiles(state.profilesPath);
   const writtenProfile = written.profiles?.[state.profileId];
   const writtenKeys = Object.keys(written.profiles || {});
-  const writtenSchemaVersion = Number(written.version);
-  const writtenUsesLegacySelection = Number.isFinite(writtenSchemaVersion)
-    && writtenSchemaVersion > 0
-    && writtenSchemaVersion < 3;
   const selectedTimestamp = Date.parse(selectedAt);
   const newerCompetitors = Object.entries(written.profiles || {}).filter(([profileId, profile]) => {
     if (profileId === state.profileId) return false;
@@ -1080,7 +1122,7 @@ async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = 
     && String(writtenProfile.lastUsed || '') === selectedAt
     && writtenKeys.at(-1) === state.profileId
     && newerCompetitors.length === 0
-    && (!writtenUsesLegacySelection || String(written.selectedProfile || '') === state.profileId));
+    && (!selectForPlay || String(written.selectedProfile || '') === state.profileId));
   if (selectForPlay && !selectionPrepared) {
     if (newerCompetitors.length) {
       throw new Error(`Minecraft Launcher has another installation with a future last-used time (${newerCompetitors[0][0]}). Correct the computer clock or open that installation once, then click Play again.`);
@@ -1092,6 +1134,7 @@ async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = 
     profileExists: true,
     selectionPrepared,
     selectedAt,
+    quickPlayPrepared: quickPlay,
     legacyProfileRemoved: migrateLegacyStable
   };
 }

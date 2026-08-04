@@ -118,7 +118,24 @@ await fs.writeFile(path.join(minecraftRoot, 'launcher_profiles.json'), `${JSON.s
     }
   },
   selectedProfile: 'random-profile',
-  version: 3
+  version: 6
+}, null, 2)}\n`, 'utf8');
+await fs.writeFile(path.join(minecraftRoot, 'launcher_accounts.json'), `${JSON.stringify({
+  activeAccountLocalId: 'active-account',
+  accounts: {
+    'active-account': { remoteId: 'active-remote-account' }
+  }
+}, null, 2)}\n`, 'utf8');
+await fs.writeFile(path.join(minecraftRoot, 'launcher_quick_play.json'), `${JSON.stringify({
+  quickPlayData: {
+    'active-remote-account': [{
+      epochLastPlayedTimeMs: Date.now() - 60_000,
+      id: 'random-profile',
+      javaInstance: { configId: 'random-profile' },
+      source: 'Java'
+    }]
+  },
+  version: 2
 }, null, 2)}\n`, 'utf8');
 const created = await ensureMinecraftLauncherProfile({ config, latest, installed: null });
 const inspected = await inspectMinecraftLauncherProfile({ config, latest, installed: null });
@@ -148,12 +165,22 @@ let selectedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'la
 let selectedKeys = Object.keys(selectedProfiles.profiles);
 if (
   !stableSelection.selectionPrepared
+  || !stableSelection.quickPlayPrepared?.changed
   || selectedKeys.at(-1) !== 'a-hard-time-dregora'
   || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) <= Date.parse(selectedProfiles.profiles['random-profile'].lastUsed)
   || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) > Date.now() + (5 * 60 * 1000)
-  || selectedProfiles.selectedProfile !== 'random-profile'
+  || selectedProfiles.selectedProfile !== 'a-hard-time-dregora'
 ) {
   throw new Error(`Stable Play did not outrank and reinsert the exact profile: ${JSON.stringify(selectedProfiles)}`);
+}
+const selectedQuickPlay = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_quick_play.json'), 'utf8'));
+const selectedQuickPlayEntries = selectedQuickPlay.quickPlayData['active-remote-account'];
+if (
+  selectedQuickPlayEntries?.[0]?.javaInstance?.configId !== 'a-hard-time-dregora'
+  || selectedQuickPlayEntries.filter((entry) => entry?.javaInstance?.configId === 'a-hard-time-dregora').length !== 1
+  || selectedQuickPlayEntries.some((entry, index) => index > 0 && entry?.javaInstance?.configId === 'a-hard-time-dregora')
+) {
+  throw new Error(`Minecraft Launcher quick-play selection did not move the exact AHT profile to the active account: ${JSON.stringify(selectedQuickPlay)}`);
 }
 const selectedStableLastUsed = selectedProfiles.profiles['a-hard-time-dregora'].lastUsed;
 await ensureMinecraftLauncherProfile({

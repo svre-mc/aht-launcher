@@ -627,7 +627,7 @@ try {
     await fsp.writeFile(path.join(curseForgeRoot, 'minecraft.exe'), 'test launcher placeholder', 'utf8');
     const competingProfilesPath = path.join(curseForgeRoot, 'launcher_profiles.json');
     const competingProfiles = JSON.parse(fs.readFileSync(competingProfilesPath, 'utf8'));
-    competingProfiles.version = 3;
+    competingProfiles.version = 6;
     competingProfiles.selectedProfile = 'random-profile';
     competingProfiles.profiles['random-profile'] = {
       name: 'Random Instance',
@@ -825,7 +825,7 @@ try {
     if (
       profileKeys.at(-1) !== 'a-hard-time-dregora'
       || curseForgeProfiles.profiles['a-hard-time']
-      || curseForgeProfiles.selectedProfile !== 'random-profile'
+      || curseForgeProfiles.selectedProfile !== 'a-hard-time-dregora'
       || Date.parse(curseForgeProfile.lastUsed) <= Date.parse(curseForgeProfiles.profiles['random-profile'].lastUsed)
     ) {
       throw new Error(`Play did not prepare the exact canonical profile over a competing selection: ${JSON.stringify(curseForgeProfiles)}`);
