@@ -727,7 +727,7 @@ h2 {
   background:
     linear-gradient(180deg, rgba(244, 240, 230, 0.07), rgba(244, 240, 230, 0.018) 58%, rgba(0, 0, 0, 0.2)),
     rgba(9, 12, 13, 0.88);
-  box-shadow: var(--bevel), 0 10px 24px rgba(0, 0, 0, 0.24);
+  box-shadow: var(--bevel);
   transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
 
@@ -746,7 +746,7 @@ h2 {
 .feature-card:hover {
   transform: translateY(-2px);
   border-color: rgba(244, 240, 230, 0.4);
-  box-shadow: var(--bevel), 0 16px 34px rgba(0, 0, 0, 0.32);
+  box-shadow: var(--bevel);
 }
 
 .feature-art {
