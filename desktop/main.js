@@ -237,6 +237,7 @@ let developerSession = null;
 const latestReleaseCache = new Map();
 const launcherProofRefreshes = new Map();
 const launcherVersionTelemetryInFlight = new Map();
+const remoteRegistrationRefreshes = new Map();
 const LATEST_RELEASE_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
 const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 
@@ -2805,7 +2806,7 @@ async function identityPayload(config = null) {
       await writeJsonFile(identityPath(), nextIdentity);
     } else if (detectedUsername && (!sameUsername || (detectedMinecraftUuid && !currentMinecraftUuid))) {
       try {
-        const registered = await registerMinecraftUsername(detectedUsername, {
+        const registered = await registerMinecraftUsernameInFlight(config, nextIdentity, detectedUsername, {
           mode: sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher',
           minecraftUuid: detectedMinecraftUuid,
           skipLauncherAuthSync: true
@@ -2823,6 +2824,7 @@ async function identityPayload(config = null) {
       }
     }
   }
+  nextIdentity = await refreshRemoteMinecraftRegistration(config, nextIdentity);
   return {
     ...nextIdentity,
     appVersion: app.getVersion(),
@@ -2855,6 +2857,84 @@ function assertMinecraftUsername(username) {
 
 function accountBaseUrl(config) {
   return config.sync?.baseUrl || config.developer?.adminBaseUrl || '';
+}
+
+const REMOTE_REGISTRATION_RETRY_INTERVAL_MS = 5 * 60 * 1000;
+
+function remoteRegistrationBaseUrl(config = {}) {
+  return workerServiceBaseUrl(accountBaseUrl(config));
+}
+
+function remoteRegistrationNeedsRefresh(config = {}, identity = {}) {
+  if (isDeveloperMode() || config.sync?.enabled === false) return false;
+  const baseUrl = remoteRegistrationBaseUrl(config);
+  const username = normalizeMinecraftUsername(identity.minecraftUsername);
+  if (!baseUrl || !/^[A-Za-z0-9_]{3,16}$/.test(username)) return false;
+
+  const confirmedAt = Date.parse(identity.remoteRegistrationConfirmedAt || '');
+  const confirmedBase = remoteRegistrationBaseUrl({ sync: { baseUrl: identity.remoteRegistrationWorkerBaseUrl || '' } });
+  if (Number.isFinite(confirmedAt) && confirmedBase === baseUrl) return false;
+
+  // Older launchers used a non-worker registration mode for automatic Minecraft
+  // account import. Retry those identities once so a Worker deployment/API
+  // outage cannot strand a legitimate player outside the player-data index.
+  const mode = String(identity.usernameRegistrationMode || '').trim().toLowerCase();
+  if (mode === 'worker') return false;
+
+  const attemptedAt = Date.parse(identity.remoteRegistrationAttemptedAt || '');
+  return !Number.isFinite(attemptedAt) || Date.now() - attemptedAt >= REMOTE_REGISTRATION_RETRY_INTERVAL_MS;
+}
+
+function remoteRegistrationKey(config = {}, identity = {}, username = '') {
+  return `${identity.installId || ''}\0${normalizeMinecraftUsername(username).toLowerCase()}\0${remoteRegistrationBaseUrl(config)}`;
+}
+
+async function registerMinecraftUsernameInFlight(config = {}, identity = {}, username = '', options = {}) {
+  const key = remoteRegistrationKey(config, identity, username);
+  const running = remoteRegistrationRefreshes.get(key);
+  if (running) return running;
+  const registration = registerMinecraftUsername(username, options).finally(() => {
+    if (remoteRegistrationRefreshes.get(key) === registration) {
+      remoteRegistrationRefreshes.delete(key);
+    }
+  });
+  remoteRegistrationRefreshes.set(key, registration);
+  return registration;
+}
+
+async function refreshRemoteMinecraftRegistration(config = {}, identity = {}) {
+  if (!remoteRegistrationNeedsRefresh(config, identity)) return identity;
+  const username = normalizeMinecraftUsername(identity.minecraftUsername);
+  const key = remoteRegistrationKey(config, identity, username);
+  const running = remoteRegistrationRefreshes.get(key);
+  if (running) return running;
+
+  const refresh = (async () => {
+    const attemptedAt = new Date().toISOString();
+    try {
+      await registerMinecraftUsernameInFlight(config, identity, username, {
+        mode: identity.usernameRegistrationMode || 'registration-refresh',
+        minecraftUuid: identity.minecraftUuid || identity.minecraftUUID || '',
+        skipLauncherAuthSync: true
+      });
+      return await loadIdentity();
+    } catch (error) {
+      const current = await loadIdentity();
+      const nextIdentity = {
+        ...current,
+        remoteRegistrationAttemptedAt: attemptedAt,
+        minecraftUsernameSyncWarning: `Player data sync unavailable: ${error.message || error}`
+      };
+      await writeJsonFile(identityPath(), nextIdentity);
+      return nextIdentity;
+    }
+  })().finally(() => {
+    if (remoteRegistrationRefreshes.get(key) === refresh) {
+      remoteRegistrationRefreshes.delete(key);
+    }
+  });
+  remoteRegistrationRefreshes.set(key, refresh);
+  return refresh;
 }
 
 function accountRecoveryCredentialPath(config = {}, username = '') {
@@ -3014,6 +3094,15 @@ async function registerMinecraftUsername(username, options = {}) {
     minecraftUuid: remoteMinecraftUuid || minecraftUuid,
     usernameRegisteredAt: identity.usernameRegisteredAt || new Date().toISOString(),
     usernameRegistrationMode: options.mode || (remote.recovered ? 'minecraft-launcher-recovery' : (remote.skipped ? 'local' : 'worker')),
+    remoteRegistrationAttemptedAt: remote.skipped
+      ? identity.remoteRegistrationAttemptedAt || ''
+      : new Date().toISOString(),
+    remoteRegistrationConfirmedAt: remote.skipped
+      ? identity.remoteRegistrationConfirmedAt || ''
+      : new Date().toISOString(),
+    remoteRegistrationWorkerBaseUrl: remote.skipped
+      ? identity.remoteRegistrationWorkerBaseUrl || ''
+      : remoteRegistrationBaseUrl(config),
     minecraftLauncherDetectedUsername: (String(options.mode || '').startsWith('minecraft-launcher') || remote.recovered) ? normalizedUsername : identity.minecraftLauncherDetectedUsername || '',
     minecraftUsernameUnavailable: '',
     minecraftUsernameSyncWarning: ''
@@ -7553,6 +7642,16 @@ async function adminFetch(config, route, options = {}) {
     ({ response, body } = await fetchWithToken(requestToken));
   }
   if (!response.ok) {
+    const normalizedRoute = route.replace(/^\/+/, '').split('?')[0];
+    const playerDataRoute = new Set([
+      'admin/launcher-downloads',
+      'admin/player-records',
+      'admin/launcher-updates',
+      'admin/player-ipv4-groups'
+    ]);
+    if (response.status === 404 && playerDataRoute.has(normalizedRoute)) {
+      throw new Error('The configured Worker is missing the player-data API. Deploy the current AHT Worker before loading Player Data.');
+    }
     throw new Error(body.error || `${response.status} ${response.statusText}`);
   }
   return body;

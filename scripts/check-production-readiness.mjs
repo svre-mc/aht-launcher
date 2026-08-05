@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CLIENT_PACK_FORMAT } from '../src/clientPackFormat.js';
+import { workerServiceBaseUrl } from '../src/releaseTargets.js';
 import { validateLauncherUpdateManifest } from './validate-launcher-update-manifest.mjs';
 
 const require = createRequire(import.meta.url);
@@ -330,6 +331,26 @@ function httpJsonStatus(url) {
   };
 }
 
+function liveWorkerPlayerDataCapabilities(baseUrl = '') {
+  const normalizedBase = workerServiceBaseUrl(baseUrl);
+  const rootUrl = normalizedBase ? new URL('.', normalizedBase).toString() : '';
+  const response = httpJsonStatus(rootUrl);
+  const required = [
+    `/${['api', 'users', 'register'].join('/')}`,
+    '/api/events',
+    '/admin/player-records',
+    '/admin/launcher-updates'
+  ];
+  const endpoints = Array.isArray(response.json?.endpoints) ? response.json.endpoints : [];
+  const missing = required.filter((endpoint) => !endpoints.includes(endpoint));
+  return {
+    ok: Boolean(response.ok && missing.length === 0),
+    detail: response.ok
+      ? (missing.length ? `Worker is missing ${missing.join(', ')}` : `Worker player-data API ready at ${rootUrl}`)
+      : response.detail
+  };
+}
+
 function resolveHttpReference(baseUrl, reference = '') {
   const value = String(reference || '').trim();
   if (!value) return '';
@@ -510,6 +531,16 @@ function checkCloudflareConfig() {
 }
 
 function checkLiveCloudflareState(authOk) {
+  const defaults = readJson(path.join(rootDir, 'config', 'app.defaults.json'));
+  const playerDataCapabilities = liveWorkerPlayerDataCapabilities(
+    defaults?.sync?.baseUrl || defaults?.developer?.adminBaseUrl || ''
+  );
+  addCheck(
+    'live Worker player-data API is current',
+    'blocker',
+    playerDataCapabilities.ok,
+    playerDataCapabilities.detail
+  );
   if (!authOk) {
     addCheck('live R2 release bucket exists', 'blocker', false, 'Cloudflare login required');
     addCheck('live R2 data bucket exists', 'blocker', false, 'Cloudflare login required');
@@ -537,7 +568,6 @@ function checkLiveCloudflareState(authOk) {
     worker.ok ? 'aht-curseforge-proxy' : worker.detail
   );
 
-  const defaults = readJson(path.join(rootDir, 'config', 'app.defaults.json'));
   const packageJson = readJson(path.join(rootDir, 'package.json'));
   const localLauncherVersion = String(packageJson?.version || '').trim();
   const releaseFeed = httpJsonStatus(defaults?.latestUrl || '');

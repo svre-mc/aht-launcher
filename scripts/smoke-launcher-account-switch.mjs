@@ -225,12 +225,12 @@ try {
     throw new Error(`Active Minecraft Launcher account did not replace old AHT username: ${JSON.stringify(proof)}`);
   }
   if (
-    registrations.length !== 1
-    || registrations[0].username !== 'StunningWolf22'
-    || registrations[0].installId !== 'same-install'
-    || registrations[0].minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
+    registrations.length !== 2
+    || registrations.some((item) => item.username !== 'StunningWolf22')
+    || registrations.some((item) => item.installId !== 'same-install')
+    || registrations.some((item) => item.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef')
   ) {
-    throw new Error(`Expected one Worker registration for StunningWolf22: ${JSON.stringify(registrations)}`);
+    throw new Error(`Expected account import plus one player-data registration refresh for StunningWolf22: ${JSON.stringify(registrations)}`);
   }
 
   for (let attempt = 0; attempt < 80 && launcherUpdateEvents.length < 1; attempt += 1) {
@@ -255,11 +255,39 @@ try {
     throw new Error(`Launcher update history did not retry once and persist after a transient failure: ${JSON.stringify({ launcherUpdateEvents, reportedIdentity })}`);
   }
 
+  // Simulate an identity written by an older launcher before the Worker
+  // registration API was available. A later status refresh must re-register
+  // the same player once, without changing the install ID or username.
+  await writeJson(path.join(userData, 'identity.json'), {
+    ...reportedIdentity,
+    remoteRegistrationAttemptedAt: '2020-01-01T00:00:00.000Z',
+    remoteRegistrationConfirmedAt: '',
+    remoteRegistrationWorkerBaseUrl: ''
+  });
+  const registrationCountBeforeRefresh = registrations.length;
+  await evaluate(client, 'window.aht.getStatus()');
+  for (let attempt = 0; attempt < 80 && registrations.length <= registrationCountBeforeRefresh; attempt += 1) {
+    await sleep(100);
+  }
+  const refreshedIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
+  const refreshRegistration = registrations[registrations.length - 1];
+  if (
+    registrations.length !== registrationCountBeforeRefresh + 1
+    || refreshRegistration?.username !== 'StunningWolf22'
+    || refreshRegistration?.installId !== 'same-install'
+    || refreshedIdentity.minecraftUsername !== 'StunningWolf22'
+    || !refreshedIdentity.remoteRegistrationConfirmedAt
+    || refreshedIdentity.minecraftUsernameSyncWarning
+  ) {
+    throw new Error(`Stale launcher identity did not recover its Worker player-data registration: ${JSON.stringify({ refreshRegistration, refreshedIdentity, registrations })}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
     proof,
     registrations,
+    refreshRegistration,
     launcherUpdateEvent: updateEvent,
     reportedLauncherVersions: reportedIdentity.reportedLauncherVersions
   }, null, 2));
