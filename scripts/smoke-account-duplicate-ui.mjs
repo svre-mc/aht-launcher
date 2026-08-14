@@ -250,7 +250,7 @@ try {
       }
     }
   });
-  await writeJson(path.join(instanceDir, '.aht-launcher', 'account-recovery', 'takenuser_1.json'), {
+  await writeJson(path.join(userData, 'account-recovery', 'takenuser_1.json'), {
     schemaVersion: 1,
     username: 'TakenUser_1',
     secret: recoverySecrets.get('takenuser_1'),
@@ -284,7 +284,7 @@ try {
       }
     }
   });
-  await writeJson(path.join(instanceDir, '.aht-launcher', 'account-recovery', 'disabledprof.json'), {
+  await writeJson(path.join(userData, 'account-recovery', 'disabledprof.json'), {
     schemaVersion: 1,
     username: 'DisabledProf',
     secret: recoverySecrets.get('disabledprof'),
