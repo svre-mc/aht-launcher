@@ -33,7 +33,7 @@
     "enabled": true,
     "required": true,
     "baseUrl": "https://aht-curseforge-proxy.example.workers.dev/",
-    "keyId": "aht-launcher-proof-v1"
+    "keyId": "aht-launcher-attestation-v2"
   },
   "social": {
     "enabled": true,

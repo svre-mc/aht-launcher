@@ -31,12 +31,19 @@ const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
 const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/';
 const ACCOUNT_USERNAME_PREFIX = 'accounts/usernames/';
 const ACCOUNT_IPV4_PREFIX = 'accounts/ipv4/';
+const LAUNCHER_ATTESTATION_PROTOCOL = 'aht-launcher-attestation-v2';
+const LEGACY_LAUNCHER_PROOF_PROTOCOL = 'aht-launcher-proof-v1';
+const LAUNCHER_ATTESTATION_KEY_ID = 'aht-launcher-attestation-v2';
+const LEGACY_LAUNCHER_PROOF_KEY_ID = 'aht-launcher-proof-v1';
+const LAUNCHER_ATTESTATION_ISSUER = 'aht-launcher-worker';
+const LAUNCHER_ATTESTATION_AUDIENCE = 'aht-minecraft-server';
+const LAUNCHER_ATTESTATION_TTL_MS = 10 * 60 * 1000;
 
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-AHT-Server-Timestamp, X-AHT-Server-Signature',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-AHT-Launcher-Recovery, X-AHT-Server-Timestamp, X-AHT-Server-Signature',
     'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified',
     'Cache-Control': 'private, max-age=60'
   };
@@ -389,6 +396,70 @@ function decodeBase64UrlJson(value) {
   return JSON.parse(new TextDecoder().decode(Uint8Array.from(raw, (char) => char.charCodeAt(0))));
 }
 
+function decodeBase64UrlBytes(value) {
+  const padded = String(value || '').replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(String(value || '').length / 4) * 4, '=');
+  const raw = atob(padded);
+  return Uint8Array.from(raw, (char) => char.charCodeAt(0));
+}
+
+function pemBytes(value, label) {
+  const normalized = String(value || '').replace(/\\n/g, '\n').trim();
+  const begin = `-----BEGIN ${label}-----`;
+  const end = `-----END ${label}-----`;
+  if (!normalized.startsWith(begin) || !normalized.endsWith(end)) {
+    throw new Error(`${label} PEM is invalid`);
+  }
+  const encoded = normalized.slice(begin.length, -end.length).replace(/\s+/g, '');
+  if (!encoded) throw new Error(`${label} PEM is empty`);
+  const raw = atob(encoded);
+  return Uint8Array.from(raw, (char) => char.charCodeAt(0));
+}
+
+let attestationPrivateKeyCache = { source: '', promise: null };
+let attestationPublicKeyCache = { source: '', promise: null };
+
+function attestationPrivateKey(env) {
+  const source = String(env.LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8 || '').trim();
+  if (!source) throw new Error('LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8 is not configured');
+  if (attestationPrivateKeyCache.source !== source || !attestationPrivateKeyCache.promise) {
+    attestationPrivateKeyCache = {
+      source,
+      promise: crypto.subtle.importKey(
+        'pkcs8',
+        pemBytes(source, 'PRIVATE KEY'),
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false,
+        ['sign']
+      ).then((key) => {
+        if (Number(key.algorithm?.modulusLength || 0) < 2048) throw new Error('Launcher attestation RSA private key must be at least 2048 bits');
+        return key;
+      })
+    };
+  }
+  return attestationPrivateKeyCache.promise;
+}
+
+function attestationPublicKey(env) {
+  const source = String(env.LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI || '').trim();
+  if (!source) throw new Error('LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI is not configured');
+  if (attestationPublicKeyCache.source !== source || !attestationPublicKeyCache.promise) {
+    attestationPublicKeyCache = {
+      source,
+      promise: crypto.subtle.importKey(
+        'spki',
+        pemBytes(source, 'PUBLIC KEY'),
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false,
+        ['verify']
+      ).then((key) => {
+        if (Number(key.algorithm?.modulusLength || 0) < 2048) throw new Error('Launcher attestation RSA public key must be at least 2048 bits');
+        return key;
+      })
+    };
+  }
+  return attestationPublicKeyCache.promise;
+}
+
 async function hmac(input, secret) {
   const key = await crypto.subtle.importKey(
     'raw',
@@ -405,21 +476,47 @@ function cleanString(value, maxLength) {
 }
 
 async function launcherProofToken(payload, env) {
-  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET || env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD;
+  if (JSON.stringify(payload || {}).length > 4608) {
+    throw new Error('Launcher attestation payload exceeds the 4608-byte JSON size limit');
+  }
+  if (payload?.protocol === LAUNCHER_ATTESTATION_PROTOCOL) {
+    const keyId = cleanString(env.LAUNCHER_ATTESTATION_KEY_ID || LAUNCHER_ATTESTATION_KEY_ID, 120);
+    if (keyId !== LAUNCHER_ATTESTATION_KEY_ID) {
+      throw new Error(`LAUNCHER_ATTESTATION_KEY_ID must be ${LAUNCHER_ATTESTATION_KEY_ID}`);
+    }
+    const header = { alg: 'RS256', typ: 'AHT-LAUNCHER-ATTESTATION', kid: keyId };
+    const encodedHeader = base64UrlJson(header);
+    const encodedPayload = base64UrlJson(payload);
+    const signingInput = `${encodedHeader}.${encodedPayload}`;
+    const key = await attestationPrivateKey(env);
+    const signature = base64Url(new Uint8Array(await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      new TextEncoder().encode(signingInput)
+    )));
+    const token = `${signingInput}.${signature}`;
+    if (token.length > 8192) throw new Error('Launcher attestation token exceeds the 8 KiB size limit');
+    return {
+      token,
+      header,
+      payload,
+      signature: { alg: 'RS256', kid: header.kid, value: signature }
+    };
+  }
+  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET;
   if (!secret) {
     throw new Error('LAUNCHER_PROOF_SECRET is not configured');
   }
-  const keyId = cleanString(env.LAUNCHER_PROOF_KEY_ID || 'aht-launcher-proof-v1', 120);
-  if (keyId !== 'aht-launcher-proof-v1') {
-    throw new Error('LAUNCHER_PROOF_KEY_ID must be aht-launcher-proof-v1');
-  }
+  const keyId = LEGACY_LAUNCHER_PROOF_KEY_ID;
   const header = { alg: 'HS256', typ: 'AHT-LAUNCHER-PROOF', kid: keyId };
   const encodedHeader = base64UrlJson(header);
   const encodedPayload = base64UrlJson(payload);
   const signingInput = `${encodedHeader}.${encodedPayload}`;
   const signature = await hmac(signingInput, secret);
+  const token = `${signingInput}.${signature}`;
+  if (token.length > 8192) throw new Error('Legacy launcher proof token exceeds the 8 KiB size limit');
   return {
-    token: `${signingInput}.${signature}`,
+    token,
     header,
     payload,
     signature: { alg: 'HS256', kid: header.kid, value: signature }
@@ -428,14 +525,19 @@ async function launcherProofToken(payload, env) {
 
 async function launcherProofSigningSelfTest(env) {
   const issuedAtMs = Date.now();
+  const launchId = crypto.randomUUID();
   const payload = {
-    protocol: 'aht-launcher-proof-v1',
-    schemaVersion: 1,
-    launchId: 'launcher-proof-status-self-test',
+    protocol: LAUNCHER_ATTESTATION_PROTOCOL,
+    schemaVersion: 2,
+    jti: launchId,
+    launchId,
     issuedAt: new Date(issuedAtMs).toISOString(),
     expiresAt: new Date(issuedAtMs + 60 * 1000).toISOString(),
+    issuer: LAUNCHER_ATTESTATION_ISSUER,
+    audience: LAUNCHER_ATTESTATION_AUDIENCE,
     packId: cleanString(env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora', 80),
     minecraftUsername: 'AHTProofCheck',
+    minecraftUuid: '01234567-89ab-4def-8123-456789abcdef',
     installId: 'launcher-proof-status-self-test',
     launcherChannel: 'developer',
     developerClient: true,
@@ -456,12 +558,12 @@ async function launcherProofSigningSelfTest(env) {
 }
 
 async function launcherProofStatus(env, origin) {
-  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET || env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD;
-  const dedicatedConfigured = Boolean(env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET);
-  const keyId = cleanString(env.LAUNCHER_PROOF_KEY_ID || 'aht-launcher-proof-v1', 120);
-  const configured = Boolean(secret);
+  const privateKeyConfigured = Boolean(String(env.LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8 || '').trim());
+  const publicKeyConfigured = Boolean(String(env.LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI || '').trim());
+  const keyId = cleanString(env.LAUNCHER_ATTESTATION_KEY_ID || LAUNCHER_ATTESTATION_KEY_ID, 120);
+  const configured = privateKeyConfigured && publicKeyConfigured;
   let signingVerified = false;
-  if (configured && keyId === 'aht-launcher-proof-v1') {
+  if (configured && keyId === LAUNCHER_ATTESTATION_KEY_ID) {
     try {
       signingVerified = await launcherProofSigningSelfTest(env);
     } catch {
@@ -469,9 +571,13 @@ async function launcherProofStatus(env, origin) {
     }
   }
   return privateJson({
-    ok: dedicatedConfigured && keyId === 'aht-launcher-proof-v1' && signingVerified,
+    ok: configured && keyId === LAUNCHER_ATTESTATION_KEY_ID && signingVerified,
+    protocol: LAUNCHER_ATTESTATION_PROTOCOL,
+    algorithm: 'RS256',
     configured,
-    dedicatedConfigured,
+    dedicatedConfigured: privateKeyConfigured,
+    privateKeyConfigured,
+    publicKeyConfigured,
     keyId,
     signingVerified
   }, 200, origin);
@@ -572,7 +678,12 @@ async function registerUser(request, env, origin) {
   if (suppliedMinecraftUuid && !minecraftUuid) {
     return json({ error: 'Minecraft UUID is invalid.' }, 400, origin);
   }
-  const accountRecoverySecret = cleanString(body.accountRecoverySecret || '', 200);
+  // New launchers keep this credential out of JSON/proof documents. The body
+  // fallback is bounded compatibility for registrations from old launchers.
+  const accountRecoverySecret = cleanString(
+    request.headers.get('X-AHT-Launcher-Recovery') || body.accountRecoverySecret || '',
+    200
+  );
   if (accountRecoverySecret && !/^[A-Za-z0-9_-]{32,200}$/.test(accountRecoverySecret)) {
     return json({ error: 'Launcher recovery credential is invalid.' }, 400, origin);
   }
@@ -675,7 +786,20 @@ function cleanAssetObject(value, allowedTypes = []) {
 }
 
 async function createLauncherProof(request, env, origin) {
+  const declaredLength = Number(request.headers.get('Content-Length') || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > 32_768) {
+    return privateJson({ error: 'Launcher attestation request is too large.' }, 413, origin);
+  }
   const body = await readBody(request);
+  if (JSON.stringify(body || {}).length > 32_768) {
+    return privateJson({ error: 'Launcher attestation request is too large.' }, 413, origin);
+  }
+  const requestedProtocol = cleanString(body.protocol || '', 80);
+  const v2Requested = requestedProtocol === LAUNCHER_ATTESTATION_PROTOCOL;
+  const legacyV1Requested = !requestedProtocol || requestedProtocol === LEGACY_LAUNCHER_PROOF_PROTOCOL;
+  if (!v2Requested && !legacyV1Requested) {
+    return privateJson({ error: 'Unsupported launcher attestation protocol.' }, 400, origin);
+  }
   const installId = cleanString(body.installId, 120);
   const minecraftUsername = normalizeMinecraftUsername(body.minecraftUsername);
   if (!installId) {
@@ -695,28 +819,59 @@ async function createLauncherProof(request, env, origin) {
   if (developerModeRequested && !developerAuthorized) {
     return privateJson({ error: 'Developer launcher proof requires developer authentication.' }, 401, origin);
   }
+  let existingRecord = null;
+  if (!developerAuthorized && v2Requested && !env.AHT_DATA) {
+    return privateJson({ error: 'Launcher account registration service is not configured.' }, 503, origin);
+  }
   if (env.AHT_DATA && !developerAuthorized) {
     const existing = await env.AHT_DATA.get(minecraftUsernameKey(minecraftUsername));
-    const existingRecord = existing ? await existing.json().catch(() => null) : null;
+    existingRecord = existing ? await existing.json().catch(() => null) : null;
     if (!existingRecord || existingRecord.installId !== installId) {
       return privateJson({ error: 'Minecraft username is not registered to this launcher install.' }, 403, origin);
+    }
+    if (v2Requested) {
+      const recoverySecret = cleanString(request.headers.get('X-AHT-Launcher-Recovery') || '', 200);
+      const recoveryVerifier = recoverySecret && /^[A-Za-z0-9_-]{32,200}$/.test(recoverySecret)
+        ? await sha256Hex(recoverySecret)
+        : '';
+      const storedVerifier = cleanString(existingRecord.accountRecoveryVerifier || '', 80);
+      const registeredMinecraftUuid = normalizeMinecraftUuid(existingRecord.minecraftUuid);
+      if (!storedVerifier || !recoveryVerifier || !secureStringEqual(storedVerifier, recoveryVerifier) || !registeredMinecraftUuid) {
+        return privateJson({ error: 'Minecraft username is not registered to this launcher install with verified account recovery.' }, 403, origin);
+      }
     }
   }
 
   const issuedAtMs = Date.now();
+  const launchId = v2Requested ? crypto.randomUUID() : cleanString(body.launchId || crypto.randomUUID(), 80);
+  const minecraftUuid = developerAuthorized
+    ? normalizeMinecraftUuid(body.minecraftUuid)
+    : normalizeMinecraftUuid(existingRecord?.minecraftUuid);
+  if (v2Requested && !minecraftUuid) {
+    return privateJson({ error: 'A verified Minecraft UUID is required for launcher attestation.' }, 400, origin);
+  }
   const payload = {
-    protocol: 'aht-launcher-proof-v1',
-    schemaVersion: 1,
-    launchId: cleanString(body.launchId || crypto.randomUUID(), 80),
+    protocol: v2Requested ? LAUNCHER_ATTESTATION_PROTOCOL : LEGACY_LAUNCHER_PROOF_PROTOCOL,
+    schemaVersion: v2Requested ? 2 : 1,
+    ...(v2Requested ? { jti: launchId } : {}),
+    launchId,
     issuedAt: new Date(issuedAtMs).toISOString(),
-    expiresAt: new Date(issuedAtMs + 10 * 60 * 1000).toISOString(),
-    packId: cleanString(body.packId || 'a-hard-time-dregora', 80),
+    expiresAt: new Date(issuedAtMs + LAUNCHER_ATTESTATION_TTL_MS).toISOString(),
+    ...(v2Requested ? {
+      issuer: LAUNCHER_ATTESTATION_ISSUER,
+      audience: LAUNCHER_ATTESTATION_AUDIENCE
+    } : {}),
+    packId: cleanString(v2Requested
+      ? (env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora')
+      : (body.packId || 'a-hard-time-dregora'), 80),
     packVersion: cleanString(body.packVersion || body.installedVersion || '', 80),
     latestVersion: cleanString(body.latestVersion || '', 80),
     installedVersion: cleanString(body.installedVersion || '', 80),
     minecraftUsername,
+    ...(v2Requested ? { minecraftUuid } : {}),
     installId,
     appVersion: cleanString(body.appVersion, 40),
+    launcherVersion: cleanString(body.launcherVersion || body.appVersion, 40),
     platform: cleanString(body.platform, 32),
     arch: cleanString(body.arch, 32),
     launcherChannel: developerAuthorized ? 'developer' : 'player',
@@ -724,11 +879,11 @@ async function createLauncherProof(request, env, origin) {
     developerClientBypass: developerAuthorized,
     modIntegrityBypass: developerAuthorized,
     instanceDirHash: cleanString(body.instanceDirHash, 80),
-    minecraft: body.minecraft && typeof body.minecraft === 'object' ? body.minecraft : null
+    minecraft: v2Requested ? null : (body.minecraft && typeof body.minecraft === 'object' ? body.minecraft : null)
   };
   return privateJson({
     protocol: payload.protocol,
-    schemaVersion: 1,
+    schemaVersion: payload.schemaVersion,
     trusted: true,
     source: 'worker',
     ...(await launcherProofToken(payload, env))
@@ -769,15 +924,12 @@ function parsedTime(value) {
 async function verifyLauncherProofRequest(request, env) {
   const authorization = request.headers.get('Authorization') || '';
   const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
-  const parts = token.split('.');
-  if (parts.length !== 3 || parts.some((part) => !part)) {
+  if (token.length > 8192) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
-  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET
-    || env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD;
-  if (!secret) return { ok: false, status: 503, error: 'Launcher proof service is not configured.' };
-  const expected = await hmac(`${parts[0]}.${parts[1]}`, secret);
-  if (!secureStringEqual(parts[2], expected)) {
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts.some((part) => !part)
+      || parts[0].length > 1024 || parts[1].length > 6144 || parts[2].length > 1024) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
   let header;
@@ -788,12 +940,51 @@ async function verifyLauncherProofRequest(request, env) {
   } catch {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
-  if (String(header?.alg || '').toUpperCase() !== 'HS256'
-      || header?.typ !== 'AHT-LAUNCHER-PROOF'
-      || header?.kid !== 'aht-launcher-proof-v1'
-      || payload?.protocol !== 'aht-launcher-proof-v1'
-      || payload?.schemaVersion !== 1) {
+  if (JSON.stringify(header || {}).length > 512 || JSON.stringify(payload || {}).length > 4608) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  const v2 = payload?.protocol === LAUNCHER_ATTESTATION_PROTOCOL && payload?.schemaVersion === 2;
+  const legacyV1 = payload?.protocol === LEGACY_LAUNCHER_PROOF_PROTOCOL && payload?.schemaVersion === 1;
+  if (!v2 && !legacyV1) {
+    return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  const signingInput = `${parts[0]}.${parts[1]}`;
+  if (v2) {
+    const configuredKeyId = cleanString(env.LAUNCHER_ATTESTATION_KEY_ID || LAUNCHER_ATTESTATION_KEY_ID, 120);
+    if (!env.LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI || configuredKeyId !== LAUNCHER_ATTESTATION_KEY_ID) {
+      return { ok: false, status: 503, error: 'Launcher attestation verification key is not configured.' };
+    }
+    if (header?.alg !== 'RS256'
+        || header?.typ !== 'AHT-LAUNCHER-ATTESTATION'
+        || header?.kid !== LAUNCHER_ATTESTATION_KEY_ID) {
+      return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+    }
+    let signatureValid = false;
+    try {
+      signatureValid = await crypto.subtle.verify(
+        'RSASSA-PKCS1-v1_5',
+        await attestationPublicKey(env),
+        decodeBase64UrlBytes(parts[2]),
+        new TextEncoder().encode(signingInput)
+      );
+    } catch {
+      return { ok: false, status: 503, error: 'Launcher attestation verification key is invalid.' };
+    }
+    if (!signatureValid) {
+      return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+    }
+  } else {
+    const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET;
+    if (!secret) return { ok: false, status: 503, error: 'Launcher proof service is not configured.' };
+    if (header?.alg !== 'HS256'
+        || header?.typ !== 'AHT-LAUNCHER-PROOF'
+        || header?.kid !== LEGACY_LAUNCHER_PROOF_KEY_ID) {
+      return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+    }
+    const expected = await hmac(signingInput, secret);
+    if (!secureStringEqual(parts[2], expected)) {
+      return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+    }
   }
   const now = Date.now();
   const issuedAt = parsedTime(payload.issuedAt);
@@ -809,20 +1000,31 @@ async function verifyLauncherProofRequest(request, env) {
     || Boolean(payload.developerClient)
     || Boolean(payload.developerClientBypass)
     || Boolean(payload.modIntegrityBypass);
+  const minecraftUuid = normalizeMinecraftUuid(payload.minecraftUuid);
+  const validLaunchId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cleanString(payload.launchId, 80));
+  const v2ClaimsValid = !v2 || (
+    payload.issuer === LAUNCHER_ATTESTATION_ISSUER
+    && payload.audience === LAUNCHER_ATTESTATION_AUDIENCE
+    && payload.jti === payload.launchId
+    && validLaunchId
+    && Boolean(minecraftUuid)
+    && expiresAt - issuedAt <= LAUNCHER_ATTESTATION_TTL_MS
+  );
   if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || !installId
       || cleanString(payload.packId, 80) !== expectedPackId
-      || !expiresAt || expiresAt <= now || issuedAt > now + 120000
-      || (hasAnyDeveloperClaim && !developerProof)) {
+      || !issuedAt || !expiresAt || expiresAt <= issuedAt || expiresAt <= now || issuedAt > now + 120000
+      || (hasAnyDeveloperClaim && !developerProof)
+      || !v2ClaimsValid) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
   if (env.AHT_DATA && !developerProof) {
     const registration = await env.AHT_DATA.get(minecraftUsernameKey(username));
     const record = registration ? await registration.json().catch(() => null) : null;
-    if (!record || record.installId !== installId) {
+    if (!record || record.installId !== installId || (v2 && normalizeMinecraftUuid(record.minecraftUuid) !== minecraftUuid)) {
       return { ok: false, status: 403, error: 'This Minecraft username is not registered to this launcher install.' };
     }
   }
-  return { ok: true, payload: { ...payload, minecraftUsername: username, installId } };
+  return { ok: true, payload: { ...payload, minecraftUsername: username, ...(v2 ? { minecraftUuid } : {}), installId } };
 }
 
 async function readRawBody(request, maxBytes = 1024 * 1024) {

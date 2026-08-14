@@ -446,8 +446,8 @@ function liveLauncherProofStatus(baseUrl) {
     '    headers: { Accept: "application/json", "User-Agent": "AHT production readiness" }',
     '  });',
     '  const json = await response.json().catch(async () => ({ error: await response.text().catch(() => "") }));',
-    '  const ok = response.ok && json.ok === true && json.configured === true && json.dedicatedConfigured === true && json.keyId === "aht-launcher-proof-v1" && json.signingVerified === true;',
-    '  console.log(JSON.stringify({ ok, status: response.status, configured: Boolean(json.configured), dedicatedConfigured: json.dedicatedConfigured === true, keyId: json.keyId || "", signingVerified: json.signingVerified === true, error: json.error || "" }));',
+    '  const ok = response.ok && json.ok === true && json.protocol === "aht-launcher-attestation-v2" && json.algorithm === "RS256" && json.privateKeyConfigured === true && json.publicKeyConfigured === true && json.keyId === "aht-launcher-attestation-v2" && json.signingVerified === true;',
+    '  console.log(JSON.stringify({ ok, status: response.status, protocol: json.protocol || "", algorithm: json.algorithm || "", privateKeyConfigured: json.privateKeyConfigured === true, publicKeyConfigured: json.publicKeyConfigured === true, keyId: json.keyId || "", signingVerified: json.signingVerified === true, error: json.error || "" }));',
     '  if (!ok) process.exitCode = 1;',
     '})().catch((error) => { console.log(JSON.stringify({ ok: false, status: 0, error: error.message || String(error) })); process.exitCode = 1; });'
   ].join('\n');
@@ -461,8 +461,8 @@ function liveLauncherProofStatus(baseUrl) {
     return {
       ok: Boolean(parsed.ok),
       detail: parsed.ok
-        ? `dedicated key ${parsed.keyId}; in-memory signing verified`
-        : `${parsed.status || 0}: ${parsed.error || (!parsed.dedicatedConfigured ? 'dedicated launcher proof secret is not configured' : 'launcher proof signing self-test failed')}`
+        ? `external ${parsed.algorithm} key ${parsed.keyId}; in-memory signing verified`
+        : `${parsed.status || 0}: ${parsed.error || (!parsed.privateKeyConfigured ? 'launcher attestation private key is not configured' : (!parsed.publicKeyConfigured ? 'launcher attestation public key is not configured' : 'launcher attestation signing self-test failed'))}`
     };
   } catch {
     return { ok: false, detail: commandDetail(`${result.stdout || ''}${result.stderr || ''}`, 'launcher proof request failed') };
@@ -690,7 +690,7 @@ function checkPlayerDefaults() {
     addCheck(`${label} launcher proof enabled`, 'blocker', launcherProof.enabled !== false, `enabled=${String(launcherProof.enabled)}`);
     addCheck(`${label} launcher proof required`, 'blocker', launcherProof.required === true, `required=${String(launcherProof.required)}`);
     addCheck(`${label} launcher proof has Worker URL`, 'blocker', /^https?:\/\//i.test(proofBaseUrl) && !textIncludesAny(proofBaseUrl, ['127.0.0.1', 'localhost', 'example.workers.dev', 'aht.local']), proofBaseUrl || 'missing proof Worker URL');
-    addCheck(`${label} launcher proof key id`, 'blocker', (launcherProof.keyId || '') === 'aht-launcher-proof-v1', launcherProof.keyId || 'missing key id');
+    addCheck(`${label} launcher proof key id`, 'blocker', (launcherProof.keyId || '') === 'aht-launcher-attestation-v2', launcherProof.keyId || 'missing key id');
   }
 }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import {
   inspectLauncherProof,
   launcherProofJavaArgs,
@@ -19,13 +20,14 @@ const config = {
     enabled: true,
     required: true,
     proofDir: stableProofDir,
-    localSecret: 'update-stability-proof-secret',
-    keyId: 'aht-launcher-proof-v1'
+    baseUrl: 'https://worker.test/',
+    keyId: 'aht-launcher-attestation-v2'
   }
 };
 const identity = {
   installId: 'stable-install-id',
   minecraftUsername: 'UpdateProofPlayer',
+  minecraftUuid: '01234567-89ab-4def-8123-456789abcdef',
   launcherChannel: 'player',
   appVersion: '0.1.83',
   platform: 'win32',
@@ -34,7 +36,11 @@ const identity = {
 const installed = { packId: config.packId, version: '2.8.534', minecraft: { version: '1.12.2', modLoaders: [] } };
 const latest = { packId: config.packId, version: '2.8.534', minecraft: installed.minecraft };
 
-const first = await writeLauncherProof({ config, identity, installed, latest, fetchImpl: null });
+const fixtureFetch = async (_url, options) => ({
+  ok: true,
+  json: async () => workerLauncherProofFixture(JSON.parse(options.body))
+});
+const first = await writeLauncherProof({ config, identity, installed, latest, recoverySecret: 'fixture_recovery_secret_123456789012345', fetchImpl: fixtureFetch });
 const stableFile = launcherProofPath(instanceDir, identity, { proofDir: stableProofDir });
 const legacyFile = launcherProofPath(instanceDir, identity);
 assert.equal(first.proofFile, path.resolve(stableFile));
@@ -47,7 +53,8 @@ const afterUpdate = await writeLauncherProof({
   identity: { ...identity, appVersion: '0.1.84' },
   installed,
   latest,
-  fetchImpl: null
+  recoverySecret: 'fixture_recovery_secret_123456789012345',
+  fetchImpl: fixtureFetch
 });
 const inspected = await inspectLauncherProof({
   config,

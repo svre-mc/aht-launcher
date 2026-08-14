@@ -5,10 +5,19 @@ workers_dev = true
 
 # After deployment:
 # wrangler secret put CURSEFORGE_API_KEY
+# wrangler secret put LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8
+# Keep LAUNCHER_PROOF_SECRET only during the old-launcher v1 compatibility window.
 # wrangler secret put LAUNCHER_PROOF_SECRET
 # wrangler secret put ADMIN_USERNAME
 # wrangler secret put ADMIN_PASSWORD
 # wrangler secret put ADMIN_TOKEN_SECRET
+
+# Public verification material is safe to configure as Worker vars. Never put
+# the PKCS#8 private key here or in any launcher/client artifact.
+# [vars]
+# LAUNCHER_ATTESTATION_KEY_ID = "aht-launcher-attestation-v2"
+# LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI = "-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----"
+# LAUNCHER_PROOF_PACK_ID = "a-hard-time-dregora"
 
 [[r2_buckets]]
 binding = "AHT_RELEASES"

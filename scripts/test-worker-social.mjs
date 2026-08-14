@@ -1,9 +1,16 @@
 import crypto from 'node:crypto';
 import worker from '../cloudflare/curseforge-proxy-worker.js';
+import {
+  TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
+  TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI
+} from './helpers/launcher-proof-fixture.mjs';
 
 const objects = new Map();
 const env = {
   LAUNCHER_PROOF_SECRET: 'proof-secret',
+  LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8: TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
+  LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI: TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI,
+  LAUNCHER_ATTESTATION_KEY_ID: 'aht-launcher-attestation-v2',
   ADMIN_TOKEN_SECRET: 'admin-secret',
   AHT_DATA: {
     async put(key, value) {
@@ -67,9 +74,13 @@ async function serverSync(payload, expectedStatus = 200, signed = true) {
 
 await jsonRequest('/api/users/register', {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Content-Type': 'application/json',
+    'X-AHT-Launcher-Recovery': 'social_recovery_secret_1234567890123456'
+  },
   body: JSON.stringify({
     username: 'SocialUser',
+    minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
     installId: 'social-install',
     packId: 'a-hard-time-dregora'
   })
@@ -77,9 +88,12 @@ await jsonRequest('/api/users/register', {
 
 const proof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Content-Type': 'application/json',
+    'X-AHT-Launcher-Recovery': 'social_recovery_secret_1234567890123456'
+  },
   body: JSON.stringify({
-    protocol: 'aht-launcher-proof-v1',
+    protocol: 'aht-launcher-attestation-v2',
     minecraftUsername: 'SocialUser',
     installId: 'social-install',
     packId: 'a-hard-time-dregora',
@@ -172,7 +186,11 @@ const updated = await jsonRequest('/api/social', { headers: authorization });
 assert(updated.friends.length === 1 && updated.friends[0].username === 'TargetUser',
   `Updated server snapshot was not returned: ${JSON.stringify(updated)}`);
 
-const tamperedToken = `${proof.token.slice(0, -1)}${proof.token.endsWith('a') ? 'b' : 'a'}`;
+const tokenParts = proof.token.split('.');
+// Mutate a full six-bit signature symbol. Changing the terminal Base64URL
+// symbol can alter only unused pad bits and still decode to identical bytes.
+tokenParts[2] = `${tokenParts[2].startsWith('A') ? 'B' : 'A'}${tokenParts[2].slice(1)}`;
+const tamperedToken = tokenParts.join('.');
 const tampered = await jsonRequest('/api/social', {
   headers: { Authorization: `Bearer ${tamperedToken}` }
 }, 401);

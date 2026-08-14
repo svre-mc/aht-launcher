@@ -194,7 +194,7 @@ try {
   if (defaults.minecraftLauncher?.memoryMb !== 4096) {
     throw new Error(`Defaults should keep 4 GB baseline RAM: ${JSON.stringify(defaults.minecraftLauncher)}`);
   }
-  if (defaults.launcherProof?.enabled !== true || defaults.launcherProof?.required !== true || defaults.launcherProof?.baseUrl !== `${workerEndpoint}/` || defaults.launcherProof?.keyId !== 'aht-launcher-proof-v1') {
+  if (defaults.launcherProof?.enabled !== true || defaults.launcherProof?.required !== true || defaults.launcherProof?.baseUrl !== `${workerEndpoint}/` || defaults.launcherProof?.keyId !== 'aht-launcher-attestation-v2') {
     throw new Error(`Defaults must require launcher proof through the Worker: ${JSON.stringify(defaults.launcherProof)}`);
   }
   if (Object.prototype.hasOwnProperty.call(defaults, 'developer')) {

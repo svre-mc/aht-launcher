@@ -39,7 +39,7 @@ import {
 } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
-import { inspectLauncherProof, launcherProofPath, writeLauncherProof } from '../src/launcherProof.js';
+import { LAUNCHER_ATTESTATION_KEY_ID, inspectLauncherProof, launcherProofPath, writeLauncherProof } from '../src/launcherProof.js';
 import { fetchSocialState, sendSocialAction } from '../src/socialClient.js';
 import { legalConsentStatus, recordLegalConsent } from '../src/legalConsent.js';
 import {
@@ -1556,7 +1556,7 @@ function defaultConfig() {
       enabled: true,
       required: false,
       baseUrl: '',
-      keyId: 'aht-launcher-proof-v1'
+      keyId: LAUNCHER_ATTESTATION_KEY_ID
     },
     social: {
       enabled: true,
@@ -2660,12 +2660,17 @@ async function clearUnavailableMinecraftUsername(username = '', message = 'That 
 
 async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null } = {}) {
   const proofIdentity = launcherProofIdentity(runtimeIdentity(identity));
+  const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
+  const recoverySecret = developerAdminSessionAllowed() || !username
+    ? ''
+    : await accountRecoverySecret(config, username);
   try {
     return await writeLauncherProofWithDeveloperAuth({
       config,
       identity: proofIdentity,
       latest,
-      installed
+      installed,
+      recoverySecret
     });
   } catch (error) {
     if (!isLauncherProofRegistrationError(error)) {
@@ -2674,7 +2679,6 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
     if (developerAdminSessionAllowed()) {
       throw new Error('Authenticated developer launcher proof was rejected by the Worker registration gate. Player identity was not changed; update the Worker before retrying developer Play.');
     }
-    const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
     if (!username) {
       throw error;
     }
@@ -2692,11 +2696,13 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
       throw new Error(`Launcher proof registration refresh failed: ${refreshError.message || refreshError}`);
     }
     const refreshedIdentity = runtimeIdentity(await loadIdentity());
+    const refreshedRecoverySecret = await accountRecoverySecret(config, username);
     return writeLauncherProofWithDeveloperAuth({
       config,
       identity: launcherProofIdentity(refreshedIdentity),
       latest,
-      installed
+      installed,
+      recoverySecret: refreshedRecoverySecret
     });
   }
 }
@@ -3042,7 +3048,6 @@ async function registerMinecraftUsername(username, options = {}) {
     const registrationPayload = {
       username: normalizedUsername,
       minecraftUuid,
-      accountRecoverySecret: recoverySecret,
       installId: identity.installId,
       appVersion: app.getVersion(),
       platform: process.platform,
@@ -3051,7 +3056,10 @@ async function registerMinecraftUsername(username, options = {}) {
     };
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-AHT-Launcher-Recovery': recoverySecret
+      },
       body: JSON.stringify(registrationPayload)
     });
     const body = await response.json().catch(() => ({}));
@@ -3062,7 +3070,10 @@ async function registerMinecraftUsername(username, options = {}) {
       }
       const recoveryResponse = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-AHT-Launcher-Recovery': recoverySecret
+        },
         body: JSON.stringify({
           ...registrationPayload,
           recoverExistingUsername: true,
@@ -5646,7 +5657,7 @@ function playerDefaultsForCloud(config, { publicLatestUrl = '', bucket = '', cac
       enabled: true,
       required: true,
       baseUrl: workerBase,
-      keyId: 'aht-launcher-proof-v1'
+      keyId: LAUNCHER_ATTESTATION_KEY_ID
     },
     minecraftLauncher: {
       enabled: true,

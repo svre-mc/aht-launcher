@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
 import worker from '../cloudflare/curseforge-proxy-worker.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
+import {
+  TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
+  TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI
+} from './helpers/launcher-proof-fixture.mjs';
 
 const originalFetch = globalThis.fetch;
 let sentLauncherPayload = null;
@@ -33,6 +37,9 @@ const env = {
   ADMIN_PASSWORD: 'secret',
   ADMIN_TOKEN_SECRET: 'test-secret',
   LAUNCHER_PROOF_SECRET: 'proof-secret',
+  LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8: TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
+  LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI: TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI,
+  LAUNCHER_ATTESTATION_KEY_ID: 'aht-launcher-attestation-v2',
   AHT_DATA: {
     async put(key, value) {
       objects.set(key, value);
@@ -185,7 +192,8 @@ const registration = await jsonRequest('/api/users/register', {
   headers: {
     'Content-Type': 'application/json',
     'CF-Connecting-IP': '203.0.113.42',
-    'User-Agent': 'AHT test'
+    'User-Agent': 'AHT test',
+    'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345'
   },
   body: JSON.stringify({
     username: 'TestRig',
@@ -378,14 +386,18 @@ if (oldRecoveredProofResponse.status !== 403) {
 
 const launcherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Content-Type': 'application/json',
+    'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345'
+  },
   body: JSON.stringify({
-    protocol: 'aht-launcher-proof-v1',
+    protocol: 'aht-launcher-attestation-v2',
     launchId: 'launch-proof-test',
     username: 'TestRig',
     minecraftUsername: 'TestRig',
+    minecraftUuid: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
     installId: 'install-b',
-    packId: 'a-hard-time-dregora',
+    packId: 'client-controlled-pack-id',
     packVersion: '2.8.2',
     installedVersion: '2.8.2',
     appVersion: '0.1.0',
@@ -397,12 +409,35 @@ const launcherProof = await jsonRequest('/api/launcher-proof', {
 if (
   !launcherProof.trusted
   || launcherProof.source !== 'worker'
-  || launcherProof.signature?.alg !== 'HS256'
+  || launcherProof.protocol !== 'aht-launcher-attestation-v2'
+  || launcherProof.schemaVersion !== 2
+  || launcherProof.signature?.alg !== 'RS256'
+  || launcherProof.header?.typ !== 'AHT-LAUNCHER-ATTESTATION'
+  || launcherProof.header?.kid !== 'aht-launcher-attestation-v2'
   || launcherProof.token.split('.').length !== 3
   || launcherProof.payload.minecraftUsername !== 'TestRig'
+  || launcherProof.payload.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
   || launcherProof.payload.installId !== 'install-b'
+  || launcherProof.payload.packId !== 'a-hard-time-dregora'
+  || launcherProof.payload.issuer !== 'aht-launcher-worker'
+  || launcherProof.payload.audience !== 'aht-minecraft-server'
+  || launcherProof.payload.jti !== launcherProof.payload.launchId
+  || launcherProof.payload.launchId === 'launch-proof-test'
 ) {
   throw new Error(`Launcher proof signing failed: ${JSON.stringify(launcherProof)}`);
+}
+
+const missingRecoveryProofResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    protocol: 'aht-launcher-attestation-v2',
+    minecraftUsername: 'TestRig',
+    installId: 'install-b'
+  })
+}), env, {});
+if (missingRecoveryProofResponse.status !== 403) {
+  throw new Error(`v2 player proof without account recovery was accepted: ${missingRecoveryProofResponse.status}`);
 }
 
 const fallbackProofResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
@@ -441,19 +476,25 @@ if (curseForgeOnlyProofResponse.status !== 500 || !/LAUNCHER_PROOF_SECRET/i.test
 const objectCountBeforeProofStatus = objects.size;
 const proofStatus = await jsonRequest('/api/launcher-proof/status');
 if (
-  JSON.stringify(Object.keys(proofStatus).sort()) !== JSON.stringify(['configured', 'dedicatedConfigured', 'keyId', 'ok', 'signingVerified'])
+  JSON.stringify(Object.keys(proofStatus).sort()) !== JSON.stringify(['algorithm', 'configured', 'dedicatedConfigured', 'keyId', 'ok', 'privateKeyConfigured', 'protocol', 'publicKeyConfigured', 'signingVerified'])
   || !proofStatus.ok
   || !proofStatus.configured
   || !proofStatus.dedicatedConfigured
+  || !proofStatus.privateKeyConfigured
+  || !proofStatus.publicKeyConfigured
   || !proofStatus.signingVerified
-  || proofStatus.keyId !== 'aht-launcher-proof-v1'
+  || proofStatus.protocol !== 'aht-launcher-attestation-v2'
+  || proofStatus.algorithm !== 'RS256'
+  || proofStatus.keyId !== 'aht-launcher-attestation-v2'
   || objects.size !== objectCountBeforeProofStatus
 ) {
   throw new Error(`Launcher proof status was not read-only/minimal: ${JSON.stringify(proofStatus)}`);
 }
 let proofStatusStorageTouched = false;
 const inMemoryProofStatusResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof/status'), {
-  LAUNCHER_PROOF_SECRET: env.LAUNCHER_PROOF_SECRET,
+  LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8: env.LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
+  LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI: env.LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI,
+  LAUNCHER_ATTESTATION_KEY_ID: env.LAUNCHER_ATTESTATION_KEY_ID,
   AHT_DATA: {
     async get() { proofStatusStorageTouched = true; throw new Error('launcher proof status read R2'); },
     async put() { proofStatusStorageTouched = true; throw new Error('launcher proof status wrote R2'); }
@@ -484,15 +525,16 @@ const adminFallbackProofStatus = await adminFallbackProofStatusResponse.json();
 if (
   adminFallbackProofStatusResponse.status !== 200
   || adminFallbackProofStatus.ok
-  || !adminFallbackProofStatus.configured
-  || adminFallbackProofStatus.dedicatedConfigured
-  || !adminFallbackProofStatus.signingVerified
+  || adminFallbackProofStatus.configured
+  || adminFallbackProofStatus.privateKeyConfigured
+  || adminFallbackProofStatus.publicKeyConfigured
+  || adminFallbackProofStatus.signingVerified
 ) {
   throw new Error(`Admin-only fallback incorrectly passed production launcher proof status: ${adminFallbackProofStatusResponse.status} ${JSON.stringify(adminFallbackProofStatus)}`);
 }
 const invalidKeyProofStatusResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof/status'), {
   ...env,
-  LAUNCHER_PROOF_KEY_ID: 'wrong-key-id'
+  LAUNCHER_ATTESTATION_KEY_ID: 'wrong-key-id'
 }, {});
 const invalidKeyProofStatus = await invalidKeyProofStatusResponse.json();
 if (
@@ -752,7 +794,9 @@ const developerLauncherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...auth },
   body: JSON.stringify({
+    protocol: 'aht-launcher-attestation-v2',
     minecraftUsername: 'TestRig',
+    minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
     installId: 'developer-install-not-registered',
     launcherChannel: 'developer',
     developerClient: true,
@@ -777,9 +821,9 @@ const developerSocial = await developerSocialResponse.json();
 if (developerSocialResponse.status !== 200 || developerSocial.username !== 'TestRig') {
   throw new Error(`Signed developer proof was rejected by the downstream Worker proof verifier: ${developerSocialResponse.status} ${JSON.stringify(developerSocial)}`);
 }
-const wrongKidHeader = { alg: 'HS256', typ: 'AHT-LAUNCHER-PROOF', kid: 'wrong-key-id' };
+const wrongKidHeader = { alg: 'RS256', typ: 'AHT-LAUNCHER-ATTESTATION', kid: 'wrong-key-id' };
 const wrongKidInput = `${Buffer.from(JSON.stringify(wrongKidHeader)).toString('base64url')}.${Buffer.from(JSON.stringify(developerLauncherProof.payload)).toString('base64url')}`;
-const wrongKidToken = `${wrongKidInput}.${crypto.createHmac('sha256', env.LAUNCHER_PROOF_SECRET).update(wrongKidInput).digest('base64url')}`;
+const wrongKidToken = `${wrongKidInput}.${crypto.sign('RSA-SHA256', Buffer.from(wrongKidInput), TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8).toString('base64url')}`;
 const wrongKidSocialResponse = await worker.fetch(new Request('https://worker.test/api/social', {
   headers: { Authorization: `Bearer ${wrongKidToken}` }
 }), env, {});
@@ -788,11 +832,11 @@ if (wrongKidSocialResponse.status !== 401) {
 }
 const wrongConfiguredKidResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ minecraftUsername: 'TestRig', installId: 'install-b' })
-}), { ...env, LAUNCHER_PROOF_KEY_ID: 'wrong-key-id' }, {});
+  headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345' },
+  body: JSON.stringify({ protocol: 'aht-launcher-attestation-v2', minecraftUsername: 'TestRig', installId: 'install-b' })
+}), { ...env, LAUNCHER_ATTESTATION_KEY_ID: 'wrong-key-id' }, {});
 const wrongConfiguredKid = await wrongConfiguredKidResponse.json();
-if (wrongConfiguredKidResponse.status !== 500 || !/LAUNCHER_PROOF_KEY_ID/i.test(wrongConfiguredKid.error || '')) {
+if (wrongConfiguredKidResponse.status !== 500 || !/LAUNCHER_ATTESTATION_KEY_ID/i.test(wrongConfiguredKid.error || '')) {
   throw new Error(`Worker issued a proof with a key ID rejected by anti-cheat: ${wrongConfiguredKidResponse.status} ${JSON.stringify(wrongConfiguredKid)}`);
 }
 const emptyLogs = await jsonRequest('/api/update-logs?limit=3');

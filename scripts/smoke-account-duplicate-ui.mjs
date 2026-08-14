@@ -139,14 +139,15 @@ const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/api/users/register' && request.method === 'POST') {
     const body = await readBody(request);
-    requests.push(body);
+    const recoveryHeader = String(request.headers['x-aht-launcher-recovery'] || '');
+    requests.push({ ...body, recoveryHeader });
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     const duplicateUsernames = new Set(['takenuser_1', 'disabledprof']);
     const normalizedUsername = String(body.username || '').toLowerCase();
     const secureRecovery = Boolean(
       body.recoverExistingUsername
       && body.minecraftAccountMatched
-      && body.accountRecoverySecret === recoverySecrets.get(normalizedUsername)
+      && recoveryHeader === recoverySecrets.get(normalizedUsername)
     );
     if (duplicateUsernames.has(normalizedUsername) && !secureRecovery) {
       response.statusCode = 409;

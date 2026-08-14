@@ -1,115 +1,99 @@
-# AHT Launcher Proof Contract
+# AHT Launcher Attestation Contract
 
-Protocol: `aht-launcher-proof-v1`
+Current protocol: `aht-launcher-attestation-v2`
 
-The launcher writes a short-lived proof file before Update finishes and before Play opens the official Minecraft Launcher.
+The launcher requests a short-lived account attestation from the Cloudflare Worker immediately before Play. Only the Worker holds the signing key. The launcher and Minecraft client never contain a signing secret and cannot create a trusted attestation offline.
 
-## JVM Properties
+## Key contract
 
-The Minecraft Launcher profile gets these Java properties:
+- JWS algorithm: `RS256` (`SHA256withRSA`)
+- Protected header: `{"alg":"RS256","typ":"AHT-LAUNCHER-ATTESTATION","kid":"aht-launcher-attestation-v2"}`
+- Worker secret: `LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8` (unencrypted PKCS#8 PEM)
+- Worker/server public key: `LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI` (SPKI PEM)
+- Fixed issuer: `aht-launcher-worker`
+- Fixed audience: `aht-minecraft-server`
+- Fixed default pack ID: `a-hard-time-dregora`
+- Maximum lifetime: 10 minutes
+- Compact JWS limits: 8192 total characters; 1024 header, 6144 payload, and 1024 signature characters
 
-```text
--Daht.launcher.present=true
--Daht.launcher.protocol=aht-launcher-proof-v1
--Daht.launcher.proofFile=<absolute path to the channel-specific proof file>
-```
+`LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8` must be installed with `wrangler secret put`; it must never be committed, written to launcher configuration, packaged into an installer, logged, or copied to the Minecraft client/server. The server receives only the public SPKI key.
 
-Client mod entry point:
+## Player issuance
 
-```java
-String protocol = System.getProperty("aht.launcher.protocol", "");
-String proofFile = System.getProperty("aht.launcher.proofFile", "");
-```
+For a player-channel v2 request, the Worker requires all of the following:
 
-If `protocol` is not `aht-launcher-proof-v1` or `proofFile` is blank, the client did not launch through the AHT launcher profile.
+1. A registered Minecraft username.
+2. The registered launcher `installId`.
+3. The account recovery credential in the `X-AHT-Launcher-Recovery` request header, matching the verifier already stored with the registration.
+4. A valid Minecraft UUID stored in that registration.
 
-## Proof File
+The recovery credential is request-only. It is never included in the request JSON, signed payload, proof file, response, or logs. The Worker ignores a client-supplied UUID and signs the UUID from its registration record.
 
-Paths:
+This proves control of the AHT launcher registration and its recovery credential; it is not a replacement for Microsoft/Mojang OAuth. At join time, the dedicated server's online-mode session authentication remains the authority for the connecting Minecraft UUID, and the attestation must match that authenticated UUID.
 
-```text
-Player launcher:    <instance>/.aht-launcher/launcher-proof.json
-Developer launcher: <instance>/.aht-launcher/launcher-proof.developer.json
-```
+The Worker generates `jti`, `launchId`, `issuedAt`, and `expiresAt`. `jti` and `launchId` are the same random UUID. The Worker also supplies the fixed issuer, audience, and pack ID.
 
-The separate files prevent the player and authenticated developer launchers from replacing each other's proof when they point at the same instance directory.
-Worker-backed files also record the normalized signing-service base URL as local cache metadata; that field is not part of the signed token.
-
-Important fields:
+## Signed v2 payload
 
 ```json
 {
-  "protocol": "aht-launcher-proof-v1",
-  "schemaVersion": 1,
-  "trusted": true,
-  "source": "worker",
-  "token": "<header.payload.signature>",
-  "header": {
-    "alg": "HS256",
-    "typ": "AHT-LAUNCHER-PROOF",
-    "kid": "aht-launcher-proof-v1"
-  },
-  "payload": {
-    "protocol": "aht-launcher-proof-v1",
-    "schemaVersion": 1,
-    "launchId": "<uuid>",
-    "issuedAt": "2026-06-25T00:00:00.000Z",
-    "expiresAt": "2026-06-25T00:10:00.000Z",
-    "packId": "a-hard-time-dregora",
-    "packVersion": "2.8.2",
-    "minecraftUsername": "PlayerName",
-    "installId": "<launcher install id>",
-    "appVersion": "0.1.0",
-    "platform": "win32",
-    "arch": "x64",
-    "launcherChannel": "player",
-    "instanceDirHash": "<sha256>"
-  },
-  "signature": {
-    "alg": "HS256",
-    "kid": "aht-launcher-proof-v1",
-    "value": "<base64url hmac>"
-  }
+  "protocol": "aht-launcher-attestation-v2",
+  "schemaVersion": 2,
+  "jti": "<worker-generated UUID>",
+  "launchId": "<same worker-generated UUID>",
+  "issuedAt": "2026-08-14T00:00:00.000Z",
+  "expiresAt": "2026-08-14T00:10:00.000Z",
+  "issuer": "aht-launcher-worker",
+  "audience": "aht-minecraft-server",
+  "packId": "a-hard-time-dregora",
+  "packVersion": "<installed pack version>",
+  "minecraftUsername": "PlayerName",
+  "minecraftUuid": "01234567-89ab-4def-8123-456789abcdef",
+  "installId": "<launcher install id>",
+  "launcherVersion": "<launcher version>",
+  "launcherChannel": "player",
+  "developerClient": false,
+  "developerClientBypass": false,
+  "modIntegrityBypass": false
 }
 ```
 
-The client mod should send the whole `token` or the whole proof JSON to the server during the mod handshake.
+The proof document has `trusted: true` and `source: "worker"`. Its `token` is the compact JWS. The launcher performs strict structural and request/response checks, but the Minecraft server is the enforcement authority and must verify the RSA signature.
 
-## Server Verification
+The Worker-authoritative claims are the account username/UUID binding, install/recovery binding, key/header, IDs, times, issuer, audience, pack ID, and channel authorization. Version, platform, architecture, instance-path hash, and Minecraft-loader context originate in the launcher request; a valid signature prevents later alteration but does not independently prove those client observations.
 
-Server mod rules:
-
-1. Require `trusted === true`.
-2. Require `source === "worker"` for real enforcement.
-3. Require `header.alg === "HS256"`.
-4. Verify `token` as a JWT-style value:
-   - Split by `.`
-   - Compute `HmacSHA256(headerBase64 + "." + payloadBase64, LAUNCHER_PROOF_SECRET)`
-   - Base64url-encode the result without padding
-   - Compare to the third token part using a constant-time comparison
-5. Decode payload JSON and require:
-   - `protocol === "aht-launcher-proof-v1"`
-   - `packId === "a-hard-time-dregora"`
-   - `minecraftUsername` matches the joining player name
-   - `expiresAt` is still in the future
-   - `issuedAt` is not too far in the future
-6. Track `launchId` for a short time and reject reuse if you want one-token-per-join behavior.
-
-## Worker Secret
-
-Cloudflare Worker secret required for real signatures:
+## JVM properties and proof files
 
 ```text
-LAUNCHER_PROOF_SECRET=<same secret your server mod uses to verify HMAC>
-LAUNCHER_PROOF_KEY_ID=aht-launcher-proof-v1
+-Daht.launcher.present=true
+-Daht.launcher.protocol=aht-launcher-attestation-v2
+-Daht.launcher.proofFile=<absolute channel-specific proof path>
 ```
 
-The key ID must remain `aht-launcher-proof-v1` because the launcher, Worker verifier, and Minecraft anti-cheat all enforce that exact identifier.
+Canonical proof files live in launcher user data; pack-local compatibility mirrors use these names:
 
-The Worker signs launcher proof tokens with `LAUNCHER_PROOF_SECRET`. For compatibility with older server-side setups it will also accept `AHT_LAUNCHER_PROOF_SECRET`, then `ADMIN_TOKEN_SECRET`, then `ADMIN_PASSWORD` as fallback signing secrets. The server should be configured with `LAUNCHER_PROOF_SECRET` set to the exact same value whenever possible.
+```text
+Player:    <instance>/.aht-launcher/launcher-proof.json
+Developer: <instance>/.aht-launcher/launcher-proof.developer.json
+```
 
-Do not use `CURSEFORGE_API_KEY` as the proof-signing secret. That key is only for CurseForge API access.
+## Server verification
 
-Set the same proof secret in the Minecraft server process environment, service manager, or host panel before starting the server.
+The server must fail closed unless all checks pass:
 
-Until the Worker is deployed and `LAUNCHER_PROOF_SECRET` is set, the launcher can write an unsigned fallback proof. The server mod should not accept fallback proofs.
+1. Parse exactly three compact-JWS segments and require the exact v2 header values.
+2. Verify `SHA256withRSA` with the configured public SPKI key.
+3. Require protocol/schema, issuer, audience, pack ID, username, Minecraft UUID, channel, and boolean claims to match the joining session.
+4. Require a valid issue/expiry window no longer than 10 minutes and reject future or expired tokens.
+5. Require `jti === launchId`, both formatted as a UUID.
+6. Record `jti` with the authenticated Minecraft UUID and expiry in a bounded replay cache. A reconnect by that same UUID may reuse the still-valid proof; reuse by any different UUID is rejected.
+
+Client integrity reports remain signals; they are not allowed to create or alter an attestation.
+
+## Rolling v1 compatibility
+
+Old launchers omit the v2 protocol and therefore receive legacy `aht-launcher-proof-v1`/HS256 responses while the compatibility window is open. A new launcher explicitly requests v2, but accepts an exact remote v1 response from an old Worker. It never creates a local HMAC proof and rejects `source: "local-hmac"`.
+
+Roll out in this order: deploy the v2-capable server verifier first with ordinary-player strict enforcement disabled; configure its public key; deploy the Worker with the matching private key while retaining remote v1 issuance for old launchers; then distribute launcher 0.1.85. Enable strict ordinary-player v2 enforcement only after the Worker, server public key, and launcher population are confirmed. The launcher and Worker compatibility window does not make the server upgrade optional.
+
+Keep the legacy `LAUNCHER_PROOF_SECRET` only as long as old launchers and old server verification must be supported. It is not used for v2. Remove the v1 issuance and verification path after the rollout population is upgraded.
