@@ -11,6 +11,10 @@ module.exports = {
       {
         target: 'nsis',
         arch: ['x64']
+      },
+      {
+        target: 'zip',
+        arch: ['x64']
       }
     ],
     artifactName: 'AHT-Launcher-Windows-10-11-${version}.${ext}'

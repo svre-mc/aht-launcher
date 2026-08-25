@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathExists, readJsonFile, writeJsonFile } from './utils.js';
 
 export const TERMS_VERSION = '2026-07-14.1';
-export const PRIVACY_VERSION = '2026-07-14.1';
+export const PRIVACY_VERSION = '2026-08-23.1';
 export const LEGAL_EFFECTIVE_AT = '2026-07-14T00:00:00-07:00';
 
 const TERMS_FILE = 'TERMS_OF_SERVICE.txt';

@@ -267,8 +267,8 @@ const server = http.createServer(async (request, response) => {
     }
     sendJson(200, {
       downloads: [
-        { id: 'download-2', receivedAt: '2026-08-03T16:15:00.000Z', ipv4: '', platformKey: 'macos-arm64', platform: 'Mac', launcherVersion: '0.1.83', fileName: 'AHT-Launcher-macOS-arm64-0.1.83.dmg' },
-        { id: 'download-1', receivedAt: '2026-08-03T15:15:00.000Z', ipv4: '203.0.113.30', platformKey: 'windows-x64', platform: 'Windows', launcherVersion: '0.1.83', fileName: 'AHT-Launcher-Windows-10-11-0.1.83.exe' }
+        { id: 'download-2', receivedAt: '2026-08-03T16:15:00.000Z', minecraftUsername: 'PlayerOne', minecraftUuid: '0123456789abcdef0123456789abcdef', ipv4: '', platformKey: 'macos-arm64', platform: 'Mac', launcherVersion: '0.1.83', fileName: 'AHT-Launcher-macOS-arm64-0.1.83.dmg' },
+        { id: 'download-1', receivedAt: '2026-08-03T15:15:00.000Z', minecraftUsername: 'PlayerTwo', minecraftUuid: 'fedcba0987654321fedcba0987654321', ipv4: '203.0.113.30', platformKey: 'windows-x64', platform: 'Windows', launcherVersion: '0.1.83', fileName: 'AHT-Launcher-Windows-10-11-0.1.83.exe' }
       ],
       cursor: '',
       hasMore: false,
@@ -310,6 +310,14 @@ const server = http.createServer(async (request, response) => {
       hasMore: false,
       appendOnly: true
     });
+    return;
+  }
+  if (url.pathname === '/admin/access-decisions') {
+    if (request.headers.authorization !== 'Bearer fresh-token') {
+      sendJson(401, { error: 'Unauthorized' });
+      return;
+    }
+    sendJson(200, { decisions: [], audit: [], currentOnly: true });
     return;
   }
   if (url.pathname === '/admin/player-ipv4-groups') {
@@ -442,10 +450,15 @@ try {
   if (loginCalls.length !== 2) {
     throw new Error(`Expected stale-token login then refresh login, got ${JSON.stringify(loginCalls)}`);
   }
-  if (launcherProofAuthHeaders.join('|') !== 'Bearer stale-token|Bearer fresh-token') {
-    throw new Error(`Immediate launcher proof did not refresh stale developer auth exactly once: ${JSON.stringify(launcherProofAuthHeaders)}`);
+  const nonEmptyLauncherProofAuthHeaders = launcherProofAuthHeaders.filter(Boolean);
+  if (
+    nonEmptyLauncherProofAuthHeaders.length < 2
+    || nonEmptyLauncherProofAuthHeaders[0] !== 'Bearer stale-token'
+    || nonEmptyLauncherProofAuthHeaders.slice(1).some((header) => header !== 'Bearer fresh-token')
+  ) {
+    throw new Error(`Immediate launcher proof did not replace stale developer auth for every retry: ${JSON.stringify(launcherProofAuthHeaders)}`);
   }
-  const developerProofPath = path.join(stableInstanceDir, '.aht-launcher', 'launcher-proof.developer.json');
+  const developerProofPath = path.join(userData, '.aht-launcher', 'launcher-proof.developer.json');
   const refreshedLauncherProof = JSON.parse(fs.readFileSync(developerProofPath, 'utf8'));
   if (
     refreshedLauncherProof.payload?.launcherChannel !== 'developer'
@@ -486,22 +499,24 @@ try {
       };
     })()
   `, 'compact paginated Player Data UI');
-  const expectedDownloadHeaders = ['Date', 'IPv4', 'Platform', 'Version', 'File'];
-  const expectedPlayerHeaders = ['Date', 'User', 'IPv4', 'MC UUID', 'Platform'];
-  const expectedRegisteredHeaders = ['Registered', 'User', 'IPv4', 'MC UUID', 'Platform'];
+  const expectedDownloadHeaders = ['Date', 'User', 'IP', 'MC UUID', 'Platform'];
+  const expectedPlayerHeaders = ['Date', 'User', 'IP', 'MC UUID', 'Platform'];
+  const expectedRegisteredHeaders = ['Last Seen', 'User', 'IP', 'Network', 'Device', 'MC UUID', 'Access', 'Action'];
   if (
     JSON.stringify(playerDataUi.downloadHeaders) !== JSON.stringify(expectedDownloadHeaders)
     || JSON.stringify(playerDataUi.playerHeaders) !== JSON.stringify(expectedRegisteredHeaders)
     || JSON.stringify(playerDataUi.updateHeaders) !== JSON.stringify([...expectedPlayerHeaders, 'Version'])
-    || playerDataUi.downloadRows[0]?.[1] !== '—'
-    || playerDataUi.downloadRows[0]?.[2] !== 'Mac'
-    || playerDataUi.downloadRows[0]?.[3] !== '0.1.83'
-    || playerDataUi.downloadRows[0]?.[4] !== 'AHT-Launcher-macOS-arm64-0.1.83.dmg'
-    || playerDataUi.downloadRows[1]?.[2] !== 'Windows'
+    || playerDataUi.downloadRows[0]?.[1] !== 'PlayerOne'
+    || !playerDataUi.downloadRows[0]?.[2]
+    || playerDataUi.downloadRows[0]?.[3] !== '01234567-89ab-cdef-0123-456789abcdef'
+    || playerDataUi.downloadRows[0]?.[4] !== 'Mac'
+    || playerDataUi.downloadRows[1]?.[1] !== 'PlayerTwo'
+    || playerDataUi.downloadRows[1]?.[4] !== 'Windows'
     || playerDataUi.playerRows[0]?.[1] !== 'PlayerOne'
-    || playerDataUi.playerRows[0]?.[3] !== '01234567-89ab-cdef-0123-456789abcdef'
-    || playerDataUi.playerRows[0]?.[4] !== 'Windows'
-    || playerDataUi.playerRows[1]?.[4] !== 'Mac'
+    || playerDataUi.playerRows[0]?.[5] !== '01234567-89ab-cdef-0123-456789abcdef'
+    || playerDataUi.playerRows[0]?.[6] !== 'Allowed'
+    || playerDataUi.playerRows[0]?.[7] !== 'Manage'
+    || playerDataUi.playerRows[1]?.[6] !== 'Allowed'
     || playerDataUi.updateRows[0]?.[5] !== '0.1.83'
     || !playerDataUi.downloadsHidden
     || !playerDataUi.playersHidden

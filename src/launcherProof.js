@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { createDeviceAssertion, validateDeviceCredential } from './deviceIdentity.js';
 import { workerServiceBaseUrl } from './releaseTargets.js';
-import { pathExists, readJsonFile, writeJsonFile } from './utils.js';
+import { pathExists, readJsonFile, removeFileIfExists, writeJsonFile } from './utils.js';
 
 export const LAUNCHER_PROOF_PROTOCOL = 'aht-launcher-attestation-v2';
 export const LEGACY_LAUNCHER_PROOF_PROTOCOL = 'aht-launcher-proof-v1';
@@ -113,6 +114,8 @@ function launcherProofDocumentReasons(proof, {
     if (payload.issuer !== LAUNCHER_ATTESTATION_ISSUER) reasons.push('issuer mismatch');
     if (payload.audience !== LAUNCHER_ATTESTATION_AUDIENCE) reasons.push('audience mismatch');
     if (payload.packId !== LAUNCHER_ATTESTATION_PACK_ID) reasons.push('pack mismatch');
+    if (payload.accessGranted !== true) reasons.push('access denied');
+    if (!['likely', 'not_detected', 'unknown'].includes(cleanString(payload.networkStatus || '', 20))) reasons.push('network status mismatch');
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cleanString(payload.jti || '', 80))) {
       reasons.push('jti mismatch');
     }
@@ -170,7 +173,22 @@ function launcherProofFiles(config = {}, identity = {}) {
   const configuredProof = config.launcherProof?.proofDir
     ? launcherProofPath(config.instanceDir || '', identity, { proofDir: config.launcherProof.proofDir })
     : instanceProof;
-  return [...new Set([configuredProof, instanceProof].map((file) => path.resolve(file)))];
+  const files = [configuredProof];
+  if (config.launcherProof?.legacyInstanceMirror === true) files.push(instanceProof);
+  return [...new Set(files.map((file) => path.resolve(file)))];
+}
+
+export function launcherProofDeviceBinding(payload = {}) {
+  return {
+    protocol: cleanString(payload.protocol || '', 80),
+    launchId: cleanString(payload.launchId || '', 80),
+    minecraftUsername: cleanString(payload.minecraftUsername || '', 16).toLowerCase(),
+    minecraftUuid: normalizeMinecraftUuid(payload.minecraftUuid || ''),
+    installId: cleanString(payload.installId || '', 120),
+    instanceDirHash: cleanString(payload.instanceDirHash || '', 80),
+    launcherVersion: cleanString(payload.launcherVersion || payload.appVersion || '', 40),
+    deviceId: cleanString(payload.deviceId || '', 80)
+  };
 }
 
 export function launcherProofJavaArgs(proofFile = '') {
@@ -229,6 +247,7 @@ export async function inspectLauncherProof({
   const expectedUsername = cleanString(identity.minecraftUsername || config.sync?.playerLabel || '', 16);
   const expectedMinecraftUuid = normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID || '');
   const expectedInstallId = cleanString(identity.installId || '', 120);
+  const expectedDeviceId = cleanString(identity.deviceId || '', 80);
   const expectedInstanceHash = sha256Hex(path.resolve(config.instanceDir || ''));
   const expectedLauncherChannel = cleanString(identity.launcherChannel || 'player', 32);
   const expectedDeveloperClient = Boolean(identity.developerClient);
@@ -242,6 +261,7 @@ export async function inspectLauncherProof({
   if (expectedUsername && cleanString(payload.minecraftUsername || '', 16).toLowerCase() !== expectedUsername.toLowerCase()) reasons.push('Minecraft username mismatch');
   if (expectedMinecraftUuid && normalizeMinecraftUuid(payload.minecraftUuid || '') !== expectedMinecraftUuid) reasons.push('Minecraft UUID mismatch');
   if (expectedInstallId && cleanString(payload.installId || '', 120) !== expectedInstallId) reasons.push('launcher install mismatch');
+  if (expectedDeviceId && cleanString(payload.deviceId || '', 80) !== expectedDeviceId) reasons.push('device identity mismatch');
   if (cleanString(payload.instanceDirHash || '', 80) !== expectedInstanceHash) reasons.push('instance path mismatch');
   if (cleanString(payload.launcherChannel || 'player', 32) !== expectedLauncherChannel) reasons.push('launcher channel mismatch');
   if (payload.developerClient !== expectedDeveloperClient) reasons.push('developer client mismatch');
@@ -284,6 +304,7 @@ export function buildLauncherProofPayload({ config = {}, identity = {}, latest =
     minecraftUsername: cleanString(identity.minecraftUsername || config.sync?.playerLabel || '', 16),
     minecraftUuid: normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID || ''),
     installId: cleanString(identity.installId || '', 120),
+    deviceId: cleanString(identity.deviceId || '', 80),
     appVersion: cleanString(identity.appVersion || '', 40),
     launcherVersion: cleanString(identity.appVersion || identity.launcherVersion || '', 40),
     platform: cleanString(identity.platform || process.platform, 32),
@@ -358,6 +379,7 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
     mismatches.push('minecraftUuid');
   }
   compareString('installId', 120);
+  if (payload?.deviceId) compareString('deviceId', 80);
   compareString('instanceDirHash', 80);
   compareString('launcherChannel', 32);
   for (const field of ['developerClient', 'developerClientBypass', 'modIntegrityBypass']) {
@@ -399,13 +421,25 @@ function unsignedProof(payload, error = '') {
   };
 }
 
-export async function writeLauncherProof({ config = {}, identity = {}, latest = null, installed = null, fetchImpl = globalThis.fetch, authToken = '', recoverySecret = '' } = {}) {
+export async function writeLauncherProof({ config = {}, identity = {}, latest = null, installed = null, fetchImpl = globalThis.fetch, authToken = '', recoverySecret = '', deviceCredential = null } = {}) {
   if (config.launcherProof?.enabled === false) {
     return { enabled: false };
   }
   const proofFiles = launcherProofFiles(config, identity);
   const proofFile = proofFiles[0];
-  const payload = buildLauncherProofPayload({ config, identity, latest, installed });
+  let payload = buildLauncherProofPayload({ config, identity, latest, installed });
+  if (deviceCredential) {
+    const credential = validateDeviceCredential(deviceCredential);
+    payload = {
+      ...payload,
+      deviceId: credential.deviceId,
+      devicePublicKey: credential.publicKey
+    };
+    payload.deviceAssertion = createDeviceAssertion(credential, {
+      purpose: 'launcher-proof',
+      binding: launcherProofDeviceBinding(payload)
+    });
+  }
   let proof = null;
   let remoteError = '';
   try {
@@ -429,9 +463,8 @@ export async function writeLauncherProof({ config = {}, identity = {}, latest = 
     generatedAt: new Date().toISOString()
   };
   await writeJsonFile(proofFile, fileProof);
-  // Keep the pack-local copy as a compatibility mirror for older profiles and
-  // client reporters. The canonical copy lives in launcher user-data so an
-  // Electron installer update cannot orphan the proof path.
+  // A pack-local mirror is opt-in compatibility only. The canonical proof is a
+  // short-lived signed document in launcher user-data, not trusted local state.
   for (const compatibilityFile of proofFiles.slice(1)) {
     if (compatibilityFile === proofFile) continue;
     await writeJsonFile(compatibilityFile, {
@@ -439,6 +472,12 @@ export async function writeLauncherProof({ config = {}, identity = {}, latest = 
       proofFile: compatibilityFile,
       javaProperties: launcherProofJavaArgs(compatibilityFile)
     }).catch(() => {});
+  }
+  const instanceProof = path.resolve(launcherProofPath(config.instanceDir || '', identity));
+  if (config.launcherProof?.proofDir
+      && config.launcherProof?.legacyInstanceMirror !== true
+      && instanceProof !== path.resolve(proofFile)) {
+    await removeFileIfExists(instanceProof).catch(() => {});
   }
   return fileProof;
 }

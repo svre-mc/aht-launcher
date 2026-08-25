@@ -16,6 +16,7 @@ const fakeR2Root = path.join(root, 'r2');
 const uploadLog = path.join(root, 'upload-log.jsonl');
 const bucket = 'ahtlauncher';
 const installer = path.join(root, 'AHT-Launcher-Windows-10-11-9.9.10.exe');
+const windowsZip = path.join(root, 'AHT-Launcher-Windows-10-11-9.9.10.zip');
 const macosArmZip = path.join(root, 'AHT-Launcher-macOS-arm64-9.9.10.zip');
 const macosX64Zip = path.join(root, 'AHT-Launcher-macOS-x64-9.9.10.zip');
 const macosArmDmg = path.join(root, 'AHT-Launcher-macOS-arm64-9.9.10.dmg');
@@ -128,6 +129,7 @@ async function waitFor(client, expression, label, attempts = 160) {
 await fsp.mkdir(fakeBin, { recursive: true });
 await fsp.mkdir(path.join(fakeR2Root, bucket), { recursive: true });
 await fsp.writeFile(installer, 'fake windows launcher installer\n', 'utf8');
+await fsp.writeFile(windowsZip, 'fake windows staged update zip\n', 'utf8');
 await fsp.writeFile(macosArmZip, 'fake macos arm64 update zip\n', 'utf8');
 await fsp.writeFile(macosX64Zip, 'fake macos x64 update zip\n', 'utf8');
 await fsp.writeFile(macosArmDmg, 'fake macos arm64 dmg\n', 'utf8');
@@ -167,7 +169,7 @@ await fs.appendFile(process.env.FAKE_UPLOAD_LOG, JSON.stringify({ bucket, key })
 console.log('uploaded ' + key);
 `, 'utf8');
 if (process.platform === 'win32') {
-  await fsp.writeFile(path.join(fakeBin, 'npx.cmd'), `@echo off\r\nnode "%~dp0fake-wrangler.mjs" %*\r\n`, 'utf8');
+  await fsp.writeFile(path.join(fakeBin, 'npx.cmd'), `@echo off\r\n"${process.execPath}" "%~dp0fake-wrangler.mjs" %*\r\n`, 'utf8');
 } else {
   const npxPath = path.join(fakeBin, 'npx');
   await fsp.writeFile(npxPath, `#!/usr/bin/env sh\nnode "$(dirname "$0")/fake-wrangler.mjs" "$@"\n`, 'utf8');
@@ -225,6 +227,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
+    AHT_WRANGLER_COMMAND: process.execPath,
+    AHT_WRANGLER_ARGS_PREFIX: JSON.stringify([fakeWrangler]),
     AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE: '1',
     AHT_DEVELOPER_USERNAME: 'admin',
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
@@ -254,6 +258,7 @@ try {
   const result = await evaluate(client, `window.aht.devSyncLauncherUpdate({
     version: '9.9.10',
     windowsPath: ${JSON.stringify(installer)},
+    windowsZipPath: ${JSON.stringify(windowsZip)},
     macosArmZipPath: ${JSON.stringify(macosArmZip)},
     macosX64ZipPath: ${JSON.stringify(macosX64Zip)},
     macosArmDmgPath: ${JSON.stringify(macosArmDmg)},
@@ -271,6 +276,9 @@ try {
   const manifest = JSON.parse(fs.readFileSync(path.join(fakeR2Root, bucket, 'launcher', 'latest.json'), 'utf8'));
   if (!manifest.platforms?.win32?.url || !manifest.platforms?.['win32-x64']?.sha256) {
     throw new Error(`Published launcher manifest missing Windows artifact aliases: ${JSON.stringify(manifest)}`);
+  }
+  if (manifest.stagedPlatforms?.['win32-x64']?.kind !== 'zip' || !manifest.stagedPlatforms?.windows?.fileName?.endsWith('.zip')) {
+    throw new Error(`Published launcher manifest missing the Windows staged update ZIP aliases: ${JSON.stringify(manifest.stagedPlatforms)}`);
   }
   if (manifest.platforms?.['darwin-arm64']?.kind !== 'zip' || manifest.platforms?.['darwin-x64']?.kind !== 'zip') {
     throw new Error(`Published launcher manifest must use macOS ZIP artifacts for self-update: ${JSON.stringify(manifest.platforms)}`);

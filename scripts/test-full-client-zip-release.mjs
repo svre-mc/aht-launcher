@@ -72,6 +72,10 @@ assert(release.latest.installMode === 'full-client-zip', 'release did not use fu
 assert(release.latest.curseforge?.disabled === true, 'full-client release should not use CurseForge resolution');
 assert(release.latest.clientZip?.modFileCount >= 2, 'full-client release did not count mod archives');
 assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.0.0.jar', 'full-client release did not record the client version lock mod');
+const serverLockConfig = await fs.readFile(path.join(outDir, release.latest.serverLock.configPath), 'utf8');
+assert(serverLockConfig.includes('S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify'), 'server launcher lock config is missing the authoritative Worker verifier');
+assert(serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}'), 'server launcher lock config is missing the reconnect update message');
+assert(!serverLockConfig.includes('requiredVersion='), 'server launcher lock config must read launcher policy live instead of freezing a pack version');
 
 await fs.mkdir(installDir, { recursive: true });
 await fs.mkdir(path.join(installDir, 'config', 'jei'), { recursive: true });
@@ -291,11 +295,11 @@ const wrappedRelease = await buildRelease({
 });
 assert(wrappedRelease.latest.installMode === 'full-client-zip', 'wrapped full-client ZIP was not recognized as a full-client release');
 assert(wrappedRelease.latest.serverLock?.injected === true, 'wrapped full-client ZIP should have the version lock injected during release build');
-assert(wrappedRelease.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.0.0.jar', `wrapped full-client ZIP did not record injected version lock: ${JSON.stringify(wrappedRelease.latest.serverLock)}`);
+assert(wrappedRelease.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.1.0.jar', `wrapped full-client ZIP did not record injected version lock: ${JSON.stringify(wrappedRelease.latest.serverLock)}`);
 assert(wrappedRelease.latest.clientZip?.modFileCount === 2, `wrapped full-client ZIP mod count should include injected version lock: ${JSON.stringify(wrappedRelease.latest.clientZip)}`);
 const wrappedPublishedZip = new AdmZip(path.join(wrappedOutDir, wrappedRelease.latest.zip.path));
 const wrappedPublishedEntries = new Set(wrappedPublishedZip.getEntries().map((entry) => entry.entryName.replace(/\\/g, '/')));
-assert(wrappedPublishedEntries.has('A Hard Time Client/mods/aht-version-lock-1.0.0.jar'), 'published wrapped ZIP is missing injected version lock mod');
+assert(wrappedPublishedEntries.has('A Hard Time Client/mods/aht-version-lock-1.1.0.jar'), 'published wrapped ZIP is missing injected version lock mod');
 const wrappedInstallDir = path.join(root, 'wrapped-install');
 await installPack({
   latestSource: path.join(wrappedOutDir, 'latest.json'),
@@ -303,7 +307,7 @@ await installPack({
   logger: { log() {} }
 });
 assert(await pathExists(path.join(wrappedInstallDir, 'mods', 'aht-wrapper.jar')), 'wrapped client ZIP installed under the wrapper folder instead of mods/');
-assert(await pathExists(path.join(wrappedInstallDir, 'mods', 'aht-version-lock-1.0.0.jar')), 'wrapped client ZIP did not install injected version lock mod');
+assert(await pathExists(path.join(wrappedInstallDir, 'mods', 'aht-version-lock-1.1.0.jar')), 'wrapped client ZIP did not install injected version lock mod');
 assert(!(await pathExists(path.join(wrappedInstallDir, 'A Hard Time Client', 'mods', 'aht-wrapper.jar'))), 'wrapped client ZIP left the wrapper folder inside the instance');
 assert(await pathExists(path.join(wrappedInstallDir, 'resourcepacks', 'aht-wrapper-resources.zip')), 'wrapped client ZIP did not normalize resourcepacks/');
 const wrappedScan = await scanManagedIntegrity(wrappedInstallDir);

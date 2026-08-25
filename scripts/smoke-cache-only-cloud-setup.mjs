@@ -219,6 +219,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
     AHT_DEVELOPER_USERNAME: 'admin',
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
+    AHT_WRANGLER_COMMAND: process.execPath,
+    AHT_WRANGLER_ARGS_PREFIX: JSON.stringify([fakeWrangler]),
     PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
     FAKE_R2_ROOT: fakeR2Root,
     FAKE_SECRET_LOG: secretLog,
@@ -252,9 +254,10 @@ try {
       document.querySelector('#playerFeedUrlInput').value = '';
       document.querySelector('#curseforgeApiKeyInput').value = '';
       document.querySelector('#launcherProofSecretInput').value = 'proof-secret';
+      document.querySelector('#socialServerSecretInput').value = 'test-social-server-secret-at-least-32-bytes';
       document.querySelector('#cacheOnlyInput').checked = true;
       document.querySelector('#bucketInput').value = ${JSON.stringify(bucket)};
-      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#cacheOnlyInput', '#bucketInput']) {
+      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#socialServerSecretInput', '#cacheOnlyInput', '#bucketInput']) {
         document.querySelector(selector).dispatchEvent(new Event('input', { bubbles: true }));
         document.querySelector(selector).dispatchEvent(new Event('change', { bubbles: true }));
       }
@@ -267,7 +270,7 @@ try {
   if (secretNames.includes('CURSEFORGE_API_KEY')) {
     throw new Error(`Cache-only setup should not write CURSEFORGE_API_KEY: ${JSON.stringify(secretNames)}`);
   }
-  for (const required of ['LAUNCHER_PROOF_SECRET', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'ADMIN_TOKEN_SECRET']) {
+  for (const required of ['LAUNCHER_PROOF_SECRET', 'AHT_SOCIAL_SERVER_SECRET', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'ADMIN_TOKEN_SECRET']) {
     if (!secretNames.includes(required)) {
       throw new Error(`Cache-only setup missed developer secret ${required}: ${JSON.stringify(secretNames)}`);
     }

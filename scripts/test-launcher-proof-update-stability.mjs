@@ -45,7 +45,7 @@ const stableFile = launcherProofPath(instanceDir, identity, { proofDir: stablePr
 const legacyFile = launcherProofPath(instanceDir, identity);
 assert.equal(first.proofFile, path.resolve(stableFile));
 await fs.access(stableFile);
-await fs.access(legacyFile);
+await assert.rejects(fs.access(legacyFile), { code: 'ENOENT' });
 assert.match(launcherProofJavaArgs(stableFile).join(' '), /launcher-user-data[\\/]\.aht-launcher/);
 
 const afterUpdate = await writeLauncherProof({
@@ -67,19 +67,22 @@ assert.equal(afterUpdate.payload.installId, identity.installId, 'launcher update
 assert.equal(afterUpdate.payload.appVersion, '0.1.84');
 assert.equal(inspected.usable, true, inspected.reason);
 assert.equal(inspected.proofFile, path.resolve(stableFile));
+await assert.rejects(fs.access(legacyFile), { code: 'ENOENT' });
 
-// A profile left behind by an older launcher can still find the compatibility
-// mirror while the next Play rewrites the canonical user-data proof.
+// Pack-local mirrors expose the proof contract inside the managed game tree.
+// If the canonical launcher-owned proof disappears, inspection fails closed.
 await fs.rm(stableFile);
-const legacyInspection = await inspectLauncherProof({
+const missingInspection = await inspectLauncherProof({
   config,
   identity: { ...identity, appVersion: '0.1.84' },
   installed,
   latest,
   minValidityMs: 30_000
 });
-assert.equal(legacyInspection.usable, true, legacyInspection.reason);
-assert.equal(legacyInspection.proofFile, path.resolve(legacyFile));
+assert.equal(missingInspection.usable, false);
+assert.equal(missingInspection.reason, 'missing proof file');
+assert.equal(missingInspection.proofFile, path.resolve(stableFile));
+await assert.rejects(fs.access(legacyFile), { code: 'ENOENT' });
 
 console.log(JSON.stringify({
   stableFile,
@@ -87,5 +90,6 @@ console.log(JSON.stringify({
   installIdPreserved: afterUpdate.payload.installId === identity.installId,
   updateVersion: afterUpdate.payload.appVersion,
   canonicalInspection: inspected.usable,
-  legacyFallbackInspection: legacyInspection.usable
+  packLocalMirrorAbsent: true,
+  missingCanonicalFailsClosed: !missingInspection.usable
 }, null, 2));

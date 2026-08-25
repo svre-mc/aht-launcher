@@ -1,5 +1,7 @@
 # A Hard Time Launcher
 
+Security and access-control operations are documented in [docs/access-control-and-data-security.md](docs/access-control-and-data-security.md).
+
 A Hard Time Launcher installs and updates the A Hard Time Minecraft modpack with a CurseForge-style pack import flow. The launcher creates its own managed Minecraft instance, downloads required files from the hosted update feed, and opens the CurseForge Minecraft Launcher when available, with the official Minecraft Launcher as a fallback.
 
 ## Downloads

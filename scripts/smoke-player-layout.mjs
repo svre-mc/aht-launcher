@@ -577,6 +577,57 @@ try {
     throw new Error(`Sidebar progress overlaps or shows unbounded transfer text: ${JSON.stringify(sidebarProgressProof)}`);
   }
 
+  const toastLifetimeProof = await evaluate(client, `
+    (async () => {
+      const stack = document.querySelector('#toastStack');
+      stack.replaceChildren();
+      const measureToast = (title, type, options) => new Promise((resolve, reject) => {
+        let target = null;
+        let insertedAt = 0;
+        const observer = new MutationObserver((records) => {
+          for (const record of records) {
+            for (const node of record.addedNodes) {
+              if (
+                !target
+                && node.nodeType === Node.ELEMENT_NODE
+                && node.classList.contains('toast')
+                && node.querySelector('strong')?.textContent === title
+              ) {
+                target = node;
+                insertedAt = performance.now();
+              }
+            }
+            if (target && [...record.removedNodes].includes(target)) {
+              window.clearTimeout(timeout);
+              observer.disconnect();
+              resolve({ removed: true, durationMs: performance.now() - insertedAt });
+              return;
+            }
+          }
+        });
+        const timeout = window.setTimeout(() => {
+          observer.disconnect();
+          reject(new Error('Toast was not removed: ' + title));
+        }, 6000);
+        observer.observe(stack, { childList: true });
+        showToast(title, 'Player toast lifetime probe', type, options);
+      });
+      const defaultError = await measureToast('Default error toast lifetime', 'error');
+      const overriddenSuccess = await measureToast('Overridden success toast lifetime', 'success', { durationMs: 5200 });
+      return { defaultError, overriddenSuccess };
+    })()
+  `);
+  if (
+    toastLifetimeProof?.defaultError?.removed !== true
+    || toastLifetimeProof?.overriddenSuccess?.removed !== true
+    || !Number.isFinite(toastLifetimeProof.defaultError.durationMs)
+    || !Number.isFinite(toastLifetimeProof.overriddenSuccess.durationMs)
+    || toastLifetimeProof.defaultError.durationMs > 4250
+    || toastLifetimeProof.overriddenSuccess.durationMs > 4250
+  ) {
+    throw new Error(`Regular player toast lifetime exceeded 4250ms: ${JSON.stringify(toastLifetimeProof)}`);
+  }
+
   const reports = [];
   const screenshots = [];
   for (const size of [
@@ -597,7 +648,16 @@ try {
     await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
   }
 
-  console.log(JSON.stringify({ ok: true, root, screenshots, reports: reports.map(({ label, viewport, activeView }) => ({ label, viewport, activeView })) }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    root,
+    screenshots,
+    toastLifetimeMs: {
+      defaultError: toastLifetimeProof.defaultError.durationMs,
+      overriddenSuccess: toastLifetimeProof.overriddenSuccess.durationMs
+    },
+    reports: reports.map(({ label, viewport, activeView }) => ({ label, viewport, activeView }))
+  }, null, 2));
 } finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});

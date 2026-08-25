@@ -225,12 +225,12 @@ try {
     throw new Error(`Active Minecraft Launcher account did not replace old AHT username: ${JSON.stringify(proof)}`);
   }
   if (
-    registrations.length !== 2
-    || registrations.some((item) => item.username !== 'StunningWolf22')
-    || registrations.some((item) => item.installId !== 'same-install')
-    || registrations.some((item) => item.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef')
+    registrations.length !== 1
+    || registrations[0].username !== 'StunningWolf22'
+    || registrations[0].installId !== 'same-install'
+    || registrations[0].minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
   ) {
-    throw new Error(`Expected account import plus one player-data registration refresh for StunningWolf22: ${JSON.stringify(registrations)}`);
+    throw new Error(`Expected one account-import registration for StunningWolf22: ${JSON.stringify(registrations)}`);
   }
 
   for (let attempt = 0; attempt < 80 && launcherUpdateEvents.length < 1; attempt += 1) {

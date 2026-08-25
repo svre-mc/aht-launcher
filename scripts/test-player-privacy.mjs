@@ -191,11 +191,12 @@ try {
         developerTabHidden: document.querySelector('#developerTab')?.hidden,
         developerTileHidden: document.querySelector('#developerTileButton')?.hidden,
         developerConsoleHidden: document.querySelector('#developerConsole')?.hidden,
+        developerReinstallControlVisible: Boolean(document.querySelector('#testLauncherReinstallButton')?.offsetParent),
         devTextVisible: document.body.innerText.includes('Developer Console') && !document.querySelector('#developerConsole')?.hidden
       };
     })()
   `);
-  if (proof.developerMode || proof.developerClientBypass || proof.configHasDeveloper || proof.configHasServerTransfer || proof.configPath || proof.platformProfileHasInstanceDir || proof.devApiKeys.length || proof.bodyDevMode || proof.bodyDevLocked || !proof.developerTabHidden || !proof.developerTileHidden || proof.devTextVisible) {
+  if (proof.developerMode || proof.developerClientBypass || proof.configHasDeveloper || proof.configHasServerTransfer || proof.configPath || proof.platformProfileHasInstanceDir || proof.devApiKeys.length || proof.bodyDevMode || proof.bodyDevLocked || !proof.developerTabHidden || !proof.developerTileHidden || proof.developerReinstallControlVisible || proof.devTextVisible) {
     throw new Error(`Player launcher exposed developer/private surface: ${JSON.stringify(proof)}`);
   }
   const allowedSetupKeys = ['canAutoConfigure', 'instanceExists', 'latestConfigured', 'minecraftAccountReuseAvailable'];

@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 import {
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,
+  REQUIRED_STAGED_WINDOWS_KEYS,
   validateLauncherUpdateManifest
 } from '../src/launcherUpdateManifest.js';
 
-export { REQUIRED_DOWNLOAD_KEYS, REQUIRED_PLATFORM_KEYS, validateLauncherUpdateManifest };
+export { REQUIRED_DOWNLOAD_KEYS, REQUIRED_PLATFORM_KEYS, REQUIRED_STAGED_WINDOWS_KEYS, validateLauncherUpdateManifest };
 
 function parseArgs(argv = process.argv.slice(2)) {
   const args = { manifestPath: '' };
@@ -48,13 +49,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = parseArgs();
   validateLauncherUpdateManifestFile(args.manifestPath, {
     latestUrl: args['latest-url'] || process.env.AHT_LAUNCHER_UPDATE_URL || '',
-    requireTrackedDownloads: true
+    requireTrackedDownloads: true,
+    requireStagedWindows: true
   }).then((result) => {
     console.log(JSON.stringify({
       ok: true,
       manifestPath: result.manifestPath,
       version: result.manifest.version,
-      downloads: REQUIRED_DOWNLOAD_KEYS
+      downloads: REQUIRED_DOWNLOAD_KEYS,
+      stagedWindows: REQUIRED_STAGED_WINDOWS_KEYS
     }, null, 2));
   }).catch((error) => {
     console.error(error.stack || error.message || String(error));

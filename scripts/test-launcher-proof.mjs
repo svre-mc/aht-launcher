@@ -79,6 +79,31 @@ assert.equal(reusable.usable, true, reusable.reason);
 assert.equal(reusable.proofFile, path.resolve(proofFile));
 assert.match(launcherProofJavaArgs(proofFile).join(' '), /aht\.launcher\.protocol=aht-launcher-attestation-v2/);
 
+const privateInstanceDir = path.join(root, 'Private Proof Instance');
+const privateProofDir = path.join(root, 'launcher-user-data', '.aht-launcher');
+const privateConfig = {
+  ...config,
+  instanceDir: privateInstanceDir,
+  launcherProof: { ...config.launcherProof, proofDir: privateProofDir }
+};
+const legacyInstanceProof = launcherProofPath(privateInstanceDir);
+await fs.mkdir(path.dirname(legacyInstanceProof), { recursive: true });
+await fs.writeFile(legacyInstanceProof, '{"stale":true}\n', 'utf8');
+const privateProof = await writeLauncherProof({
+  config: privateConfig,
+  identity,
+  latest,
+  installed,
+  recoverySecret: 'recovery_secret_that_is_long_enough_123456',
+  fetchImpl: async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    return { ok: true, json: async () => workerLauncherProofFixture(payload) };
+  }
+});
+assert.equal(privateProof.proofFile, path.resolve(launcherProofPath(privateInstanceDir, identity, { proofDir: privateProofDir })));
+await fs.access(privateProof.proofFile);
+await assert.rejects(fs.access(legacyInstanceProof), /ENOENT/, 'pack-local launcher proof compatibility mirror must be removed by default');
+
 const unsignedConfig = {
   ...config,
   instanceDir: path.join(root, 'Unsigned'),
@@ -177,5 +202,6 @@ console.log(JSON.stringify({
   remoteV1Fallback: oldWorker.protocol,
   localTrustedSigningDisabled: true,
   malformedResponsesRejected: 4,
+  packLocalMirrorRemoved: true,
   proofFile
 }, null, 2));

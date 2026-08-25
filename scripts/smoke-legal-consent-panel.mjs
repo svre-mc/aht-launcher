@@ -205,7 +205,7 @@ try {
   const status = await evaluate(client, 'window.aht.legalStatus()');
   if (status.required || !status.accepted) throw new Error(`Legal acceptance did not persist: ${JSON.stringify(status)}`);
   const record = JSON.parse(await fsp.readFile(path.join(userData, 'legal-consent.json'), 'utf8'));
-  if (!record.affirmed || record.termsVersion !== '2026-07-14.1' || record.privacyVersion !== '2026-07-14.1' || record.termsSha256?.length !== 64 || record.privacySha256?.length !== 64) {
+  if (!record.affirmed || record.termsVersion !== '2026-07-14.1' || record.privacyVersion !== '2026-08-23.1' || record.termsSha256?.length !== 64 || record.privacySha256?.length !== 64) {
     throw new Error(`Legal consent record was incomplete: ${JSON.stringify(record)}`);
   }
   console.log(JSON.stringify({ ok: true, packaged: Boolean(smokeExe), version: visible.version, acceptedAt: record.acceptedAt }, null, 2));

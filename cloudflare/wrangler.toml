@@ -1,7 +1,51 @@
 name = "aht-curseforge-proxy"
+account_id = "04235a5734219bed31fa93dec6e3ffb6"
 main = "curseforge-proxy-worker.js"
 compatibility_date = "2026-06-01"
 workers_dev = true
+keep_vars = true
+send_metrics = false
+
+[observability]
+enabled = true
+
+[vars]
+LAUNCHER_ATTESTATION_KEY_ID = "aht-launcher-attestation-v2"
+LAUNCHER_PROOF_PACK_ID = "a-hard-time-dregora"
+AHT_REQUIRE_DEVICE_ATTESTATION = "true"
+AHT_BLOCK_LIKELY_VPN = "false"
+
+[secrets]
+required = [
+  "ADMIN_USERNAME",
+  "ADMIN_PASSWORD",
+  "ADMIN_TOKEN_SECRET",
+  "CURSEFORGE_API_KEY",
+  "LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8",
+  "LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI",
+  "LAUNCHER_PROOF_SECRET"
+]
+
+[[ratelimits]]
+name = "AHT_ADMIN_RATE_LIMITER"
+namespace_id = "1047362711"
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+[[ratelimits]]
+name = "AHT_PLAYER_API_RATE_LIMITER"
+namespace_id = "1047362712"
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+[[ratelimits]]
+name = "AHT_PROOF_VERIFY_RATE_LIMITER"
+namespace_id = "1047362713"
+  [ratelimits.simple]
+  limit = 600
+  period = 60
 
 [[r2_buckets]]
 binding = "AHT_RELEASES"

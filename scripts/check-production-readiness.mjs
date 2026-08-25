@@ -125,7 +125,7 @@ function nextRequiredStep(blockers = []) {
   if (staleLauncherFeed) {
     return 'publish a launcher update for the current package version when ready, then re-run this check.';
   }
-  if (names.includes('live launcher Windows download matches local artifact')) {
+  if (names.includes('live launcher Windows download matches local artifact') || names.includes('live launcher Windows staged update matches local artifact')) {
     return 'publish the current Windows launcher artifact to the launcher update feed, then re-run this check.';
   }
   if (names.includes('live pack ZIP supports parallel range downloads')) {
@@ -246,7 +246,25 @@ function command(name, commandName, commandArgs, timeoutMs = 30000, options = {}
 }
 
 function runWrangler(args, timeoutMs = 60000) {
-  const result = spawnSync('npx', ['--yes', 'wrangler', ...args], {
+  const projectExecutable = process.platform === 'win32'
+    ? path.join(rootDir, 'node_modules', '.bin', 'wrangler.cmd')
+    : path.join(rootDir, 'node_modules', '.bin', 'wrangler');
+  const candidates = [
+    process.env.AHT_WRANGLER_EXECUTABLE,
+    projectExecutable,
+    ...(process.platform === 'win32'
+      ? ['C:\\1.12.2 Server\\Automation\\Toolchains\\Wrangler\\node_modules\\.bin\\wrangler.cmd']
+      : [])
+  ].filter(Boolean);
+  const executable = candidates.find(existsNonEmpty);
+  if (!existsNonEmpty(executable)) {
+    return {
+      ok: false,
+      output: '',
+      detail: 'Pinned project Wrangler is missing; run npm ci before production checks.'
+    };
+  }
+  const result = spawnSync(executable, args, {
     cwd: rootDir,
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -338,6 +356,8 @@ function liveWorkerPlayerDataCapabilities(baseUrl = '') {
   const required = [
     `/${['api', 'users', 'register'].join('/')}`,
     '/api/events',
+    '/api/launcher-proof/verify',
+    '/admin/access-decisions',
     '/admin/player-records',
     '/admin/launcher-updates'
   ];
@@ -413,9 +433,9 @@ function sha256FileSync(filePath) {
   return hash.digest('hex');
 }
 
-function localWindowsLauncherArtifact(version = '') {
+function localWindowsLauncherArtifact(version = '', extension = 'exe') {
   if (!version) return null;
-  const filePath = path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.exe`);
+  const filePath = path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.${extension}`);
   try {
     const stat = fs.statSync(filePath);
     if (!stat.isFile() || stat.size <= 0) return null;
@@ -430,7 +450,7 @@ function localWindowsLauncherArtifact(version = '') {
 }
 
 function validateLauncherDownloads(manifest = {}, latestUrl = '') {
-  const result = validateLauncherUpdateManifest(manifest, { latestUrl });
+  const result = validateLauncherUpdateManifest(manifest, { latestUrl, requireStagedWindows: true });
   return result.ok ? [] : result.errors;
 }
 
@@ -646,6 +666,28 @@ function checkLiveCloudflareState(authOk) {
       ? `${path.basename(localWindowsArtifact.filePath)} ${localWindowsSha}`
       : `live sha=${liveWindowsSha || 'missing'} size=${liveWindowsSize || 'missing'}, local sha=${localWindowsSha || 'missing'} size=${localWindowsSize || 'missing'}`
   );
+  const localWindowsUpdateArtifact = localWindowsLauncherArtifact(localLauncherVersion, 'zip');
+  const liveWindowsUpdateArtifact = launcherFeed.json?.stagedPlatforms?.['win32-x64'] || null;
+  const liveWindowsUpdateSha = String(liveWindowsUpdateArtifact?.sha256 || '').toLowerCase();
+  const liveWindowsUpdateSize = Number(liveWindowsUpdateArtifact?.size || 0);
+  const localWindowsUpdateSha = String(localWindowsUpdateArtifact?.sha256 || '').toLowerCase();
+  const localWindowsUpdateSize = Number(localWindowsUpdateArtifact?.size || 0);
+  const windowsUpdateArtifactMatches = Boolean(
+    launcherFeed.ok
+    && localWindowsUpdateArtifact
+    && liveWindowsUpdateArtifact
+    && liveWindowsUpdateSha
+    && liveWindowsUpdateSha === localWindowsUpdateSha
+    && liveWindowsUpdateSize === localWindowsUpdateSize
+  );
+  addCheck(
+    'live launcher Windows staged update matches local artifact',
+    'blocker',
+    windowsUpdateArtifactMatches,
+    windowsUpdateArtifactMatches
+      ? `${path.basename(localWindowsUpdateArtifact.filePath)} ${localWindowsUpdateSha}`
+      : `live sha=${liveWindowsUpdateSha || 'missing'} size=${liveWindowsUpdateSize || 'missing'}, local sha=${localWindowsUpdateSha || 'missing'} size=${localWindowsUpdateSize || 'missing'}`
+  );
   const proofBaseUrl = defaults?.launcherProof?.baseUrl || defaults?.sync?.baseUrl || '';
   const proofStatus = liveLauncherProofStatus(proofBaseUrl);
   addCheck(
@@ -704,6 +746,7 @@ function checkArtifacts() {
 
   const artifacts = [
     path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.exe`),
+    path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.zip`),
     path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.exe.blockmap`),
     path.join(releaseDir, 'windows', 'win-unpacked', 'A Hard Time Launcher Windows.exe')
   ];

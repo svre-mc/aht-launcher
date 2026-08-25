@@ -205,6 +205,22 @@ async function waitForCleanScanUiReset(client, attempts = 60) {
 }
 
 const packBuffer = await makeClientZip(packZipPath);
+const clientManifest = {
+  format: 'aht-client-manifest-v1',
+  packId: 'a-hard-time',
+  version: '7.7.7',
+  files: [{
+    relativePath: 'mods/aht-required.jar',
+    size: Buffer.byteLength('required mod bytes\n'),
+    sha256: sha256('required mod bytes\n')
+  }, {
+    relativePath: 'mods/aht-version-lock-7.7.7.jar',
+    size: Buffer.byteLength('version lock bytes\n'),
+    sha256: sha256('version lock bytes\n')
+  }]
+};
+const clientManifestBody = JSON.stringify(clientManifest);
+const ptbClientManifestBody = JSON.stringify({ ...clientManifest, packId: 'a-hard-time-ptb' });
 const fullClientLatest = {
   schemaVersion: 1,
   packId: 'a-hard-time',
@@ -222,6 +238,12 @@ const fullClientLatest = {
     url: `${workerEndpoint}/packs/${path.basename(packZipPath)}`,
     sha256: sha256(packBuffer),
     size: packBuffer.length
+  },
+  clientManifest: {
+    format: 'aht-client-manifest-v1',
+    url: 'client-manifest.json',
+    sha256: sha256(clientManifestBody),
+    size: Buffer.byteLength(clientManifestBody)
   },
   curseforge: { disabled: true, fileCount: 0 }
 };
@@ -241,7 +263,13 @@ const ptbLatest = {
   ...fullClientLatest,
   packId: 'a-hard-time-ptb',
   name: 'A Hard Time PTB',
-  channel: 'ptb'
+  channel: 'ptb',
+  clientManifest: {
+    format: 'aht-client-manifest-v1',
+    url: 'client-manifest.json',
+    sha256: sha256(ptbClientManifestBody),
+    size: Buffer.byteLength(ptbClientManifestBody)
+  }
 };
 let latest = legacyLatest;
 const packRequests = [];
@@ -261,7 +289,7 @@ await writeJson(defaultsPath, {
   latestUrl: `${workerEndpoint}/latest.json`,
   curseforge: { proxyBaseUrl: '', apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
-  launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
+  launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-attestation-v2' },
   launcherUpdate: { enabled: false, latestUrl: '' },
   packs: {
     ptb: {
@@ -300,6 +328,12 @@ const server = http.createServer((request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(ptbLatest));
+    return;
+  }
+  if (url.pathname === '/client-manifest.json' || url.pathname === '/ptb/client-manifest.json') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(url.pathname.startsWith('/ptb/') ? ptbClientManifestBody : clientManifestBody);
     return;
   }
   if (url.pathname.startsWith('/packs/')) {
@@ -507,6 +541,21 @@ try {
   if (!afterUpdate.launchReady || afterUpdate.launchBlockedReason || afterUpdate.integrity?.counts?.corrupted !== 0) {
     throw new Error(`Player stayed launch-locked after clean update: ${JSON.stringify(afterUpdate)}`);
   }
+  const instanceStateKey = crypto.createHash('sha256')
+    .update(path.resolve(instanceDir))
+    .digest('hex')
+    .slice(0, 24);
+  const instanceStateDir = path.join(userData, 'instance-state', instanceStateKey);
+  const externalManagedState = path.join(instanceStateDir, 'managed-files.json');
+  const externalIntegrityState = path.join(instanceStateDir, 'integrity.json');
+  const legacyManagedState = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
+  const legacyIntegrityState = path.join(instanceDir, '.aht-launcher', 'integrity.json');
+  if (!fs.existsSync(externalManagedState) || !fs.existsSync(externalIntegrityState)) {
+    throw new Error(`Launcher-owned security state was not written outside the game instance: ${JSON.stringify({ externalManagedState, externalIntegrityState })}`);
+  }
+  if (fs.existsSync(legacyManagedState) || fs.existsSync(legacyIntegrityState)) {
+    throw new Error(`Legacy security state remained in the player-visible game instance: ${JSON.stringify({ legacyManagedState, legacyIntegrityState })}`);
+  }
 
   await evaluate(client, `document.querySelector('#scanButton')?.click(); true`);
   const cleanScanUi = await waitForCleanScanUiReset(client, 60);
@@ -532,9 +581,12 @@ try {
   if (launcherMarker.disableRtss !== '1' || launcherMarker.disableObs !== '1') {
     throw new Error(`Minecraft Launcher environment hardening was not applied: ${JSON.stringify(launcherMarker)}`);
   }
-  const proof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+  const proof = JSON.parse(fs.readFileSync(path.join(userData, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
   if (!proof.trusted || proof.source !== 'worker' || !Array.isArray(proof.javaProperties) || !proof.javaProperties.some((arg) => arg.startsWith('-Daht.launcher.proofFile='))) {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
+  }
+  if (fs.existsSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'))) {
+    throw new Error('A pack-local launcher-proof.json compatibility mirror was written for the player instance.');
   }
   const stableReportsAfterFirstPlay = launchReportsFor(instanceDir);
   if (
@@ -679,7 +731,12 @@ try {
       stable: finalStableReports.map((report) => report.name),
       ptb: ptbReportsAfterPlay.map((report) => report.name)
     },
-    proofSource: proof.source
+    proofSource: proof.source,
+    securityState: {
+      launcherOwned: true,
+      legacyInstanceFilesAbsent: true,
+      packLocalProofAbsent: true
+    }
   }, null, 2));
 } finally {
   if (client) {

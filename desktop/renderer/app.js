@@ -233,7 +233,7 @@ if (!window.aht) {
       accepted: true,
       reason: "accepted",
       termsVersion: "2026-07-14.1",
-      privacyVersion: "2026-07-14.1",
+      privacyVersion: "2026-08-23.1",
       termsText: "A HARD TIME TERMS OF SERVICE",
       privacyText: "A HARD TIME PRIVACY POLICY"
     }),
@@ -436,6 +436,7 @@ if (!window.aht) {
       curseforgeApiKey: "",
       serverSshPassword: "",
       launcherProofSecret: "",
+      socialServerSecret: "",
       githubToken: "",
       r2AccessKeyId: "",
       r2SecretAccessKey: ""
@@ -675,6 +676,7 @@ const els = {
   playerFeedUrlInput: $("#playerFeedUrlInput"),
   curseforgeApiKeyInput: $("#curseforgeApiKeyInput"),
   launcherProofSecretInput: $("#launcherProofSecretInput"),
+  socialServerSecretInput: $("#socialServerSecretInput"),
   outDirInput: $("#outDirInput"),
   cacheModsInput: $("#cacheModsInput"),
   clientModpackDirInput: $("#clientModpackDirInput"),
@@ -705,6 +707,7 @@ const els = {
   pickOutButton: $("#pickOutButton"),
   pickCacheModsButton: $("#pickCacheModsButton"),
   generateProofSecretButton: $("#generateProofSecretButton"),
+  generateSocialSecretButton: $("#generateSocialSecretButton"),
   setupCloudButton: $("#setupCloudButton"),
   writeDefaultsButton: $("#writeDefaultsButton"),
   publishReleaseButton: $("#publishReleaseButton"),
@@ -725,6 +728,8 @@ const els = {
   launcherDeployProgressLabel: $("#launcherDeployProgressLabel"),
   launcherDeployProgressCount: $("#launcherDeployProgressCount"),
   launcherDeployProgressBar: $("#launcherDeployProgressBar"),
+  testLauncherReinstallButton: $("#testLauncherReinstallButton"),
+  launcherReinstallStatus: $("#launcherReinstallStatus"),
   serverSourceInput: $("#serverSourceInput"),
   pickServerSourceButton: $("#pickServerSourceButton"),
   serverHostInput: $("#serverHostInput"),
@@ -772,9 +777,21 @@ const els = {
   playerDownloadsPanel: $("#playerDownloadsPanel"),
   playerRecordsPanel: $("#playerRecordsPanel"),
   playerLauncherUpdatesPanel: $("#playerLauncherUpdatesPanel"),
+  playerAccessPanel: $("#playerAccessPanel"),
   playerDownloadsList: $("#playerDownloadsList"),
   playerRecordsList: $("#playerRecordsList"),
   playerLauncherUpdatesList: $("#playerLauncherUpdatesList"),
+  playerAccessList: $("#playerAccessList"),
+  accessDecisionDialog: $("#accessDecisionDialog"),
+  accessDecisionForm: $("#accessDecisionForm"),
+  accessDecisionClose: $("#accessDecisionClose"),
+  accessDecisionTitle: $("#accessDecisionTitle"),
+  accessDecisionIdentity: $("#accessDecisionIdentity"),
+  accessDecisionAction: $("#accessDecisionAction"),
+  accessDecisionScope: $("#accessDecisionScope"),
+  accessDecisionReason: $("#accessDecisionReason"),
+  accessDecisionStatus: $("#accessDecisionStatus"),
+  accessDecisionSubmit: $("#accessDecisionSubmit"),
   toastStack: $("#toastStack")
 };
 
@@ -798,6 +815,8 @@ let developerAuthenticated = false;
 let playerDownloadRecords = [];
 let canonicalPlayerRecords = [];
 let launcherUpdateRecords = [];
+let accessDecisionRecords = [];
+let selectedAccessPlayer = null;
 let activePlayerDataView = "downloads";
 let playerDataLoaded = false;
 let playerDataLoading = false;
@@ -819,6 +838,11 @@ const friendsActionRefreshTimers = new Set();
 let currentLegalState = null;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
+const TOAST_MAX_LIFETIME_MS = 4000;
+const TOAST_EXIT_DURATION_MS = 180;
+const TOAST_SCHEDULER_HEADROOM_MS = 2000;
+const TOAST_MAX_VISIBLE_MS = TOAST_MAX_LIFETIME_MS - TOAST_EXIT_DURATION_MS - TOAST_SCHEDULER_HEADROOM_MS;
+const TOAST_DEFAULT_VISIBLE_MS = 1800;
 
 function setBadge(text, state = "") {
   els.statusBadge.textContent = text;
@@ -893,9 +917,9 @@ async function copyErrorReportFromToast(payload = {}) {
   try {
     const result = await window.aht.copyErrorReport(payload);
     const file = result.fileName ? ` Saved as ${result.fileName}.` : "";
-    showToast("Launch report copied", `${result.chars || 0} characters copied.${file} Paste it into your support message.`, "success", { durationMs: 5200, disableDiagnostics: true });
+    showToast("Launch report copied", `${result.chars || 0} characters copied.${file} Paste it into your support message.`, "success", { durationMs: 1800, disableDiagnostics: true });
   } catch {
-    showToast("Copy failed", "Open the AHT instance logs\\launcher folder and send the newest AHT-Launch text file.", "warn", { durationMs: 5200, disableDiagnostics: true });
+    showToast("Copy failed", "Open the AHT instance logs\\launcher folder and send the newest AHT-Launch text file.", "warn", { durationMs: 1800, disableDiagnostics: true });
   }
 }
 
@@ -913,11 +937,18 @@ function updateLogText(log) {
 }
 
 function updateLogImageUrl(log) {
-  return String(log?.image?.url || log?.imageUrl || log?.bannerUrl || "").trim();
+  const value = String(log?.image?.url || log?.imageUrl || log?.bannerUrl || "").trim();
+  return isRemoteUrl(value) ? value : "";
 }
 
 function isRemoteUrl(value) {
-  return /^https?:\/\//i.test(String(value || "").trim());
+  try {
+    const url = new URL(String(value || "").trim());
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 function youtubeEmbedUrl(value) {
@@ -947,7 +978,7 @@ function updateLogPlayable(log) {
   const embed = youtubeEmbedUrl(youtube);
   if (embed) return { type: "youtube", url: embed, originalUrl: youtube, title: media?.title || log?.title || "Update video" };
   const videoUrl = String(log?.videoUrl || log?.video?.url || (media?.type === "video" ? media.url : "") || "").trim();
-  if (videoUrl) return { type: "video", url: videoUrl, title: media?.title || log?.title || "Update video" };
+  if (isRemoteUrl(videoUrl)) return { type: "video", url: videoUrl, title: media?.title || log?.title || "Update video" };
   return null;
 }
 
@@ -1061,6 +1092,8 @@ function openUpdateLogVideo(log) {
     const iframe = document.createElement("iframe");
     iframe.src = playable.url;
     iframe.title = playable.title;
+    iframe.referrerPolicy = "strict-origin-when-cross-origin";
+    iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
     iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
     iframe.allowFullscreen = true;
     els.updateLogVideoStage.appendChild(iframe);
@@ -1731,6 +1764,17 @@ function setMemoryValue(mb) {
   }
 }
 
+function setLauncherReinstallStatus(state, label, title, detail) {
+  if (!els.launcherReinstallStatus) return;
+  els.launcherReinstallStatus.className = `release-check-card ${state}`.trim();
+  const span = els.launcherReinstallStatus.querySelector("span");
+  const strong = els.launcherReinstallStatus.querySelector("strong");
+  const p = els.launcherReinstallStatus.querySelector("p");
+  if (span) span.textContent = label;
+  if (strong) strong.textContent = title;
+  if (p) p.textContent = detail;
+}
+
 function developerOutDir() {
   return currentStatus?.config?.developer?.defaultOutDir || "";
 }
@@ -1756,6 +1800,16 @@ function workerBaseFromFeedUrl(value = "") {
     const normalized = new URL(feed);
     normalized.pathname = normalized.pathname.replace(/\/ptb\/latest\.json$/i, "/latest.json");
     return new URL(".", normalized).toString();
+  } catch {
+    return "";
+  }
+}
+
+function artifactBaseFromFeedUrl(value = "") {
+  const feed = normalizePlayerFeedUrl(value);
+  if (!/^https?:\/\//i.test(feed)) return "";
+  try {
+    return new URL(".", new URL(feed)).toString();
   } catch {
     return "";
   }
@@ -1824,6 +1878,10 @@ function localLauncherProofSecret() {
   return inputValue(els.launcherProofSecretInput, "");
 }
 
+function localSocialServerSecret() {
+  return inputValue(els.socialServerSecretInput, "");
+}
+
 function generateLauncherProofSecret() {
   const bytes = new Uint8Array(32);
   window.crypto.getRandomValues(bytes);
@@ -1837,6 +1895,7 @@ async function saveDeveloperSecrets({ quiet = true } = {}) {
     curseforgeApiKey: localCurseForgeApiKey(),
     serverSshPassword: inputValue(els.serverPasswordInput, ""),
     launcherProofSecret: localLauncherProofSecret(),
+    socialServerSecret: localSocialServerSecret(),
     githubToken: inputValue(els.githubTokenInput, ""),
     r2AccountId: inputValue(els.r2AccountIdInput, ""),
     r2AccessKeyId: inputValue(els.r2AccessKeyIdInput, ""),
@@ -1871,6 +1930,9 @@ function setupCloudBlockReason() {
   if (!developerAuthenticated) return "Developer login is required before cloud setup.";
   if (!localLauncherProofSecret()) {
     return "Enter the Launcher Proof Secret before cloud setup. The server must use the same value.";
+  }
+  if (localSocialServerSecret().length < 32) {
+    return "Enter a Server Social Secret containing at least 32 characters before cloud setup.";
   }
   return "";
 }
@@ -2062,7 +2124,7 @@ async function buildReleaseFromSelectedZip(reason = "Building release", target =
   const result = await window.aht.devBuildRelease({
     packZip,
     outDir: developerOutDir(),
-    baseUrl: workerBaseFromFeedUrl(releaseFeedUrl(target)) || developerBaseUrl(),
+    baseUrl: artifactBaseFromFeedUrl(releaseFeedUrl(target)) || developerBaseUrl(),
     releaseTarget: target,
     cacheModsDir: els.cacheModsInput.value.trim()
   });
@@ -2119,11 +2181,16 @@ function showToast(title, detail = "", type = "info", options = {}) {
   }
   toast.appendChild(body);
   els.toastStack.appendChild(toast);
+  const requestedDurationMs = Number(options.durationMs);
+  const desiredVisibleMs = Number.isFinite(requestedDurationMs) && requestedDurationMs > 0
+    ? requestedDurationMs
+    : type === "error" ? TOAST_MAX_VISIBLE_MS : TOAST_DEFAULT_VISIBLE_MS;
+  const visibleDurationMs = Math.min(desiredVisibleMs, TOAST_MAX_VISIBLE_MS);
   const remove = () => {
     toast.classList.add("is-hiding");
-    window.setTimeout(() => toast.remove(), 180);
+    window.setTimeout(() => toast.remove(), TOAST_EXIT_DURATION_MS);
   };
-  window.setTimeout(remove, Number(options.durationMs) || (type === "error" ? 30000 : 3800));
+  window.setTimeout(remove, visibleDurationMs);
 }
 
 function setProgress(visible, percent = 0, label = "Preparing") {
@@ -2359,29 +2426,48 @@ function launcherUpdatePercent(state) {
   return state?.running ? 25 : 0;
 }
 
-function setLauncherUpdateButton(restartReady = false) {
+function setLauncherUpdateButton(restartReady = false, instantRestartReady = false) {
   if (!els.launcherUpdateNowButton) return;
   const icon = document.createElement("span");
   icon.className = `button-icon ${restartReady ? "icon-sync" : "icon-download"}`;
   icon.setAttribute("aria-hidden", "true");
-  els.launcherUpdateNowButton.replaceChildren(icon, document.createTextNode(restartReady ? "Install and Restart" : "Update Launcher"));
+  const label = restartReady
+    ? instantRestartReady ? "Restart Launcher" : "Install and Restart"
+    : "Update Launcher";
+  els.launcherUpdateNowButton.replaceChildren(icon, document.createTextNode(label));
 }
 
 function renderLauncherUpdateOverlay(status = currentStatus, state = lastLauncherUpdateState) {
   if (!els.launcherUpdateOverlay) return;
   const update = status?.launcherUpdate || {};
-  const required = Boolean(update.updateRequired);
+  const developerReinstall = Boolean(
+    update.developerReinstall
+    || state?.purpose === "developer-reinstall"
+    || state?.developerReinstall
+    || state?.lastResult?.purpose === "developer-reinstall"
+    || state?.lastResult?.developerReinstall
+  );
+  const required = Boolean(update.updateRequired || developerReinstall);
   els.launcherUpdateOverlay.hidden = !required;
   if (!required) return;
   const restartReady = Boolean(state?.lastResult?.restartRequired && !state?.error);
+  const instantRestartReady = Boolean(restartReady && state?.lastResult?.instantRestartReady);
   const current = update.currentVersion || status?.appVersion || "-";
   const latest = update.latestVersion || "-";
-  els.launcherUpdateTitle.textContent = restartReady ? "Ready to Install" : "Launcher update required";
+  els.launcherUpdateTitle.textContent = restartReady
+    ? instantRestartReady ? developerReinstall ? "Reinstall finished" : "Update finished" : "Ready to Install"
+    : developerReinstall ? "Preparing launcher reinstall" : "Launcher update required";
   els.launcherUpdateSummary.textContent = restartReady
-    ? `AHT Launcher ${latest} is downloaded and verified. Click Install and Restart to close AHT Launcher, install it, and reopen when finished.`
-    : `AHT Launcher ${latest} is required. Installed launcher version: ${current}.`;
+    ? instantRestartReady
+      ? developerReinstall
+        ? `AHT Launcher ${latest} is fully copied, extracted, and verified for a same-version reinstall. Click Restart Launcher to swap to the prepared copy immediately.`
+        : `AHT Launcher ${latest} is fully downloaded, extracted, and verified. Click Restart Launcher to close this version and open the prepared update immediately.`
+      : `AHT Launcher ${latest} uses the legacy installer. Click Install and Restart to apply it and reopen when finished.`
+    : developerReinstall
+      ? `AHT Launcher ${latest} is preparing a developer-only same-version reinstall. Installed launcher version: ${current}.`
+      : `AHT Launcher ${latest} is required. Installed launcher version: ${current}.`;
   const percent = launcherUpdatePercent(state);
-  const phase = state?.progress?.phase || (state?.error ? "Update failed" : restartReady ? "Ready to install" : state?.lastResult ? "Installer ready" : "Preparing");
+  const phase = state?.progress?.phase || (state?.error ? "Update failed" : restartReady ? instantRestartReady ? "Update finished - ready to restart" : "Ready to install" : state?.lastResult ? "Update ready" : "Preparing");
   els.launcherUpdateProgressLabel.textContent = phase;
   els.launcherUpdateProgressCount.textContent = `${Math.round(percent)}%`;
   setMiniProgress(els.launcherUpdateProgressBar, percent);
@@ -2389,9 +2475,13 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   if (state?.error) lines.push(`ERROR: ${state.error}`);
   if (!lines.length) lines.push("Waiting to start launcher update.");
   setTextContentBounded(els.launcherUpdateLog, lines.join("\n"), LOG_TEXT_LIMIT);
-  setLauncherUpdateButton(restartReady);
+  setLauncherUpdateButton(restartReady, instantRestartReady);
   setUnavailable(els.launcherUpdateNowButton, Boolean(state?.running));
-  if (!launcherUpdateAutoStarted && !state?.running && !state?.lastResult) {
+  if (developerReinstall && developerAuthenticated && !state && !launcherUpdatePoll) {
+    launcherUpdatePoll = setInterval(pollLauncherUpdate, 800);
+    window.setTimeout(() => pollLauncherUpdate(), 0);
+  }
+  if (!developerReinstall && !launcherUpdateAutoStarted && !state?.running && !state?.lastResult) {
     launcherUpdateAutoStarted = true;
     window.setTimeout(() => startLauncherSelfUpdate(), 500);
   }
@@ -2465,7 +2555,7 @@ async function restartLauncherSelfUpdate() {
     ...lastLauncherUpdateState,
     running: true,
     lines: [...(lastLauncherUpdateState.lines || []), "Installing launcher update."],
-    progress: { phase: "Starting install helper", percent: 100 },
+    progress: { phase: lastLauncherUpdateState?.lastResult?.instantRestartReady ? "Restarting launcher" : "Starting install helper", percent: 100 },
     error: null
   };
   renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
@@ -2549,18 +2639,152 @@ function displayMinecraftUuid(value = "") {
 }
 
 function playerDataRecord(item = {}) {
+  const networkStatus = String(item.network?.status || "unknown").trim().toLowerCase();
+  const networkLabel = networkStatus === "likely"
+    ? "Likely VPN"
+    : (networkStatus === "not_detected" ? "No VPN signal" : "Unknown");
+  const networkDetail = [
+    item.network?.asn ? `AS${item.network.asn}` : "",
+    String(item.network?.organization || "").trim()
+  ].filter(Boolean).join(" ");
   return {
     receivedAt: String(item.receivedAt || item.createdAt || item.updatedAt || ""),
     username: String(item.minecraftUsername || item.username || "").trim() || "—",
-    ipv4: String(item.ipv4 || "").trim() || "—",
+    ip: String(item.ip || item.ipv4 || "").trim() || "—",
     minecraftUuid: displayMinecraftUuid(item.minecraftUuid),
     platform: normalizePlayerPlatform(item.platform || item.platformLabel || item.platformKey),
     launcherVersion: String(item.launcherVersion || item.appVersion || "").trim() || "—",
-    fileName: String(item.fileName || "").trim() || "—"
+    fileName: String(item.fileName || "").trim() || "—",
+    deviceId: String(item.deviceId || "").trim(),
+    networkLabel,
+    networkDetail,
+    networkStatus,
+    accessAllowed: item.access?.allowed !== false,
+    activeScopes: Array.isArray(item.access?.activeScopes) ? item.access.activeScopes : []
   };
 }
 
+function shortDeviceId(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "—";
+  return text.length > 20 ? `${text.slice(0, 11)}…${text.slice(-7)}` : text;
+}
+
+function appendPlayerDataCell(row, value, title = "", className = "") {
+  const cell = document.createElement("span");
+  cell.textContent = value;
+  if (title) cell.title = title;
+  if (className) cell.className = className;
+  row.appendChild(cell);
+  return cell;
+}
+
+function openAccessDecisionDialog(record) {
+  if (!record || !els.accessDecisionDialog) return;
+  selectedAccessPlayer = record;
+  els.accessDecisionTitle.textContent = `Manage ${record.username}`;
+  els.accessDecisionIdentity.textContent = [
+    record.minecraftUuid !== "—" ? `UUID ${record.minecraftUuid}` : "No verified UUID",
+    record.deviceId ? `device ${shortDeviceId(record.deviceId)}` : "no device credential",
+    record.ip !== "—" ? `IP ${record.ip}` : "no connection IP",
+    record.networkLabel
+  ].join(" · ");
+  els.accessDecisionAction.value = record.accessAllowed ? "deny" : "allow";
+  els.accessDecisionScope.value = record.activeScopes[0] || "account";
+  els.accessDecisionReason.value = "";
+  els.accessDecisionStatus.textContent = "";
+  els.accessDecisionDialog.showModal();
+}
+
+function accessDecisionValue(record, scope) {
+  if (scope === "account") return record.username === "—" ? "" : record.username;
+  if (scope === "minecraft_uuid") return record.minecraftUuid === "—" ? "" : record.minecraftUuid;
+  if (scope === "device") return record.deviceId;
+  if (scope === "ip") return record.ip === "—" ? "" : record.ip;
+  return "";
+}
+
+function renderPlayerRows(list, records = []) {
+  if (!list) return;
+  list.innerHTML = "";
+  if (!records.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No players found.";
+    list.appendChild(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const record of records) {
+    const row = document.createElement("div");
+    row.className = "event";
+    appendPlayerDataCell(row, shortDateTime(record.receivedAt));
+    appendPlayerDataCell(row, record.username);
+    appendPlayerDataCell(row, record.ip);
+    appendPlayerDataCell(row, record.networkLabel, record.networkDetail);
+    appendPlayerDataCell(row, shortDeviceId(record.deviceId), record.deviceId);
+    appendPlayerDataCell(row, record.minecraftUuid, record.minecraftUuid);
+    appendPlayerDataCell(
+      row,
+      record.accessAllowed ? "Allowed" : `Restricted (${record.activeScopes.join(", ") || "policy"})`,
+      "",
+      record.accessAllowed ? "player-access-allowed" : "player-access-denied"
+    );
+    const actionCell = document.createElement("span");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "player-access-button";
+    button.textContent = "Manage";
+    button.addEventListener("click", () => openAccessDecisionDialog(record));
+    actionCell.appendChild(button);
+    row.appendChild(actionCell);
+    fragment.appendChild(row);
+  }
+  list.appendChild(fragment);
+}
+
+function accessDecisionRecord(item = {}) {
+  const decision = item?.decision && typeof item.decision === "object" ? item.decision : item;
+  return {
+    updatedAt: String(item.receivedAt || decision.updatedAt || decision.createdAt || ""),
+    scope: String(decision.scope || "").trim() || "—",
+    value: String(decision.value || "").trim() || "—",
+    active: decision.active === true && decision.effect === "deny",
+    reason: String(decision.reason || "").trim() || "—",
+    actor: String(item.actor || decision.actor || "").trim() || "—"
+  };
+}
+
+function renderAccessDecisionRows(list, records = []) {
+  if (!list) return;
+  list.innerHTML = "";
+  if (!records.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No access decisions found.";
+    list.appendChild(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const record of records) {
+    const row = document.createElement("div");
+    row.className = "event";
+    appendPlayerDataCell(row, shortDateTime(record.updatedAt));
+    appendPlayerDataCell(row, record.scope.replaceAll("_", " "));
+    appendPlayerDataCell(row, record.value, record.value);
+    appendPlayerDataCell(row, record.active ? "Restricted" : "Restored", "", record.active ? "player-access-denied" : "player-access-allowed");
+    appendPlayerDataCell(row, record.reason, record.reason);
+    appendPlayerDataCell(row, record.actor);
+    fragment.appendChild(row);
+  }
+  list.appendChild(fragment);
+}
+
 function renderPlayerDataRows(list, records = [], kind = "players", emptyText = "No records found.") {
+  if (kind === "players") {
+    renderPlayerRows(list, records);
+    return;
+  }
   if (!list) return;
   list.innerHTML = "";
   if (!records.length) {
@@ -2574,9 +2798,7 @@ function renderPlayerDataRows(list, records = [], kind = "players", emptyText = 
   for (const record of records) {
     const row = document.createElement("div");
     row.className = "event";
-    const values = kind === "downloads"
-      ? [shortDateTime(record.receivedAt), record.ipv4, record.platform, record.launcherVersion, record.fileName]
-      : [shortDateTime(record.receivedAt), record.username, record.ipv4, record.minecraftUuid, record.platform];
+    const values = [shortDateTime(record.receivedAt), record.username, record.ip, record.minecraftUuid, record.platform];
     if (kind === "updates") values.push(record.launcherVersion);
     for (const value of values) {
       const cell = document.createElement("span");
@@ -2589,7 +2811,7 @@ function renderPlayerDataRows(list, records = [], kind = "players", emptyText = 
 }
 
 function playerDataFailureSummary(results = []) {
-  const labels = ["Downloads", "Players", "Launcher updates"];
+  const labels = ["Downloads", "Players", "Launcher updates", "Access control"];
   return results
     .map((result, index) => {
       if (result.status !== "rejected") return "";
@@ -2601,11 +2823,12 @@ function playerDataFailureSummary(results = []) {
 }
 
 function activatePlayerDataView(view = "downloads") {
-  activePlayerDataView = ["downloads", "players", "updates"].includes(view) ? view : "downloads";
+  activePlayerDataView = ["downloads", "players", "updates", "access"].includes(view) ? view : "downloads";
   els.playerDataTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.playerDataView === activePlayerDataView));
   if (els.playerDownloadsPanel) els.playerDownloadsPanel.hidden = activePlayerDataView !== "downloads";
   if (els.playerRecordsPanel) els.playerRecordsPanel.hidden = activePlayerDataView !== "players";
   if (els.playerLauncherUpdatesPanel) els.playerLauncherUpdatesPanel.hidden = activePlayerDataView !== "updates";
+  if (els.playerAccessPanel) els.playerAccessPanel.hidden = activePlayerDataView !== "access";
 }
 
 async function loadAllPlayerDataPages(fetchPage, property) {
@@ -2632,12 +2855,13 @@ async function loadPlayerDownloadHistory() {
   const originalMarkup = els.loadDashboardButton.innerHTML;
   try {
     els.loadDashboardButton.textContent = "Loading";
-    const [downloadsResult, playersResult, updatesResult] = await Promise.allSettled([
+    const [downloadsResult, playersResult, updatesResult, accessResult] = await Promise.allSettled([
       loadAllPlayerDataPages((payload) => window.aht.devLauncherDownloads(payload), "downloads"),
       loadAllPlayerDataPages((payload) => window.aht.devPlayerRecords(payload), "players"),
-      loadAllPlayerDataPages((payload) => window.aht.devLauncherUpdates(payload), "updates")
+      loadAllPlayerDataPages((payload) => window.aht.devLauncherUpdates(payload), "updates"),
+      window.aht.devAccessDecisions({ active: false, history: true })
     ]);
-    const historyResults = [downloadsResult, playersResult, updatesResult];
+    const historyResults = [downloadsResult, playersResult, updatesResult, accessResult];
     const failureSummary = playerDataFailureSummary(historyResults);
     if (historyResults.every((result) => result.status === "rejected")) throw new Error(failureSummary);
     playerDownloadRecords = (downloadsResult.status === "fulfilled" ? downloadsResult.value : [])
@@ -2649,16 +2873,23 @@ async function loadPlayerDownloadHistory() {
     launcherUpdateRecords = (updatesResult.status === "fulfilled" ? updatesResult.value : [])
       .map(playerDataRecord)
       .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
+    const accessItems = accessResult.status === "fulfilled" && Array.isArray(accessResult.value?.audit)
+      ? accessResult.value.audit
+      : (accessResult.status === "fulfilled" && Array.isArray(accessResult.value?.decisions) ? accessResult.value.decisions : []);
+    accessDecisionRecords = accessItems
+      .map(accessDecisionRecord)
+      .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
     renderPlayerDataRows(els.playerDownloadsList, playerDownloadRecords, "downloads", "No installer downloads found.");
     renderPlayerDataRows(els.playerRecordsList, canonicalPlayerRecords, "players", "No players found.");
     renderPlayerDataRows(els.playerLauncherUpdatesList, launcherUpdateRecords, "updates", "No launcher updates found.");
+    renderAccessDecisionRows(els.playerAccessList, accessDecisionRecords);
     playerDataLoaded = true;
     activatePlayerDataView(activePlayerDataView);
     if (historyResults.some((result) => result.status === "rejected")) {
       setDevLog(failureSummary);
       showToast("Player data partially loaded", failureSummary, "warn");
     } else {
-      showToast("Player data loaded", `${playerDownloadRecords.length} downloads, ${canonicalPlayerRecords.length} players, ${launcherUpdateRecords.length} launcher updates.`, "success");
+      showToast("Player data loaded", `${playerDownloadRecords.length} downloads, ${canonicalPlayerRecords.length} players, ${launcherUpdateRecords.length} launcher updates, ${accessDecisionRecords.length} access decisions.`, "success");
     }
   } catch (error) {
     const message = cleanErrorMessage(error);
@@ -2668,6 +2899,40 @@ async function loadPlayerDownloadHistory() {
     playerDataLoading = false;
     els.loadDashboardButton.innerHTML = originalMarkup;
     setUnavailable(els.loadDashboardButton, false);
+  }
+}
+
+async function submitAccessDecision(event) {
+  event?.preventDefault?.();
+  if (!selectedAccessPlayer || !els.accessDecisionDialog) return;
+  const action = els.accessDecisionAction.value;
+  const scope = els.accessDecisionScope.value;
+  const value = accessDecisionValue(selectedAccessPlayer, scope);
+  const reason = els.accessDecisionReason.value.trim();
+  if (!value) {
+    els.accessDecisionStatus.textContent = `This player does not have a ${scope.replaceAll("_", " ")} value to control.`;
+    return;
+  }
+  if (action === "deny" && reason.length < 3) {
+    els.accessDecisionStatus.textContent = "Enter an audit reason of at least 3 characters.";
+    return;
+  }
+  setUnavailable(els.accessDecisionSubmit, true);
+  els.accessDecisionStatus.textContent = action === "deny" ? "Applying restriction…" : "Restoring access…";
+  try {
+    await window.aht.devSetAccessDecision({ action, scope, value, reason });
+    els.accessDecisionDialog.close();
+    selectedAccessPlayer = null;
+    playerDataLoaded = false;
+    await loadPlayerDownloadHistory();
+    activatePlayerDataView(action === "deny" ? "players" : "access");
+    showToast(action === "deny" ? "Access restricted" : "Access restored", `${scope.replaceAll("_", " ")} decision applied.`, "success");
+  } catch (error) {
+    const message = cleanErrorMessage(error);
+    els.accessDecisionStatus.textContent = message;
+    showToast("Access decision failed", message, "error");
+  } finally {
+    setUnavailable(els.accessDecisionSubmit, false);
   }
 }
 
@@ -2828,6 +3093,35 @@ async function scanLauncherBuilds() {
     setDevLog(message);
   } finally {
     setUnavailable(els.scanLauncherBuildsButton, false);
+  }
+}
+
+async function prepareLocalLauncherReinstall() {
+  if (!els.testLauncherReinstallButton || isUnavailable(els.testLauncherReinstallButton)) return;
+  setUnavailable(els.testLauncherReinstallButton, true);
+  setLauncherReinstallStatus(
+    "warn",
+    "Opening regular launcher",
+    "Preparing a one-time local update test",
+    "The exact current-version Windows ZIP is copied and hash-bound before the installed regular AHT Launcher opens."
+  );
+  try {
+    const result = await window.aht.devPrepareLauncherReinstall();
+    setLauncherReinstallStatus(
+      "ok",
+      "Regular launcher opened",
+      `AHT Launcher ${result.version} update prompt is ready`,
+      "Continue in the regular launcher. It will run the normal copy, verification, staging, Restart Launcher, swap, relaunch, and acknowledgement flow; Developer Mode will close."
+    );
+    setDevLog(result);
+    showToast("Regular launcher ready", `Continue the local update test in AHT Launcher ${result.version}.`, "success");
+  } catch (error) {
+    const message = cleanErrorMessage(error);
+    setLauncherReinstallStatus("bad", "Local update test failed", "Regular launcher was not opened", message);
+    setDevLog(message);
+    showToast("Local update test failed", message, "error");
+  } finally {
+    setUnavailable(els.testLauncherReinstallButton, false);
   }
 }
 
@@ -3152,6 +3446,13 @@ function fillSettings(status) {
     && document.activeElement !== els.launcherProofSecretInput
   ) {
     setInputValue(els.launcherProofSecretInput, status.developerSecrets.launcherProofSecret);
+  }
+  if (
+    els.socialServerSecretInput
+    && status.developerSecrets?.socialServerSecret
+    && document.activeElement !== els.socialServerSecretInput
+  ) {
+    setInputValue(els.socialServerSecretInput, status.developerSecrets.socialServerSecret);
   }
   if (
     els.githubTokenInput
@@ -3971,6 +4272,9 @@ document.addEventListener("keydown", (event) => {
 });
 els.scanLauncherBuildsButton.addEventListener("click", () => scanLauncherBuilds());
 els.publishLauncherUpdateButton.addEventListener("click", () => publishLauncherUpdate());
+if (els.testLauncherReinstallButton) {
+  els.testLauncherReinstallButton.addEventListener("click", () => prepareLocalLauncherReinstall());
+}
 els.planServerTransferButton.addEventListener("click", () => planServerTransfer().catch(() => {}));
 els.uploadServerFilesButton.addEventListener("click", () => uploadServerFiles().catch(() => {}));
 if (els.loadDashboardButton) {
@@ -3979,6 +4283,15 @@ if (els.loadDashboardButton) {
 els.playerDataTabs.forEach((tab) => {
   tab.addEventListener("click", () => activatePlayerDataView(tab.dataset.playerDataView));
 });
+if (els.accessDecisionClose) {
+  els.accessDecisionClose.addEventListener("click", () => {
+    els.accessDecisionDialog?.close();
+    selectedAccessPlayer = null;
+  });
+}
+if (els.accessDecisionForm) {
+  els.accessDecisionForm.addEventListener("submit", submitAccessDecision);
+}
 els.pickZipButton.addEventListener("click", async () => {
   const file = await window.aht.selectZip();
   if (file) {
@@ -4213,10 +4526,11 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
     });
     requireOk(buckets, "R2 bucket setup");
 
-    setReleaseCheck("warn", "Cloud setup", "Saving Worker secrets", localCurseForgeApiKey() ? "Writing CurseForge, developer login, and launcher proof secrets." : "Writing developer login and launcher proof secrets; CurseForge proxy is disabled unless a key is added later.");
+    setReleaseCheck("warn", "Cloud setup", "Saving Worker secrets", localCurseForgeApiKey() ? "Writing CurseForge, developer login, launcher proof, and server social secrets." : "Writing developer login, launcher proof, and server social secrets; CurseForge proxy is disabled unless a key is added later.");
     const secrets = await window.aht.devCloudSetupSecrets({
       curseforgeApiKey: localCurseForgeApiKey(),
       launcherProofSecret: localLauncherProofSecret(),
+      socialServerSecret: localSocialServerSecret(),
       adminUsername: inputValue(els.adminUserInput, "admin"),
       adminPassword: inputValue(els.adminPasswordInput, ""),
       releaseBucket: releaseBucketName(),
@@ -4366,7 +4680,7 @@ els.publishReleaseButton.addEventListener("click", () => {
   input.addEventListener("input", () => invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb"));
   input.addEventListener("change", () => invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb"));
 });
-[els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
+[els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.socialServerSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
   const invalidateBoth = () => {
     invalidateReleaseValidation();
     invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb");
@@ -4389,6 +4703,12 @@ if (els.serverPasswordInput) {
 if (els.launcherProofSecretInput) {
   els.launcherProofSecretInput.addEventListener("input", queueDeveloperSecretSave);
   els.launcherProofSecretInput.addEventListener("change", () => {
+    saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
+  });
+}
+if (els.socialServerSecretInput) {
+  els.socialServerSecretInput.addEventListener("input", queueDeveloperSecretSave);
+  els.socialServerSecretInput.addEventListener("change", () => {
     saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
   });
 }
@@ -4420,6 +4740,13 @@ if (els.generateProofSecretButton) {
   els.generateProofSecretButton.addEventListener("click", () => {
     setInputValue(els.launcherProofSecretInput, generateLauncherProofSecret());
     invalidateReleaseValidation("Proof secret generated", "Save or run cloud setup, then set the same secret on the server.");
+    saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
+  });
+}
+if (els.generateSocialSecretButton) {
+  els.generateSocialSecretButton.addEventListener("click", () => {
+    setInputValue(els.socialServerSecretInput, generateLauncherProofSecret());
+    invalidateReleaseValidation("Server social secret generated", "Save or run cloud setup, then set the same secret on the server.");
     saveDeveloperSecrets().catch((error) => setDevLog(cleanErrorMessage(error)));
   });
 }

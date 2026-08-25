@@ -12,7 +12,7 @@ const store = new Map([
   ['cache/files/test.jar', { value: new Uint8Array([1, 2, 3]), contentType: '' }],
   ['packs/range-test.zip', { value: new Uint8Array([10, 11, 12, 13, 14]), contentType: '' }],
   ['packs/empty.zip', { value: new Uint8Array([]), contentType: '' }],
-  ['server/aht_version_lock.cfg', { value: 'requiredVersion=2.8.1', contentType: '' }]
+  ['server/aht_version_lock.cfg', { value: 'verificationUrl=https://worker.test/api/launcher-proof/verify', contentType: '' }]
 ]);
 
 function objectFor(key, record, options = {}) {

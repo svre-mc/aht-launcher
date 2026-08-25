@@ -1,7 +1,7 @@
 A HARD TIME PRIVACY POLICY
 
-Effective Date: July 14, 2026
-Privacy Version: 2026-07-14.1
+Effective Date: August 23, 2026
+Privacy Version: 2026-08-23.1
 
 This Privacy Policy explains how SIIS Enterprise LLC ("SIIS," "we," "us," or "our") collects, uses, discloses, and protects information when you use the A Hard Time launcher, official game servers, websites, APIs, update services, community features, and related services (collectively, the "Services"). It also describes your privacy choices.
 
@@ -23,11 +23,12 @@ A. Information you provide
 
 B. Information collected automatically by the launcher
 
-- A launcher installation identifier, launcher version, operating system, platform, architecture, update channel, and general device/runtime compatibility information.
+- A launcher installation identifier and a separate cryptographic device-install identifier and public key, plus launcher version, operating system, platform, architecture, update channel, and general device/runtime compatibility information. The launcher protects the corresponding private key with the operating system's credential protection when available. This design does not collect motherboard, disk, BIOS, MAC-address, TPM, registry, or other hardware serial numbers.
 - Modpack version, install/update/repair events, download status, error details, and technical diagnostics.
 - Managed-mod integrity results, such as the name or relative path and hash/status of a missing, changed, added, or corrupted managed mod file. The launcher is not intended to inspect personal documents or report user-edited configuration files as unauthorized changes.
 - Launcher proof and security information, including short-lived signed proof tokens, launch identifiers, pack/version claims, timestamps, and hashes used to bind proof to an installation. SIIS does not receive your Microsoft password through the launcher.
-- Network information such as IP address, request time, requested resource, response status, transfer size, user agent, and rate-limit/security events when the launcher communicates with our infrastructure.
+- Network information such as IPv4 or IPv6 address, autonomous system number and organization, country and Cloudflare data-center code, request time, requested resource, response status, transfer size, user agent, and rate-limit/security events when the launcher communicates with our infrastructure.
+- A network-security assessment that may classify a connection as likely VPN/proxy, no VPN/proxy signal detected, or unknown, together with the source and confidence of that assessment. A classification is a security inference and may be incomplete or incorrect; VPN presence alone is not automatically a Terms violation.
 
 C. Information collected on official game servers
 
@@ -56,6 +57,7 @@ We use information to:
 - show and update your friends, blocked players, requests, and permitted online status;
 - maintain progression, permissions, ranks, purchases, community systems, and server features;
 - detect corrupted files, cheating, abuse, fraud, ban evasion, unauthorized access, attacks, and violations of the Terms;
+- make and enforce documented access decisions associated with a Minecraft account, Minecraft UUID, cryptographic device-install identifier, or IP address, and maintain an administrative audit history of those decisions;
 - investigate reports, enforce rules, protect users, preserve evidence, and comply with law;
 - measure downloads, unique network activity, feature usage, and aggregate service health;
 - communicate service, security, legal, and policy notices; and
@@ -84,6 +86,7 @@ We retain information only for as long as reasonably necessary for the purposes 
 - Short-lived launcher proof tokens expire by design, although related security events may be retained longer.
 - Current friendship, block, progression, permissions, and server-state records generally remain while your player record or the relevant server system remains active.
 - Launcher, download, web, security, moderation, and diagnostic logs may be retained as reasonably needed to investigate incidents, measure service operation, prevent repeated abuse, or meet legal requirements. SIIS does not promise a fixed deletion date where an active incident, dispute, ban, chargeback, legal hold, backup cycle, or security need requires continued retention.
+- Active access restrictions and their audit history may be retained while needed to enforce the restriction, investigate evasion, review an appeal, preserve accountability, or establish, exercise, or defend legal rights.
 - Local acceptance and launcher configuration records remain on your device until replaced, deleted, or the launcher data is removed.
 - Backups may retain information for a limited additional period before rotation and may be restored only for disaster recovery, integrity, or legal needs.
 
@@ -123,7 +126,7 @@ The Services are operated from the United States. Information may be processed a
 
 11. AUTOMATED SECURITY AND MODERATION
 
-The launcher and servers may automatically evaluate version, managed-mod integrity, launcher proof, rate limits, gameplay events, and known abuse indicators. These systems may block launch, require repair or update, restrict access, or flag an event for review. Significant enforcement may also involve human review where reasonably available. You may request review through the official support channel, but we may withhold information that would compromise security, reveal another person's data, or enable evasion.
+The launcher and servers may automatically evaluate version, managed-mod integrity, launcher proof, cryptographic device-install identity, account and IP restrictions, network-security assessments, rate limits, gameplay events, and known abuse indicators. These systems may block launch, require repair or update, restrict access, or flag an event for review. A network-security assessment is not treated as infallible, and VPN presence alone is not automatically a Terms violation. Significant enforcement may also involve human review where reasonably available. You may request review through the official support channel, but we may withhold information that would compromise security, reveal another person's data, or enable evasion.
 
 12. CHANGES TO THIS POLICY
 

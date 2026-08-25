@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -18,7 +19,6 @@ import {
 } from '../src/clientPackFormat.js';
 import { installPack } from '../src/installer.js';
 import {
-  captureManagedModFingerprint,
   scanLocalChanges,
   scanManagedIntegrity
 } from '../src/localChanges.js';
@@ -40,6 +40,8 @@ import {
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
 import { LAUNCHER_ATTESTATION_KEY_ID, inspectLauncherProof, launcherProofPath, writeLauncherProof } from '../src/launcherProof.js';
+import { createDeviceAssertion, createDeviceCredential, validateDeviceCredential } from '../src/deviceIdentity.js';
+import { loadVerifiedManagedManifest } from '../src/managedManifest.js';
 import { fetchSocialState, sendSocialAction } from '../src/socialClient.js';
 import { legalConsentStatus, recordLegalConsent } from '../src/legalConsent.js';
 import {
@@ -54,6 +56,12 @@ import {
   writeLaunchReport
 } from '../src/launchDiagnostics.js';
 import { selectLauncherArtifact, validateLauncherUpdateManifest } from '../src/launcherUpdateManifest.js';
+import {
+  removeWindowsLauncherBackupDirectory,
+  stageWindowsLauncherUpdate,
+  validateStagedWindowsLauncherUpdate,
+  versionMatches
+} from '../src/launcherUpdateStaging.js';
 import {
   assertReleaseMatchesTarget,
   normalizeReleaseTarget,
@@ -92,6 +100,14 @@ import {
 
 const DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS = ['mods', 'scripts', 'config', 'ForgeEssentials'];
 const DEFAULT_MINECRAFT_MEMORY_MB = 4096;
+const require = createRequire(import.meta.url);
+let physicalFsSync = fsSync;
+try {
+  physicalFsSync = require('original-fs');
+} catch {
+  // original-fs exists in Electron; plain Node tooling can use node:fs.
+}
+const physicalFs = physicalFsSync.promises || fs;
 const LAUNCHER_WORKFLOW_DEFAULTS = {
   repo: 'svre-mc/aht-launcher',
   branch: 'main',
@@ -226,6 +242,16 @@ function loadR2DirectUploadModule() {
 let mainWindow = null;
 let updateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
+let validatedPendingLauncherUpdateKey = '';
+const LOCAL_REINSTALL_REQUEST_SCHEMA = 'aht-launcher-local-reinstall-request/v1';
+const LOCAL_REINSTALL_PROMPT_ACK_SCHEMA = 'aht-launcher-local-reinstall-prompt-ready/v1';
+const LOCAL_REINSTALL_PURPOSE = 'local-reinstall-test';
+const LOCAL_REINSTALL_REQUEST_TTL_MS = 5 * 60 * 1000;
+const LOCAL_REINSTALL_MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024;
+const LAUNCHER_UPDATE_HANDOFF_NONCE_ENV = 'AHT_LAUNCHER_UPDATE_HANDOFF_NONCE';
+let activeLocalReinstallRequest = null;
+let localReinstallConsumePromise = null;
+let developerLocalReinstallPromise = null;
 let serverTransferState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let uploadState = { running: false, total: 0, completed: 0, current: '', lines: [], lastResult: null, error: null, verification: null };
 let launcherDeployState = { running: false, lines: [], lastResult: null, error: null, progress: null };
@@ -244,7 +270,7 @@ const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
 const DEVELOPER_SESSION_MS = 12 * 60 * 60 * 1000;
 const REMOTE_ADMIN_LOGIN_TIMEOUT_MS = 15_000;
-const DEVELOPER_SECRET_KEYS = ['curseforgeApiKey', 'serverSshPassword', 'launcherProofSecret', 'githubToken', 'r2AccountId', 'r2AccessKeyId', 'r2SecretAccessKey'];
+const DEVELOPER_SECRET_KEYS = ['curseforgeApiKey', 'serverSshPassword', 'launcherProofSecret', 'socialServerSecret', 'githubToken', 'r2AccountId', 'r2AccessKeyId', 'r2SecretAccessKey'];
 const OPERATION_LINES_MAX = 120;
 const OPERATION_LINE_MAX_CHARS = 900;
 let launcherModeCache = null;
@@ -940,6 +966,14 @@ function explicitUserDataDirArg() {
   return index >= 0 ? process.argv[index + 1] || '' : '';
 }
 
+// Electron resolves appData through the Windows known-folder API, so changing
+// APPDATA alone does not isolate source/packaged smoke processes. Honor the
+// already-gated test root before either launcher mode derives its userData.
+const testAppDataRoot = String(process.env.APPDATA || '').trim();
+if (process.env.AHT_TEST_HOOKS === '1' && path.isAbsolute(testAppDataRoot)) {
+  app.setPath('appData', path.resolve(testAppDataRoot));
+}
+
 const launchMode = rawRequestedDeveloperMode() ? 'developer' : 'player';
 const explicitUserDataDir = explicitUserDataDirArg();
 
@@ -960,7 +994,34 @@ if (process.platform === 'win32') {
 
 migrateDeveloperEncryptionProfile();
 
-const singleInstanceLock = app.requestSingleInstanceLock({ mode: launchMode });
+function shouldExitForSameVersionLauncherUpdateBeforeLock() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const pendingPath = path.join(app.getPath('userData'), 'launcher-updates', 'pending-launcher-update.json');
+    const pending = JSON.parse(fsSync.readFileSync(pendingPath, 'utf8'));
+    const prepared = pending?.preparedRestart || {};
+    const expectedNonce = String(prepared.handoffNonce || '').toLowerCase();
+    const candidateNonce = String(process.env[LAUNCHER_UPDATE_HANDOFF_NONCE_ENV] || '').toLowerCase();
+    const validSameVersionHandoff = pending?.product === 'aht-launcher'
+      && ['swapping', 'installing'].includes(String(pending.status || ''))
+      && ['developer-reinstall', LOCAL_REINSTALL_PURPOSE].includes(String(pending.purpose || ''))
+      && compareVersions(app.getVersion(), String(pending.version || '')) >= 0
+      && prepared.strategy === 'windows-staged-helper'
+      && /^[a-f0-9]{32}$/.test(expectedNonce)
+      && String(prepared.payloadPath || '')
+      && String(prepared.payloadSha256 || '').match(/^[a-f0-9]{64}$/i);
+    return Boolean(validSameVersionHandoff && candidateNonce !== expectedNonce);
+  } catch {
+    // Malformed or incomplete pending state must reach the normal recovery path,
+    // never brick every launcher start before the app can discard it safely.
+    return false;
+  }
+}
+
+const blockedBySameVersionLauncherHandoff = shouldExitForSameVersionLauncherUpdateBeforeLock();
+const singleInstanceLock = blockedBySameVersionLauncherHandoff
+  ? false
+  : app.requestSingleInstanceLock({ mode: launchMode });
 
 function launcherBuildMode() {
   if (launcherModeCache !== null) {
@@ -1139,6 +1200,10 @@ function identityPath() {
   return path.join(app.getPath('userData'), 'identity.json');
 }
 
+function deviceIdentityPath() {
+  return path.join(app.getPath('userData'), 'device-identity.json');
+}
+
 function installerJava8SelectionPath() {
   return path.join(app.getPath('userData'), 'installer-java8-selection.json');
 }
@@ -1199,9 +1264,42 @@ async function loadDeveloperCredentials() {
   } catch {
     localCredentials = {};
   }
+  const environmentPassword = String(process.env.AHT_DEVELOPER_PASSWORD || '');
+  if (environmentPassword) {
+    return {
+      username: String(process.env.AHT_DEVELOPER_USERNAME || localCredentials.username || DEFAULT_DEVELOPER_USERNAME).trim(),
+      password: environmentPassword
+    };
+  }
+  let localPassword = '';
+  if (localCredentials.protectedPassword) {
+    try {
+      localPassword = decryptDeveloperSecret(localCredentials.protectedPassword);
+    } catch (error) {
+      throw new Error(`Developer credentials could not be decrypted: ${error.message || error}`);
+    }
+  } else if (localCredentials.password) {
+    localPassword = String(localCredentials.password);
+    const allowTestFallback = process.env.AHT_ALLOW_UNENCRYPTED_DEVELOPER_CREDENTIALS === '1';
+    if (!safeStorageAvailable() && !allowTestFallback) {
+      throw new Error('OS-backed secret encryption is required to migrate developer credentials. Set AHT_DEVELOPER_PASSWORD for this launch instead.');
+    }
+    const protectedPassword = encryptDeveloperSecret(localPassword);
+    if (!protectedPassword.encrypted && !allowTestFallback) {
+      throw new Error('OS-backed secret encryption is required to protect developer credentials.');
+    }
+    await writeJsonFile(developerCredentialsPath(), {
+      schemaVersion: 2,
+      username: String(localCredentials.username || DEFAULT_DEVELOPER_USERNAME).trim(),
+      protectedPassword,
+      createdAt: localCredentials.createdAt || new Date().toISOString(),
+      migratedAt: new Date().toISOString(),
+      protectedBy: protectedPassword.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
+    });
+  }
   return {
     username: String(process.env.AHT_DEVELOPER_USERNAME || localCredentials.username || DEFAULT_DEVELOPER_USERNAME).trim(),
-    password: String(process.env.AHT_DEVELOPER_PASSWORD || localCredentials.password || '')
+    password: localPassword
   };
 }
 
@@ -1245,6 +1343,65 @@ function decryptDeveloperSecret(record = {}) {
     return safeStorage.decryptString(buffer);
   }
   return buffer.toString('utf8');
+}
+
+let deviceCredentialPromise = null;
+
+async function loadDeviceCredential() {
+  if (deviceCredentialPromise) return deviceCredentialPromise;
+  deviceCredentialPromise = (async () => {
+    const file = deviceIdentityPath();
+    if (await pathExists(file)) {
+      const stored = await readJsonFile(file).catch((error) => {
+        throw new Error(`Device identity could not be read: ${error.message || error}`);
+      });
+      if (stored.privateKey?.encrypted !== true && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+        throw new Error('Device identity is not protected by OS-backed encryption. Remove it and restart the launcher to create a protected identity.');
+      }
+      let privateKey = '';
+      try {
+        privateKey = decryptDeveloperSecret(stored.privateKey || {});
+      } catch (error) {
+        throw new Error(`Device identity could not be decrypted: ${error.message || error}`);
+      }
+      return validateDeviceCredential({
+        ...stored,
+        privateKey
+      });
+    }
+    if (!safeStorageAvailable() && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+      throw new Error('OS-backed secret encryption is required before this launcher can create its device identity.');
+    }
+    const created = createDeviceCredential();
+    const protectedPrivateKey = encryptDeveloperSecret(created.privateKey);
+    if (!protectedPrivateKey.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+      throw new Error('OS-backed secret encryption is required before this launcher can save its device identity.');
+    }
+    await writeJsonFile(file, {
+      schemaVersion: created.schemaVersion,
+      protocol: created.protocol,
+      algorithm: created.algorithm,
+      deviceId: created.deviceId,
+      publicKey: created.publicKey,
+      privateKey: protectedPrivateKey,
+      createdAt: created.createdAt,
+      protectedBy: protectedPrivateKey.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
+    });
+    return created;
+  })().catch((error) => {
+    deviceCredentialPromise = null;
+    throw error;
+  });
+  return deviceCredentialPromise;
+}
+
+async function publicDeviceIdentity() {
+  const credential = await loadDeviceCredential();
+  return {
+    deviceId: credential.deviceId,
+    devicePublicKey: credential.publicKey,
+    deviceIdentityProtocol: credential.protocol
+  };
 }
 
 async function readDeveloperSecretsFile() {
@@ -1315,6 +1472,7 @@ async function loadDeveloperSecrets() {
   const curseforge = stored.secrets?.curseforgeApiKey || {};
   const serverSsh = stored.secrets?.serverSshPassword || {};
   const launcherProof = stored.secrets?.launcherProofSecret || {};
+  const socialServer = stored.secrets?.socialServerSecret || {};
   const github = stored.secrets?.githubToken || {};
   const r2Account = stored.secrets?.r2AccountId || {};
   const r2AccessKey = stored.secrets?.r2AccessKeyId || {};
@@ -1322,6 +1480,7 @@ async function loadDeveloperSecrets() {
   let curseforgeApiKey = '';
   let serverSshPassword = '';
   let launcherProofSecret = '';
+  let socialServerSecret = '';
   let githubToken = '';
   let r2AccountId = '';
   let r2AccessKeyId = '';
@@ -1339,6 +1498,11 @@ async function loadDeveloperSecrets() {
   }
   try {
     launcherProofSecret = decryptDeveloperSecret(launcherProof);
+  } catch (error) {
+    warning = warning || error.message;
+  }
+  try {
+    socialServerSecret = decryptDeveloperSecret(socialServer);
   } catch (error) {
     warning = warning || error.message;
   }
@@ -1363,11 +1527,12 @@ async function loadDeveloperSecrets() {
     warning = warning || error.message;
   }
   return {
-    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || github.value || r2Account.value || r2AccessKey.value || r2SecretKey.value),
+    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || socialServer.value || github.value || r2Account.value || r2AccessKey.value || r2SecretKey.value),
     encrypted: Boolean(
       (curseforge.value ? curseforge.encrypted : true)
       && (serverSsh.value ? serverSsh.encrypted : true)
       && (launcherProof.value ? launcherProof.encrypted : true)
+      && (socialServer.value ? socialServer.encrypted : true)
       && (github.value ? github.encrypted : true)
       && (r2AccessKey.value ? r2AccessKey.encrypted : true)
       && (r2SecretKey.value ? r2SecretKey.encrypted : true)
@@ -1377,6 +1542,7 @@ async function loadDeveloperSecrets() {
     curseforgeApiKey,
     serverSshPassword,
     launcherProofSecret,
+    socialServerSecret,
     githubToken,
     r2AccountId,
     r2AccessKeyId,
@@ -1452,6 +1618,7 @@ async function saveDeveloperSecrets(secrets = {}) {
   saveDeveloperSecretField(next, secrets, 'curseforgeApiKey');
   saveDeveloperSecretField(next, secrets, 'serverSshPassword');
   saveDeveloperSecretField(next, secrets, 'launcherProofSecret');
+  saveDeveloperSecretField(next, secrets, 'socialServerSecret');
   saveDeveloperSecretField(next, secrets, 'githubToken');
   saveDeveloperSecretField(next, secrets, 'r2AccountId');
   saveDeveloperSecretField(next, secrets, 'r2AccessKeyId');
@@ -2287,21 +2454,21 @@ async function loadConfig() {
       }
     }
   }
-  if (!Object.prototype.hasOwnProperty.call(stored.developer || {}, 'defaultCacheModsDir') && defaults.developer?.defaultCacheModsDir) {
-    config.developer.defaultCacheModsDir = defaults.developer.defaultCacheModsDir;
-    changed = true;
-  }
   if (isDeveloperMode()) {
+    if (!Object.prototype.hasOwnProperty.call(stored.developer || {}, 'defaultCacheModsDir') && defaults.developer?.defaultCacheModsDir) {
+      config.developer.defaultCacheModsDir = defaults.developer.defaultCacheModsDir;
+      changed = true;
+    }
     for (const key of ['clientModpackDir', 'ptbClientModpackDir']) {
       if (!String(stored.developer?.[key] || '').trim() && String(defaults.developer?.[key] || '').trim()) {
         config.developer[key] = defaults.developer[key];
         changed = true;
       }
     }
-  }
-  if (!String(stored.developer?.defaultOutDir || '').trim()) {
-    config.developer.defaultOutDir = resolveReleaseOutDir(config.developer?.defaultOutDir);
-    changed = true;
+    if (!String(stored.developer?.defaultOutDir || '').trim()) {
+      config.developer.defaultOutDir = resolveReleaseOutDir(config.developer?.defaultOutDir);
+      changed = true;
+    }
   }
   await ensureDir(config.instanceDir);
   if (changed) {
@@ -2350,6 +2517,7 @@ async function saveConfig(nextConfig) {
   }
   delete merged.developer.curseforgeApiKey;
   delete merged.developer.launcherProofSecret;
+  delete merged.developer.socialServerSecret;
   delete merged.developer.githubToken;
   delete merged.developer.r2AccessKeyId;
   delete merged.developer.r2SecretAccessKey;
@@ -2659,7 +2827,12 @@ async function clearUnavailableMinecraftUsername(username = '', message = 'That 
 }
 
 async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null } = {}) {
-  const proofIdentity = launcherProofIdentity(runtimeIdentity(identity));
+  const deviceCredential = await loadDeviceCredential();
+  const proofIdentity = launcherProofIdentity(runtimeIdentity({
+    ...identity,
+    deviceId: deviceCredential.deviceId,
+    devicePublicKey: deviceCredential.publicKey
+  }));
   const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
   const recoverySecret = developerAdminSessionAllowed() || !username
     ? ''
@@ -2670,7 +2843,8 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
       identity: proofIdentity,
       latest,
       installed,
-      recoverySecret
+      recoverySecret,
+      deviceCredential
     });
   } catch (error) {
     if (!isLauncherProofRegistrationError(error)) {
@@ -2699,10 +2873,15 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
     const refreshedRecoverySecret = await accountRecoverySecret(config, username);
     return writeLauncherProofWithDeveloperAuth({
       config,
-      identity: launcherProofIdentity(refreshedIdentity),
+      identity: launcherProofIdentity({
+        ...refreshedIdentity,
+        deviceId: deviceCredential.deviceId,
+        devicePublicKey: deviceCredential.publicKey
+      }),
       latest,
       installed,
-      recoverySecret: refreshedRecoverySecret
+      recoverySecret: refreshedRecoverySecret,
+      deviceCredential
     });
   }
 }
@@ -2831,8 +3010,10 @@ async function identityPayload(config = null) {
     }
   }
   nextIdentity = await refreshRemoteMinecraftRegistration(config, nextIdentity);
+  const device = await publicDeviceIdentity();
   return {
     ...nextIdentity,
+    ...device,
     appVersion: app.getVersion(),
     platform: process.platform,
     arch: process.arch
@@ -2965,24 +3146,62 @@ async function accountRecoverySecret(config = {}, username = '') {
   const candidates = [...new Set([file, ...legacyFiles].map((candidate) => path.resolve(candidate)))];
   for (const candidate of candidates) {
     const existing = await readJsonFile(candidate).catch(() => null);
-    const existingSecret = String(existing?.secret || '').trim();
+    let existingSecret = String(existing?.secret || '').trim();
+    if (!existingSecret && existing?.protectedSecret) {
+      try {
+        existingSecret = String(decryptDeveloperSecret(existing.protectedSecret) || '').trim();
+      } catch (error) {
+        throw new Error(`Launcher recovery credential could not be decrypted: ${error.message || error}`);
+      }
+    }
     if (
       Number(existing?.schemaVersion) === 1
       && normalizeMinecraftUsername(existing?.username).toLowerCase() === normalizedUsername
       && /^[A-Za-z0-9_-]{32,200}$/.test(existingSecret)
     ) {
-      if (!samePath(candidate, file)) {
-        await writeJsonFile(file, { ...existing, migratedAt: new Date().toISOString() });
+      if (!safeStorageAvailable() && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+        throw new Error('OS-backed secret encryption is required to protect launcher recovery credentials.');
+      }
+      if (samePath(candidate, file) && !existing.secret && existing.protectedSecret?.encrypted === true) {
+        for (const legacyFile of legacyFiles) {
+          if (!samePath(legacyFile, file)) await fs.rm(legacyFile, { force: true }).catch(() => {});
+        }
+        return existingSecret;
+      }
+      const protectedSecret = existing?.protectedSecret?.encrypted
+        ? existing.protectedSecret
+        : encryptDeveloperSecret(existingSecret);
+      if (!protectedSecret.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+        throw new Error('OS-backed secret encryption is required to migrate launcher recovery credentials.');
+      }
+      await writeJsonFile(file, {
+        schemaVersion: 1,
+        username: normalizeMinecraftUsername(username),
+        protectedSecret,
+        createdAt: existing.createdAt || new Date().toISOString(),
+        migratedAt: samePath(candidate, file) && !existing.secret ? existing.migratedAt || '' : new Date().toISOString(),
+        protectedBy: protectedSecret.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
+      });
+      for (const legacyFile of legacyFiles) {
+        if (!samePath(legacyFile, file)) await fs.rm(legacyFile, { force: true }).catch(() => {});
       }
       return existingSecret;
     }
   }
   const secret = crypto.randomBytes(32).toString('base64url');
+  if (!safeStorageAvailable() && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+    throw new Error('OS-backed secret encryption is required to create launcher recovery credentials.');
+  }
+  const protectedSecret = encryptDeveloperSecret(secret);
+  if (!protectedSecret.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+    throw new Error('OS-backed secret encryption is required to save launcher recovery credentials.');
+  }
   await writeJsonFile(file, {
     schemaVersion: 1,
     username: normalizeMinecraftUsername(username),
-    secret,
-    createdAt: new Date().toISOString()
+    protectedSecret,
+    createdAt: new Date().toISOString(),
+    protectedBy: protectedSecret.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
   });
   return secret;
 }
@@ -3045,15 +3264,27 @@ async function registerMinecraftUsername(username, options = {}) {
   if (base && !developerLocalOnly) {
     const url = new URL('api/users/register', base.endsWith('/') ? base : `${base}/`);
     const recoverySecret = await accountRecoverySecret(config, normalizedUsername);
+    const deviceCredential = await loadDeviceCredential();
     const registrationPayload = {
       username: normalizedUsername,
       minecraftUuid,
       installId: identity.installId,
+      deviceId: deviceCredential.deviceId,
+      devicePublicKey: deviceCredential.publicKey,
       appVersion: app.getVersion(),
       platform: process.platform,
       arch: process.arch,
       packId: config.packId
     };
+    registrationPayload.deviceAssertion = createDeviceAssertion(deviceCredential, {
+      purpose: 'account-registration',
+      binding: {
+        username: normalizedUsername.toLowerCase(),
+        minecraftUuid: normalizeMinecraftUuid(minecraftUuid),
+        installId: String(identity.installId || '').trim(),
+        deviceId: deviceCredential.deviceId
+      }
+    });
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -3296,14 +3527,74 @@ async function expectedCacheExtraManagedFiles(config, latest = null) {
     }));
 }
 
+function instanceSecurityStateDir(config = {}) {
+  const instanceKey = crypto.createHash('sha256')
+    .update(path.resolve(config.instanceDir || defaultInstanceDir()))
+    .digest('hex')
+    .slice(0, 24);
+  return path.join(app.getPath('userData'), 'instance-state', instanceKey);
+}
+
+function managedStatePath(config = {}) {
+  return path.join(instanceSecurityStateDir(config), 'managed-files.json');
+}
+
+function legacyManagedStatePath(config = {}) {
+  return path.join(config.instanceDir, '.aht-launcher', 'managed-files.json');
+}
+
+function legacyIntegrityStatePath(config = {}) {
+  return path.join(config.instanceDir, '.aht-launcher', 'integrity.json');
+}
+
+async function migrateInstanceSecurityState(config = {}) {
+  const migrations = [
+    [legacyManagedStatePath(config), managedStatePath(config)],
+    [legacyIntegrityStatePath(config), integrityStatePath(config)]
+  ];
+  for (const [legacy, target] of migrations) {
+    if (samePath(legacy, target) || !(await pathExists(legacy))) continue;
+    if (!(await pathExists(target))) {
+      const value = await readJsonFile(legacy).catch(() => null);
+      if (value !== null) await writeJsonFile(target, value);
+    }
+    await fs.rm(legacy, { force: true }).catch(() => {});
+  }
+}
+
+async function managedIntegrityOptions(config, latest = null) {
+  const release = latest || await readLatest(config);
+  if (isFullClientRelease(release)) {
+    const verified = await loadVerifiedManagedManifest({
+      latestSource: config.latestUrl,
+      latest: release
+    });
+    return {
+      managedFiles: verified.managedFiles,
+      ignoreLocalManaged: true
+    };
+  }
+  return {
+    managedPath: managedStatePath(config),
+    requiredManaged: await expectedCacheExtraManagedFiles(config, release)
+  };
+}
+
 async function scanCurrentManagedIntegrity(config, latest = null, options = {}) {
-  const requiredManaged = await expectedCacheExtraManagedFiles(config, latest).catch((error) => {
-    console.warn(`Unable to load expected cache extras for integrity scan: ${error.message || error}`);
-    return [];
-  });
+  await migrateInstanceSecurityState(config);
+  const managedOptions = await managedIntegrityOptions(config, latest);
   return scanManagedIntegrity(config.instanceDir, {
-    requiredManaged,
+    ...managedOptions,
     onProgress: typeof options.onProgress === 'function' ? options.onProgress : null
+  });
+}
+
+async function scanCurrentLocalChanges(config, latest = null, options = {}) {
+  await migrateInstanceSecurityState(config);
+  const managedOptions = await managedIntegrityOptions(config, latest);
+  return scanLocalChanges(config.instanceDir, {
+    ...managedOptions,
+    limit: options.limit
   });
 }
 
@@ -3323,10 +3614,11 @@ async function readUpdateLogs(config, limit = 3) {
 }
 
 function integrityStatePath(config) {
-  return path.join(config.instanceDir, '.aht-launcher', 'integrity.json');
+  return path.join(instanceSecurityStateDir(config), 'integrity.json');
 }
 
 async function readIntegrityState(config) {
+  await migrateInstanceSecurityState(config);
   const file = integrityStatePath(config);
   if (!(await pathExists(file))) {
     return null;
@@ -3343,52 +3635,20 @@ async function writeIntegrityState(config, integrity, source = 'scan') {
     generatedAt: integrity?.generatedAt || new Date().toISOString()
   };
   await writeJsonFile(file, state);
+  await fs.rm(legacyIntegrityStatePath(config), { force: true }).catch(() => {});
   return state;
 }
 
 async function scanPlayIntegrity(config, latest = null) {
-  const requiredManaged = await expectedCacheExtraManagedFiles(config, latest).catch((error) => {
-    console.warn(`Unable to load expected cache extras for Play integrity check: ${error.message || error}`);
-    return [];
-  });
-  const [stored, fingerprint] = await Promise.all([
-    readIntegrityState(config),
-    captureManagedModFingerprint(config.instanceDir, { requiredManaged })
-  ]);
-  const checkedAt = new Date().toISOString();
-
-  if (
-    stored?.valid
-    && fingerprint.pathsValid
-    && stored.fingerprint?.schemaVersion === fingerprint.schemaVersion
-    && stored.fingerprint?.digest === fingerprint.digest
-  ) {
-    return writeIntegrityState(config, {
-      ...stored,
-      fingerprint,
-      quickCheckedAt: checkedAt,
-      checkMode: 'fingerprint'
-    }, 'play-fast-check');
+  await migrateInstanceSecurityState(config);
+  const managedOptions = await managedIntegrityOptions(config, latest);
+  if (!Array.isArray(managedOptions.managedFiles)) {
+    throw new Error('Play requires a current full-client release with a verified client manifest. Update or repair the pack before launching.');
   }
-
-  const verifiedAtMs = Date.parse(String(stored?.generatedAt || ''));
-  const canAdoptLegacyBaseline = stored?.valid
-    && !stored?.fingerprint?.digest
-    && fingerprint.pathsValid
-    && Number(stored?.counts?.corrupted || 0) === 0
-    && Number(stored?.counts?.managed || 0) === fingerprint.managedCount
-    && Number.isFinite(verifiedAtMs)
-    && fingerprint.latestChangeMs <= verifiedAtMs;
-  if (canAdoptLegacyBaseline) {
-    return writeIntegrityState(config, {
-      ...stored,
-      fingerprint,
-      quickCheckedAt: checkedAt,
-      checkMode: 'fingerprint-baseline'
-    }, 'play-fast-baseline');
-  }
-
-  const integrity = await scanManagedIntegrity(config.instanceDir, { requiredManaged });
+  // Local integrity JSON and metadata fingerprints are user-editable caches.
+  // A Play authorization therefore always hashes the authoritative managed set
+  // derived from the verified release manifest instead of trusting cached state.
+  const integrity = await scanManagedIntegrity(config.instanceDir, managedOptions);
   return writeIntegrityState(config, {
     ...integrity,
     checkMode: 'full-hash'
@@ -3759,6 +4019,48 @@ async function readLauncherUpdate(config = {}) {
     artifact: null,
     error: ''
   };
+  if (!isDeveloperMode() && activeLocalReinstallRequest) {
+    return {
+      ...base,
+      enabled: true,
+      latestUrl: '',
+      latestVersion: activeLocalReinstallRequest.version,
+      required: true,
+      updateRequired: true,
+      localReinstallTest: true,
+      artifact: {
+        label: 'Local launcher reinstall test',
+        kind: 'zip',
+        fileName: activeLocalReinstallRequest.artifact.fileName,
+        sha256: activeLocalReinstallRequest.artifact.sha256,
+        size: activeLocalReinstallRequest.artifact.size,
+        localTest: true
+      }
+    };
+  }
+  if (!isDeveloperMode()) {
+    const localPending = await readPendingLauncherUpdate();
+    if (localPending?.purpose === LOCAL_REINSTALL_PURPOSE
+        && String(localPending.version || '') === currentVersion) {
+      const completing = ['swapping', 'installing'].includes(localPending.status);
+      return {
+        ...base,
+        enabled: true,
+        latestUrl: '',
+        latestVersion: currentVersion,
+        required: !completing,
+        updateRequired: !completing,
+        localReinstallTest: true,
+        pendingStatus: String(localPending.status || ''),
+        artifact: completing ? null : {
+          label: 'Local launcher reinstall test',
+          kind: 'zip',
+          fileName: expectedLocalReinstallArchiveName(currentVersion),
+          localTest: true
+        }
+      };
+    }
+  }
   if (!enabled || !latestUrl) {
     return base;
   }
@@ -3805,6 +4107,77 @@ function configForStorage(config = {}) {
 
 function rendererStatusConfig(config = {}) {
   return isDeveloperMode() ? config : playerSafeConfig(config);
+}
+
+function launcherUpdateForRenderer(update = {}) {
+  if (!update?.localReinstallTest) return update;
+  return {
+    enabled: update.enabled !== false,
+    currentVersion: String(update.currentVersion || app.getVersion()),
+    latestVersion: String(update.latestVersion || app.getVersion()),
+    required: Boolean(update.required),
+    updateRequired: Boolean(update.updateRequired),
+    localReinstallTest: true,
+    pendingStatus: String(update.pendingStatus || ''),
+    artifact: update.artifact ? {
+      label: 'Local launcher reinstall test',
+      kind: 'zip',
+      fileName: expectedLocalReinstallArchiveName(update.latestVersion || app.getVersion())
+    } : null,
+    error: update.error ? 'The local launcher reinstall test could not be prepared.' : ''
+  };
+}
+
+function launcherUpdateStateForRenderer(state = {}) {
+  const localReinstallTest = state?.purpose === LOCAL_REINSTALL_PURPOSE
+    || state?.lastResult?.purpose === LOCAL_REINSTALL_PURPOSE
+    || state?.localReinstallTest
+    || state?.lastResult?.localReinstallTest;
+  if (!localReinstallTest) return state;
+  const progress = state.progress ? {
+    phase: String(state.progress.phase || ''),
+    completed: Number(state.progress.completed || 0),
+    total: Number(state.progress.total || 0),
+    percent: Number(state.progress.percent || 0),
+    completedBytes: Number(state.progress.completedBytes || 0),
+    totalBytes: Number(state.progress.totalBytes || 0),
+    speedBytesPerSecond: Number(state.progress.speedBytesPerSecond || 0)
+  } : null;
+  const result = state.lastResult ? {
+    ok: Boolean(state.lastResult.ok),
+    version: String(state.lastResult.version || app.getVersion()),
+    purpose: LOCAL_REINSTALL_PURPOSE,
+    localReinstallTest: true,
+    restartRequired: Boolean(state.lastResult.restartRequired),
+    instantRestartReady: Boolean(state.lastResult.instantRestartReady),
+    pendingStatus: String(state.lastResult.pendingStatus || ''),
+    stagedAt: String(state.lastResult.stagedAt || ''),
+    restartStartedAt: String(state.lastResult.restartStartedAt || '')
+  } : null;
+  return {
+    running: Boolean(state.running),
+    purpose: LOCAL_REINSTALL_PURPOSE,
+    localReinstallTest: true,
+    lines: Array.isArray(state.lines)
+      ? state.lines.map((line) => String(line)).filter((line) => !/[A-Za-z]:[\\/]/.test(line)).slice(-OPERATION_LINES_MAX)
+      : [],
+    lastResult: result,
+    error: state.error ? 'The local launcher reinstall test failed.' : null,
+    progress
+  };
+}
+
+function launcherUpdateResultForRenderer(result) {
+  const localReinstallTest = result?.purpose === LOCAL_REINSTALL_PURPOSE
+    || result?.localReinstallTest
+    || result?.lastResult?.purpose === LOCAL_REINSTALL_PURPOSE
+    || result?.lastResult?.localReinstallTest;
+  if (!localReinstallTest) return result;
+  if (Object.prototype.hasOwnProperty.call(result || {}, 'lastResult')
+      || Object.prototype.hasOwnProperty.call(result || {}, 'running')) {
+    return launcherUpdateStateForRenderer({ ...result, purpose: LOCAL_REINSTALL_PURPOSE, localReinstallTest: true });
+  }
+  return launcherUpdateStateForRenderer({ purpose: LOCAL_REINSTALL_PURPOSE, lastResult: result }).lastResult;
 }
 
 function setupForRenderer(setup = {}) {
@@ -3923,6 +4296,11 @@ function minecraftLaunchResultForRenderer(result = {}) {
   };
 }
 
+function identityForRenderer(identity = {}) {
+  const { devicePublicKey: _devicePublicKey, ...safeIdentity } = identity;
+  return safeIdentity;
+}
+
 function minecraftLauncherHandoffForRenderer(handoff = {}) {
   return {
     restartedExisting: Boolean(handoff.detected && handoff.closed),
@@ -3983,12 +4361,20 @@ async function getStatus(configOverride = null, packValue = 'stable') {
   });
   const pendingLauncherUpdate = await hydratePendingLauncherUpdateState();
   let launcherUpdate = await readLauncherUpdate(config);
-  if (pendingLauncherUpdate?.version && compareVersions(pendingLauncherUpdate.version, app.getVersion()) > 0) {
+  if (pendingLauncherUpdate?.version && (
+    compareVersions(pendingLauncherUpdate.version, app.getVersion()) > 0
+    || (pendingLauncherUpdate.purpose === 'developer-reinstall' && isDeveloperMode() && isDeveloperAuthenticated())
+    || (pendingLauncherUpdate.purpose === LOCAL_REINSTALL_PURPOSE
+      && !isDeveloperMode()
+      && !['swapping', 'installing'].includes(pendingLauncherUpdate.status))
+  )) {
     launcherUpdate = {
       ...launcherUpdate,
       latestVersion: pendingLauncherUpdate.version,
       required: true,
       updateRequired: true,
+      developerReinstall: pendingLauncherUpdate.purpose === 'developer-reinstall',
+      localReinstallTest: pendingLauncherUpdate.purpose === LOCAL_REINSTALL_PURPOSE,
       artifact: pendingLauncherUpdate.artifact || launcherUpdate.artifact,
       pendingStatus: pendingLauncherUpdate.status || 'staged',
       error: ''
@@ -4008,7 +4394,7 @@ async function getStatus(configOverride = null, packValue = 'stable') {
     })),
     config: rendererStatusConfig(config),
     configPath: configPathForRenderer(),
-    identity,
+    identity: identityForRenderer(identity),
     developerAuthenticated: isDeveloperAuthenticated(),
     developerSessionExpiresAt: developerSession?.expiresAt ? new Date(developerSession.expiresAt).toISOString() : '',
     developerSecrets: isDeveloperMode() && isDeveloperAuthenticated()
@@ -4020,12 +4406,13 @@ async function getStatus(configOverride = null, packValue = 'stable') {
         curseforgeApiKey: '',
         serverSshPassword: '',
         launcherProofSecret: '',
+        socialServerSecret: '',
         githubToken: '',
         r2AccountId: '',
         r2AccessKeyId: '',
         r2SecretAccessKey: ''
       }))
-      : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
+      : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', socialServerSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
     setup: setupForRenderer(await setupRecommendations(config)),
     minecraftProfile: minecraftProfileForRenderer(minecraftProfile),
     java8Runtime,
@@ -4033,7 +4420,7 @@ async function getStatus(configOverride = null, packValue = 'stable') {
     latestError,
     updateLogs,
     updateLogsError,
-    launcherUpdate,
+    launcherUpdate: launcherUpdateForRenderer(launcherUpdate),
     installed,
     integrity,
     updateBlockedReason,
@@ -4067,6 +4454,7 @@ async function runUpdate(forceRepair = false, options = {}) {
     if (!developerClientBypassAllowed()) {
       requirePlayerFullClientRelease(latestBeforeInstall);
     }
+    await migrateInstanceSecurityState(config);
     await sendLauncherEvent(config, identity, {
       type: forceRepair ? 'repair_started' : 'install_started',
       version: null
@@ -4074,6 +4462,7 @@ async function runUpdate(forceRepair = false, options = {}) {
     const result = await installPack({
       latestSource: config.latestUrl,
       instanceDir: config.instanceDir,
+      managedStatePath: managedStatePath(config),
       cfProxyBaseUrl: config.curseforge?.proxyBaseUrl || '',
       cfApiKey: process.env[config.curseforge?.apiKeyEnv || 'CURSEFORGE_API_KEY'] || '',
       forceRepair,
@@ -4181,13 +4570,451 @@ function windowsPowerShellPath() {
     : 'powershell.exe';
 }
 
-function windowsCommandPromptPath() {
-  return process.env.ComSpec || (process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'cmd.exe') : 'cmd.exe');
+function launcherUpdateTestHook(name) {
+  return process.env.AHT_TEST_HOOKS === '1' && process.env[name] === '1';
 }
 
 function launcherUpdateInstalledExePath() {
   if (process.platform !== 'win32') return '';
+  const testTarget = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_LAUNCHER_UPDATE_TARGET_EXE || '').trim()
+    : '';
+  if (testTarget) return path.resolve(testTarget);
   return process.execPath || '';
+}
+
+function defaultInstalledWindowsLauncherExePath() {
+  if (process.platform !== 'win32') return '';
+  const localAppData = String(process.env.LOCALAPPDATA || '').trim();
+  if (!localAppData) return '';
+  return path.join(
+    path.resolve(localAppData),
+    'Programs',
+    'A Hard Time Launcher Windows',
+    'A Hard Time Launcher Windows.exe'
+  );
+}
+
+function regularLauncherUserDataPath() {
+  return path.resolve(app.getPath('appData'), 'aht-launcher');
+}
+
+function localReinstallInboxPath() {
+  return path.join(regularLauncherUserDataPath(), 'launcher-updates', LOCAL_REINSTALL_PURPOSE);
+}
+
+function localReinstallRequestDirectory(nonce = '') {
+  return path.join(localReinstallInboxPath(), String(nonce || ''));
+}
+
+function strictPathDescendant(rootPath = '', candidatePath = '') {
+  if (!rootPath || !candidatePath) return false;
+  const root = path.resolve(rootPath);
+  const candidate = path.resolve(candidatePath);
+  const relative = path.relative(root, candidate);
+  return Boolean(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+async function assertNormalPhysicalPath(filePath, expectedKind = '') {
+  const resolved = path.resolve(String(filePath || ''));
+  const parsed = path.parse(resolved);
+  const parts = path.relative(parsed.root, resolved).split(path.sep).filter(Boolean);
+  let current = parsed.root;
+  for (let index = 0; index < parts.length; index += 1) {
+    current = path.join(current, parts[index]);
+    const stat = await physicalFs.lstat(current).catch(() => null);
+    if (!stat) throw new Error(`Required local reinstall path is missing: ${current}`);
+    if (stat.isSymbolicLink()) throw new Error(`Local reinstall paths cannot use links or reparse points: ${current}`);
+    if (index < parts.length - 1 && !stat.isDirectory()) {
+      throw new Error(`Local reinstall path parent is not a normal directory: ${current}`);
+    }
+    if (index === parts.length - 1 && expectedKind === 'file' && !stat.isFile()) {
+      throw new Error(`Local reinstall path is not a normal file: ${current}`);
+    }
+    if (index === parts.length - 1 && expectedKind === 'directory' && !stat.isDirectory()) {
+      throw new Error(`Local reinstall path is not a normal directory: ${current}`);
+    }
+  }
+  return resolved;
+}
+
+async function ensureNormalLocalReinstallDirectory(directoryPath) {
+  const resolved = path.resolve(directoryPath);
+  const missing = [];
+  let cursor = resolved;
+  while (!(await physicalFs.lstat(cursor).catch(() => null))) {
+    missing.push(cursor);
+    const parent = path.dirname(cursor);
+    if (parent === cursor) throw new Error('Could not find a normal parent for the local reinstall inbox.');
+    cursor = parent;
+  }
+  await assertNormalPhysicalPath(cursor, 'directory');
+  for (const candidate of missing.reverse()) {
+    await physicalFs.mkdir(candidate, { recursive: false });
+    await assertNormalPhysicalPath(candidate, 'directory');
+  }
+  return assertNormalPhysicalPath(resolved, 'directory');
+}
+
+function expectedLocalReinstallArchiveName(version = app.getVersion()) {
+  return `AHT-Launcher-Windows-10-11-${String(version || '').trim()}.zip`;
+}
+
+async function validateInstalledLocalReinstallTarget(targetExe, options = {}) {
+  const resolvedTarget = await assertNormalPhysicalPath(targetExe, 'file');
+  if (path.basename(resolvedTarget).toLowerCase() !== 'a hard time launcher windows.exe') {
+    throw new Error('The local reinstall target is not the installed A Hard Time Launcher Windows executable.');
+  }
+  if (options.currentProcess && !sameLauncherUpdatePath(resolvedTarget, process.execPath)) {
+    throw new Error('The local reinstall request targets a different launcher executable.');
+  }
+  const installedAsar = path.join(path.dirname(resolvedTarget), 'resources', 'app.asar');
+  const installedUninstaller = path.join(path.dirname(resolvedTarget), 'Uninstall A Hard Time Launcher Windows.exe');
+  await Promise.all([
+    assertNormalPhysicalPath(installedAsar, 'file'),
+    assertNormalPhysicalPath(installedUninstaller, 'file')
+  ]);
+  const installedVersion = String(await readWindowsLauncherProductVersion(resolvedTarget) || '').trim();
+  if (!versionMatches(installedVersion, app.getVersion())) {
+    throw new Error(`Installed launcher version ${installedVersion || 'unknown'} does not match ${app.getVersion()}.`);
+  }
+  return { targetExe: resolvedTarget, installedVersion, installedAsar, installedUninstaller };
+}
+
+function localReinstallRequestRecordKeysAreStrict(request = {}) {
+  const requestKeys = Object.keys(request).sort().join('|');
+  const artifactKeys = Object.keys(request.artifact || {}).sort().join('|');
+  return requestKeys === ['artifact', 'createdAt', 'expiresAt', 'nonce', 'product', 'purpose', 'schema', 'targetExe', 'version'].sort().join('|')
+    && artifactKeys === ['fileName', 'sha256', 'size'].sort().join('|');
+}
+
+async function validateLocalReinstallRequestRecord(requestDir, request = {}) {
+  const inbox = localReinstallInboxPath();
+  const nonce = String(request?.nonce || '');
+  if (!localReinstallRequestRecordKeysAreStrict(request)
+      || request.schema !== LOCAL_REINSTALL_REQUEST_SCHEMA
+      || request.product !== 'aht-launcher'
+      || request.purpose !== LOCAL_REINSTALL_PURPOSE
+      || !/^[a-f0-9]{32}$/.test(nonce)
+      || path.basename(requestDir) !== nonce
+      || !strictPathDescendant(inbox, requestDir)) {
+    throw new Error('Local reinstall request metadata is invalid.');
+  }
+  const bridgeTest = launcherUpdateTestHook('AHT_TEST_LOCAL_REINSTALL_BRIDGE');
+  if (launchMode !== 'player'
+      || requestedDeveloperMode()
+      || isDeveloperMode()
+      || (explicitUserDataDir && !bridgeTest)
+      || !sameLauncherUpdatePath(app.getPath('userData'), regularLauncherUserDataPath())) {
+    throw new Error('Only the regular launcher at its fixed user-data location may consume a local reinstall request.');
+  }
+  if (String(request.version || '') !== app.getVersion()) {
+    throw new Error('Local reinstall requests must target the exact current launcher version.');
+  }
+  const createdAt = Date.parse(String(request.createdAt || ''));
+  const expiresAt = Date.parse(String(request.expiresAt || ''));
+  const now = Date.now();
+  if (!Number.isFinite(createdAt) || !Number.isFinite(expiresAt)
+      || createdAt > now + 30_000
+      || expiresAt <= now
+      || expiresAt <= createdAt
+      || expiresAt - createdAt > LOCAL_REINSTALL_REQUEST_TTL_MS) {
+    throw new Error('Local reinstall request is stale or has an invalid lifetime.');
+  }
+  const expectedFileName = expectedLocalReinstallArchiveName(request.version);
+  if (String(request.artifact?.fileName || '').toLowerCase() !== expectedFileName.toLowerCase()
+      || !/^[a-f0-9]{64}$/i.test(String(request.artifact?.sha256 || ''))
+      || !Number.isSafeInteger(Number(request.artifact?.size))
+      || Number(request.artifact.size) <= 0
+      || Number(request.artifact.size) > LOCAL_REINSTALL_MAX_ARCHIVE_BYTES) {
+    throw new Error('Local reinstall request artifact metadata is invalid.');
+  }
+  const artifactPath = path.join(requestDir, expectedFileName);
+  if (!strictPathDescendant(requestDir, artifactPath)) {
+    throw new Error('Local reinstall request artifact escaped its one-shot request directory.');
+  }
+  await assertNormalPhysicalPath(requestDir, 'directory');
+  await assertNormalPhysicalPath(artifactPath, 'file');
+  const artifactStat = await physicalFs.stat(artifactPath);
+  if (artifactStat.size !== Number(request.artifact.size)) {
+    throw new Error('Local reinstall request artifact size changed.');
+  }
+  const artifactSha256 = await hashFile(artifactPath, 'sha256');
+  if (artifactSha256.toLowerCase() !== String(request.artifact.sha256).toLowerCase()) {
+    throw new Error('Local reinstall request artifact hash changed.');
+  }
+  const target = await validateInstalledLocalReinstallTarget(request.targetExe, { currentProcess: true });
+  return {
+    ...request,
+    requestDir,
+    artifactPath,
+    promptAckPath: path.join(requestDir, 'prompt-ready.json'),
+    targetExe: target.targetExe,
+    artifact: { ...request.artifact, sha256: artifactSha256, size: artifactStat.size }
+  };
+}
+
+async function removeLocalReinstallRequestDirectory(requestDir) {
+  const inbox = localReinstallInboxPath();
+  if (!strictPathDescendant(inbox, requestDir) || !/^[a-f0-9]{32}$/.test(path.basename(requestDir))) return false;
+  const stat = await physicalFs.lstat(requestDir).catch(() => null);
+  if (!stat) return true;
+  await assertNormalPhysicalPath(inbox, 'directory');
+  await assertNormalPhysicalPath(requestDir, 'directory');
+  await physicalFs.rm(requestDir, { recursive: true, force: true });
+  return true;
+}
+
+async function cleanupExpiredLocalReinstallRequests() {
+  const inbox = localReinstallInboxPath();
+  const inboxStat = await physicalFs.lstat(inbox).catch(() => null);
+  if (!inboxStat) return;
+  await assertNormalPhysicalPath(inbox, 'directory');
+  const entries = await physicalFs.readdir(inbox, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-f0-9]{32}$/.test(entry.name)) continue;
+    const requestDir = path.join(inbox, entry.name);
+    if (activeLocalReinstallRequest && sameLauncherUpdatePath(activeLocalReinstallRequest.requestDir, requestDir)) continue;
+    const descriptor = await readJsonFile(path.join(requestDir, 'request.json')).catch(async () => (
+      readJsonFile(path.join(requestDir, 'request.consumed.json')).catch(() => null)
+    ));
+    const requestStat = await physicalFs.stat(requestDir).catch(() => null);
+    const expiresAt = Date.parse(String(descriptor?.expiresAt || ''));
+    const staleByAge = requestStat && Date.now() - requestStat.mtimeMs > LOCAL_REINSTALL_REQUEST_TTL_MS * 2;
+    if ((Number.isFinite(expiresAt) && expiresAt <= Date.now()) || staleByAge) {
+      await removeLocalReinstallRequestDirectory(requestDir);
+    }
+  }
+}
+
+async function consumeLocalReinstallRequest() {
+  if (localReinstallConsumePromise) return localReinstallConsumePromise;
+  localReinstallConsumePromise = (async () => {
+    const bridgeTest = launcherUpdateTestHook('AHT_TEST_LOCAL_REINSTALL_BRIDGE');
+    if (process.platform !== 'win32'
+        || launchMode !== 'player'
+        || requestedDeveloperMode()
+        || isDeveloperMode()
+        || (explicitUserDataDir && !bridgeTest)
+        || activeLocalReinstallRequest) return activeLocalReinstallRequest;
+    if (!sameLauncherUpdatePath(app.getPath('userData'), regularLauncherUserDataPath())) return null;
+    await cleanupExpiredLocalReinstallRequests();
+    await hydratePendingLauncherUpdateState();
+    const pending = await readPendingLauncherUpdate();
+    if (pending?.version || launcherUpdateState.running || launcherUpdateState.lastResult?.restartRequired) return null;
+    const inbox = localReinstallInboxPath();
+    const entries = await physicalFs.readdir(inbox, { withFileTypes: true }).catch((error) => {
+      if (error?.code === 'ENOENT') return [];
+      throw error;
+    });
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-f0-9]{32}$/.test(entry.name)) continue;
+      const requestDir = path.join(inbox, entry.name);
+      const requestPath = path.join(requestDir, 'request.json');
+      const consumedPath = path.join(requestDir, 'request.consumed.json');
+      const requestStat = await physicalFs.lstat(requestPath).catch(() => null);
+      const consumedStat = await physicalFs.lstat(consumedPath).catch(() => null);
+      const descriptorPath = requestStat?.isFile() && !requestStat.isSymbolicLink()
+        ? requestPath
+        : consumedStat?.isFile() && !consumedStat.isSymbolicLink()
+          ? consumedPath
+          : '';
+      if (!descriptorPath) continue;
+      const request = await readJsonFile(descriptorPath).catch(() => null);
+      if (request) candidates.push({
+        requestDir,
+        requestPath,
+        consumedPath,
+        alreadyConsumed: sameLauncherUpdatePath(descriptorPath, consumedPath),
+        request,
+        createdAt: Date.parse(String(request.createdAt || '')) || 0
+      });
+    }
+    candidates.sort((left, right) => {
+      if (left.alreadyConsumed !== right.alreadyConsumed) return left.alreadyConsumed ? 1 : -1;
+      return right.createdAt - left.createdAt;
+    });
+    for (const candidate of candidates) {
+      try {
+        const validated = await validateLocalReinstallRequestRecord(candidate.requestDir, candidate.request);
+        if (!candidate.alreadyConsumed) {
+          await physicalFs.rename(candidate.requestPath, candidate.consumedPath);
+        } else {
+          await assertNormalPhysicalPath(candidate.consumedPath, 'file');
+        }
+        activeLocalReinstallRequest = { ...validated, consumedPath: candidate.consumedPath, promptAcknowledged: false };
+        return activeLocalReinstallRequest;
+      } catch (error) {
+        recordErrorDiagnostic('launcher:localReinstallRequest', error);
+      }
+    }
+    return null;
+  })();
+  try {
+    return await localReinstallConsumePromise;
+  } finally {
+    localReinstallConsumePromise = null;
+  }
+}
+
+function sanitizedLauncherEnvironment(source = process.env) {
+  const env = {};
+  const explicitlySensitive = /(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|ACCESS_KEY|PRIVATE_KEY)/;
+  const blockedExact = new Set([
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+    'INIT_CWD',
+    'NPM_CONFIG_LOCAL_PREFIX',
+    'ELECTRON_RUN_AS_NODE',
+    'ELECTRON_NO_ASAR',
+    'NODE_OPTIONS',
+    'NODE_PATH',
+    LAUNCHER_UPDATE_HANDOFF_NONCE_ENV
+  ]);
+  for (const [key, value] of Object.entries(source || {})) {
+    const normalizedKey = String(key).toUpperCase();
+    if (normalizedKey.startsWith('AHT_')
+        || normalizedKey.startsWith('WRANGLER_')
+        || normalizedKey.startsWith('CLOUDFLARE_')
+        || normalizedKey.startsWith('AWS_')
+        || blockedExact.has(normalizedKey)
+        || explicitlySensitive.test(normalizedKey)) continue;
+    env[key] = value;
+  }
+  return env;
+}
+
+function sanitizedRegularLauncherEnvironment() {
+  const env = sanitizedLauncherEnvironment(process.env);
+  if (launcherUpdateTestHook('AHT_TEST_LOCAL_REINSTALL_BRIDGE')) {
+    env.AHT_TEST_HOOKS = '1';
+    const playerPort = String(process.env.AHT_TEST_LOCAL_REINSTALL_PLAYER_PORT || '').trim();
+    if (/^\d{2,5}$/.test(playerPort)) env.AHT_TEST_REMOTE_DEBUG_PORT = playerPort;
+    const playerDefaults = String(process.env.AHT_TEST_LOCAL_REINSTALL_PLAYER_DEFAULTS || '').trim();
+    if (playerDefaults) env.AHT_APP_DEFAULTS = playerDefaults;
+    for (const key of ['AHT_TEST_LAUNCHER_UPDATE_NO_QUIT', 'AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY']) {
+      if (process.env[key] === '1') env[key] = '1';
+    }
+  }
+  return env;
+}
+
+async function waitForLocalReinstallPromptReady(request, timeoutMs = 90_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const ack = await readJsonFile(request.promptAckPath).catch(() => null);
+    if (ack
+        && ack.schema === LOCAL_REINSTALL_PROMPT_ACK_SCHEMA
+        && ack.product === 'aht-launcher'
+        && ack.purpose === LOCAL_REINSTALL_PURPOSE
+        && ack.nonce === request.nonce
+        && ack.version === request.version
+        && ack.rendererPromptReady === true
+        && ack.developerMode === false
+        && sameLauncherUpdatePath(ack.executablePath, request.targetExe)) {
+      return ack;
+    }
+    await sleep(100);
+  }
+  throw new Error('The regular AHT Launcher did not show the local reinstall update prompt in time.');
+}
+
+async function acknowledgeLocalReinstallPromptReady() {
+  const request = activeLocalReinstallRequest;
+  if (!request || request.promptAcknowledged || isDeveloperMode()) return false;
+  await writeJsonFile(request.promptAckPath, {
+    schema: LOCAL_REINSTALL_PROMPT_ACK_SCHEMA,
+    product: 'aht-launcher',
+    purpose: LOCAL_REINSTALL_PURPOSE,
+    nonce: request.nonce,
+    version: request.version,
+    rendererPromptReady: true,
+    developerMode: false,
+    processId: process.pid,
+    executablePath: process.execPath,
+    promptReadyAt: new Date().toISOString()
+  });
+  request.promptAcknowledged = true;
+  return true;
+}
+
+async function resolveDeveloperLauncherReinstallTarget() {
+  const explicitTestTarget = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_LAUNCHER_UPDATE_TARGET_EXE || '').trim()
+    : '';
+  const targetExe = path.resolve(
+    explicitTestTarget
+      || (app.isPackaged ? launcherUpdateInstalledExePath() : defaultInstalledWindowsLauncherExePath())
+      || ''
+  );
+  const expectedName = 'A Hard Time Launcher Windows.exe';
+  if (!targetExe || path.basename(targetExe).toLowerCase() !== expectedName.toLowerCase()) {
+    throw new Error('Could not resolve the installed A Hard Time Launcher Windows executable for the reinstall test.');
+  }
+  if (!app.isPackaged && sameLauncherUpdatePath(targetExe, process.execPath)) {
+    throw new Error('Source Developer Mode cannot use its Electron runtime as the launcher reinstall target.');
+  }
+  const targetStat = await physicalFs.lstat(targetExe).catch(() => null);
+  const installedAsar = path.join(path.dirname(targetExe), 'resources', 'app.asar');
+  const asarStat = await physicalFs.lstat(installedAsar).catch(() => null);
+  const installedUninstaller = path.join(path.dirname(targetExe), 'Uninstall A Hard Time Launcher Windows.exe');
+  const uninstallerStat = await physicalFs.lstat(installedUninstaller).catch(() => null);
+  if (!targetStat?.isFile() || targetStat.isSymbolicLink()) {
+    throw new Error(`The installed packaged launcher was not found at ${targetExe}. Install AHT Launcher ${app.getVersion()} before testing reinstall from source Developer Mode.`);
+  }
+  if (!asarStat?.isFile() || asarStat.isSymbolicLink()) {
+    throw new Error(`The installed packaged launcher is incomplete because ${installedAsar} is missing or unsafe. Reinstall AHT Launcher ${app.getVersion()} before testing reinstall.`);
+  }
+  if (!uninstallerStat?.isFile() || uninstallerStat.isSymbolicLink()) {
+    throw new Error(`The installed packaged launcher is incomplete because ${installedUninstaller} is missing or unsafe. Reinstall AHT Launcher ${app.getVersion()} before testing reinstall.`);
+  }
+  await Promise.all([
+    assertNormalPhysicalPath(targetExe, 'file'),
+    assertNormalPhysicalPath(installedAsar, 'file'),
+    assertNormalPhysicalPath(installedUninstaller, 'file')
+  ]);
+  const installedVersion = String(await readWindowsLauncherProductVersion(targetExe) || '').trim();
+  if (!versionMatches(installedVersion, app.getVersion())) {
+    throw new Error(`Installed launcher version ${installedVersion || 'unknown'} does not match Developer Launcher ${app.getVersion()}. Install the matching launcher before testing a same-version reinstall.`);
+  }
+  return {
+    targetExe,
+    installedVersion,
+    sourceDeveloperHandoff: !app.isPackaged
+  };
+}
+
+function launcherUpdateHelperSourcePath() {
+  return path.join(appRoot, 'desktop', 'launcher-update-helper.ps1');
+}
+
+function launcherUpdateBootstrapSourcePath() {
+  return path.join(appRoot, 'desktop', 'launcher-update-bootstrap.ps1');
+}
+
+function newLauncherUpdateNonce() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+async function readWindowsLauncherProductVersion(filePath) {
+  if (process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_LAUNCHER_UPDATE_PRODUCT_VERSION) {
+    return String(process.env.AHT_TEST_LAUNCHER_UPDATE_PRODUCT_VERSION);
+  }
+  const script = "$item = Get-Item -LiteralPath $env:AHT_LAUNCHER_VERSION_TARGET; [Console]::Out.Write([string]$item.VersionInfo.ProductVersion)";
+  const result = await spawnCaptured(windowsPowerShellPath(), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ], {
+    cwd: path.dirname(filePath),
+    env: { ...process.env, AHT_LAUNCHER_VERSION_TARGET: filePath },
+    timeoutMs: 15_000
+  });
+  return String(result.stdout || '').trim();
 }
 
 function launcherUpdatePendingPath() {
@@ -4220,50 +5047,227 @@ async function writePendingLauncherUpdate(pending = {}) {
 async function clearPendingLauncherUpdate() {
   await fs.rm(launcherUpdatePendingPath(), { force: true }).catch(() => {});
   await fs.rm(launcherUpdatePendingFailurePath(), { force: true }).catch(() => {});
+  validatedPendingLauncherUpdateKey = '';
 }
 
 function launcherUpdateResultFromPending(pending = {}) {
   if (!pending?.version || !pending?.preparedRestart) return null;
+  const instantRestartReady = pending.preparedRestart.strategy === 'windows-staged-helper';
   return {
     ok: true,
     version: pending.version,
     downloadedPath: pending.downloadedPath || '',
     artifact: pending.artifact || null,
     restartRequired: true,
-    pendingStatus: pending.status || 'staged',
+    instantRestartReady,
+    pendingStatus: pending.status || 'ready-to-relaunch',
+    purpose: String(pending.purpose || ''),
+    developerReinstall: pending.purpose === 'developer-reinstall',
+    localReinstallTest: pending.purpose === LOCAL_REINSTALL_PURPOSE,
     stagedAt: pending.stagedAt || pending.createdAt || '',
     installingStartedAt: pending.installingStartedAt || '',
     preparedRestart: pending.preparedRestart
   };
 }
 
+function pendingLauncherUpdateValidationKey(pending = {}) {
+  const prepared = pending.preparedRestart || {};
+  return [
+    pending.version,
+    prepared.strategy,
+    prepared.stagingDir,
+    prepared.receiptSha256,
+    prepared.payloadSha256,
+    prepared.scriptSha256,
+    prepared.bootstrapScriptSha256,
+    pending.purpose,
+    pending.localReinstallRequestNonce,
+    pending.downloadedPath,
+    pending.artifact?.sha256
+  ].map((value) => String(value || '')).join('|');
+}
+
+function sameLauncherUpdatePath(left = '', right = '') {
+  if (!left || !right) return String(left || '') === String(right || '');
+  const leftPath = path.resolve(String(left));
+  const rightPath = path.resolve(String(right));
+  return process.platform === 'win32'
+    ? leftPath.toLowerCase() === rightPath.toLowerCase()
+    : leftPath === rightPath;
+}
+
+function assertPreparedLauncherUpdatePayload(prepared = {}, payload = {}, expectedVersion = '') {
+  const mode = String(prepared.mode || payload.mode || '');
+  const exactFields = [
+    'mode',
+    'handoffNonce',
+    'expectedVersion',
+    'relaunchDeveloper'
+  ];
+  const pathFields = [
+    'logPath',
+    'ackPath',
+    'pendingPath',
+    'pendingFailurePath'
+  ];
+  if (mode === 'staged-swap') {
+    exactFields.push('targetRelativePath', 'receiptSha256', 'treeSha256');
+    pathFields.push('installDir', 'stagingDir', 'backupDir', 'failedCandidateDir', 'receiptPath');
+  } else if (mode === 'legacy-installer') {
+    pathFields.push('installDir', 'targetExe', 'installerPath');
+  }
+  for (const field of exactFields) {
+    if (prepared[field] === undefined || prepared[field] === '') continue;
+    if (String(payload[field] ?? '') !== String(prepared[field])) {
+      throw new Error(`Prepared launcher update payload changed field: ${field}.`);
+    }
+  }
+  for (const field of pathFields) {
+    if (!prepared[field]) continue;
+    if (!sameLauncherUpdatePath(payload[field], prepared[field])) {
+      throw new Error(`Prepared launcher update payload changed path: ${field}.`);
+    }
+  }
+  if (expectedVersion && String(payload.expectedVersion || '') !== String(expectedVersion)) {
+    throw new Error('Prepared launcher update payload version no longer matches the pending update.');
+  }
+}
+
+async function validatePreparedLauncherUpdateHandoff(prepared = {}, expectedVersion = '') {
+  if (!['windows-helper', 'windows-staged-helper'].includes(prepared.strategy)) return null;
+  const requiredFiles = [
+    [prepared.scriptPath, prepared.scriptSha256, 'helper script'],
+    [prepared.bootstrapScriptPath, prepared.bootstrapScriptSha256, 'bootstrap script'],
+    [prepared.payloadPath, prepared.payloadSha256, 'payload']
+  ];
+  for (const [filePath, expectedSha256, label] of requiredFiles) {
+    const stat = filePath ? await fs.stat(filePath).catch(() => null) : null;
+    if (!stat?.isFile() || !expectedSha256) {
+      throw new Error(`Prepared launcher update ${label} is missing or unbound.`);
+    }
+    const actualSha256 = await hashFile(filePath, 'sha256');
+    if (actualSha256.toLowerCase() !== String(expectedSha256).toLowerCase()) {
+      throw new Error(`Prepared launcher update ${label} hash changed.`);
+    }
+  }
+  const payload = await readJsonFile(prepared.payloadPath);
+  assertPreparedLauncherUpdatePayload(prepared, payload, expectedVersion);
+  return payload;
+}
+
+async function validatePendingLauncherUpdate(pending = {}) {
+  const prepared = pending.preparedRestart || {};
+  const validationKey = pendingLauncherUpdateValidationKey(pending);
+  if (validationKey && validationKey === validatedPendingLauncherUpdateKey) return;
+  if (!pending.version || !pending.downloadedPath || !prepared.strategy) {
+    throw new Error('Prepared launcher update metadata is incomplete.');
+  }
+  const archiveStat = await fs.stat(pending.downloadedPath).catch(() => null);
+  if (!archiveStat?.isFile()) throw new Error('Prepared launcher update download is missing.');
+  if (Number(pending.artifact?.size || 0) > 0 && archiveStat.size !== Number(pending.artifact.size)) {
+    throw new Error('Prepared launcher update download size changed.');
+  }
+  if (pending.artifact?.sha256) {
+    const archiveSha256 = await hashFile(pending.downloadedPath, 'sha256');
+    if (archiveSha256.toLowerCase() !== String(pending.artifact.sha256).toLowerCase()) {
+      throw new Error('Prepared launcher update download hash changed.');
+    }
+  }
+  for (const helperPath of [prepared.scriptPath, prepared.bootstrapScriptPath, prepared.payloadPath]) {
+    if (helperPath && !(await fs.stat(helperPath).catch(() => null))?.isFile()) {
+      throw new Error(`Prepared launcher update helper is missing: ${path.basename(helperPath)}`);
+    }
+  }
+  await validatePreparedLauncherUpdateHandoff(prepared, pending.version);
+  if (prepared.strategy === 'windows-staged-helper') {
+    const receiptStat = await fs.stat(prepared.receiptPath).catch(() => null);
+    if (!receiptStat?.isFile()) throw new Error('Prepared launcher update receipt is missing.');
+    const receiptSha256 = await hashFile(prepared.receiptPath, 'sha256');
+    if (receiptSha256.toLowerCase() !== String(prepared.receiptSha256 || '').toLowerCase()) {
+      throw new Error('Prepared launcher update receipt hash changed.');
+    }
+    const receipt = await readJsonFile(prepared.receiptPath);
+    await validateStagedWindowsLauncherUpdate({
+      stagingDir: prepared.stagingDir,
+      receipt,
+      expectedVersion: pending.version,
+      readProductVersion: readWindowsLauncherProductVersion,
+      verifyHashes: true
+    });
+  }
+  validatedPendingLauncherUpdateKey = validationKey;
+}
+
 async function hydratePendingLauncherUpdateState() {
   const pending = await readPendingLauncherUpdate();
   if (!pending?.version) return null;
-  if (compareVersions(app.getVersion(), pending.version) >= 0) {
-    await clearPendingLauncherUpdate();
+  if (pending.purpose === 'developer-reinstall' && !isDeveloperMode()) return null;
+  if (pending.purpose === LOCAL_REINSTALL_PURPOSE && isDeveloperMode()) return null;
+  const activeDeveloperReinstall = pending.purpose === 'developer-reinstall' && isDeveloperMode();
+  const activeLocalReinstall = pending.purpose === LOCAL_REINSTALL_PURPOSE
+    && !isDeveloperMode()
+    && !['swapping', 'installing'].includes(pending.status);
+  if (compareVersions(app.getVersion(), pending.version) >= 0 && !activeDeveloperReinstall && !activeLocalReinstall) {
+    if (!['swapping', 'installing'].includes(pending.status)) {
+      await clearPendingLauncherUpdate();
+    }
     if (launcherUpdateState.lastResult?.version === pending.version) {
       launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
     }
     return null;
   }
+  try {
+    await validatePendingLauncherUpdate(pending);
+  } catch (error) {
+    await clearPendingLauncherUpdate();
+    const localReinstallTest = pending.purpose === LOCAL_REINSTALL_PURPOSE;
+    launcherUpdateState = {
+      running: false,
+      ...(localReinstallTest ? { purpose: LOCAL_REINSTALL_PURPOSE, localReinstallTest: true } : {}),
+      lines: [
+        localReinstallTest
+          ? `Local launcher reinstall test ${pending.version}`
+          : `Launcher update ${app.getVersion()} -> ${pending.version}`,
+        localReinstallTest
+          ? 'The prepared local reinstall test could not be validated and was discarded.'
+          : `Prepared update was discarded: ${error.message || String(error)}`,
+        localReinstallTest ? 'Run the test again from Developer Launcher.' : 'Download the launcher update again.'
+      ],
+      lastResult: null,
+      error: localReinstallTest ? 'The local launcher reinstall test failed.' : (error.message || String(error)),
+      progress: { phase: 'Update preparation failed', completed: 0, total: 1, percent: 100 }
+    };
+    return null;
+  }
   const lastResult = launcherUpdateResultFromPending(pending);
   if (!lastResult) return null;
-  if (!launcherUpdateState.lastResult || launcherUpdateState.lastResult.version !== pending.version) {
+  if (!launcherUpdateState.lastResult
+      || launcherUpdateState.lastResult.version !== pending.version
+      || String(launcherUpdateState.lastResult.purpose || '') !== String(pending.purpose || '')) {
     launcherUpdateState = {
       running: false,
       lines: Array.isArray(pending.lines) && pending.lines.length
         ? pending.lines
         : [
-          `Launcher update ${app.getVersion()} -> ${pending.version}`,
-          pending.status === 'installing'
-            ? 'Launcher update install is already in progress.'
-            : 'Launcher update is downloaded and ready to install.'
+          activeDeveloperReinstall
+            ? `Developer launcher reinstall ${pending.version}`
+            : activeLocalReinstall
+              ? `Local launcher reinstall test ${pending.version}`
+            : `Launcher update ${app.getVersion()} -> ${pending.version}`,
+          ['swapping', 'installing'].includes(pending.status)
+            ? 'Launcher restart handoff is already in progress.'
+            : lastResult.instantRestartReady
+              ? 'Launcher update is fully staged and ready to restart.'
+              : 'Launcher update is downloaded and ready to install.'
         ],
       lastResult,
       error: null,
       progress: {
-        phase: pending.status === 'installing' ? 'Installing launcher update' : 'Ready to install',
+        phase: ['swapping', 'installing'].includes(pending.status)
+          ? 'Restarting launcher'
+          : lastResult.instantRestartReady
+            ? 'Update finished - ready to restart'
+            : 'Ready to install',
         completed: 3,
         total: 3,
         percent: 100
@@ -4275,21 +5279,50 @@ async function hydratePendingLauncherUpdateState() {
 
 async function shouldExitForPendingLauncherInstall() {
   const pending = await readPendingLauncherUpdate();
-  if (pending?.status !== 'installing' || !pending.version) return false;
+  if (!['swapping', 'installing'].includes(pending?.status) || !pending.version) return false;
+  const sameVersionReinstall = compareVersions(app.getVersion(), pending.version) >= 0
+    && ['developer-reinstall', LOCAL_REINSTALL_PURPOSE].includes(String(pending.purpose || ''));
+  if (sameVersionReinstall) {
+    const prepared = pending.preparedRestart || {};
+    const expectedNonce = String(pending.preparedRestart?.handoffNonce || '');
+    const candidateNonce = String(process.env[LAUNCHER_UPDATE_HANDOFF_NONCE_ENV] || '');
+    if (prepared.strategy !== 'windows-staged-helper'
+        || !/^[a-f0-9]{32}$/.test(expectedNonce)
+        || !/^[a-f0-9]{64}$/i.test(String(prepared.payloadSha256 || ''))
+        || !prepared.payloadPath) {
+      await clearPendingLauncherUpdate();
+      launcherUpdateState = {
+        running: false,
+        ...(pending.purpose === LOCAL_REINSTALL_PURPOSE
+          ? { purpose: LOCAL_REINSTALL_PURPOSE, localReinstallTest: true }
+          : {}),
+        lines: ['An incomplete launcher reinstall handoff was discarded safely.'],
+        lastResult: null,
+        error: pending.purpose === LOCAL_REINSTALL_PURPOSE
+          ? 'The local launcher reinstall test failed.'
+          : 'The launcher reinstall handoff was incomplete.',
+        progress: { phase: 'Update preparation failed', completed: 0, total: 1, percent: 100 }
+      };
+      return false;
+    }
+    if (candidateNonce !== expectedNonce) {
+      return true;
+    }
+  }
+  if (pending.purpose === 'developer-reinstall' && !isDeveloperMode()) return true;
   if (compareVersions(app.getVersion(), pending.version) >= 0) {
-    await clearPendingLauncherUpdate();
     return false;
   }
   const started = Date.parse(pending.installingStartedAt || pending.updatedAt || '');
   const age = Number.isFinite(started) ? Date.now() - started : 0;
   const helperFailure = await fs.readFile(launcherUpdatePendingFailurePath(), 'utf8').catch(() => '');
-  if (helperFailure || age > LAUNCHER_UPDATE_INSTALLING_STALE_MS || process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1') {
+  if (helperFailure || age > LAUNCHER_UPDATE_INSTALLING_STALE_MS || launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')) {
     const retryLine = helperFailure
       ? `Previous install helper failed: ${helperFailure.trim() || 'unknown error'}`
       : 'Previous install handoff did not finish. The update is ready to retry.';
     await writePendingLauncherUpdate({
       ...pending,
-      status: 'staged',
+      status: pending.preparedRestart?.strategy === 'windows-staged-helper' ? 'ready-to-relaunch' : 'staged',
       installingStartedAt: '',
       lines: [
         `Launcher update ${app.getVersion()} -> ${pending.version}`,
@@ -4302,128 +5335,334 @@ async function shouldExitForPendingLauncherInstall() {
   return true;
 }
 
-function launcherUpdateHelperBatch(scriptPath, bootstrapLogPath) {
-  return [
-    '@echo off',
-    'setlocal',
-    `>> "${bootstrapLogPath}" echo %DATE% %TIME% Launcher update helper bootstrap started.`,
-    `"${windowsPowerShellPath()}" -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" >> "${bootstrapLogPath}" 2>&1`,
-    `>> "${bootstrapLogPath}" echo %DATE% %TIME% Launcher update helper bootstrap exited with %ERRORLEVEL%.`,
-    'exit /b %ERRORLEVEL%',
-    ''
-  ].join('\r\n');
+function safeCompletedLauncherUpdateBackupPath(backupDir = '') {
+  if (process.platform !== 'win32' || !process.execPath || !backupDir) return '';
+  const installDir = path.resolve(path.dirname(process.execPath));
+  const installParent = path.dirname(installDir);
+  const candidate = path.resolve(String(backupDir));
+  if (path.dirname(candidate).toLowerCase() !== installParent.toLowerCase()
+      || candidate.toLowerCase() === installDir.toLowerCase()
+      || !path.basename(candidate).toLowerCase().startsWith('.aht-launcher-backup-')) {
+    throw new Error(`Refusing unsafe launcher update backup cleanup path: ${candidate}`);
+  }
+  return candidate;
 }
 
-function launcherUpdateHelperScript(payloadPath) {
-  return `
-$ErrorActionPreference = 'Stop'
-$payloadPath = ${JSON.stringify(payloadPath)}
-$payload = Get-Content -LiteralPath $payloadPath -Raw | ConvertFrom-Json
-$logPath = [string]$payload.logPath
-$pendingFailurePath = [string]$payload.pendingFailurePath
-function Write-UpdateLog([string]$message) {
-  try {
-    $parent = Split-Path -Parent $logPath
-    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
-    Add-Content -LiteralPath $logPath -Value ((Get-Date).ToString('o') + ' ' + $message) -Encoding UTF8
-  } catch {}
-}
-function Write-PendingFailure([string]$message) {
-  try {
-    if (-not $pendingFailurePath) { return }
-    $parent = Split-Path -Parent $pendingFailurePath
-    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
-    Set-Content -LiteralPath $pendingFailurePath -Value $message -Encoding UTF8
-  } catch {}
-}
-try {
-  Write-UpdateLog ('Waiting for old launcher PID ' + $payload.oldPid)
-  if ($payload.testStartOnly -eq $true -or $env:AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY -eq '1') {
-    Write-UpdateLog 'Test mode helper startup confirmed.'
-    exit 0
-  }
-  $target = [string]$payload.targetExe
-  if ([int]$payload.oldPid -gt 0) {
+async function waitForLauncherUpdateCommitMarker(commit = {}, timeoutMs = 125_000) {
+  if (!commit.path) return false;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
     try {
-      $old = Get-Process -Id ([int]$payload.oldPid) -ErrorAction SilentlyContinue
-      if ($old) { Wait-Process -Id ([int]$payload.oldPid) -Timeout 120 -ErrorAction SilentlyContinue }
-    } catch {}
-  }
-  function Get-BlockingLauncherProcesses {
-    $targetPath = [string]$target
-    if (-not $targetPath) { return @() }
-    $targetName = [System.IO.Path]::GetFileNameWithoutExtension($targetPath)
-    $targetFull = ''
-    try { $targetFull = [System.IO.Path]::GetFullPath($targetPath).ToLowerInvariant() } catch {}
-    $matches = @()
-    foreach ($process in Get-Process -Name $targetName -ErrorAction SilentlyContinue) {
-      if ($process.Id -eq $PID) { continue }
-      $processPath = ''
-      try { $processPath = [string]$process.Path } catch {}
-      if (-not $processPath) {
-        $matches += $process
-        continue
+      await assertNormalPhysicalPath(commit.path, 'file');
+      const marker = await readJsonFile(commit.path);
+      if (marker?.schema === 'aht-launcher-update-commit/v1'
+          && marker.product === 'aht-launcher'
+          && marker.handoffNonce === commit.handoffNonce
+          && versionMatches(marker.version, commit.version)
+          && Number(marker.processId) === Number(commit.processId)
+          && Boolean(marker.developerMode) === Boolean(commit.developerMode)
+          && sameLauncherUpdatePath(marker.executablePath, commit.executablePath)
+          && String(marker.treeSha256 || '').toLowerCase() === String(commit.treeSha256 || '').toLowerCase()) {
+        return true;
       }
-      try {
-        if ([System.IO.Path]::GetFullPath($processPath).ToLowerInvariant() -eq $targetFull) {
-          $matches += $process
-        }
-      } catch {}
+    } catch {
+      // The helper may still be validating the candidate acknowledgement.
     }
-    return $matches
+    await sleep(125);
   }
-  Write-UpdateLog ('Waiting for launcher processes to close for ' + $target)
-  $remaining = @()
-  for ($i = 0; $i -lt 240; $i += 1) {
-    $remaining = @(Get-BlockingLauncherProcesses)
-    if ($remaining.Count -eq 0) { break }
-    Start-Sleep -Milliseconds 500
-  }
-  if ($remaining.Count -gt 0) {
-    throw ('Timed out waiting for launcher processes to close: ' + (($remaining | ForEach-Object { $_.Id }) -join ', '))
-  }
-  Start-Sleep -Milliseconds 600
-  $installerArgs = @()
-  if ($payload.installerArgs) {
-    foreach ($arg in $payload.installerArgs) { $installerArgs += [string]$arg }
-  }
-  Write-UpdateLog ('Running installer ' + $payload.installerPath)
-  $installer = Start-Process -FilePath ([string]$payload.installerPath) -ArgumentList $installerArgs -Wait -PassThru -WindowStyle Hidden
-  $exitCode = 0
-  if ($null -ne $installer.ExitCode) { $exitCode = [int]$installer.ExitCode }
-  if ($exitCode -ne 0) { throw ('Installer exited with code ' + $exitCode) }
-  $expected = [string]$payload.expectedVersion
-  $ready = $false
-  for ($i = 0; $i -lt 160; $i += 1) {
-    if ($target -and (Test-Path -LiteralPath $target)) {
-      $versionOk = $true
-      if ($expected) {
-        try {
-          $productVersion = [string](Get-Item -LiteralPath $target).VersionInfo.ProductVersion
-          if ($productVersion) { $versionOk = $productVersion.StartsWith($expected) }
-        } catch {}
-      }
-      if ($versionOk) { $ready = $true; break }
-    }
-    Start-Sleep -Milliseconds 500
-  }
-  if (-not $ready) { throw ('Updated launcher executable was not ready: ' + $target) }
-  try {
-    $iconRefresh = Join-Path $env:windir 'System32\\ie4uinit.exe'
-    if (Test-Path -LiteralPath $iconRefresh) { Start-Process -FilePath $iconRefresh -ArgumentList '-show' -Wait -WindowStyle Hidden }
-  } catch {}
-  Start-Sleep -Milliseconds 500
-  Write-UpdateLog ('Starting updated launcher ' + $target)
-  Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target)
-  Write-UpdateLog 'Launcher update handoff complete.'
-  exit 0
-} catch {
-  $reason = [string]$_.Exception.Message
-  Write-UpdateLog ('Launcher update helper failed: ' + $reason)
-  Write-PendingFailure $reason
-  exit 1
+  return false;
 }
-`.trimStart();
+
+async function waitForLauncherUpdateBackupCleanup(cleanupStatusPath = '', timeoutMs = 135_000) {
+  if (!cleanupStatusPath) return false;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const status = await readJsonFile(cleanupStatusPath).catch(() => null);
+    if (status?.status === 'complete') return true;
+    if (['failed', 'deferred'].includes(String(status?.status || ''))) return false;
+    await sleep(125);
+  }
+  return false;
+}
+
+function scheduleCompletedLauncherUpdateBackupCleanup(backupDir = '', ackPath = '', commit = {}) {
+  const cleanupStatusPath = ackPath ? `${ackPath}.cleanup.json` : '';
+  let safeBackupDir = '';
+  try {
+    safeBackupDir = safeCompletedLauncherUpdateBackupPath(backupDir);
+    if (!commit.path
+        || !sameLauncherUpdatePath(commit.path, `${ackPath}.commit.json`)
+        || !/^[a-f0-9]{32}$/.test(String(commit.handoffNonce || ''))
+        || !/^[a-f0-9]{64}$/i.test(String(commit.treeSha256 || ''))
+        || !Number.isSafeInteger(Number(commit.processId))
+        || Number(commit.processId) <= 0
+        || !commit.version
+        || !commit.executablePath) {
+      throw new Error('Launcher update backup cleanup requires a complete helper commit contract.');
+    }
+  } catch (error) {
+    recordErrorDiagnostic('launcher:updateBackupCleanupPath', error);
+    if (cleanupStatusPath) {
+      writeJsonFile(cleanupStatusPath, { status: 'failed', error: error.message || String(error), backupDir }).catch(() => {});
+    }
+    return;
+  }
+  if (!safeBackupDir) return;
+  setTimeout(() => {
+    (async () => {
+      if (cleanupStatusPath) {
+        await writeJsonFile(cleanupStatusPath, {
+          status: 'waiting-for-helper-commit',
+          backupDir: safeBackupDir,
+          startedAt: new Date().toISOString()
+        });
+      }
+      if (!(await waitForLauncherUpdateCommitMarker(commit))) {
+        if (cleanupStatusPath) {
+          await writeJsonFile(cleanupStatusPath, {
+            status: 'deferred',
+            reason: 'The helper did not commit the candidate acknowledgement; rollback backup was preserved.',
+            backupDir: safeBackupDir,
+            deferredAt: new Date().toISOString()
+          });
+        }
+        return;
+      }
+      if (cleanupStatusPath) {
+        await writeJsonFile(cleanupStatusPath, { status: 'running', backupDir: safeBackupDir, startedAt: new Date().toISOString() });
+      }
+      const stat = await fs.lstat(safeBackupDir).catch(() => null);
+      if (!stat) {
+        if (cleanupStatusPath) await writeJsonFile(cleanupStatusPath, { status: 'complete', backupDir: safeBackupDir, alreadyMissing: true, completedAt: new Date().toISOString() });
+        return;
+      }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error(`Launcher update backup is not a normal directory: ${safeBackupDir}`);
+      }
+      if (cleanupStatusPath) {
+        await writeJsonFile(cleanupStatusPath, { status: 'removing', backupDir: safeBackupDir, startedAt: new Date().toISOString() });
+      }
+      const removal = await removeWindowsLauncherBackupDirectory(safeBackupDir);
+      if (cleanupStatusPath) await writeJsonFile(cleanupStatusPath, {
+        status: 'complete',
+        backupDir: safeBackupDir,
+        removed: Boolean(removal?.removed),
+        alreadyMissing: Boolean(removal?.alreadyMissing),
+        completedAt: new Date().toISOString()
+      });
+    })().catch((error) => {
+      recordErrorDiagnostic('launcher:updateBackupCleanup', error);
+      if (cleanupStatusPath) {
+        writeJsonFile(cleanupStatusPath, { status: 'failed', error: error.message || String(error), backupDir: safeBackupDir, failedAt: new Date().toISOString() }).catch(() => {});
+      }
+    });
+  }, 1000);
+}
+
+async function validateCompletedLauncherUpdateCandidate(pending = {}) {
+  const prepared = pending.preparedRestart || {};
+  if (prepared.strategy !== 'windows-staged-helper'
+      || !prepared.ackPath
+      || !prepared.handoffNonce
+      || !prepared.receiptPath
+      || !prepared.backupDir) {
+    throw new Error('Completed launcher update handoff metadata is incomplete.');
+  }
+  const payload = await validatePreparedLauncherUpdateHandoff(prepared, pending.version);
+  if (!payload || payload.mode !== 'staged-swap') {
+    throw new Error('Completed launcher update payload is not a staged swap.');
+  }
+  const expectedNonce = String(payload.handoffNonce || '');
+  if (!/^[a-f0-9]{32}$/.test(expectedNonce)
+      || String(process.env[LAUNCHER_UPDATE_HANDOFF_NONCE_ENV] || '').toLowerCase() !== expectedNonce.toLowerCase()) {
+    throw new Error('Completed launcher update candidate is missing its bound handoff identity.');
+  }
+  if (Boolean(payload.relaunchDeveloper) !== Boolean(isDeveloperMode())
+      || (pending.purpose === 'developer-reinstall' && !isDeveloperMode())
+      || (pending.purpose === LOCAL_REINSTALL_PURPOSE && isDeveloperMode())) {
+    throw new Error('Completed launcher update candidate opened in the wrong launcher mode.');
+  }
+  const installDir = path.resolve(path.dirname(process.execPath));
+  const expectedTarget = path.resolve(
+    String(payload.installDir || ''),
+    ...String(payload.targetRelativePath || '').replaceAll('\\', '/').split('/').filter(Boolean)
+  );
+  if (!sameLauncherUpdatePath(payload.installDir, installDir)
+      || !strictPathDescendant(installDir, expectedTarget)
+      || !sameLauncherUpdatePath(expectedTarget, process.execPath)) {
+    throw new Error('Completed launcher update candidate does not match the bound install target.');
+  }
+  await Promise.all([
+    assertNormalPhysicalPath(installDir, 'directory'),
+    assertNormalPhysicalPath(process.execPath, 'file'),
+    assertNormalPhysicalPath(path.dirname(prepared.ackPath), 'directory'),
+    assertNormalPhysicalPath(prepared.receiptPath, 'file'),
+    assertNormalPhysicalPath(safeCompletedLauncherUpdateBackupPath(prepared.backupDir), 'directory')
+  ]);
+  const receiptSha256 = await hashFile(prepared.receiptPath, 'sha256');
+  if (!/^[a-f0-9]{64}$/i.test(String(prepared.receiptSha256 || ''))
+      || receiptSha256.toLowerCase() !== String(prepared.receiptSha256).toLowerCase()
+      || receiptSha256.toLowerCase() !== String(payload.receiptSha256 || '').toLowerCase()) {
+    throw new Error('Completed launcher update receipt no longer matches its handoff.');
+  }
+  const receipt = await readJsonFile(prepared.receiptPath);
+  const validated = await validateStagedWindowsLauncherUpdate({
+    stagingDir: installDir,
+    receipt,
+    expectedVersion: pending.version,
+    readProductVersion: readWindowsLauncherProductVersion,
+    verifyHashes: true
+  });
+  if (!/^[a-f0-9]{64}$/i.test(String(prepared.treeSha256 || ''))
+      || String(validated.treeSha256 || '').toLowerCase() !== String(prepared.treeSha256).toLowerCase()
+      || String(validated.treeSha256 || '').toLowerCase() !== String(payload.treeSha256 || '').toLowerCase()) {
+    throw new Error('Completed launcher update tree no longer matches its handoff receipt.');
+  }
+  return { prepared, payload, installDir, expectedTarget, receipt, validated };
+}
+
+async function acknowledgeCompletedLauncherUpdate() {
+  const pending = await readPendingLauncherUpdate();
+  if (pending?.status !== 'swapping' || !pending.version) return false;
+  if (compareVersions(app.getVersion(), pending.version) < 0) return false;
+  const { prepared, payload } = await validateCompletedLauncherUpdateCandidate(pending);
+  const acknowledgement = {
+    schemaVersion: 1,
+    product: 'aht-launcher',
+    handoffNonce: prepared.handoffNonce,
+    version: app.getVersion(),
+    developerMode: isDeveloperMode(),
+    processId: process.pid,
+    executablePath: process.execPath,
+    windowReadyAt: new Date().toISOString()
+  };
+  await writeJsonFile(prepared.ackPath, acknowledgement);
+  const commit = {
+    path: `${prepared.ackPath}.commit.json`,
+    handoffNonce: prepared.handoffNonce,
+    version: pending.version,
+    processId: process.pid,
+    developerMode: isDeveloperMode(),
+    executablePath: process.execPath,
+    treeSha256: payload.treeSha256
+  };
+  scheduleCompletedLauncherUpdateBackupCleanup(prepared.backupDir, prepared.ackPath, commit);
+  if (pending.purpose === LOCAL_REINSTALL_PURPOSE
+      && /^[a-f0-9]{32}$/.test(String(pending.localReinstallRequestNonce || ''))) {
+    const requestDir = localReinstallRequestDirectory(pending.localReinstallRequestNonce);
+    setTimeout(() => {
+      (async () => {
+        if (await waitForLauncherUpdateBackupCleanup(`${prepared.ackPath}.cleanup.json`)) {
+          await removeLocalReinstallRequestDirectory(requestDir);
+        }
+      })().catch((error) => {
+        recordErrorDiagnostic('launcher:localReinstallCleanup', error);
+      });
+    }, 1000);
+  }
+  return true;
+}
+
+function launcherUpdateRelaunchArgs() {
+  const args = [];
+  if (isDeveloperMode()) args.push('--developer');
+  if (explicitUserDataDir) args.push(`--user-data-dir=${explicitUserDataDir}`);
+  return args;
+}
+
+async function writeWindowsLauncherUpdateHandoff({ payload, downloadDir }) {
+  const nonce = String(payload.handoffNonce || newLauncherUpdateNonce());
+  const relaunchDeveloper = isDeveloperMode();
+  const helperDir = path.join(downloadDir, 'handoff');
+  await ensureDir(helperDir);
+  const payloadPath = path.join(helperDir, `payload-${nonce}.json`);
+  const scriptPath = path.join(helperDir, `apply-launcher-update-${nonce}.ps1`);
+  const bootstrapScriptPath = path.join(helperDir, `start-launcher-update-${nonce}.ps1`);
+  const logPath = path.join(helperDir, `handoff-${nonce}.log`);
+  const bootstrapLogPath = path.join(helperDir, `bootstrap-${nonce}.log`);
+  const ackPath = path.join(helperDir, `ready-${nonce}.json`);
+  const pendingPath = launcherUpdatePendingPath();
+  const pendingFailurePath = launcherUpdatePendingFailurePath();
+  await Promise.all([
+    fs.copyFile(launcherUpdateHelperSourcePath(), scriptPath),
+    fs.copyFile(launcherUpdateBootstrapSourcePath(), bootstrapScriptPath)
+  ]);
+  await Promise.all([
+    fs.rm(logPath, { force: true }),
+    fs.rm(bootstrapLogPath, { force: true }),
+    fs.rm(ackPath, { force: true }),
+    fs.rm(pendingFailurePath, { force: true })
+  ]);
+  const payloadRecord = {
+    ...payload,
+    handoffNonce: nonce,
+    oldPid: process.pid,
+    logPath,
+    ackPath,
+    pendingPath,
+    pendingFailurePath,
+    relaunchArgs: launcherUpdateRelaunchArgs(),
+    relaunchDeveloper,
+    testStartOnly: launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'),
+    createdAt: new Date().toISOString()
+  };
+  await writeJsonFile(payloadPath, payloadRecord);
+  const [scriptSha256, bootstrapScriptSha256, payloadSha256] = await Promise.all([
+    hashFile(scriptPath, 'sha256'),
+    hashFile(bootstrapScriptPath, 'sha256'),
+    hashFile(payloadPath, 'sha256')
+  ]);
+  return {
+    helperDir,
+    payloadPath,
+    payloadSha256,
+    scriptPath,
+    scriptSha256,
+    bootstrapScriptPath,
+    bootstrapScriptSha256,
+    logPath,
+    bootstrapLogPath,
+    ackPath,
+    pendingPath,
+    pendingFailurePath,
+    handoffNonce: nonce,
+    relaunchDeveloper,
+    mode: String(payloadRecord.mode || '')
+  };
+}
+
+function windowsPowerShellHandoffArgs(helper = {}) {
+  return [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-WindowStyle',
+    'Hidden',
+    '-File',
+    helper.bootstrapScriptPath,
+    '-HelperPath',
+    helper.scriptPath,
+    '-PayloadPath',
+    helper.payloadPath,
+    '-ExpectedPayloadSha256',
+    helper.payloadSha256,
+    '-ExpectedHelperSha256',
+    helper.scriptSha256
+  ];
+}
+
+function preparedWindowsPowerShellHandoff(helper, strategy, details = {}) {
+  return {
+    ok: true,
+    prepared: true,
+    strategy,
+    command: windowsPowerShellPath(),
+    args: windowsPowerShellHandoffArgs(helper),
+    cwd: helper.helperDir,
+    ...helper,
+    ...details
+  };
 }
 
 async function writeWindowsLauncherUpdateHelper({ filePath, artifact, latestVersion, downloadDir }) {
@@ -4431,30 +5670,26 @@ async function writeWindowsLauncherUpdateHelper({ filePath, artifact, latestVers
   if (!targetExe) {
     throw new Error('Could not resolve installed launcher executable for restart.');
   }
-  const helperDir = path.join(downloadDir, 'handoff');
-  await ensureDir(helperDir);
-  const payloadPath = path.join(helperDir, 'payload.json');
-  const scriptPath = path.join(helperDir, 'apply-launcher-update.ps1');
-  const cmdPath = path.join(helperDir, 'apply-launcher-update.cmd');
-  const logPath = path.join(helperDir, 'handoff.log');
-  const bootstrapLogPath = path.join(helperDir, 'bootstrap.log');
   const installerArgs = windowsLauncherInstallerArgs(artifact, targetExe);
-  await writeJsonFile(payloadPath, {
+  const helper = await writeWindowsLauncherUpdateHandoff({
+    downloadDir,
+    payload: {
+      mode: 'legacy-installer',
+      installerPath: filePath,
+      installerArgs,
+      targetExe,
+      installDir: path.dirname(targetExe),
+      expectedVersion: latestVersion || ''
+    }
+  });
+  return {
+    ...helper,
     installerPath: filePath,
-    installerArgs,
     targetExe,
     installDir: path.dirname(targetExe),
-    expectedVersion: latestVersion || '',
-    oldPid: process.pid,
-    logPath,
-    bootstrapLogPath,
-    pendingFailurePath: launcherUpdatePendingFailurePath(),
-    testStartOnly: process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY === '1',
-    createdAt: new Date().toISOString()
-  });
-  await fs.writeFile(scriptPath, launcherUpdateHelperScript(payloadPath), 'utf8');
-  await fs.writeFile(cmdPath, launcherUpdateHelperBatch(scriptPath, bootstrapLogPath), 'utf8');
-  return { scriptPath, cmdPath, payloadPath, logPath, bootstrapLogPath, targetExe, installerArgs };
+    installerArgs,
+    expectedVersion: latestVersion || ''
+  };
 }
 
 async function launchWindowsLauncherUpdateHelper(filePath, artifact = {}, options = {}) {
@@ -4469,9 +5704,83 @@ async function prepareWindowsLauncherUpdateHelper(filePath, artifact = {}, optio
     latestVersion: options.latestVersion || '',
     downloadDir: options.downloadDir || path.dirname(filePath)
   });
-  const command = windowsCommandPromptPath();
-  const args = ['/d', '/s', '/c', 'start', '""', '/min', windowsCommandPromptPath(), '/d', '/s', '/c', helper.cmdPath];
-  return { ok: true, prepared: true, strategy: 'windows-helper', command, args, cwd: path.dirname(helper.scriptPath), ...helper };
+  return preparedWindowsPowerShellHandoff(helper, 'windows-helper', {
+    downloadedPath: filePath,
+    artifact,
+    expectedVersion: options.latestVersion || ''
+  });
+}
+
+async function prepareWindowsStagedLauncherUpdate(filePath, artifact = {}, options = {}) {
+  const targetExe = options.targetExe
+    ? path.resolve(String(options.targetExe))
+    : launcherUpdateInstalledExePath();
+  if (!targetExe) throw new Error('Could not resolve installed launcher executable for restart.');
+  const installDir = path.dirname(targetExe);
+  const parentDir = path.dirname(installDir);
+  const versionSlug = normalizedVersion(options.latestVersion || 'update').replace(/[^a-z0-9._-]+/gi, '-');
+  const nonce = newLauncherUpdateNonce();
+  const stagingDir = path.join(parentDir, `.aht-launcher-update-${versionSlug}-${nonce}`);
+  const extractRoot = path.join(parentDir, `.aht-launcher-extract-${versionSlug}-${nonce}`);
+  const backupDir = path.join(parentDir, `.aht-launcher-backup-${normalizedVersion(app.getVersion())}-${nonce}`);
+  const failedCandidateDir = path.join(parentDir, `.aht-launcher-failed-${versionSlug}-${nonce}`);
+  launcherUpdateState.progress = { phase: 'Extracting verified launcher', completed: 2, total: 4, percent: 82 };
+  const staged = await stageWindowsLauncherUpdate({
+    archivePath: filePath,
+    archiveSha256: artifact.sha256 || '',
+    installDir,
+    stagingDir,
+    extractRoot,
+    targetExeName: path.basename(targetExe),
+    expectedVersion: options.latestVersion || '',
+    readProductVersion: readWindowsLauncherProductVersion,
+    onProgress: (progress) => {
+      const percent = progress.total > 0 ? Math.min(100, (progress.completed / progress.total) * 100) : 0;
+      launcherUpdateState.progress = {
+        phase: 'Extracting verified launcher',
+        currentPath: progress.currentPath || '',
+        completed: progress.completed,
+        total: progress.total,
+        percent: weightedOperationPercent(percent, 80, 10)
+      };
+    }
+  });
+  launcherUpdateState.progress = { phase: 'Validating staged launcher', completed: 3, total: 4, percent: 92 };
+  const receiptPath = path.join(options.downloadDir || path.dirname(filePath), `staged-receipt-${nonce}.json`);
+  await writeJsonFile(receiptPath, staged.receipt);
+  const receiptSha256 = await hashFile(receiptPath, 'sha256');
+  const helper = await writeWindowsLauncherUpdateHandoff({
+    downloadDir: options.downloadDir || path.dirname(filePath),
+    payload: {
+      mode: 'staged-swap',
+      handoffNonce: nonce,
+      installDir,
+      stagingDir,
+      backupDir,
+      failedCandidateDir,
+      targetRelativePath: path.basename(targetExe),
+      expectedVersion: options.latestVersion || '',
+      receiptPath,
+      receiptSha256,
+      treeSha256: staged.receipt.treeSha256
+    }
+  });
+  return preparedWindowsPowerShellHandoff(helper, 'windows-staged-helper', {
+    downloadedPath: filePath,
+    artifact,
+    expectedVersion: options.latestVersion || '',
+    installDir,
+    stagingDir,
+    backupDir,
+    failedCandidateDir,
+    targetExe,
+    targetRelativePath: path.basename(targetExe),
+    receiptPath,
+    receiptSha256,
+    treeSha256: staged.receipt.treeSha256,
+    stagedFileCount: staged.receipt.fileCount,
+    stagedBytes: staged.receipt.totalBytes
+  });
 }
 
 function shellSingleQuote(value) {
@@ -4537,7 +5846,7 @@ fail_update() {
   exit 1
 }
 write_log "Waiting for old launcher PID $old_pid"
-if [ "$test_start_only" = "1" ] || [ "\${AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY:-}" = "1" ]; then
+if [ "$test_start_only" = "1" ]; then
   write_log "Test mode helper startup confirmed."
   exit 0
 fi
@@ -4615,7 +5924,7 @@ async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadD
   const currentApp = launcherUpdateInstalledMacAppPath();
   const targetApp = macLauncherUpdateTargetApp(currentApp);
   const fallbackApp = path.join(app.getPath('home'), 'Applications', defaultMacLauncherAppName(currentApp || targetApp));
-  if (!launcherUpdateInstalledMacAppPath() && process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
+  if (!launcherUpdateInstalledMacAppPath() && !launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')) {
     throw new Error('Could not resolve installed macOS .app bundle for restart.');
   }
   const payloadPath = path.join(helperDir, 'macos-payload.json');
@@ -4630,7 +5939,7 @@ async function writeMacLauncherUpdateHelper({ filePath, latestVersion, downloadD
     logPath,
     pendingFailurePath: launcherUpdatePendingFailurePath(),
     workDir: path.join(helperDir, 'macos-extract'),
-    testStartOnly: process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY === '1',
+    testStartOnly: launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'),
     createdAt: new Date().toISOString()
   };
   await writeJsonFile(payloadPath, payload);
@@ -4663,6 +5972,9 @@ async function launchDownloadedLauncherUpdate(filePath, artifact = {}, options =
 
 async function prepareDownloadedLauncherUpdate(filePath, artifact = {}, options = {}) {
   const fileName = String(artifact.fileName || artifact.path || artifact.url || filePath).toLowerCase();
+  if (process.platform === 'win32' && fileName.endsWith('.zip')) {
+    return prepareWindowsStagedLauncherUpdate(filePath, artifact, options);
+  }
   if (process.platform === 'win32' && fileName.endsWith('.exe')) {
     return prepareWindowsLauncherUpdateHelper(filePath, artifact, options);
   }
@@ -4679,42 +5991,274 @@ async function prepareDownloadedLauncherUpdate(filePath, artifact = {}, options 
   return { ok: true, prepared: true, strategy: 'direct', command: filePath, args, cwd };
 }
 
-async function waitForLauncherUpdateHelperStart(prepared = {}, timeoutMs = 5000) {
-  if (!prepared.logPath || !['windows-helper', 'macos-helper'].includes(prepared.strategy)) return;
+async function defaultDeveloperLauncherReinstallZip() {
+  const roots = [];
+  for (const root of [...developerSourceRoots(), appRoot]) {
+    roots.push(path.join(root, 'release-builds', 'windows'), path.join(root, 'release-builds'));
+  }
+  const exactName = expectedLocalReinstallArchiveName(app.getVersion());
+  const exactPattern = new RegExp(`^${exactName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+  return findNewestFile([...new Set(roots)], exactPattern);
+}
+
+async function selectDeveloperLauncherReinstallZip() {
+  const testPath = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_DEVELOPER_REINSTALL_ZIP || '').trim()
+    : '';
+  if (testPath) return path.resolve(testPath);
+  const defaultPath = await defaultDeveloperLauncherReinstallZip();
+  if (!defaultPath) {
+    throw new Error(`The exact same-version launcher ZIP ${expectedLocalReinstallArchiveName(app.getVersion())} was not found in release-builds.`);
+  }
+  return defaultPath;
+}
+
+async function prepareDeveloperLauncherReinstallBridge() {
+  if (process.platform !== 'win32') {
+    throw new Error('The developer launcher reinstall test is currently available on Windows only.');
+  }
+  if (launcherUpdateState.running) {
+    throw new Error('A launcher update or reinstall is already running.');
+  }
+  const reinstallTarget = await resolveDeveloperLauncherReinstallTarget();
+  const selectedPath = await selectDeveloperLauncherReinstallZip();
+  const version = app.getVersion();
+  const expectedArchiveName = expectedLocalReinstallArchiveName(version);
+  if (path.basename(selectedPath).toLowerCase() !== expectedArchiveName.toLowerCase()) {
+    throw new Error(`The local reinstall test requires the exact same-version archive ${expectedArchiveName}.`);
+  }
+  await assertNormalPhysicalPath(selectedPath, 'file');
+  const sourceStat = await physicalFs.stat(selectedPath);
+  if (sourceStat.size <= 0 || sourceStat.size > LOCAL_REINSTALL_MAX_ARCHIVE_BYTES) {
+    throw new Error('The same-version launcher ZIP has an invalid size.');
+  }
+  await cleanupExpiredLocalReinstallRequests();
+  const inbox = await ensureNormalLocalReinstallDirectory(localReinstallInboxPath());
+  const nonce = newLauncherUpdateNonce();
+  const requestDir = localReinstallRequestDirectory(nonce);
+  if (!strictPathDescendant(inbox, requestDir)) throw new Error('Local reinstall request directory escaped the fixed regular-launcher inbox.');
+  await physicalFs.mkdir(requestDir, { recursive: false });
+  await assertNormalPhysicalPath(requestDir, 'directory');
+  const copiedPath = path.join(requestDir, expectedArchiveName);
+  const requestPath = path.join(requestDir, 'request.json');
+  try {
+    const sourceSha256 = await hashFile(selectedPath, 'sha256');
+    await physicalFs.copyFile(selectedPath, copiedPath, fsSync.constants.COPYFILE_EXCL);
+    await assertNormalPhysicalPath(copiedPath, 'file');
+    const copiedStat = await physicalFs.stat(copiedPath);
+    if (copiedStat.size !== sourceStat.size) {
+      throw new Error('Launcher reinstall ZIP size changed while copying into the one-shot inbox.');
+    }
+    const copiedSha256 = await hashFile(copiedPath, 'sha256');
+    if (copiedSha256.toLowerCase() !== sourceSha256.toLowerCase()) {
+      throw new Error('Launcher reinstall ZIP hash changed while copying into the one-shot inbox.');
+    }
+    const createdAt = Date.now();
+    const request = {
+      schema: LOCAL_REINSTALL_REQUEST_SCHEMA,
+      product: 'aht-launcher',
+      purpose: LOCAL_REINSTALL_PURPOSE,
+      nonce,
+      version,
+      createdAt: new Date(createdAt).toISOString(),
+      expiresAt: new Date(createdAt + LOCAL_REINSTALL_REQUEST_TTL_MS).toISOString(),
+      targetExe: reinstallTarget.targetExe,
+      artifact: {
+        fileName: expectedArchiveName,
+        sha256: copiedSha256,
+        size: copiedStat.size
+      }
+    };
+    await writeJsonFile(requestPath, request);
+    const launch = await spawnDetachedGui(
+      reinstallTarget.targetExe,
+      [],
+      path.dirname(reinstallTarget.targetExe),
+      sanitizedRegularLauncherEnvironment()
+    );
+    const promptAck = await waitForLocalReinstallPromptReady({
+      ...request,
+      requestDir,
+      promptAckPath: path.join(requestDir, 'prompt-ready.json')
+    });
+    setTimeout(() => app.quit(), 250);
+    return {
+      ok: true,
+      version,
+      regularLauncherOpened: true,
+      promptReady: true,
+      launched: Boolean(launch?.ok),
+      playerProcessId: Number(promptAck.processId || 0) || null
+    };
+  } catch (error) {
+    await removeLocalReinstallRequestDirectory(requestDir).catch(() => {});
+    throw error;
+  }
+}
+
+async function prepareDeveloperLauncherReinstall() {
+  assertDeveloperAuthenticated();
+  if (developerLocalReinstallPromise) {
+    throw new Error('A local reinstall test is already opening the regular launcher.');
+  }
+  developerLocalReinstallPromise = prepareDeveloperLauncherReinstallBridge();
+  try {
+    return await developerLocalReinstallPromise;
+  } finally {
+    developerLocalReinstallPromise = null;
+  }
+}
+
+async function waitForLauncherUpdateHelperStart(prepared = {}, timeoutMs = ['windows-helper', 'windows-staged-helper'].includes(prepared.strategy) ? 120_000 : 5000) {
+  if (!prepared.logPath || !['windows-helper', 'windows-staged-helper', 'macos-helper'].includes(prepared.strategy)) return;
   const start = Date.now();
-  let bootstrapText = '';
   while (Date.now() - start < timeoutMs) {
     try {
       const text = await fs.readFile(prepared.logPath, 'utf8');
-      if (text.includes('Waiting for old launcher PID') || text.includes('Test mode helper startup confirmed.')) {
+      const nonceReady = prepared.handoffNonce && text.includes(`Handoff started nonce=${prepared.handoffNonce}`);
+      const stagedReady = prepared.handoffNonce
+        && text.toLowerCase().includes(`ready to quit nonce=${prepared.handoffNonce}`.toLowerCase());
+      const testReady = launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY')
+        && text.includes('Test mode helper startup confirmed.');
+      const macReady = prepared.strategy === 'macos-helper' && text.includes('Waiting for old launcher PID');
+      const windowsReady = ['windows-helper', 'windows-staged-helper'].includes(prepared.strategy)
+        && (stagedReady || testReady);
+      if (windowsReady || (prepared.strategy !== 'windows-helper' && prepared.strategy !== 'windows-staged-helper' && nonceReady) || macReady) {
         return;
       }
     } catch {
       // Helper has not written its first line yet.
     }
-    if (prepared.bootstrapLogPath) {
-      bootstrapText = await fs.readFile(prepared.bootstrapLogPath, 'utf8').catch(() => bootstrapText);
-    }
     await sleep(100);
   }
-  const bootstrapDetail = prepared.bootstrapLogPath
-    ? ` Bootstrap log: ${prepared.bootstrapLogPath}${bootstrapText ? ` (${bootstrapText.slice(-500)})` : ''}.`
+  const bootstrapText = prepared.bootstrapLogPath
+    ? await fs.readFile(prepared.bootstrapLogPath, 'utf8').catch(() => '')
     : '';
-  throw new Error(`Launcher update helper did not start. No handoff log was written at ${prepared.logPath}.${bootstrapDetail}`);
+  throw new Error(`Launcher update helper did not start with the current handoff nonce. Log: ${prepared.logPath}.${bootstrapText ? ` Bootstrap: ${bootstrapText.slice(-800)}` : ''}`);
 }
 
-async function launchPreparedLauncherUpdate(prepared = {}) {
+function spawnBootstrapWithLog(command, args, cwd, env, logPath) {
+  return new Promise((resolve, reject) => {
+    fsSync.mkdirSync(path.dirname(logPath), { recursive: true });
+    const output = fsSync.openSync(logPath, 'a');
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      // The short-lived bootstrap creates the independent hidden helper. Keeping
+      // this first process attached avoids CREATE_NEW_CONSOLE while Electron is open.
+      detached: false,
+      stdio: ['ignore', output, output],
+      windowsHide: true
+    });
+    let settled = false;
+    const closeOutput = () => {
+      try { fsSync.closeSync(output); } catch {}
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch {}
+      closeOutput();
+      reject(new Error('Launcher update bootstrap did not finish within 15 seconds.'));
+    }, 15_000);
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      closeOutput();
+      reject(error);
+    });
+    child.once('close', async (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      closeOutput();
+      if (code !== 0 || signal) {
+        const bootstrapText = await fs.readFile(logPath, 'utf8').catch(() => '');
+        reject(new Error(`Launcher update bootstrap exited with code ${code}${signal ? ` (${signal})` : ''}.${bootstrapText ? ` ${bootstrapText.slice(-800)}` : ''}`));
+        return;
+      }
+      resolve({ ok: true, command, args, pid: child.pid });
+    });
+  });
+}
+
+async function armPreparedLauncherUpdate(prepared = {}) {
+  if (!['windows-helper', 'windows-staged-helper'].includes(prepared.strategy)) return prepared;
+  const payload = await validatePreparedLauncherUpdateHandoff(prepared, prepared.expectedVersion || '');
+  if (!payload || payload.handoffNonce !== prepared.handoffNonce) {
+    throw new Error('Prepared launcher update handoff metadata is invalid.');
+  }
+  await Promise.all([
+    fs.rm(prepared.logPath, { force: true }),
+    prepared.bootstrapLogPath ? fs.rm(prepared.bootstrapLogPath, { force: true }) : Promise.resolve(),
+    fs.rm(prepared.ackPath, { force: true }),
+    fs.rm(launcherUpdatePendingFailurePath(), { force: true })
+  ]);
+  await writeJsonFile(prepared.payloadPath, {
+    ...payload,
+    oldPid: process.pid,
+    relaunchArgs: launcherUpdateRelaunchArgs(),
+    testStartOnly: launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'),
+    armedAt: new Date().toISOString()
+  });
+  const payloadSha256 = await hashFile(prepared.payloadPath, 'sha256');
+  const armed = { ...prepared, payloadSha256 };
+  armed.args = windowsPowerShellHandoffArgs(armed);
+  await validatePreparedLauncherUpdateHandoff(armed, armed.expectedVersion || '');
+  return armed;
+}
+
+function launcherUpdateHelperEnvironment() {
+  const env = sanitizedLauncherEnvironment(process.env);
+  if (process.env.AHT_TEST_HOOKS === '1') {
+    env.AHT_TEST_HOOKS = '1';
+    const remoteDebugPort = String(process.env.AHT_TEST_REMOTE_DEBUG_PORT || '').trim();
+    if (/^\d{2,5}$/.test(remoteDebugPort)) env.AHT_TEST_REMOTE_DEBUG_PORT = remoteDebugPort;
+    const defaultsPath = String(process.env.AHT_APP_DEFAULTS || '').trim();
+    try {
+      if (path.isAbsolute(defaultsPath)
+          && fsSync.lstatSync(defaultsPath).isFile()
+          && sameLauncherUpdatePath(fsSync.realpathSync.native(defaultsPath), defaultsPath)) {
+        env.AHT_APP_DEFAULTS = path.resolve(defaultsPath);
+      }
+    } catch {
+      // Test defaults are optional and must be a normal physical file.
+    }
+  }
+  if (isDeveloperMode()) {
+    const sourceRoot = String(process.env.AHT_LAUNCHER_SOURCE_ROOT || '').trim();
+    try {
+      const resolvedRoot = path.resolve(sourceRoot);
+      const metadata = JSON.parse(fsSync.readFileSync(path.join(resolvedRoot, 'package.json'), 'utf8'));
+      if (path.isAbsolute(sourceRoot)
+          && fsSync.lstatSync(resolvedRoot).isDirectory()
+          && sameLauncherUpdatePath(fsSync.realpathSync.native(resolvedRoot), resolvedRoot)
+          && metadata?.name === 'aht-launcher') {
+        env.AHT_LAUNCHER_SOURCE_ROOT = resolvedRoot;
+      }
+    } catch {
+      // Packaged developer relaunches only retain a verified AHT source root.
+    }
+  }
+  return env;
+}
+
+async function launchPreparedLauncherUpdate(prepared = {}, options = {}) {
   if (!prepared?.command) {
     throw new Error('Launcher update restart helper is not prepared.');
   }
-  const shouldSkipLaunch = process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
-    && process.env.AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY !== '1';
+  const armed = options.armed ? prepared : await armPreparedLauncherUpdate(prepared);
+  const shouldSkipLaunch = launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')
+    && !launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY');
   if (shouldSkipLaunch) {
-    return { ...prepared, ok: true, skipped: true };
+    return { ...armed, ok: true, skipped: true };
   }
-  const launched = await spawnDetached(prepared.command, prepared.args || [], prepared.cwd || path.dirname(prepared.command), process.env);
-  const result = { ...prepared, ...launched, strategy: prepared.strategy };
-  await waitForLauncherUpdateHelperStart(prepared);
+  const launched = armed.bootstrapLogPath
+    ? await spawnBootstrapWithLog(armed.command, armed.args || [], armed.cwd || path.dirname(armed.command), launcherUpdateHelperEnvironment(), armed.bootstrapLogPath)
+    : await spawnDetached(armed.command, armed.args || [], armed.cwd || path.dirname(armed.command), launcherUpdateHelperEnvironment());
+  const result = { ...armed, ...launched, strategy: armed.strategy };
+  await waitForLauncherUpdateHelperStart(armed);
   return result;
 }
 
@@ -4725,7 +6269,9 @@ async function runLauncherUpdate() {
   }
   const pending = await hydratePendingLauncherUpdateState();
   if (pending && launcherUpdateState.lastResult?.restartRequired) {
-    appendOperationLine(launcherUpdateState, 'Launcher update is already downloaded and ready to install.');
+    appendOperationLine(launcherUpdateState, launcherUpdateState.lastResult.instantRestartReady
+      ? 'Launcher update is already fully staged and ready to restart.'
+      : 'Launcher update is already downloaded and ready to install.');
     return launcherUpdateState.lastResult;
   }
   const config = await loadConfig();
@@ -4733,7 +6279,23 @@ async function runLauncherUpdate() {
   if (!update.updateRequired || !update.artifact) {
     throw new Error(update.error || 'Launcher is already current.');
   }
-  const source = resolveSource(update.latestUrl, update.artifact.url || update.artifact.path);
+  const localReinstallTest = Boolean(update.localReinstallTest && activeLocalReinstallRequest);
+  if (localReinstallTest) {
+    const descriptor = await readJsonFile(activeLocalReinstallRequest.consumedPath);
+    const revalidated = await validateLocalReinstallRequestRecord(activeLocalReinstallRequest.requestDir, descriptor);
+    if (revalidated.nonce !== activeLocalReinstallRequest.nonce) {
+      throw new Error('The one-shot local reinstall request changed after it was claimed.');
+    }
+    activeLocalReinstallRequest = {
+      ...activeLocalReinstallRequest,
+      ...revalidated,
+      consumedPath: activeLocalReinstallRequest.consumedPath
+    };
+    await acknowledgeLocalReinstallPromptReady();
+  }
+  const source = localReinstallTest
+    ? activeLocalReinstallRequest.artifactPath
+    : resolveSource(update.latestUrl, update.artifact.url || update.artifact.path);
   if (!source) {
     throw new Error('Launcher update artifact URL is missing.');
   }
@@ -4742,18 +6304,32 @@ async function runLauncherUpdate() {
   const target = path.join(downloadDir, fileName);
   launcherUpdateState = {
     running: true,
-    lines: [`Launcher update ${app.getVersion()} -> ${update.latestVersion}`, `Downloading ${fileName}`],
+    ...(localReinstallTest ? { purpose: LOCAL_REINSTALL_PURPOSE, localReinstallTest: true } : {}),
+    lines: [
+      localReinstallTest
+        ? `Local launcher reinstall test ${update.latestVersion}`
+        : `Launcher update ${app.getVersion()} -> ${update.latestVersion}`,
+      `Downloading ${fileName}`
+    ],
     lastResult: null,
     error: null,
     progress: { phase: 'Downloading launcher', completed: 0, total: 1, percent: 20 }
   };
   try {
+    if (localReinstallTest) {
+      await ensureNormalLocalReinstallDirectory(downloadDir);
+      await assertNormalPhysicalPath(downloadDir, 'directory');
+    }
     await downloadToFile(source, target, {
       onProgress: (progress) => {
         launcherUpdateState.progress = byteOperationProgress('Downloading launcher', fileName, progress, 8, 55);
       }
     });
-    launcherUpdateState.progress = { phase: 'Verifying launcher', completed: 1, total: 3, percent: 70 };
+    const downloadedStat = await fs.stat(target);
+    if (Number(update.artifact.size || 0) > 0 && downloadedStat.size !== Number(update.artifact.size)) {
+      throw new Error(`Launcher update size mismatch: expected ${update.artifact.size}, got ${downloadedStat.size}`);
+    }
+    launcherUpdateState.progress = { phase: 'Verifying launcher', completed: 1, total: 4, percent: 70 };
     if (update.artifact.sha256) {
       const actual = await hashFile(target, 'sha256', {
         onProgress: (progress) => {
@@ -4764,34 +6340,62 @@ async function runLauncherUpdate() {
         throw new Error(`Launcher update hash mismatch: expected ${update.artifact.sha256}, got ${actual}`);
       }
     }
-    appendOperationLine(launcherUpdateState, 'Launcher update downloaded and verified.');
-    launcherUpdateState.progress = { phase: 'Preparing restart handoff', completed: 2, total: 3, percent: 92 };
+    appendOperationLine(launcherUpdateState, 'Launcher update archive downloaded and verified.');
+    if (localReinstallTest) await assertNormalPhysicalPath(downloadDir, 'directory');
+    launcherUpdateState.progress = { phase: 'Preparing complete launcher payload', completed: 2, total: 4, percent: 80 };
     const preparedRestart = await prepareDownloadedLauncherUpdate(target, update.artifact, { latestVersion: update.latestVersion, downloadDir });
+    const instantRestartReady = preparedRestart.strategy === 'windows-staged-helper';
+    const stagedAt = new Date().toISOString();
     const result = {
       ok: true,
       version: update.latestVersion,
+      ...(localReinstallTest ? { purpose: LOCAL_REINSTALL_PURPOSE, localReinstallTest: true } : {}),
       downloadedPath: target,
       artifact: update.artifact,
       restartRequired: true,
+      instantRestartReady,
+      stagedAt,
       preparedRestart
     };
-    await writePendingLauncherUpdate({
-      status: 'staged',
+    const pendingRecord = {
+      schemaVersion: 2,
+      status: instantRestartReady ? 'ready-to-relaunch' : 'staged',
       version: update.latestVersion,
+      ...(localReinstallTest ? {
+        purpose: LOCAL_REINSTALL_PURPOSE,
+        localReinstallRequestNonce: activeLocalReinstallRequest.nonce
+      } : {}),
       downloadedPath: target,
       artifact: update.artifact,
       preparedRestart,
-      stagedAt: new Date().toISOString(),
+      stagedAt,
       lines: [
-        `Launcher update ${app.getVersion()} -> ${update.latestVersion}`,
-        'Launcher update downloaded and verified.',
-        'Ready to install. Click Install and Restart to close AHT Launcher, install the update, and reopen it.'
+        localReinstallTest
+          ? `Local launcher reinstall test ${update.latestVersion}`
+          : `Launcher update ${app.getVersion()} -> ${update.latestVersion}`,
+        instantRestartReady
+          ? 'Launcher update downloaded, extracted, and verified.'
+          : 'Launcher update installer downloaded and verified.',
+        instantRestartReady
+          ? 'Update finished. Click Restart Launcher to switch to the prepared version immediately.'
+          : 'Ready to install. Click Install and Restart to apply the legacy installer.'
       ]
-    });
+    };
+    await writePendingLauncherUpdate(pendingRecord);
+    validatedPendingLauncherUpdateKey = pendingLauncherUpdateValidationKey(pendingRecord);
     launcherUpdateState.lastResult = result;
-    launcherUpdateState.progress = { phase: 'Ready to install', completed: 3, total: 3, percent: 100 };
-    appendOperationLine(launcherUpdateState, 'Ready to install.');
-    appendOperationLine(launcherUpdateState, 'Click Install and Restart to close AHT Launcher, install the update, and reopen it.');
+    launcherUpdateState.progress = {
+      phase: instantRestartReady ? 'Update finished - ready to restart' : 'Ready to install',
+      completed: 4,
+      total: 4,
+      percent: 100
+    };
+    appendOperationLine(launcherUpdateState, instantRestartReady
+      ? 'Update finished. The complete launcher is staged and verified.'
+      : 'Legacy installer is ready.');
+    appendOperationLine(launcherUpdateState, instantRestartReady
+      ? 'Click Restart Launcher to close this copy and open the prepared update immediately.'
+      : 'Click Install and Restart to apply the legacy installer.');
     return result;
   } catch (error) {
     launcherUpdateState.error = error.message || String(error);
@@ -4810,56 +6414,103 @@ async function restartLauncherUpdate() {
   if (!staged?.restartRequired || !staged?.preparedRestart) {
     throw new Error('Launcher update is not ready to restart yet.');
   }
+  if (staged.developerReinstall) {
+    assertDeveloperAuthenticated();
+  }
+  const pendingMetadata = await readPendingLauncherUpdate();
+  const stagedPurpose = staged.developerReinstall
+    ? 'developer-reinstall'
+    : staged.localReinstallTest
+      ? LOCAL_REINSTALL_PURPOSE
+      : '';
+  const localReinstallRequestNonce = stagedPurpose === LOCAL_REINSTALL_PURPOSE
+    && /^[a-f0-9]{32}$/.test(String(pendingMetadata?.localReinstallRequestNonce || ''))
+    ? String(pendingMetadata.localReinstallRequestNonce)
+    : '';
   launcherUpdateState.running = true;
   launcherUpdateState.error = null;
-  launcherUpdateState.progress = { phase: 'Starting install helper', completed: 3, total: 3, percent: 100 };
-  appendOperationLine(launcherUpdateState, 'Install and restart requested. Starting launcher update helper.');
+  launcherUpdateState.progress = { phase: 'Restarting launcher', completed: 4, total: 4, percent: 100 };
+  appendOperationLine(launcherUpdateState, staged.instantRestartReady
+    ? 'Restart requested. Starting the prepared launcher handoff.'
+    : 'Install and restart requested. Starting the legacy launcher update helper.');
+  let preparedRestart = staged.preparedRestart;
   try {
+    if (staged.preparedRestart.strategy === 'windows-staged-helper') {
+      const receipt = await readJsonFile(staged.preparedRestart.receiptPath);
+      await validateStagedWindowsLauncherUpdate({
+        stagingDir: staged.preparedRestart.stagingDir,
+        receipt,
+        expectedVersion: staged.version,
+        verifyHashes: false
+      });
+    }
+    preparedRestart = await armPreparedLauncherUpdate(preparedRestart);
     await writePendingLauncherUpdate({
-      status: 'installing',
+      schemaVersion: 2,
+      status: staged.instantRestartReady ? 'swapping' : 'installing',
       version: staged.version,
       downloadedPath: staged.downloadedPath,
       artifact: staged.artifact,
-      preparedRestart: staged.preparedRestart,
+      ...(stagedPurpose ? { purpose: stagedPurpose } : {}),
+      ...(localReinstallRequestNonce ? { localReinstallRequestNonce } : {}),
+      preparedRestart,
       stagedAt: staged.stagedAt || '',
       installingStartedAt: new Date().toISOString(),
       lines: [
-        `Launcher update ${app.getVersion()} -> ${staged.version}`,
-        'Installing launcher update. If this copy opens before installation finishes, it will close so the helper can complete.'
+        staged.developerReinstall
+          ? `Developer launcher reinstall ${staged.version}`
+          : staged.localReinstallTest
+            ? `Local launcher reinstall test ${staged.version}`
+          : `Launcher update ${app.getVersion()} -> ${staged.version}`,
+        staged.instantRestartReady
+          ? 'Restarting into the fully prepared launcher update.'
+          : 'Installing launcher update. If this copy opens before installation finishes, it will close so the helper can complete.'
       ]
     });
-    const launched = await launchPreparedLauncherUpdate(staged.preparedRestart);
+    const launched = await launchPreparedLauncherUpdate(preparedRestart, { armed: true });
     const result = {
       ...staged,
+      preparedRestart,
       restartRequired: false,
-      pendingStatus: 'installing',
+      pendingStatus: staged.instantRestartReady ? 'swapping' : 'installing',
       restartStartedAt: new Date().toISOString(),
       launched
     };
     launcherUpdateState.lastResult = result;
-    launcherUpdateState.progress = { phase: process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1' ? 'Restart verified' : 'Installing launcher update', completed: 3, total: 3, percent: 100 };
-    appendOperationLine(launcherUpdateState, process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT === '1'
+    launcherUpdateState.progress = { phase: launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT') ? 'Restart verified' : 'Restarting launcher', completed: 4, total: 4, percent: 100 };
+    appendOperationLine(launcherUpdateState, launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')
       ? 'Test mode verified the restart helper without closing the launcher.'
-      : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
-    if (process.env.AHT_TEST_LAUNCHER_UPDATE_NO_QUIT !== '1') {
-      setTimeout(() => app.quit(), 250);
+      : staged.instantRestartReady
+        ? 'Prepared update handoff is running. Closing this launcher now.'
+        : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
+    if (!launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')) {
+      setTimeout(() => app.quit(), 0);
     } else {
       launcherUpdateState.running = false;
     }
     return result;
   } catch (error) {
     await writePendingLauncherUpdate({
-      status: 'staged',
+      schemaVersion: 2,
+      status: staged.instantRestartReady ? 'ready-to-relaunch' : 'staged',
       version: staged.version,
       downloadedPath: staged.downloadedPath,
       artifact: staged.artifact,
-      preparedRestart: staged.preparedRestart,
+      ...(stagedPurpose ? { purpose: stagedPurpose } : {}),
+      ...(localReinstallRequestNonce ? { localReinstallRequestNonce } : {}),
+      preparedRestart,
       stagedAt: staged.stagedAt || new Date().toISOString(),
       installingStartedAt: '',
       lines: [
-        `Launcher update ${app.getVersion()} -> ${staged.version}`,
-        `Install helper failed to start: ${error.message || String(error)}`,
-        'The update is still downloaded and can be retried.'
+        staged.developerReinstall
+          ? `Developer launcher reinstall ${staged.version}`
+          : staged.localReinstallTest
+            ? `Local launcher reinstall test ${staged.version}`
+          : `Launcher update ${app.getVersion()} -> ${staged.version}`,
+        `Restart helper failed to start: ${error.message || String(error)}`,
+        staged.instantRestartReady
+          ? 'The fully prepared update is still ready and can be retried.'
+          : 'The update is still downloaded and can be retried.'
       ]
     }).catch(() => {});
     launcherUpdateState.error = error.message || String(error);
@@ -5496,6 +7147,7 @@ async function cloudSetupSecrets({
   adminPassword = '',
   adminTokenSecret = '',
   launcherProofSecret = '',
+  socialServerSecret = '',
   releaseBucket = 'ahtlauncher',
   dataBucket = '',
   cacheOnlyMode = false
@@ -5506,6 +7158,10 @@ async function cloudSetupSecrets({
   launcherProofSecret = String(launcherProofSecret || '').trim();
   if (!launcherProofSecret) {
     throw new Error('Launcher Proof Secret is required before cloud setup. Set the same value on the server as LAUNCHER_PROOF_SECRET.');
+  }
+  socialServerSecret = String(socialServerSecret || '').trim();
+  if (socialServerSecret.length < 32) {
+    throw new Error('Server Social Secret must contain at least 32 characters and must be configured on the game server as AHT_SOCIAL_SERVER_SECRET.');
   }
   const credentials = await loadDeveloperCredentials();
   const resolvedAdminUsername = String(adminUsername || credentials.username || DEFAULT_DEVELOPER_USERNAME).trim();
@@ -5518,7 +7174,8 @@ async function cloudSetupSecrets({
     ['ADMIN_USERNAME', resolvedAdminUsername],
     ['ADMIN_PASSWORD', resolvedAdminPassword],
     ['ADMIN_TOKEN_SECRET', adminTokenSecret || randomSecret()],
-    ['LAUNCHER_PROOF_SECRET', launcherProofSecret]
+    ['LAUNCHER_PROOF_SECRET', launcherProofSecret],
+    ['AHT_SOCIAL_SERVER_SECRET', socialServerSecret]
   ];
   if (curseforgeApiKey) {
     secrets.unshift(['CURSEFORGE_API_KEY', curseforgeApiKey]);
@@ -6086,6 +7743,16 @@ function launcherArtifactDescriptors(payload = {}) {
       file: payload.windowsPath || payload.win32Path || ''
     },
     {
+      key: 'win32-x64',
+      aliases: ['win32', 'windows', 'windows-x64'],
+      label: 'Windows 10/11 staged update ZIP',
+      kind: 'zip',
+      installArgs: [],
+      stagedPlatform: true,
+      platform: false,
+      file: payload.windowsZipPath || payload.win32ZipPath || ''
+    },
+    {
       key: 'darwin-arm64',
       aliases: ['macos-arm64'],
       label: 'macOS Apple Silicon update ZIP',
@@ -6130,6 +7797,7 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     throw new Error('Launcher update version is required.');
   }
   const platforms = {};
+  const stagedPlatforms = {};
   const downloads = {};
   const uploads = [];
   for (const descriptor of artifacts) {
@@ -6160,6 +7828,12 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
         platforms[alias] = entry;
       }
     }
+    if (descriptor.stagedPlatform === true) {
+      stagedPlatforms[descriptor.key] = entry;
+      for (const alias of descriptor.aliases || []) {
+        stagedPlatforms[alias] = entry;
+      }
+    }
     if (descriptor.downloadKey) {
       const trackedUrl = new URL(entry.url);
       trackedUrl.searchParams.set('aht_download', descriptor.downloadKey);
@@ -6182,12 +7856,14 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     createdAt: new Date().toISOString(),
     currentVersion: app.getVersion(),
     platforms,
+    stagedPlatforms,
     downloads
   };
   const validation = validateLauncherUpdateManifest(manifest, {
     latestUrl: launcherLatestUrlFromInput(publicLatestUrl || config.launcherUpdate?.latestUrl || config.latestUrl || ''),
     allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1',
-    requireTrackedDownloads: true
+    requireTrackedDownloads: true,
+    requireStagedWindows: true
   });
   if (!validation.ok) {
     throw new Error(`Launcher update manifest is invalid: ${validation.errors.join('; ')}`);
@@ -6220,6 +7896,10 @@ async function findLauncherBuilds() {
       path.join(appRoot, 'release-builds', 'windows'),
       path.join(appRoot, 'release-builds')
     ], /\.exe$/i),
+    windowsZipPath: await findNewestFile([
+      path.join(appRoot, 'release-builds', 'windows'),
+      path.join(appRoot, 'release-builds')
+    ], /AHT-Launcher-Windows-10-11-.*\.zip$/i),
     macosArmZipPath: await findNewestFile(macosRoots, /(?:arm64|aarch64).*\.zip$/i),
     macosX64ZipPath: await findNewestFile(macosRoots, /(?:x64|x86_64|intel).*\.zip$/i),
     macosArmDmgPath: await findNewestFile(macosRoots, /(?:arm64|aarch64).*\.dmg$/i),
@@ -6342,6 +8022,7 @@ async function waitForPublishedLauncherVersion(config, version) {
       const validation = validateLauncherUpdateManifest(latest, {
         latestUrl,
         requireTrackedDownloads: true,
+        requireStagedWindows: true,
         allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
       });
       if (!validation.ok) {
@@ -6437,6 +8118,7 @@ async function verifyRemoteLauncherUpdate({ publicLatestUrl, localManifest }) {
   const remote = await fetchRemoteJson(latestUrl);
   const validation = validateLauncherUpdateManifest(remote, {
     latestUrl,
+    requireStagedWindows: true,
     allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
   });
   if (!validation.ok) {
@@ -7484,28 +9166,29 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
   const serverLockRef = latest.serverLock?.configPath || 'server/aht_version_lock.cfg';
   const serverLockPath = localReleasePath(outDir, serverLockRef);
   if (!serverLockPath) {
-    add('warning', 'server version lock config is remote-only', serverLockRef);
+    add('warning', 'server launcher lock config is remote-only', serverLockRef);
   } else if (!(await pathExists(serverLockPath))) {
-    add('warning', 'server version lock config missing', serverLockPath);
+    add('warning', 'server launcher lock config missing', serverLockPath);
   } else {
     const serverLockConfig = await fs.readFile(serverLockPath, 'utf8');
     const hasPackId = serverLockConfig.includes(`S:requiredPackId=${latest.packId}`);
-    const hasVersion = serverLockConfig.includes(`S:requiredVersion=${latest.version}`);
-    if (hasPackId && hasVersion) {
-      add('ok', 'server version lock config matches release', path.relative(outDir, serverLockPath));
+    const hasVerifier = serverLockConfig.includes('S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify');
+    const hasReconnectMessage = serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}');
+    if (hasPackId && hasVerifier && hasReconnectMessage) {
+      add('ok', 'server launcher lock config matches release', path.relative(outDir, serverLockPath));
     } else {
-      add('error', 'server version lock config mismatch', `Expected ${latest.packId} ${latest.version}`);
+      add('error', 'server launcher lock config mismatch', `Expected live proof verification for ${latest.packId}`);
     }
   }
 
-  const serverLockModRef = latest.serverLock?.modPath || 'server/mods/aht-version-lock-1.0.0.jar';
+  const serverLockModRef = latest.serverLock?.modPath || 'server/mods/aht-version-lock-1.1.0.jar';
   const serverLockModPath = localReleasePath(outDir, serverLockModRef);
   if (!serverLockModPath) {
-    add('warning', 'server version lock jar is remote-only', serverLockModRef);
+    add('warning', 'server launcher lock jar is remote-only', serverLockModRef);
   } else if (!(await pathExists(serverLockModPath))) {
-    add('error', 'server version lock jar missing', serverLockModPath);
+    add('error', 'server launcher lock jar missing', serverLockModPath);
   } else {
-    add('ok', 'server version lock jar bundled', path.relative(outDir, serverLockModPath));
+    add('ok', 'server launcher lock jar bundled', path.relative(outDir, serverLockModPath));
   }
 
   return {
@@ -7658,7 +9341,8 @@ async function adminFetch(config, route, options = {}) {
       'admin/launcher-downloads',
       'admin/player-records',
       'admin/launcher-updates',
-      'admin/player-ipv4-groups'
+      'admin/player-ipv4-groups',
+      'admin/access-decisions'
     ]);
     if (response.status === 404 && playerDataRoute.has(normalizedRoute)) {
       throw new Error('The configured Worker is missing the player-data API. Deploy the current AHT Worker before loading Player Data.');
@@ -7702,8 +9386,9 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
     });
     child.once('error', reject);
     child.once('spawn', () => {
+      const pid = child.pid;
       child.unref();
-      resolve({ ok: true, command, args });
+      resolve({ ok: true, command, args, pid });
     });
   });
 }
@@ -8311,11 +9996,20 @@ function createWindow() {
     webPreferences: {
       preload: path.join(appRoot, 'desktop', 'preload.cjs'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false
     }
   });
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
   mainWindow.loadFile(path.join(appRoot, 'desktop', 'renderer', 'index.html'), {
     query: isDeveloperMode() ? { mode: 'developer' } : {}
+  });
+  mainWindow.webContents.once('did-finish-load', () => {
+    acknowledgeCompletedLauncherUpdate().catch((error) => {
+      recordErrorDiagnostic('launcher:updateAcknowledge', error);
+    });
   });
 }
 
@@ -8368,11 +10062,41 @@ ipcMain.handle('update:start', diagnosticIpc('update:start', async (_event, payl
   packKey: payload.packKey || 'stable'
 })));
 ipcMain.handle('update:state', async () => updateState);
-ipcMain.handle('launcher:updateStart', diagnosticIpc('launcher:updateStart', async () => runLauncherUpdate()));
-ipcMain.handle('launcher:updateRestart', diagnosticIpc('launcher:updateRestart', async () => restartLauncherUpdate()));
+ipcMain.handle('launcher:updateStart', diagnosticIpc('launcher:updateStart', async () => {
+  try {
+    const result = await runLauncherUpdate();
+    return launcherUpdateResultForRenderer(result);
+  } catch (error) {
+    if (activeLocalReinstallRequest
+        || launcherUpdateState.localReinstallTest
+        || launcherUpdateState.purpose === LOCAL_REINSTALL_PURPOSE
+        || launcherUpdateState.lastResult?.localReinstallTest
+        || launcherUpdateState.lastResult?.purpose === LOCAL_REINSTALL_PURPOSE) {
+      recordErrorDiagnostic('launcher:localReinstallStart', error);
+      throw new Error('The local launcher reinstall test failed.');
+    }
+    throw error;
+  }
+}));
+ipcMain.handle('launcher:updateRestart', diagnosticIpc('launcher:updateRestart', async () => {
+  try {
+    const result = await restartLauncherUpdate();
+    return launcherUpdateResultForRenderer(result);
+  } catch (error) {
+    if (activeLocalReinstallRequest
+        || launcherUpdateState.localReinstallTest
+        || launcherUpdateState.purpose === LOCAL_REINSTALL_PURPOSE
+        || launcherUpdateState.lastResult?.localReinstallTest
+        || launcherUpdateState.lastResult?.purpose === LOCAL_REINSTALL_PURPOSE) {
+      recordErrorDiagnostic('launcher:localReinstallRestart', error);
+      throw new Error('The local launcher reinstall test failed.');
+    }
+    throw error;
+  }
+}));
 ipcMain.handle('launcher:updateState', async () => {
   await hydratePendingLauncherUpdateState();
-  return launcherUpdateState;
+  return launcherUpdateStateForRenderer(launcherUpdateState);
 });
 ipcMain.handle('account:register', async (_event, username) => registerMinecraftUsername(username));
 ipcMain.handle('legal:status', diagnosticIpc('legal:status', async () => launcherLegalStatus()));
@@ -8398,7 +10122,7 @@ ipcMain.handle('changes:scan', async (_event, payload = {}) => {
   if (developerClientBypassAllowed()) {
     return developerBypassLocalChangesState(config, 'developer-scan-bypass');
   }
-  return scanLocalChanges(config.instanceDir);
+  return scanCurrentLocalChanges(config);
 });
 ipcMain.handle('files:scan', async (_event, payload = {}) => {
   const config = configForPack(await loadConfig(), payload?.packKey || payload || 'stable');
@@ -8413,7 +10137,7 @@ ipcMain.handle('changes:sync', async (_event, payload = {}) => {
   const identity = await identityPayload(config);
   const changes = developerClientBypassAllowed()
     ? developerBypassLocalChangesState(config, 'developer-sync-bypass')
-    : await scanLocalChanges(config.instanceDir);
+    : await scanCurrentLocalChanges(config);
   return sendLauncherEvent(config, identity, {
     type: 'local_changes',
     version: null,
@@ -8959,6 +10683,7 @@ ipcMain.handle('dev:syncLauncherUpdate', diagnosticIpc('dev:syncLauncherUpdate',
 ipcMain.handle('dev:checkLauncherWorkflow', async (_event, payload) => checkLauncherWorkflow(payload));
 ipcMain.handle('dev:dispatchLauncherWorkflow', diagnosticIpc('dev:dispatchLauncherWorkflow', async (_event, payload) => dispatchLauncherWorkflow(payload)));
 ipcMain.handle('dev:deployLauncher', diagnosticIpc('dev:deployLauncher', async (_event, payload) => startLauncherDeploy(payload)));
+ipcMain.handle('dev:prepareLauncherReinstall', diagnosticIpc('dev:prepareLauncherReinstall', async () => prepareDeveloperLauncherReinstall()));
 ipcMain.handle('dev:launcherDeployState', async () => launcherDeployState);
 ipcMain.handle('dev:uploadState', async () => uploadState);
 ipcMain.handle('dev:saveServerTransfer', diagnosticIpc('dev:saveServerTransfer', async (_event, payload) => persistServerTransferSettings(payload)));
@@ -9036,6 +10761,31 @@ ipcMain.handle('dev:launcherUpdates', async (_event, payload = {}) => {
   if (payload.cursor) params.set('cursor', String(payload.cursor));
   return adminFetch(await loadConfig(), `admin/launcher-updates?${params.toString()}`);
 });
+ipcMain.handle('dev:accessDecisions', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const params = new URLSearchParams();
+  if (payload.active === true) params.set('active', 'true');
+  if (payload.history === true) params.set('history', 'true');
+  return adminFetch(await loadConfig(), `admin/access-decisions${params.size ? `?${params.toString()}` : ''}`);
+});
+ipcMain.handle('dev:setAccessDecision', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const action = String(payload.action || '').trim().toLowerCase();
+  const scope = String(payload.scope || '').trim().toLowerCase();
+  const value = String(payload.value || '').trim().slice(0, 160);
+  const reason = String(payload.reason || '').trim().slice(0, 500);
+  if (!['deny', 'allow'].includes(action)
+      || !['account', 'minecraft_uuid', 'device', 'ip'].includes(scope)
+      || !value
+      || (action === 'deny' && reason.length < 3)) {
+    throw new Error('A valid access action, scope, value, and ban reason are required.');
+  }
+  return adminFetch(await loadConfig(), 'admin/access-decisions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, scope, value, reason })
+  });
+});
 ipcMain.handle('dev:updateLogs', async (_event, limit = 20) => adminFetch(await loadConfig(), `admin/update-logs?limit=${limit}`));
 ipcMain.handle('dev:publishUpdateLog', diagnosticIpc('dev:publishUpdateLog', async (_event, payload) => {
   assertDeveloperAuthenticated();
@@ -9053,6 +10803,16 @@ if (!singleInstanceLock) {
 } else {
   app.on('second-instance', () => {
     focusMainWindow();
+    if (!isDeveloperMode() && !activeLocalReinstallRequest) {
+      consumeLocalReinstallRequest().then((request) => {
+        if (request && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.reload();
+          focusMainWindow();
+        }
+      }).catch((error) => {
+        recordErrorDiagnostic('launcher:localReinstallSecondInstance', error);
+      });
+    }
   });
 
   app.whenReady().then(async () => {
@@ -9061,6 +10821,11 @@ if (!singleInstanceLock) {
       writeTestStartupProbe('launcher-update-install-pending-exit', { version: app.getVersion() });
       app.exit(0);
       return;
+    }
+    if (!isDeveloperMode()) {
+      await consumeLocalReinstallRequest().catch((error) => {
+        recordErrorDiagnostic('launcher:localReinstallStartup', error);
+      });
     }
     createWindow();
   });

@@ -17,7 +17,8 @@ const checks = [
   ['test:close-during-update'],
   ['test:play-gate'],
   ['test:player-update-play'],
-  ['test:launcher-self-update']
+  ['test:launcher-self-update'],
+  ['test:developer-launcher-reinstall']
 ];
 
 function packageManagerInvocation(args) {

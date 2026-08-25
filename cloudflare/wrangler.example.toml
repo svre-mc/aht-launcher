@@ -2,6 +2,7 @@ name = "aht-curseforge-proxy"
 main = "curseforge-proxy-worker.js"
 compatibility_date = "2026-06-01"
 workers_dev = true
+keep_vars = true
 
 # After deployment:
 # wrangler secret put CURSEFORGE_API_KEY
@@ -11,6 +12,34 @@ workers_dev = true
 # wrangler secret put ADMIN_USERNAME
 # wrangler secret put ADMIN_PASSWORD
 # wrangler secret put ADMIN_TOKEN_SECRET
+# wrangler secret put AHT_SOCIAL_SERVER_SECRET
+
+# Optional Cloudflare Workers Rate Limiting binding for admin login attempts.
+# Choose a positive namespace ID unique to this limit in your Cloudflare account.
+# [[ratelimits]]
+# name = "AHT_ADMIN_RATE_LIMITER"
+# namespace_id = "1001"
+#   [ratelimits.simple]
+#   limit = 10
+#   period = 60
+
+# Optional per-IP protection for registration, proof issuance, and telemetry.
+# [[ratelimits]]
+# name = "AHT_PLAYER_API_RATE_LIMITER"
+# namespace_id = "1002"
+#   [ratelimits.simple]
+#   limit = 120
+#   period = 60
+
+# Optional per-origin protection for game-server proof verification. Use a
+# namespace ID that is unique across the Cloudflare account. Size this above
+# the highest legitimate reconnect burst from a single server egress IP.
+# [[ratelimits]]
+# name = "AHT_PROOF_VERIFY_RATE_LIMITER"
+# namespace_id = "1003"
+#   [ratelimits.simple]
+#   limit = 600
+#   period = 60
 
 # Public verification material is safe to configure as Worker vars. Never put
 # the PKCS#8 private key here or in any launcher/client artifact.
@@ -18,6 +47,9 @@ workers_dev = true
 # LAUNCHER_ATTESTATION_KEY_ID = "aht-launcher-attestation-v2"
 # LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI = "-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----"
 # LAUNCHER_PROOF_PACK_ID = "a-hard-time-dregora"
+# AHT_REQUIRE_DEVICE_ATTESTATION = "true" # Enable only after launcher rollout.
+# AHT_VPN_ASNS = "12345,67890"
+# AHT_BLOCK_LIKELY_VPN = "false"
 
 [[r2_buckets]]
 binding = "AHT_RELEASES"

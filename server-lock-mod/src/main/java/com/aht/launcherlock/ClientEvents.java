@@ -21,13 +21,18 @@ public class ClientEvents {
     }
 
     @SubscribeEvent
+    public void onDisconnected(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
+        this.sendDelayTicks = -1;
+    }
+
+    @SubscribeEvent
     public void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase != TickEvent.Phase.END || sendDelayTicks < 0) {
             return;
         }
         sendDelayTicks--;
         if (sendDelayTicks == 0) {
-            PackVersionLock.NETWORK.sendToServer(InstalledVersionReader.readInstalledVersion());
+            PackVersionLock.NETWORK.sendToServer(LauncherProofReader.readLauncherProof());
             sendDelayTicks = -1;
         }
     }

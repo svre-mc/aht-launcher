@@ -154,6 +154,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
     AHT_DEVELOPER_USERNAME: 'admin',
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
+    AHT_WRANGLER_COMMAND: process.execPath,
+    AHT_WRANGLER_ARGS_PREFIX: JSON.stringify([fakeWrangler]),
     PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
     FAKE_AUTH_STATE: authStatePath,
     FAKE_COMMAND_LOG: commandLogPath,

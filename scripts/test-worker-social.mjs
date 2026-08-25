@@ -8,10 +8,12 @@ import {
 const objects = new Map();
 const env = {
   LAUNCHER_PROOF_SECRET: 'proof-secret',
+  AHT_SOCIAL_SERVER_SECRET: 'test-social-server-secret-at-least-32-bytes',
   LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8: TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
   LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI: TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI,
   LAUNCHER_ATTESTATION_KEY_ID: 'aht-launcher-attestation-v2',
-  ADMIN_TOKEN_SECRET: 'admin-secret',
+  AHT_REQUIRED_LAUNCHER_VERSION: '0.1.86',
+  ADMIN_TOKEN_SECRET: 'test-admin-token-secret-at-least-32-bytes',
   AHT_DATA: {
     async put(key, value) {
       objects.set(key, String(value));
@@ -55,7 +57,7 @@ async function jsonRequest(path, options = {}, expectedStatus = 200) {
 
 function serverSignature(method, target, timestamp, body) {
   const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
-  return crypto.createHmac('sha256', env.LAUNCHER_PROOF_SECRET)
+  return crypto.createHmac('sha256', env.AHT_SOCIAL_SERVER_SECRET)
     .update(`${method}\n${target}\n${timestamp}\n${bodyHash}`)
     .digest('base64url');
 }
@@ -97,6 +99,7 @@ const proof = await jsonRequest('/api/launcher-proof', {
     minecraftUsername: 'SocialUser',
     installId: 'social-install',
     packId: 'a-hard-time-dregora',
+    appVersion: '0.1.86',
     installedVersion: '2.8.60'
   })
 });

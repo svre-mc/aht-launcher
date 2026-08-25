@@ -2418,17 +2418,126 @@ body.dev-mode.dev-locked #developerLoginScreen {
 
 .event-table-head.player-download-table,
 .data-events.player-download-table .event {
-  grid-template-columns: 145px minmax(130px, 0.9fr) 138px minmax(245px, 1.35fr) 90px;
+  grid-template-columns: 132px minmax(110px, 0.7fr) 124px minmax(145px, 0.9fr) minmax(130px, 0.9fr) minmax(220px, 1.2fr) 92px 112px;
 }
 
 .event-table-head.launcher-download-table,
 .data-events.launcher-download-table .event {
-  grid-template-columns: 145px 138px 90px 92px minmax(250px, 1fr);
+  grid-template-columns: 145px minmax(130px, 0.9fr) 138px minmax(245px, 1.35fr) 90px;
 }
 
 .event-table-head.player-update-table,
 .data-events.player-update-table .event {
   grid-template-columns: 145px minmax(130px, 0.9fr) 138px minmax(245px, 1.35fr) 90px 92px;
+}
+
+.event-table-head.player-access-table,
+.data-events.player-access-table .event {
+  grid-template-columns: 145px 120px minmax(210px, 1fr) 90px minmax(220px, 1.25fr) 120px;
+}
+
+.player-data-note {
+  margin: 0 0 10px;
+  color: #9da9ad;
+  font: 12px/1.5 var(--mono);
+}
+
+.player-access-button {
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 1px solid #48545a;
+  background: #161c1f;
+  color: #e7e2d6;
+  font: 700 11px var(--mono);
+  cursor: pointer;
+}
+
+.player-access-button:hover,
+.player-access-button:focus-visible {
+  border-color: #87b8d8;
+  background: #1c272c;
+}
+
+.player-access-denied {
+  color: #ef9b8f !important;
+}
+
+.player-access-allowed {
+  color: #9fd0ad !important;
+}
+
+.access-decision-dialog {
+  width: min(620px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid #3b464b;
+  background: #0d1113;
+  color: #e7e2d6;
+  box-shadow: 0 24px 80px #000c;
+}
+
+.access-decision-dialog::backdrop {
+  background: #030506c7;
+}
+
+.access-decision-dialog form {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.access-decision-head,
+.access-decision-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.access-decision-head span {
+  color: #87b8d8;
+  font: 700 11px var(--mono);
+  text-transform: uppercase;
+}
+
+.access-decision-head h2 {
+  margin: 4px 0 0;
+}
+
+.access-decision-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.access-decision-fields label {
+  display: grid;
+  gap: 6px;
+  color: #aeb7ba;
+  font: 700 11px var(--mono);
+  text-transform: uppercase;
+}
+
+.access-decision-fields select,
+.access-decision-fields textarea {
+  width: 100%;
+  border: 1px solid #333e43;
+  background: #111719;
+  color: #eee9de;
+  font: 12px var(--mono);
+}
+
+.access-decision-fields select {
+  min-height: 38px;
+  padding: 7px 9px;
+}
+
+.access-decision-fields textarea {
+  resize: vertical;
+  padding: 9px;
+}
+
+.access-decision-reason {
+  grid-column: 1 / -1;
 }
 
 .event-table-head {
@@ -3511,7 +3620,7 @@ body.dev-mode .toast {
 
   body.dev-mode .event-table-head.launcher-download-table,
   body.dev-mode .data-events.launcher-download-table .event {
-    grid-template-columns: 120px 120px 76px 82px minmax(210px, 1fr);
+    grid-template-columns: 120px minmax(110px, 0.85fr) 120px minmax(220px, 1.35fr) 76px;
   }
 
   body.dev-mode .event-table-head.player-update-table,

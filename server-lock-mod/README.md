@@ -1,28 +1,25 @@
-# AHT Version Lock
+# AHT Launcher Lock
 
-Forge 1.12.2 helper mod for private A Hard Time servers.
+Forge 1.12.2 reconnect gate for private A Hard Time servers.
 
-Install the built jar on both the client pack and the server. The launcher writes the client pack version to:
+Install the same `aht-version-lock-*.jar` on the client pack and dedicated server. The launcher starts Minecraft with the path of its short-lived, Worker-signed launcher proof. The client mod sends only that compact signed token to the server; the server calls the authoritative Worker endpoint and accepts the connection only when all of these checks pass:
 
-```text
-.aht-launcher/installed.json
-```
+- proof signature, issuer, audience, expiry, and reconnect window;
+- Minecraft username and UUID match the joining player;
+- account/install/device access remains allowed;
+- pack ID matches the server;
+- proof launcher version meets the version in `launcher/latest.json`.
 
-When a player connects, the client sends that installed `packId` and `version` to the server. The server compares it to `config/aht_version_lock.cfg` and disconnects players whose version is missing, outdated, or from the wrong pack.
-
-Build with Java 8:
-
-```powershell
-cd server-lock-mod
-gradle build
-```
-
-The release builder also writes a server config template to:
+Acceptance belongs to one connection. A launcher release can raise the version floor without polling or kicking players who are already connected. Logout clears acceptance, so the next connection must be verified against the current floor. An outdated reconnect receives:
 
 ```text
-server/aht_version_lock.cfg
+Current Launcher Version: 0.1.86
+Necessary Launcher Version: 0.1.87
+Update A Hard Time Launcher, restart it, and reconnect.
 ```
 
-Copy that file into the Minecraft server `config/` folder when publishing a new required pack version.
+The server fails closed on missing proof, identity mismatch, restricted access, timeout, malformed response, or Worker outage. Proof tokens and local proof paths are never logged. The token is not a server secret: the Worker signature and live server-side verification make client edits untrusted.
 
-The Gradle project compiles against Forge `1.12.2-14.23.5.2847` because that userdev artifact is available in the local ForgeGradle cache. The built mod only uses stable 1.12.2 Forge networking/events and is intended for Forge 1.12.2 packs, including the 14.23.5.2860 runtime used by the pack.
+Server configuration is `config/aht_version_lock.cfg`. The release builder generates the deployment template at `server/aht_version_lock.cfg`; it contains the endpoint, pack ID, timeouts, and player-facing messages. Launcher-version policy is intentionally not duplicated in that file.
+
+Build and deployment must use the reviewed AHT Java 8/ForgeGradle workflow documented by the AHT workspace guards. The project compiles against Forge `1.12.2-14.23.5.2847` and uses stable 1.12.2 networking/events compatible with the pack's 14.23.5.2860 runtime.

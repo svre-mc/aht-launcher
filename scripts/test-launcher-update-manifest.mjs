@@ -17,6 +17,7 @@ async function writeArtifact(name, text) {
 }
 
 await writeArtifact('AHT-Launcher-Windows-10-11-7.8.9.exe', 'windows');
+await writeArtifact('AHT-Launcher-Windows-10-11-7.8.9.zip', 'windows-staged-update');
 await writeArtifact('AHT-Launcher-macOS-arm64-7.8.9.zip', 'mac-arm-update');
 await writeArtifact('AHT-Launcher-macOS-x64-7.8.9.zip', 'mac-x64-update');
 await writeArtifact('AHT-Launcher-macOS-arm64-7.8.9.dmg', 'mac-arm-installer');
@@ -37,13 +38,17 @@ const uploadScript = await fsp.readFile(new URL('./upload-r2-plan.mjs', import.m
 const manifest = result.manifest;
 const validation = validateLauncherUpdateManifest(manifest, {
   latestUrl: 'https://example.test/launcher/latest.json',
-  requireTrackedDownloads: true
+  requireTrackedDownloads: true,
+  requireStagedWindows: true
 });
 assert(validation.ok, `generated launcher manifest failed reusable validation: ${validation.errors.join('; ')}`);
 const requiredDownloadKeys = REQUIRED_DOWNLOAD_KEYS;
 assert(uploadScript.includes("process.platform === 'win32' && /\\.cmd$/i.test(command)"), 'Windows R2 upload must shell-wrap npx.cmd');
 assert(manifest.version === '7.8.9', 'manifest version mismatch');
-assert(manifest.platforms['win32-x64']?.installArgs?.[0] === '/S', 'Windows silent install args missing');
+assert(manifest.platforms['win32-x64']?.installArgs?.[0] === '/S', 'Legacy Windows installer fallback must retain silent install args');
+assert(manifest.stagedPlatforms['win32-x64']?.kind === 'zip', 'Windows in-app updates must use a pre-staged ZIP payload');
+assert(manifest.stagedPlatforms['windows-x64']?.fileName?.endsWith('.zip'), 'Windows staged update alias must point at the ZIP payload');
+assert(manifest.stagedPlatforms['win32-x64']?.sha256 !== manifest.platforms['win32-x64']?.sha256, 'Windows staged ZIP and manual NSIS installer must be distinct artifacts');
 assert(manifest.platforms['darwin-arm64']?.path?.includes('/darwin-arm64/'), 'Apple Silicon path missing');
 assert(manifest.platforms['darwin-x64']?.path?.includes('/darwin-x64/'), 'Intel macOS path missing');
 assert(manifest.platforms['darwin-arm64']?.kind === 'zip', 'Apple Silicon launcher updates must use ZIP, not DMG');
@@ -91,6 +96,7 @@ badManifest.downloads['macos-x64'].path = 'launcher/files/darwin-x64/AHT-Launche
 badManifest.downloads['macos-arm64'].url = 'https://example.test/launcher/files/darwin-arm64/AHT-Launcher-macOS-arm64-7.8.8.dmg';
 badManifest.platforms['win32-x64'].url = badManifest.platforms['win32-x64'].url.replace('https://', 'http://');
 badManifest.platforms['windows-x64'].installArgs = [];
+badManifest.stagedPlatforms['win32-x64'].kind = 'nsis';
 badManifest.platforms['darwin-arm64'].kind = 'dmg';
 const badValidation = validateLauncherUpdateManifest(badManifest, {
   latestUrl: 'https://example.test/launcher/latest.json',
@@ -101,10 +107,12 @@ assert(badValidation.errors.some((error) => error.includes('path basename must m
 assert(badValidation.errors.some((error) => error.includes('url basename must match fileName')), 'manifest validator must reject artifact URLs that point at a different fileName');
 assert(badValidation.errors.some((error) => error.includes('platforms.win32-x64 url must point at launcher/files/')), 'manifest validator must reject non-HTTPS launcher artifact URLs');
 assert(badValidation.errors.some((error) => error.includes('platforms.windows-x64 must include /S silent install args')), 'manifest validator must reject Windows platform artifacts without silent install args');
+assert(badValidation.errors.some((error) => error.includes('stagedPlatforms.win32-x64 kind must be zip')), 'manifest validator must reject a Windows staged update that is not a ZIP');
 assert(badValidation.errors.some((error) => error.includes('platforms.darwin-arm64 kind must be zip')), 'manifest validator must reject macOS self-update platform artifacts that are not ZIPs');
 
 const staleArtifacts = path.join(root, 'stale-artifacts');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-Windows-10-11-7.8.8.exe'), 'stale-windows');
+await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-Windows-10-11-7.8.8.zip'), 'stale-windows-update');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-macOS-arm64-7.8.8.zip'), 'stale-mac-arm-update');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-macOS-x64-7.8.8.zip'), 'stale-mac-x64-update');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-macOS-arm64-7.8.8.dmg'), 'stale-mac-arm-installer');
@@ -118,7 +126,7 @@ try {
     latestUrl: 'https://example.test/launcher/latest.json'
   });
 } catch (error) {
-  staleRejected = String(error?.message || error).includes('Missing Windows 10/11 launcher artifact');
+  staleRejected = String(error?.message || error).includes('Missing Windows 10/11');
 }
 assert(staleRejected, 'launcher update prep must reject artifacts that do not match the manifest/package version');
 

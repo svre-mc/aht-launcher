@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 export const REQUIRED_DOWNLOAD_KEYS = ['windows-x64', 'macos-arm64', 'macos-x64'];
+export const REQUIRED_STAGED_WINDOWS_KEYS = ['win32-x64', 'win32', 'windows', 'windows-x64'];
 export const REQUIRED_PLATFORM_KEYS = [
   'win32-x64',
   'win32',
@@ -127,10 +128,15 @@ function validateWindowsSilentInstall(errors, entry, key) {
 
 function validateKnownEntryShape(errors, entry, key) {
   if (!isObject(entry)) return;
-  const entryKey = String(key || '').replace(/^(?:downloads|platforms)\./, '');
+  const collection = String(key || '').split('.')[0];
+  const entryKey = String(key || '').replace(/^(?:downloads|platforms|stagedPlatforms)\./, '');
   if (/^(?:win32|windows)/i.test(entryKey)) {
-    validateKindAndExtension(errors, entry, key, 'nsis', '.exe');
-    validateWindowsSilentInstall(errors, entry, key);
+    if (collection === 'stagedPlatforms') {
+      validateKindAndExtension(errors, entry, key, 'zip', '.zip');
+    } else {
+      validateKindAndExtension(errors, entry, key, 'nsis', '.exe');
+      validateWindowsSilentInstall(errors, entry, key);
+    }
   }
   if (/^(?:darwin|macos)/i.test(entryKey)) {
     const isManualDownload = key.startsWith('downloads.macos-');
@@ -146,10 +152,16 @@ export function launcherPlatformKeys(platform = process.platform, arch = process
 }
 
 export function selectLauncherArtifact(manifest, platform = process.platform, arch = process.arch) {
+  const stagedPlatforms = manifest?.stagedPlatforms || {};
   const platforms = manifest?.platforms || {};
   for (const key of launcherPlatformKeys(platform, arch)) {
+    if (stagedPlatforms[key]) {
+      return { key, delivery: 'pre-staged', ...stagedPlatforms[key] };
+    }
+  }
+  for (const key of launcherPlatformKeys(platform, arch)) {
     if (platforms[key]) {
-      return { key, ...platforms[key] };
+      return { key, delivery: 'legacy-installer', ...platforms[key] };
     }
   }
   return null;
@@ -170,9 +182,13 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
   if (!manifestVersion) errors.push('version is missing');
   if (manifest.required !== true) errors.push('required must be true');
   if (!isObject(manifest.platforms)) errors.push('platforms must be an object');
+  if (manifest.stagedPlatforms !== undefined && !isObject(manifest.stagedPlatforms)) {
+    errors.push('stagedPlatforms must be an object when present');
+  }
   if (requireDownloads && !isObject(manifest.downloads)) errors.push('downloads must be an object');
 
   const platforms = isObject(manifest.platforms) ? manifest.platforms : {};
+  const stagedPlatforms = isObject(manifest.stagedPlatforms) ? manifest.stagedPlatforms : {};
   const downloads = isObject(manifest.downloads) ? manifest.downloads : {};
   if (requireAllPlatforms) {
     for (const key of REQUIRED_PLATFORM_KEYS) {
@@ -186,6 +202,11 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
       if (!downloads[key]) errors.push(`manual download entry missing: ${key}`);
     }
   }
+  if (options.requireStagedWindows) {
+    for (const key of REQUIRED_STAGED_WINDOWS_KEYS) {
+      if (!stagedPlatforms[key]) errors.push(`staged platform entry missing: ${key}`);
+    }
+  }
 
   const forbiddenDownloadKeys = Object.keys(downloads).filter((key) => /^darwin|^win32|linux|ubuntu/i.test(key));
   if (forbiddenDownloadKeys.length) {
@@ -195,6 +216,10 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
   if (forbiddenPlatformKeys.length) {
     errors.push(`platforms must not publish Linux artifacts: ${forbiddenPlatformKeys.join(', ')}`);
   }
+  const forbiddenStagedPlatformKeys = Object.keys(stagedPlatforms).filter((key) => /linux|ubuntu/i.test(key));
+  if (forbiddenStagedPlatformKeys.length) {
+    errors.push(`stagedPlatforms must not publish Linux artifacts: ${forbiddenStagedPlatformKeys.join(', ')}`);
+  }
 
   for (const [key, entry] of Object.entries(downloads)) {
     validateCommonEntry(errors, entry, `downloads.${key}`, expectedRootUrl, manifestVersion, options);
@@ -203,6 +228,10 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
   for (const [key, entry] of Object.entries(platforms)) {
     validateCommonEntry(errors, entry, `platforms.${key}`, expectedRootUrl, manifestVersion, options);
     validateKnownEntryShape(errors, entry, `platforms.${key}`);
+  }
+  for (const [key, entry] of Object.entries(stagedPlatforms)) {
+    validateCommonEntry(errors, entry, `stagedPlatforms.${key}`, expectedRootUrl, manifestVersion, options);
+    validateKnownEntryShape(errors, entry, `stagedPlatforms.${key}`);
   }
 
   return { ok: errors.length === 0, errors };

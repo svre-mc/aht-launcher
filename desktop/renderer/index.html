@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http://127.0.0.1:* http://localhost:*; media-src 'self' blob: data: https: http://127.0.0.1:* http://localhost:*; frame-src https://www.youtube.com; connect-src 'self'">
   <title>A Hard Time Launcher</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -228,6 +229,7 @@
               <label class="span-2">Pack ZIP <span class="browse"><input id="packZipInput" type="text"><button id="pickZipButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label class="span-2">CurseForge API Key <input id="curseforgeApiKeyInput" type="password" autocomplete="off"></label>
               <label class="span-2">Launcher Proof Secret <span class="browse"><input id="launcherProofSecretInput" type="password" autocomplete="off" placeholder="Same value must be set on the server"><button id="generateProofSecretButton" class="button compact" type="button"><span class="button-icon icon-shield" aria-hidden="true"></span>Generate</button></span></label>
+              <label class="span-2">Server Social Secret <span class="browse"><input id="socialServerSecretInput" type="password" autocomplete="off" placeholder="Dedicated AHT_SOCIAL_SERVER_SECRET (32+ characters)"><button id="generateSocialSecretButton" class="button compact" type="button"><span class="button-icon icon-shield" aria-hidden="true"></span>Generate</button></span></label>
             </div>
             <div class="settings-row">
               <label class="switch"><input id="cacheOnlyInput" type="checkbox"><span></span>Cache-only mode</label>
@@ -303,6 +305,7 @@
             <div class="dev-section-head">
               <h2>Launcher Updates</h2>
               <div class="dev-actions">
+                <button id="testLauncherReinstallButton" class="button compact" type="button"><span class="button-icon icon-sync" aria-hidden="true"></span>Test Local Reinstall</button>
                 <button id="scanLauncherBuildsButton" class="button compact"><span class="button-icon icon-scan" aria-hidden="true"></span>Check GitHub</button>
                 <button id="publishLauncherUpdateButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Deploy Latest Launcher</button>
               </div>
@@ -319,6 +322,13 @@
                 <strong>GitHub Actions ready</strong>
               </div>
               <p>Run the GitHub release workflow. Actions builds Windows and macOS, publishes GitHub Releases, uploads R2, then players update from launcher/latest.json.</p>
+            </div>
+            <div id="launcherReinstallStatus" class="release-check-card warn">
+              <div>
+                <span>Regular launcher update test</span>
+                <strong>Open the installed player launcher</strong>
+              </div>
+              <p>Uses the exact current-version Windows ZIP as a one-time local update. The installed regular AHT Launcher opens with its normal update window, runs the real copy, hash, staging, Restart Launcher, swap, relaunch, and acknowledgement flow, and never publishes or downloads live update data.</p>
             </div>
             <div id="launcherDeployProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="launcherDeployProgressLabel">Preparing public deploy</span><span id="launcherDeployProgressCount">0%</span></div>
@@ -391,13 +401,14 @@
                   <button id="playerDownloadsTab" class="player-data-tab active" type="button" data-player-data-view="downloads">Downloads</button>
                   <button id="playerRecordsTab" class="player-data-tab" type="button" data-player-data-view="players">Players</button>
                   <button id="playerLauncherUpdatesTab" class="player-data-tab" type="button" data-player-data-view="updates">Launcher Updates</button>
+                  <button id="playerAccessTab" class="player-data-tab" type="button" data-player-data-view="access">Access Control</button>
                 </nav>
               </div>
               <button id="loadDashboardButton" class="button compact" type="button"><span class="button-icon icon-activity" aria-hidden="true"></span>Reload</button>
             </div>
             <div id="playerDownloadsPanel" class="player-data-panel">
               <div class="event-table-head launcher-download-table">
-                <span>Date</span><span>IPv4</span><span>Platform</span><span>Version</span><span>File</span>
+                <span>Date</span><span>User</span><span>IP</span><span>MC UUID</span><span>Platform</span>
               </div>
               <div id="playerDownloadsList" class="events data-events launcher-download-table">
                 <div class="empty-state">No installer downloads found.</div>
@@ -405,7 +416,7 @@
             </div>
             <div id="playerRecordsPanel" class="player-data-panel" hidden>
               <div class="event-table-head player-download-table">
-                <span>Registered</span><span>User</span><span>IPv4</span><span>MC UUID</span><span>Platform</span>
+                <span>Last Seen</span><span>User</span><span>IP</span><span>Network</span><span>Device</span><span>MC UUID</span><span>Access</span><span>Action</span>
               </div>
               <div id="playerRecordsList" class="events data-events player-download-table">
                 <div class="empty-state">No players found.</div>
@@ -413,10 +424,19 @@
             </div>
             <div id="playerLauncherUpdatesPanel" class="player-data-panel" hidden>
               <div class="event-table-head player-update-table">
-                <span>Date</span><span>User</span><span>IPv4</span><span>MC UUID</span><span>Platform</span><span>Version</span>
+                <span>Date</span><span>User</span><span>IP</span><span>MC UUID</span><span>Platform</span><span>Version</span>
               </div>
               <div id="playerLauncherUpdatesList" class="events data-events player-update-table">
                 <div class="empty-state">No launcher updates found.</div>
+              </div>
+            </div>
+            <div id="playerAccessPanel" class="player-data-panel" hidden>
+              <p class="player-data-note">Device controls use an OS-protected, cryptographic launcher-install identity. They do not scrape hardware serial numbers. VPN status is shown as likely, not detected, or unknown according to configured network intelligence.</p>
+              <div class="event-table-head player-access-table">
+                <span>Updated</span><span>Scope</span><span>Value</span><span>Status</span><span>Reason</span><span>Admin</span>
+              </div>
+              <div id="playerAccessList" class="events data-events player-access-table">
+                <div class="empty-state">No access decisions found.</div>
               </div>
             </div>
             <pre id="devLog" hidden></pre>
@@ -425,6 +445,42 @@
       </section>
     </section>
   </main>
+
+  <dialog id="accessDecisionDialog" class="access-decision-dialog">
+    <form id="accessDecisionForm" method="dialog">
+      <div class="access-decision-head">
+        <div>
+          <span>Server-authoritative control</span>
+          <h2 id="accessDecisionTitle">Manage player access</h2>
+        </div>
+        <button id="accessDecisionClose" class="ghost-button compact" type="button" aria-label="Close">Close</button>
+      </div>
+      <p id="accessDecisionIdentity" class="player-data-note"></p>
+      <div class="access-decision-fields">
+        <label>Action
+          <select id="accessDecisionAction">
+            <option value="deny">Restrict access</option>
+            <option value="allow">Restore access</option>
+          </select>
+        </label>
+        <label>Scope
+          <select id="accessDecisionScope">
+            <option value="account">Minecraft account</option>
+            <option value="device">Device credential</option>
+            <option value="minecraft_uuid">Minecraft UUID</option>
+            <option value="ip">IP address</option>
+          </select>
+        </label>
+        <label class="access-decision-reason">Audit reason
+          <textarea id="accessDecisionReason" rows="4" maxlength="500" placeholder="Required when restricting access"></textarea>
+        </label>
+      </div>
+      <div class="access-decision-actions">
+        <span id="accessDecisionStatus" class="field-help"></span>
+        <button id="accessDecisionSubmit" class="button" type="submit">Apply decision</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="downloadsOverlay" class="overlay downloads-overlay" hidden>
     <section class="downloads-dialog" role="dialog" aria-modal="true" aria-labelledby="downloadsTitle">

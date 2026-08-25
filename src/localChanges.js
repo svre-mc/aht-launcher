@@ -191,8 +191,16 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
   return added;
 }
 
-async function loadManaged(instanceDir) {
-  const managedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
+async function loadManaged(instanceDir, options = {}) {
+  if (Array.isArray(options.managedFiles)) {
+    return options.managedFiles;
+  }
+  if (options.ignoreLocalManaged === true && !options.managedPath) {
+    return [];
+  }
+  const managedPath = options.managedPath
+    ? path.resolve(options.managedPath)
+    : path.join(instanceDir, '.aht-launcher', 'managed-files.json');
   if (!(await pathExists(managedPath))) {
     return [];
   }
@@ -205,7 +213,7 @@ function statNanoseconds(stat, field) {
   return BigInt(Math.round(Number(stat?.[`${field}Ms`] || 0) * 1_000_000));
 }
 
-async function captureFingerprintFromManaged(instanceDir, managed = []) {
+async function captureFingerprintFromManaged(instanceDir, managed = [], options = {}) {
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const managedDirs = managedDirectoryPrefixes(managedSet);
   const actualEntries = [];
@@ -214,26 +222,30 @@ async function captureFingerprintFromManaged(instanceDir, managed = []) {
   let visited = 0;
   let latestChangeMs = 0;
 
-  const managedManifestPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
-  try {
-    const manifestStat = await fs.lstat(managedManifestPath, { bigint: true });
-    const manifestMtimeNs = statNanoseconds(manifestStat, 'mtime');
-    const manifestCtimeNs = statNanoseconds(manifestStat, 'ctime');
-    latestChangeMs = Math.max(
-      latestChangeMs,
-      Number(manifestMtimeNs / 1_000_000n),
-      Number(manifestCtimeNs / 1_000_000n)
-    );
-    actualEntries.push({
-      path: '.aht-launcher/managed-files.json',
-      type: 'manifest',
-      size: manifestStat.size.toString(),
-      mtimeNs: manifestMtimeNs.toString(),
-      ctimeNs: manifestCtimeNs.toString(),
-      ino: manifestStat.ino.toString()
-    });
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
+  const managedManifestPath = options.managedPath
+    ? path.resolve(options.managedPath)
+    : (options.ignoreLocalManaged === true ? '' : path.join(instanceDir, '.aht-launcher', 'managed-files.json'));
+  if (managedManifestPath) {
+    try {
+      const manifestStat = await fs.lstat(managedManifestPath, { bigint: true });
+      const manifestMtimeNs = statNanoseconds(manifestStat, 'mtime');
+      const manifestCtimeNs = statNanoseconds(manifestStat, 'ctime');
+      latestChangeMs = Math.max(
+        latestChangeMs,
+        Number(manifestMtimeNs / 1_000_000n),
+        Number(manifestCtimeNs / 1_000_000n)
+      );
+      actualEntries.push({
+        path: 'managed-manifest-state',
+        type: 'manifest',
+        size: manifestStat.size.toString(),
+        mtimeNs: manifestMtimeNs.toString(),
+        ctimeNs: manifestCtimeNs.toString(),
+        ino: manifestStat.ino.toString()
+      });
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
   }
 
   for (const root of MONITORED_ROOTS) {
@@ -310,13 +322,13 @@ async function captureFingerprintFromManaged(instanceDir, managed = []) {
 }
 
 export async function captureManagedModFingerprint(instanceDir, options = {}) {
-  const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
-  return captureFingerprintFromManaged(instanceDir, managed);
+  const managed = managedModFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
+  return captureFingerprintFromManaged(instanceDir, managed, options);
 }
 
 export async function scanLocalChanges(instanceDir, options = {}) {
   const limit = options.limit || 500;
-  const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
+  const managed = managedModFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
   const managedToCheck = managed.filter((item) => item.relativePath);
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
@@ -383,7 +395,7 @@ export async function scanLocalChanges(instanceDir, options = {}) {
 
 export async function scanManagedIntegrity(instanceDir, options = {}) {
   const limit = options.limit || 500;
-  const managed = managedModFiles(await loadManaged(instanceDir), options.requiredManaged || []);
+  const managed = managedModFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
   const managedToCheck = managed.filter((item) => item.relativePath);
   const managedSet = new Set(managed.map((item) => item.relativePath));
   const changed = [];
@@ -433,7 +445,7 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
   const added = await scanAddedModFiles(instanceDir, managedSet, limit, { yieldEvery: 25 });
   reportProgress('Integrity scan complete', managedToCheck.length, managedToCheck.length);
   const corruptCount = changed.length + missing.length + added.length;
-  const fingerprint = await captureFingerprintFromManaged(instanceDir, managed);
+  const fingerprint = await captureFingerprintFromManaged(instanceDir, managed, options);
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,

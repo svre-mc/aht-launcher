@@ -16,8 +16,12 @@ const workerEndpoint = `http://127.0.0.1:${workerPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-play-gate-'));
 const userData = path.join(root, 'userData');
 const fakeHome = path.join(root, 'home');
-const fakeAppData = path.join(root, 'appdata');
-const fakeLocalAppData = path.join(root, 'localappdata');
+const fakeAppData = process.platform === 'win32'
+  ? path.join(fakeHome, 'AppData', 'Roaming')
+  : path.join(root, 'appdata');
+const fakeLocalAppData = process.platform === 'win32'
+  ? path.join(fakeHome, 'AppData', 'Local')
+  : path.join(root, 'localappdata');
 const fakeProgramFiles = path.join(root, 'program-files');
 const fakeProgramFilesX86 = path.join(root, 'program-files-x86');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
@@ -45,7 +49,12 @@ const electronArgs = smokeExe
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
-await fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true });
+await Promise.all([
+  fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true }),
+  fsp.mkdir(fakeAppData, { recursive: true }),
+  fsp.mkdir(fakeLocalAppData, { recursive: true }),
+  fsp.mkdir(userData, { recursive: true })
+]);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,6 +68,14 @@ async function writeJson(file, value) {
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
+
+const integrityStatePath = path.join(
+  userData,
+  'instance-state',
+  sha256(path.resolve(instanceDir)).slice(0, 24),
+  'integrity.json'
+);
+const launcherProofStatePath = path.join(userData, '.aht-launcher', 'launcher-proof.json');
 
 async function waitForTarget() {
   let lastError;
@@ -156,6 +173,27 @@ const latest = {
 
 const expectedContent = 'managed=true\n';
 const corruptContent = 'managed=false\n';
+const clientManifest = {
+  format: 'aht-client-manifest-v1',
+  packId: latest.packId,
+  version: latest.version,
+  files: [{
+    relativePath: 'config/aht-integrity-test.cfg',
+    size: Buffer.byteLength(expectedContent),
+    sha256: sha256(expectedContent)
+  }, {
+    relativePath: 'mods/aht-integrity-test.jar',
+    size: Buffer.byteLength(expectedContent),
+    sha256: sha256(expectedContent)
+  }]
+};
+const clientManifestBody = JSON.stringify(clientManifest);
+latest.clientManifest = {
+  format: 'aht-client-manifest-v1',
+  url: 'client-manifest.json',
+  size: Buffer.byteLength(clientManifestBody),
+  sha256: sha256(clientManifestBody)
+};
 const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
 await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
 await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
@@ -249,7 +287,7 @@ await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), co
 await writeForgeInstallationFixture(mcRoot, { versionId: '1.12.2-forge-14.23.5.2860' });
 
 const registeredUsers = new Map();
-let launcherProofRequests = 0;
+const launcherProofRequests = [];
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/latest.json') {
@@ -268,6 +306,12 @@ const server = http.createServer((request, response) => {
         sha256: sha256('old legacy cache bytes')
       }]
     }));
+    return;
+  }
+  if (url.pathname === '/client-manifest.json') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(clientManifestBody);
     return;
   }
   if (url.pathname === '/api/users/register') {
@@ -297,11 +341,11 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url.pathname === '/api/launcher-proof') {
-    launcherProofRequests += 1;
     let body = '';
     request.on('data', (chunk) => { body += String(chunk); });
     request.on('end', () => {
       const payload = JSON.parse(body || '{}');
+      launcherProofRequests.push(payload);
       const username = String(payload.minecraftUsername || '').trim().toLowerCase();
       const installId = String(payload.installId || '').trim();
       if (!username || registeredUsers.get(username) !== installId) {
@@ -400,7 +444,7 @@ try {
   if (initialFailureReports.length !== 1) {
     throw new Error(`Initial status failure Play did not create exactly one report: ${JSON.stringify({ initialPlayFailure, initialFailureReports })}`);
   }
-  await fsp.rm(path.join(instanceDir, '.aht-launcher', 'integrity.json'), { force: true });
+  await fsp.rm(integrityStatePath, { force: true });
   for (const name of initialFailureReports) {
     await fsp.rm(path.join(initialLaunchLogsDir, name), { force: true });
   }
@@ -413,6 +457,13 @@ try {
   if (!registration.ok || !registration.result?.ok) {
     throw new Error(`Smoke player account registration failed: ${JSON.stringify(registration)}`);
   }
+  await writeJson(integrityStatePath, {
+    generatedAt: new Date(Date.now() + 60_000).toISOString(),
+    valid: true,
+    counts: { managed: 2, checked: 2, ok: 2, changed: 0, missing: 0, added: 0, corrupted: 0 },
+    fingerprint: { schemaVersion: 1, digest: '0'.repeat(64), managedCount: 2, pathsValid: true },
+    source: 'forged-local-cache'
+  });
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '2.8.2' ? status : false)
   `, 'release feed');
@@ -444,7 +495,7 @@ try {
     throw new Error(`Blocked Play must stay clickable while explaining the preflight problem: ${JSON.stringify(blockedPlayUi)}`);
   }
 
-  const persistedIntegrity = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'integrity.json'), 'utf8'));
+  const persistedIntegrity = JSON.parse(fs.readFileSync(integrityStatePath, 'utf8'));
   if (persistedIntegrity.source !== 'play-check' || persistedIntegrity.counts?.corrupted !== 1) {
     throw new Error(`Play check integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
   }
@@ -560,7 +611,7 @@ try {
   ) {
     throw new Error(`Clean Play did not write the 6 GB and Java 8 launcher profile: ${JSON.stringify(cleanProfile)}`);
   }
-  const proof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+  const proof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
   if (!proof.trusted || proof.source !== 'worker' || !Array.isArray(proof.javaProperties) || !proof.javaProperties.some((arg) => arg.startsWith('-Daht.launcher.proofFile='))) {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
   }
@@ -615,7 +666,7 @@ try {
     ) {
       throw new Error(`Desktop Minecraft Launcher fallback did not preserve the configured workDir and visible GUI contract: ${JSON.stringify(desktopSpawnCapture)}`);
     }
-    desktopFallbackProof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+    desktopFallbackProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     if (!desktopFallbackProof.payload?.launchId || desktopFallbackProof.payload.launchId === proof.payload?.launchId) {
       throw new Error(`Desktop fallback Play reused the prior one-time launchId: ${JSON.stringify({ first: proof.payload?.launchId, desktop: desktopFallbackProof.payload?.launchId })}`);
     }
@@ -699,9 +750,6 @@ try {
     if (curseForgePlayDurationMs >= 5000) {
       throw new Error(`Prepared CurseForge Play took too long (${curseForgePlayDurationMs}ms).`);
     }
-    if (launcherProofRequests !== 3) {
-      throw new Error(`Each Play must request a fresh one-time launcher proof; expected 3 requests, got ${launcherProofRequests}.`);
-    }
     const handoffReportsBeforeCopy = fs.readdirSync(launchLogsDir)
       .filter((name) => /^AHT-Launch-.*-HANDOFF.*\.txt$/i.test(name))
       .sort((left, right) => fs.statSync(path.join(launchLogsDir, left)).mtimeMs - fs.statSync(path.join(launchLogsDir, right)).mtimeMs);
@@ -750,7 +798,7 @@ try {
     if (!refreshedHandoffText.includes(postHandoffSignal) || !refreshedHandoffText.includes(currentInstanceSignal) || refreshedHandoffText.includes(stalePreLaunchSignal) || refreshedHandoffText.includes(staleInstanceSignal)) {
       throw new Error(`Copy latest launch report did not refresh the HANDOFF report with the new exit signal: ${refreshedHandoffText.slice(-1800)}`);
     }
-    const curseForgeProof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+    const curseForgeProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     if (
       !curseForgeProof.payload?.launchId
       || curseForgeProof.payload.launchId === proof.payload?.launchId
@@ -847,9 +895,9 @@ try {
     if (launcherUiSettings.lastVisitedPage !== 'home' || !launcherUiStateRaw.startsWith(launcherUiPreamble)) {
       throw new Error(`Play did not prepare Minecraft Launcher Home safely: ${launcherUiStateRaw}`);
     }
-    const fastIntegrity = await evaluate(client, 'window.aht.getStatus().then((status) => status.integrity)');
-    if (fastIntegrity?.checkMode !== 'fingerprint' || !fastIntegrity?.quickCheckedAt) {
-      throw new Error(`Prepared Play did not use the verified fingerprint path: ${JSON.stringify(fastIntegrity)}`);
+    const verifiedIntegrity = await evaluate(client, 'window.aht.getStatus().then((status) => status.integrity)');
+    if (verifiedIntegrity?.checkMode !== 'full-hash' || verifiedIntegrity?.source !== 'play-check') {
+      throw new Error(`Prepared Play did not perform a fresh authoritative hash scan: ${JSON.stringify(verifiedIntegrity)}`);
     }
     const retryUi = await evaluate(client, `(() => {
       const button = document.querySelector('#playButton');
@@ -874,15 +922,25 @@ try {
     if (retryMigrationBackups.length !== 1) {
       throw new Error(`CurseForge settings self-heal created duplicate backups: ${JSON.stringify(retryMigrationBackups)}`);
     }
-    const retryProof = JSON.parse(fs.readFileSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+    const retryProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
+    const playLaunchIds = [
+      proof.payload?.launchId,
+      desktopFallbackProof.payload?.launchId,
+      curseForgeProof.payload?.launchId,
+      retryProof.payload?.launchId
+    ];
+    const requestedLaunchIds = launcherProofRequests.map((request) => request?.launchId).filter(Boolean);
+    const missingOrRepeatedPlayLaunchIds = playLaunchIds.filter((launchId) => (
+      !launchId || requestedLaunchIds.filter((requested) => requested === launchId).length !== 1
+    ));
     if (
-      launcherProofRequests !== 4
-      || !retryProof.payload?.launchId
+      missingOrRepeatedPlayLaunchIds.length > 0
+      || new Set(playLaunchIds).size !== playLaunchIds.length
       || retryProof.payload.launchId === curseForgeProof.payload.launchId
       || retryProof.payload.launchId === desktopFallbackProof.payload?.launchId
       || retryProof.payload.launchId === proof.payload?.launchId
     ) {
-      throw new Error(`Later Play did not receive a fourth distinct one-time launchId: ${JSON.stringify({ requests: launcherProofRequests, first: proof.payload?.launchId, desktop: desktopFallbackProof.payload?.launchId, curseForge: curseForgeProof.payload?.launchId, retry: retryProof.payload?.launchId })}`);
+      throw new Error(`Each explicit Play did not receive one distinct one-time launchId: ${JSON.stringify({ requestCount: launcherProofRequests.length, requestedLaunchIds, playLaunchIds, missingOrRepeatedPlayLaunchIds })}`);
     }
     curseForgePlayResult.durationMs = curseForgePlayDurationMs;
     curseForgePlayResult.distinctLaunchIds = 4;
@@ -901,7 +959,7 @@ try {
     curseForgeLaunchCommand: curseForgePlayResult?.result?.command || '',
     curseForgeLaunchKind: curseForgePlayResult?.result?.kind || '',
     curseForgePlayDurationMs: curseForgePlayResult?.durationMs || 0,
-    launcherProofRequests,
+    launcherProofRequests: launcherProofRequests.length,
     distinctLaunchIds: curseForgePlayResult?.distinctLaunchIds || 1,
     proofSource: proof.source,
     integrity: {

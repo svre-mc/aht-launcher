@@ -277,6 +277,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
+    AHT_WRANGLER_COMMAND: process.execPath,
+    AHT_WRANGLER_ARGS_PREFIX: JSON.stringify([fakeWrangler]),
     PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
     FAKE_R2_ROOT: fakeR2Root,
     FAKE_UPLOAD_LOG: uploadLog,
@@ -312,6 +314,7 @@ try {
   const secrets = await evaluate(client, `window.aht.devCloudSetupSecrets({
     curseforgeApiKey: 'fake-cf-key',
     launcherProofSecret: 'proof-secret',
+    socialServerSecret: 'test-social-server-secret-at-least-32-bytes',
     adminUsername: 'admin',
     adminPassword: 'test-dev-password',
     releaseBucket: ${JSON.stringify(bucket)},

@@ -310,6 +310,11 @@ FunctionEnd
 
 !macro customInstall
   CreateDirectory "$APPDATA\aht-launcher"
+  ; A silent self-update must not replace the already-consumed player choice.
+  ; The installer owns this file only on first install or an interactive reinstall.
+  ${If} ${Silent}
+    IfFileExists "$APPDATA\aht-launcher\installer-java8-selection.json" AhtJavaSelectionDone 0
+  ${EndIf}
   FileOpen $0 "$APPDATA\aht-launcher\installer-java8-selection.json" w
   ${If} $AhtInstallManagedJava == ${BST_CHECKED}
     FileWrite $0 '{$\"schemaVersion$\":1,$\"allowManagedJava8$\":true}$\r$\n'
@@ -317,6 +322,7 @@ FunctionEnd
     FileWrite $0 '{$\"schemaVersion$\":1,$\"allowManagedJava8$\":false}$\r$\n'
   ${EndIf}
   FileClose $0
+AhtJavaSelectionDone:
 
   ${If} $AhtCreateDesktopShortcut != ${BST_CHECKED}
     WinShell::UninstShortcut "$newDesktopLink"

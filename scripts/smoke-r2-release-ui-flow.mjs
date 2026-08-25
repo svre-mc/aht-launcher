@@ -312,6 +312,8 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
+    AHT_WRANGLER_COMMAND: process.execPath,
+    AHT_WRANGLER_ARGS_PREFIX: JSON.stringify([fakeWrangler]),
     PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
     FAKE_R2_ROOT: fakeR2Root,
     FAKE_UPLOAD_LOG: uploadLog,
@@ -351,10 +353,11 @@ try {
       document.querySelector('#playerFeedUrlInput').value = '';
       document.querySelector('#curseforgeApiKeyInput').value = 'fake-cf-key';
       document.querySelector('#launcherProofSecretInput').value = 'proof-secret';
+      document.querySelector('#socialServerSecretInput').value = 'test-social-server-secret-at-least-32-bytes';
       document.querySelector('#cacheModsInput').value = '';
       document.querySelector('#bucketInput').value = ${JSON.stringify(bucket)};
       document.querySelector('#githubTokenInput').value = 'test-token';
-      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#cacheModsInput', '#bucketInput', '#githubTokenInput']) {
+      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#socialServerSecretInput', '#cacheModsInput', '#bucketInput', '#githubTokenInput']) {
         document.querySelector(selector).dispatchEvent(new Event('input', { bubbles: true }));
       }
     })()
@@ -390,7 +393,7 @@ try {
     throw new Error(`Player update failed after UI publish: ${JSON.stringify(updateResult)}`);
   }
   for (const requiredPath of [
-    path.join(instanceDir, 'mods', 'aht-version-lock-1.0.0.jar'),
+    path.join(instanceDir, 'mods', 'aht-version-lock-1.1.0.jar'),
     path.join(instanceDir, 'config', 'aht-ui-test.cfg'),
     path.join(instanceDir, 'resourcepacks', 'aht-ui-test.zip'),
     path.join(instanceDir, 'scripts', 'aht-ui.zs')

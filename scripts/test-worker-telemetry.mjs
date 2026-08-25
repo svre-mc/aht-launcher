@@ -35,11 +35,12 @@ const objects = new Map();
 const env = {
   ADMIN_USERNAME: 'admin',
   ADMIN_PASSWORD: 'secret',
-  ADMIN_TOKEN_SECRET: 'test-secret',
+  ADMIN_TOKEN_SECRET: 'test-admin-token-secret-at-least-32-bytes',
   LAUNCHER_PROOF_SECRET: 'proof-secret',
   LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8: TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
   LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI: TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI,
   LAUNCHER_ATTESTATION_KEY_ID: 'aht-launcher-attestation-v2',
+  AHT_REQUIRED_LAUNCHER_VERSION: '0.1.0',
   AHT_DATA: {
     async put(key, value) {
       objects.set(key, value);
@@ -79,6 +80,7 @@ objects.set('launcher/latest.json', JSON.stringify({
   schemaVersion: 1,
   product: 'aht-launcher',
   version: '9.9.9',
+  required: true,
   downloads: {
     'windows-x64': { label: 'Windows 10/11', fileName: 'AHT-Windows.exe', path: 'launcher/files/win32-x64/AHT-Windows.exe' },
     'macos-arm64': { label: 'macOS Apple Silicon', fileName: 'AHT-arm64.dmg', path: 'launcher/files/darwin-arm64/AHT-arm64.dmg' },
@@ -108,7 +110,7 @@ async function trackedDownload(path, headers = {}) {
   return response.headers.get('Location') || '';
 }
 
-const windowsDownload = await trackedDownload('/launcher/download/windows-x64', {
+const windowsDownload = await trackedDownload('/launcher/download/windows-x64?aht_player=DownloadUser&aht_uuid=01234567-89ab-cdef-0123-456789abcdef', {
   'CF-Connecting-IP': '203.0.113.42',
   'User-Agent': 'AHT website test'
 });
@@ -369,6 +371,7 @@ const recoveredProof = await jsonRequest('/api/launcher-proof', {
     minecraftUsername: 'RecoveredRig',
     installId: 'install-new',
     packId: 'a-hard-time-dregora',
+    appVersion: '0.1.0',
     installedVersion: '2.8.2'
   })
 });
@@ -378,7 +381,7 @@ if (!recoveredProof.trusted || recoveredProof.payload.installId !== 'install-new
 const oldRecoveredProofResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ minecraftUsername: 'RecoveredRig', installId: 'install-old' })
+  body: JSON.stringify({ minecraftUsername: 'RecoveredRig', installId: 'install-old', appVersion: '0.1.0' })
 }), env, {});
 if (oldRecoveredProofResponse.status !== 403) {
   throw new Error(`Recovered username should reject the old install proof, got ${oldRecoveredProofResponse.status}`);
@@ -433,7 +436,8 @@ const missingRecoveryProofResponse = await worker.fetch(new Request('https://wor
   body: JSON.stringify({
     protocol: 'aht-launcher-attestation-v2',
     minecraftUsername: 'TestRig',
-    installId: 'install-b'
+    installId: 'install-b',
+    appVersion: '0.1.0'
   })
 }), env, {});
 if (missingRecoveryProofResponse.status !== 403) {
@@ -445,7 +449,8 @@ const fallbackProofResponse = await worker.fetch(new Request('https://worker.tes
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
     minecraftUsername: 'TestRig',
-    installId: 'install-b'
+    installId: 'install-b',
+    appVersion: '0.1.0'
   })
 }), {
   ...env,
@@ -462,14 +467,18 @@ const curseForgeOnlyProofResponse = await worker.fetch(new Request('https://work
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
     minecraftUsername: 'TestRig',
-    installId: 'install-b'
+    installId: 'install-b',
+    appVersion: '0.1.0'
   })
 }), {
   AHT_DATA: env.AHT_DATA,
+  AHT_REQUIRED_LAUNCHER_VERSION: '0.1.0',
   CURSEFORGE_API_KEY: 'cf-key-is-not-a-proof-secret'
 }, {});
 const curseForgeOnlyProof = await curseForgeOnlyProofResponse.json();
-if (curseForgeOnlyProofResponse.status !== 500 || !/LAUNCHER_PROOF_SECRET/i.test(curseForgeOnlyProof.error || '')) {
+if (curseForgeOnlyProofResponse.status !== 500
+    || curseForgeOnlyProof.error !== 'Internal service error.'
+    || !curseForgeOnlyProof.requestId) {
   throw new Error(`CurseForge API key should not sign launcher proofs: ${curseForgeOnlyProofResponse.status} ${JSON.stringify(curseForgeOnlyProof)}`);
 }
 
@@ -553,7 +562,8 @@ const proofMismatchResponse = await worker.fetch(new Request('https://worker.tes
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
     minecraftUsername: 'TestRig',
-    installId: 'install-c'
+    installId: 'install-c',
+    appVersion: '0.1.0'
   })
 }), env, {});
 if (proofMismatchResponse.status !== 403) {
@@ -623,8 +633,8 @@ for (let attempt = 0; attempt < 2; attempt += 1) {
     },
     body: JSON.stringify(launcherUpdatePayload)
   });
-  if (!updateResult.accountRefreshed || !updateResult.launcherUpdateKey) {
-    throw new Error(`Registered launcher update did not refresh its canonical account: ${JSON.stringify(updateResult)}`);
+  if (!updateResult.accountValidated || updateResult.accountRefreshed || !updateResult.launcherUpdateKey) {
+    throw new Error(`Registered launcher update was not validated without mutating canonical identity: ${JSON.stringify(updateResult)}`);
   }
 }
 await jsonRequest('/api/events', {
@@ -646,11 +656,12 @@ const mismatchedUpdateResponse = await worker.fetch(new Request('https://worker.
   headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.250' },
   body: JSON.stringify({
     ...launcherUpdatePayload,
-    installId: 'install-c'
+    installId: 'install-c',
+    minecraftUuid: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
   })
 }), env, {});
 const mismatchedUpdateBody = await mismatchedUpdateResponse.json();
-if (mismatchedUpdateResponse.status !== 403 || !/does not match/i.test(mismatchedUpdateBody.error || '')) {
+if (mismatchedUpdateResponse.status !== 409 || !/does not match/i.test(mismatchedUpdateBody.error || '')) {
   throw new Error(`Mismatched launcher update overwrote an account: ${mismatchedUpdateResponse.status} ${JSON.stringify(mismatchedUpdateBody)}`);
 }
 const testRigAccountBeforeInvalidUpdate = objects.get('accounts/usernames/testrig.json');
@@ -698,6 +709,32 @@ if (poisonedAdminRoute.status !== 404 || poisonedProofRoute.status !== 404) {
   throw new Error(`Unknown PTB-prefixed control routes must fail closed: ${poisonedAdminRoute.status}/${poisonedProofRoute.status}`);
 }
 
+const limitedLogin = await worker.fetch(new Request('https://worker.test/admin/login', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ username: 'admin', password: 'secret' })
+}), {
+  ...env,
+  AHT_ADMIN_RATE_LIMITER: { async limit() { return { success: false }; } }
+}, {});
+if (limitedLogin.status !== 429 || limitedLogin.headers.get('Retry-After') !== '60') {
+  throw new Error(`Configured admin login rate limiting did not fail closed: ${limitedLogin.status}`);
+}
+const eventCountBeforeRateLimit = [...objects.keys()].filter((key) => key.startsWith('telemetry/events/')).length;
+const limitedEvent = await worker.fetch(new Request('https://worker.test/api/events', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '192.0.2.201' },
+  body: JSON.stringify({ installId: 'rate-limited', event: { type: 'install_completed' } })
+}), {
+  ...env,
+  AHT_PLAYER_API_RATE_LIMITER: { async limit() { return { success: false }; } }
+}, {});
+if (limitedEvent.status !== 429
+    || limitedEvent.headers.get('Retry-After') !== '60'
+    || [...objects.keys()].filter((key) => key.startsWith('telemetry/events/')).length !== eventCountBeforeRateLimit) {
+  throw new Error(`Configured player API rate limiting did not fail closed before storage: ${limitedEvent.status}`);
+}
+
 const login = await jsonRequest('/admin/login', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -718,18 +755,36 @@ while (downloadCursor) {
 if (
   allDownloadRecords.length !== 4
   || allDownloadRecords.some((item) => String(item.ipv4 || '').includes(':'))
-  || allDownloadRecords.some((item) => item.minecraftUsername || item.minecraftUuid)
+  || allDownloadRecords.some((item) => item.minecraftUsername && item.minecraftUsername !== 'DownloadUser')
   || allDownloadRecords.some((item) => !['Windows', 'Mac'].includes(item.platform))
 ) {
-  throw new Error(`Launcher download history must contain only IPv4 display values: ${JSON.stringify(allDownloadRecords)}`);
+  throw new Error(`Launcher download history must preserve explicit player identity without inventing it: ${JSON.stringify(allDownloadRecords)}`);
+}
+const namedDownload = allDownloadRecords.find((item) => item.minecraftUsername === 'DownloadUser');
+if (!namedDownload || namedDownload.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef') {
+  throw new Error(`Launcher download history did not preserve the download-link player identity: ${JSON.stringify(namedDownload)}`);
 }
 const pseudoIpv4Download = allDownloadRecords.find((item) => item.platformKey === 'macos-arm64');
-if (!pseudoIpv4Download || pseudoIpv4Download.ipv4 || pseudoIpv4Download.ipv4Source !== 'ipv6-only') {
-  throw new Error(`Cloudflare pseudo IPv4 must never be presented as a native player IPv4: ${JSON.stringify(pseudoIpv4Download)}`);
+if (
+  !pseudoIpv4Download
+  || pseudoIpv4Download.ip !== '2001:db8::10'
+  || pseudoIpv4Download.ipVersion !== 6
+  || pseudoIpv4Download.ipv4
+  || pseudoIpv4Download.ipv4Source !== 'cloudflare-connecting-ip'
+  || pseudoIpv4Download.pseudoIpv4 !== true
+) {
+  throw new Error(`Cloudflare pseudo IPv4 must be rejected while preserving the native player IPv6: ${JSON.stringify(pseudoIpv4Download)}`);
 }
 const ipv6OnlyDownload = allDownloadRecords.find((item) => item.platformKey === 'macos-x64');
-if (!ipv6OnlyDownload || ipv6OnlyDownload.ipv4 || ipv6OnlyDownload.ipv4Source !== 'ipv6-only') {
-  throw new Error(`IPv6-only visitors must be marked unavailable instead of exposing or inventing an IPv4: ${JSON.stringify(ipv6OnlyDownload)}`);
+if (
+  !ipv6OnlyDownload
+  || ipv6OnlyDownload.ip !== '2001:db8::20'
+  || ipv6OnlyDownload.ipVersion !== 6
+  || ipv6OnlyDownload.ipv4
+  || ipv6OnlyDownload.ipv4Source !== 'cloudflare-connecting-ip'
+  || ipv6OnlyDownload.pseudoIpv4 !== false
+) {
+  throw new Error(`IPv6-only visitors must retain their native IP without inventing an IPv4: ${JSON.stringify(ipv6OnlyDownload)}`);
 }
 const allPlayers = [];
 let playerCursor = '';
@@ -744,11 +799,11 @@ const forwardedOnlyPlayer = allPlayers.find((player) => player.minecraftUsername
 if (
   !testRigPlayer
   || testRigPlayer.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
-  || testRigPlayer.ipv4 !== '192.0.2.55'
-  || testRigPlayer.platform !== 'Windows'
-  || testRigPlayer.launcherVersion !== '0.1.82'
+  || testRigPlayer.ipv4 !== '203.0.113.42'
+  || testRigPlayer.platform !== 'Mac'
+  || testRigPlayer.launcherVersion !== '0.1.81'
 ) {
-  throw new Error(`Launcher update did not refresh the canonical player record: ${JSON.stringify(testRigPlayer)}`);
+  throw new Error(`Launcher update telemetry mutated the canonical player record: ${JSON.stringify(testRigPlayer)}`);
 }
 if (!sharedOnePlayer || sharedOnePlayer.ipv4 !== '198.51.100.88' || sharedOnePlayer.minecraftUuid !== '11111111-1111-1111-1111-111111111111') {
   throw new Error(`Moved player did not retain one current canonical association: ${JSON.stringify(sharedOnePlayer)}`);
@@ -764,10 +819,15 @@ if (!objects.has('accounts/ipv4/203.0.113.99/sharedone.json')) {
 }
 
 const firstUpdatePage = await jsonRequest('/admin/launcher-updates?limit=1', { headers: auth });
-const secondUpdatePage = await jsonRequest(`/admin/launcher-updates?limit=2&cursor=${encodeURIComponent(firstUpdatePage.cursor)}`, { headers: auth });
-const allLauncherUpdates = [...firstUpdatePage.updates, ...secondUpdatePage.updates];
-if (allLauncherUpdates.length !== 2 || !firstUpdatePage.hasMore || !firstUpdatePage.cursor) {
-  throw new Error(`Launcher update pagination/idempotency failed: ${JSON.stringify({ firstUpdatePage, secondUpdatePage })}`);
+const allLauncherUpdates = [...firstUpdatePage.updates];
+let updateCursor = firstUpdatePage.hasMore ? firstUpdatePage.cursor : '';
+while (updateCursor) {
+  const page = await jsonRequest(`/admin/launcher-updates?limit=2&cursor=${encodeURIComponent(updateCursor)}`, { headers: auth });
+  allLauncherUpdates.push(...page.updates);
+  updateCursor = page.hasMore ? page.cursor : '';
+}
+if (allLauncherUpdates.length < 2 || !firstUpdatePage.hasMore || !firstUpdatePage.cursor) {
+  throw new Error(`Launcher update pagination/idempotency failed: ${JSON.stringify({ firstUpdatePage, allLauncherUpdates })}`);
 }
 const testRigUpdate = allLauncherUpdates.find((update) => update.minecraftUsername === 'TestRig');
 if (
@@ -778,6 +838,10 @@ if (
   || testRigUpdate.launcherVersion !== '0.1.82'
 ) {
   throw new Error(`Launcher update history lost canonical fields: ${JSON.stringify(testRigUpdate)}`);
+}
+const canonicalFallbackUpdate = allLauncherUpdates.find((update) => update.minecraftUsername === 'SharedOne' && update.source === 'canonical-account');
+if (!canonicalFallbackUpdate || canonicalFallbackUpdate.launcherVersion !== '0.1.81') {
+  throw new Error(`Launcher update history did not include the current canonical player fallback: ${JSON.stringify(canonicalFallbackUpdate)}`);
 }
 const playerIpv4Groups = await jsonRequest('/admin/player-ipv4-groups', { headers: auth });
 const formerlySharedIpv4 = playerIpv4Groups.groups.find((group) => group.ipv4 === '203.0.113.99');
@@ -803,6 +867,7 @@ const developerLauncherProof = await jsonRequest('/api/launcher-proof', {
     developerClientBypass: true,
     modIntegrityBypass: true,
     packId: 'a-hard-time-dregora',
+    appVersion: '0.1.0',
     installedVersion: '2.8.2'
   })
 });
@@ -833,10 +898,12 @@ if (wrongKidSocialResponse.status !== 401) {
 const wrongConfiguredKidResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345' },
-  body: JSON.stringify({ protocol: 'aht-launcher-attestation-v2', minecraftUsername: 'TestRig', installId: 'install-b' })
+  body: JSON.stringify({ protocol: 'aht-launcher-attestation-v2', minecraftUsername: 'TestRig', installId: 'install-b', appVersion: '0.1.0' })
 }), { ...env, LAUNCHER_ATTESTATION_KEY_ID: 'wrong-key-id' }, {});
 const wrongConfiguredKid = await wrongConfiguredKidResponse.json();
-if (wrongConfiguredKidResponse.status !== 500 || !/LAUNCHER_ATTESTATION_KEY_ID/i.test(wrongConfiguredKid.error || '')) {
+if (wrongConfiguredKidResponse.status !== 500
+    || wrongConfiguredKid.error !== 'Internal service error.'
+    || !wrongConfiguredKid.requestId) {
   throw new Error(`Worker issued a proof with a key ID rejected by anti-cheat: ${wrongConfiguredKidResponse.status} ${JSON.stringify(wrongConfiguredKid)}`);
 }
 const emptyLogs = await jsonRequest('/api/update-logs?limit=3');
@@ -881,6 +948,23 @@ if (events.events.length !== 5) {
 const changeEvent = events.events.find((item) => item.event?.type === 'local_changes');
 if (!changeEvent?.ip || changeEvent.event.changes.counts.changed !== 2 || changeEvent.playerLabel !== 'TestRig') {
   throw new Error(`Local change event lost detail: ${JSON.stringify(changeEvent)}`);
+}
+
+const recoveredInstallResponse = await worker.fetch(new Request('https://worker.test/api/events', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '192.0.2.56' },
+  body: JSON.stringify({
+    ...launcherUpdatePayload,
+    installId: 'install-new-after-reinstall',
+    appVersion: '0.1.83',
+    event: { type: 'launcher_update_completed', fromVersion: '0.1.82', toVersion: '0.1.83' }
+  })
+}), env, {});
+const recoveredInstallUpdate = await recoveredInstallResponse.json();
+if (recoveredInstallResponse.status !== 403
+    || recoveredInstallUpdate.error !== 'Launcher update identity does not match the registered player.'
+    || JSON.parse(objects.get('accounts/usernames/testrig.json')).installId !== 'install-b') {
+  throw new Error(`Public UUID telemetry rotated a registered install identity: ${recoveredInstallResponse.status} ${JSON.stringify(recoveredInstallUpdate)}`);
 }
 
 console.log(JSON.stringify({ registration, launcherDownloads: allDownloadRecords, launcherUpdates: allLauncherUpdates, players: allPlayers, playerIpv4Groups, launcherProof: { source: launcherProof.source, trusted: launcherProof.trusted, tokenParts: launcherProof.token.split('.').length }, developerLauncherProof: { bypass: developerLauncherProof.payload.modIntegrityBypass, channel: developerLauncherProof.payload.launcherChannel, downstreamVerified: developerSocialResponse.status === 200 }, publishedLog, publicLogs, summary, events }, null, 2));

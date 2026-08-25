@@ -54,6 +54,7 @@ const developerApi = {
   devCheckLauncherWorkflow: (payload) => ipcRenderer.invoke('dev:checkLauncherWorkflow', payload),
   devDispatchLauncherWorkflow: (payload) => ipcRenderer.invoke('dev:dispatchLauncherWorkflow', payload),
   devDeployLauncher: (payload) => ipcRenderer.invoke('dev:deployLauncher', payload),
+  devPrepareLauncherReinstall: () => ipcRenderer.invoke('dev:prepareLauncherReinstall'),
   devLauncherDeployState: () => ipcRenderer.invoke('dev:launcherDeployState'),
   devUploadState: () => ipcRenderer.invoke('dev:uploadState'),
   devPlanServerTransfer: (payload) => ipcRenderer.invoke('dev:planServerTransfer', payload),
@@ -69,6 +70,8 @@ const developerApi = {
   devPlayerIpv4Groups: () => ipcRenderer.invoke('dev:playerIpv4Groups'),
   devPlayerRecords: (payload) => ipcRenderer.invoke('dev:playerRecords', payload || {}),
   devLauncherUpdates: (payload) => ipcRenderer.invoke('dev:launcherUpdates', payload || {}),
+  devAccessDecisions: (payload) => ipcRenderer.invoke('dev:accessDecisions', payload || {}),
+  devSetAccessDecision: (payload) => ipcRenderer.invoke('dev:setAccessDecision', payload || {}),
   devUpdateLogs: (limit) => ipcRenderer.invoke('dev:updateLogs', limit),
   devPublishUpdateLog: (payload) => ipcRenderer.invoke('dev:publishUpdateLog', payload)
 };
@@ -78,4 +81,8 @@ if (developerApiAllowed()) {
   Object.assign(api, developerApi);
 }
 
-contextBridge.exposeInMainWorld('aht', api);
+// Electron preloads can execute inside subframes. Never expose launcher IPC to
+// remote update-media frames such as the sandboxed YouTube player.
+if (process.isMainFrame === true) {
+  contextBridge.exposeInMainWorld('aht', api);
+}

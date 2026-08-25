@@ -20,6 +20,12 @@ function normalizedUuid(value = '') {
 }
 
 export function workerLauncherProofFixture(payload, options = {}) {
+  const {
+    deviceAssertion: _deviceAssertion,
+    devicePublicKey: _devicePublicKey,
+    accountRecoverySecret: _accountRecoverySecret,
+    ...proofSafePayload
+  } = payload || {};
   const legacy = options.legacy === true || payload?.protocol === 'aht-launcher-proof-v1';
   const kid = String(options.kid || (legacy ? 'aht-launcher-proof-v1' : 'aht-launcher-attestation-v2'));
   const header = legacy
@@ -28,17 +34,27 @@ export function workerLauncherProofFixture(payload, options = {}) {
   const launchId = legacy
     ? String(payload?.launchId || randomUUID())
     : String(options.launchId || payload?.launchId || randomUUID());
+  const issuedAt = String(payload?.issuedAt || new Date().toISOString());
+  const issuedAtMs = Date.parse(issuedAt);
   const workerPayload = legacy
-    ? { ...payload, protocol: 'aht-launcher-proof-v1', schemaVersion: 1, launchId }
+    ? { ...proofSafePayload, protocol: 'aht-launcher-proof-v1', schemaVersion: 1, launchId }
     : {
-      ...payload,
+      ...proofSafePayload,
       protocol: 'aht-launcher-attestation-v2',
       schemaVersion: 2,
+      packId: String(options.packId || 'a-hard-time-dregora'),
       jti: String(options.jti || launchId),
       launchId,
       issuer: String(options.issuer || 'aht-launcher-worker'),
       audience: String(options.audience || 'aht-minecraft-server'),
-      minecraftUuid: normalizedUuid(options.minecraftUuid || payload?.minecraftUuid) || '01234567-89ab-4def-8123-456789abcdef'
+      minecraftUuid: normalizedUuid(options.minecraftUuid || payload?.minecraftUuid) || '01234567-89ab-4def-8123-456789abcdef',
+      launcherVersion: String(payload?.launcherVersion || payload?.appVersion || '0.1.86'),
+      packVersion: String(payload?.packVersion || payload?.installedVersion || '2.9.0'),
+      issuedAt,
+      expiresAt: String(payload?.expiresAt || new Date((Number.isFinite(issuedAtMs) ? issuedAtMs : Date.now()) + 5 * 60 * 1000).toISOString()),
+      reconnectExpiresAt: String(payload?.reconnectExpiresAt || new Date((Number.isFinite(issuedAtMs) ? issuedAtMs : Date.now()) + 24 * 60 * 60 * 1000).toISOString()),
+      accessGranted: options.accessGranted !== false,
+      networkStatus: String(options.networkStatus || 'unknown')
     };
   const signingInput = `${base64UrlJson(header)}.${base64UrlJson(workerPayload)}`;
   const signatureValue = String(options.signature || (legacy

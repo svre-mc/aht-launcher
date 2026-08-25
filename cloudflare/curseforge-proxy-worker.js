@@ -31,6 +31,13 @@ const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
 const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/';
 const ACCOUNT_USERNAME_PREFIX = 'accounts/usernames/';
 const ACCOUNT_IPV4_PREFIX = 'accounts/ipv4/';
+const ACCOUNT_UUID_PREFIX = 'accounts/uuids/';
+const ACCOUNT_DEVICE_PREFIX = 'accounts/devices/';
+const ACCESS_DECISION_PREFIX = 'access/decisions/';
+const ACCESS_AUDIT_PREFIX = 'access/audit/';
+const ACCESS_SCOPES = new Set(['account', 'minecraft_uuid', 'device', 'ip', 'ipv4']);
+const DEVICE_ASSERTION_PROTOCOL = 'aht-device-assertion-v1';
+const DEVICE_ID_PREFIX = 'ahtd_';
 const LAUNCHER_ATTESTATION_PROTOCOL = 'aht-launcher-attestation-v2';
 const LEGACY_LAUNCHER_PROOF_PROTOCOL = 'aht-launcher-proof-v1';
 const LAUNCHER_ATTESTATION_KEY_ID = 'aht-launcher-attestation-v2';
@@ -38,6 +45,15 @@ const LEGACY_LAUNCHER_PROOF_KEY_ID = 'aht-launcher-proof-v1';
 const LAUNCHER_ATTESTATION_ISSUER = 'aht-launcher-worker';
 const LAUNCHER_ATTESTATION_AUDIENCE = 'aht-minecraft-server';
 const LAUNCHER_ATTESTATION_TTL_MS = 10 * 60 * 1000;
+const LAUNCHER_RECONNECT_TTL_MS = 24 * 60 * 60 * 1000;
+
+class RequestPayloadError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = 'RequestPayloadError';
+    this.status = status;
+  }
+}
 
 function corsHeaders(origin) {
   return {
@@ -45,7 +61,11 @@ function corsHeaders(origin) {
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-AHT-Launcher-Recovery, X-AHT-Server-Timestamp, X-AHT-Server-Signature',
     'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified',
-    'Cache-Control': 'private, max-age=60'
+    'Cache-Control': 'private, max-age=60',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()'
   };
 }
 
@@ -97,34 +117,166 @@ function normalizeMinecraftUuid(value = '') {
   ].join('-');
 }
 
+function normalizedConnectionIp(value = '') {
+  const raw = cleanString(String(value || '').split(',')[0], 80).toLowerCase();
+  const ipv4 = ipv4FromHeader(raw);
+  if (ipv4) return ipv4;
+  if (raw.length >= 2 && raw.length <= 45 && raw.includes(':') && /^[0-9a-f:.]+$/.test(raw)) {
+    try {
+      const hostname = new URL(`http://[${raw}]/`).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+      if (hostname.includes(':')) return hostname;
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
 function requestIpv4(request) {
   const connecting = request.headers.get('CF-Connecting-IP') || '';
   const connectingV6 = request.headers.get('CF-Connecting-IPv6') || '';
   const pseudo = request.headers.get('CF-Pseudo-IPv4') || '';
-  if (connectingV6) {
-    return { ipv4: '', source: 'ipv6-only', available: false, pseudo: true };
+  const nativeIpv6 = normalizedConnectionIp(connectingV6);
+  if (nativeIpv6 && nativeIpv6.includes(':')) {
+    return { ip: nativeIpv6, ipVersion: 6, ipv4: '', source: 'cloudflare-connecting-ipv6', available: true, ipv4Available: false, pseudo: true };
   }
   const connectingIpv4 = ipv4FromHeader(connecting);
   if (connectingIpv4) {
     return {
+      ip: connectingIpv4,
+      ipVersion: 4,
       ipv4: connectingIpv4,
       source: 'cloudflare-connecting-ip',
       available: true,
+      ipv4Available: true,
       pseudo: false
     };
   }
+  const connectingIp = normalizedConnectionIp(connecting);
+  if (connectingIp && connectingIp.includes(':')) {
+    return { ip: connectingIp, ipVersion: 6, ipv4: '', source: 'cloudflare-connecting-ip', available: true, ipv4Available: false, pseudo: Boolean(pseudo) };
+  }
   return {
+    ip: '',
+    ipVersion: 0,
     ipv4: '',
     source: connecting.includes(':') || pseudo ? 'ipv6-only' : 'unavailable',
     available: false,
+    ipv4Available: false,
     pseudo: Boolean(pseudo)
   };
+}
+
+function configuredNumberSet(value = '') {
+  return new Set(String(value || '').split(',')
+    .map((item) => Number(String(item).trim().replace(/^AS/i, '')))
+    .filter((item) => Number.isSafeInteger(item) && item > 0));
+}
+
+function normalizedNetworkAssessment(value = {}, fallback = {}) {
+  const status = ['likely', 'not_detected', 'unknown'].includes(value.status) ? value.status : 'unknown';
+  const confidence = ['high', 'medium', 'low', 'unknown'].includes(value.confidence) ? value.confidence : 'unknown';
+  return {
+    status,
+    confidence,
+    vpn: status === 'likely',
+    proxy: Boolean(value.proxy),
+    hosting: Boolean(value.hosting),
+    source: cleanString(value.source || fallback.source || 'cloudflare-metadata', 80),
+    asn: Number.isSafeInteger(Number(fallback.asn)) ? Number(fallback.asn) : 0,
+    organization: cleanString(fallback.organization || '', 160),
+    country: cleanString(fallback.country || '', 8),
+    colo: cleanString(fallback.colo || '', 16),
+    checkedAt: new Date().toISOString()
+  };
+}
+
+async function requestNetworkAssessment(request, env, clientIp = requestIpv4(request)) {
+  const metadata = {
+    asn: Number(request.cf?.asn || 0),
+    organization: cleanString(request.cf?.asOrganization || '', 160),
+    country: cleanString(request.cf?.country || '', 8),
+    colo: cleanString(request.cf?.colo || '', 16)
+  };
+  const configuredVpns = configuredNumberSet(env.AHT_VPN_ASNS);
+  if (metadata.asn && configuredVpns.has(metadata.asn)) {
+    return normalizedNetworkAssessment({
+      status: 'likely',
+      confidence: 'high',
+      vpn: true,
+      hosting: true,
+      source: 'configured-vpn-asn'
+    }, metadata);
+  }
+  if (env.AHT_NETWORK_INTELLIGENCE?.fetch && clientIp.ip) {
+    try {
+      const response = await env.AHT_NETWORK_INTELLIGENCE.fetch('https://aht-network-intelligence.internal/assess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip: clientIp.ip, ipv4: clientIp.ipv4, ...metadata })
+      });
+      if (response.ok) {
+        const result = JSON.parse(await readRawBody(response, 16_384));
+        const status = result.vpn === true || result.proxy === true
+          ? 'likely'
+          : (result.vpn === false && result.proxy === false ? 'not_detected' : 'unknown');
+        return normalizedNetworkAssessment({
+          status,
+          confidence: cleanString(result.confidence || (status === 'unknown' ? 'unknown' : 'medium'), 20),
+          proxy: Boolean(result.proxy),
+          hosting: Boolean(result.hosting),
+          source: cleanString(result.source || 'network-intelligence-service', 80)
+        }, metadata);
+      }
+    } catch {
+      // A lookup outage is represented as unknown; it never becomes a false negative.
+    }
+  }
+  return normalizedNetworkAssessment({ status: 'unknown', confidence: 'unknown' }, metadata);
 }
 
 function nativeIpv4FromRecord(record = {}) {
   const source = String(record.ipv4Source || '').toLowerCase();
   if (record.pseudoIpv4 || source.includes('pseudo') || source === 'forwarded-for') return '';
   return ipv4FromHeader(record.ipv4 || record.ip || '');
+}
+
+async function enforcePlayerApiRateLimit(request, env, route, origin) {
+  if (!env.AHT_PLAYER_API_RATE_LIMITER?.limit) return null;
+  const connection = requestIpv4(request);
+  const ipKey = connection.ip || 'unavailable';
+  let allowed = false;
+  try {
+    const result = await env.AHT_PLAYER_API_RATE_LIMITER.limit({
+      key: `player:${cleanString(route, 24)}:${(await sha256Hex(ipKey)).slice(0, 40)}`
+    });
+    allowed = result?.success === true;
+  } catch {
+    allowed = false;
+  }
+  if (allowed) return null;
+  const response = privateJson({ error: 'Too many launcher requests. Try again shortly.' }, 429, origin);
+  response.headers.set('Retry-After', '60');
+  return response;
+}
+
+async function enforceProofVerifyRateLimit(request, env, origin) {
+  if (!env.AHT_PROOF_VERIFY_RATE_LIMITER?.limit) return null;
+  const connection = requestIpv4(request);
+  const ipKey = connection.ip || 'unavailable';
+  let allowed = false;
+  try {
+    const result = await env.AHT_PROOF_VERIFY_RATE_LIMITER.limit({
+      key: `proof-verify:${(await sha256Hex(ipKey)).slice(0, 40)}`
+    });
+    allowed = result?.success === true;
+  } catch {
+    allowed = false;
+  }
+  if (allowed) return null;
+  const response = privateJson({ error: 'Too many launcher proof verification requests. Try again shortly.' }, 429, origin);
+  response.headers.set('Retry-After', '60');
+  return response;
 }
 
 function launcherDownloadKey(receivedAt = new Date().toISOString(), id = crypto.randomUUID()) {
@@ -304,7 +456,60 @@ async function readLauncherManifest(env) {
   if (!bucket) throw new Error('AHT_RELEASES R2 binding is not configured');
   const object = await bucket.get('launcher/latest.json');
   if (!object) throw new Error('Launcher update manifest is not available');
+  if (Number(object.size || 0) > 256 * 1024) throw new Error('Launcher update manifest is too large');
   return object.json();
+}
+
+function parsedLauncherVersion(value = '') {
+  const match = cleanString(value, 40).match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+  if (!match) return null;
+  const numbers = match.slice(1, 4).map(Number);
+  if (numbers.some((part) => !Number.isSafeInteger(part) || part < 0 || part > 1_000_000)) return null;
+  return { text: cleanString(value, 40), numbers, prerelease: match[4] || '' };
+}
+
+function compareLauncherVersions(left, right) {
+  const a = parsedLauncherVersion(left);
+  const b = parsedLauncherVersion(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < a.numbers.length; index += 1) {
+    if (a.numbers[index] !== b.numbers[index]) return a.numbers[index] > b.numbers[index] ? 1 : -1;
+  }
+  if (a.prerelease === b.prerelease) return 0;
+  if (!a.prerelease) return 1;
+  if (!b.prerelease) return -1;
+  return a.prerelease.localeCompare(b.prerelease, 'en', { numeric: true, sensitivity: 'base' });
+}
+
+async function launcherVersionPolicy(env) {
+  const configuredFloor = cleanString(env.AHT_REQUIRED_LAUNCHER_VERSION || '', 40);
+  if (configuredFloor) {
+    if (!parsedLauncherVersion(configuredFloor)) throw new Error('AHT_REQUIRED_LAUNCHER_VERSION is invalid');
+    return { necessaryLauncherVersion: configuredFloor, source: 'configured-floor' };
+  }
+  const manifest = await readLauncherManifest(env);
+  const necessaryLauncherVersion = cleanString(manifest?.version || manifest?.currentVersion || '', 40);
+  if (manifest?.schemaVersion !== 1 || manifest?.product !== 'aht-launcher'
+      || manifest?.required !== true || !parsedLauncherVersion(necessaryLauncherVersion)) {
+    throw new Error('Launcher update manifest is not a required production manifest');
+  }
+  return { necessaryLauncherVersion, source: 'launcher/latest.json' };
+}
+
+function launcherVersionAccepted(currentLauncherVersion, policy) {
+  const comparison = compareLauncherVersions(currentLauncherVersion, policy?.necessaryLauncherVersion || '');
+  return comparison !== null && comparison >= 0;
+}
+
+function launcherVersionFailure(currentLauncherVersion, policy) {
+  return {
+    ok: false,
+    status: 426,
+    code: 'LAUNCHER_UPDATE_REQUIRED',
+    error: 'A newer AHT Launcher version is required before reconnecting.',
+    currentLauncherVersion: cleanString(currentLauncherVersion || '', 40) || 'unknown',
+    necessaryLauncherVersion: cleanString(policy?.necessaryLauncherVersion || '', 40) || 'unknown'
+  };
 }
 
 async function recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact) {
@@ -312,9 +517,25 @@ async function recordLauncherInstallerDownload(request, env, platformKey, manife
   const receivedAt = new Date().toISOString();
   const downloadId = crypto.randomUUID();
   const ip = requestIpv4(request);
+  const network = await requestNetworkAssessment(request, env, ip);
   const platform = normalizePlatform(artifact?.label || platformKey);
+  const requestUrl = new URL(request.url);
+  const requestedUsername = normalizeMinecraftUsername(
+    requestUrl.searchParams.get('aht_player')
+      || requestUrl.searchParams.get('aht_username')
+      || request.headers.get('X-AHT-Minecraft-Username')
+      || ''
+  );
+  const minecraftUsername = /^[A-Za-z0-9_]{3,16}$/.test(requestedUsername) ? requestedUsername : '';
+  const requestedUuid = cleanString(
+    requestUrl.searchParams.get('aht_uuid')
+      || request.headers.get('X-AHT-Minecraft-UUID')
+      || '',
+    80
+  );
+  const minecraftUuid = normalizeMinecraftUuid(requestedUuid);
   const record = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     type: 'launcher_installer_download',
     downloadId,
     receivedAt,
@@ -323,14 +544,20 @@ async function recordLauncherInstallerDownload(request, env, platformKey, manife
     platform,
     platformLabel: platform,
     fileName: cleanString(artifact?.fileName || '', 260),
-    minecraftUsername: '',
-    minecraftUuid: '',
+    minecraftUsername,
+    minecraftUuid,
+    identitySource: minecraftUsername ? 'download-link' : '',
     ipv4: ip.ipv4,
-    ip: ip.ipv4,
+    ip: ip.ip,
+    ipVersion: ip.ipVersion,
     ipv4Source: ip.source,
-    ipv4Available: ip.available,
+    ipv4Available: ip.ipv4Available,
     pseudoIpv4: ip.pseudo,
     country: request.cf?.country || '',
+    asn: network.asn,
+    asOrganization: network.organization,
+    colo: network.colo,
+    network,
     userAgent: cleanString(request.headers.get('User-Agent') || '', 600),
     referrer: cleanString(request.headers.get('Referer') || '', 600),
     cfRay: cleanString(request.headers.get('CF-Ray') || '', 120)
@@ -378,6 +605,83 @@ async function sha256Hex(value) {
   const data = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest('SHA-256', data);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256BytesHex(value) {
+  const digest = await crypto.subtle.digest('SHA-256', value);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+}
+
+async function deviceBindingHash(binding = {}) {
+  return sha256Hex(canonicalJson(binding));
+}
+
+function deviceAssertionMessage(assertion = {}) {
+  return [
+    DEVICE_ASSERTION_PROTOCOL,
+    cleanString(assertion.deviceId, 80),
+    cleanString(assertion.purpose, 80),
+    cleanString(assertion.signedAt, 80),
+    cleanString(assertion.nonce, 80),
+    cleanString(assertion.bindingHash, 80)
+  ].join('\n');
+}
+
+async function verifyDeviceAssertion(body = {}, purpose = '', binding = {}) {
+  const assertion = body.deviceAssertion;
+  const required = Boolean(body.deviceId || body.devicePublicKey || assertion);
+  if (!required) return { ok: false, missing: true, error: 'Device identity is required.' };
+  if (!assertion || typeof assertion !== 'object'
+      || assertion.protocol !== DEVICE_ASSERTION_PROTOCOL
+      || assertion.algorithm !== 'Ed25519'
+      || cleanString(assertion.purpose, 80) !== purpose) {
+    return { ok: false, missing: false, error: 'Device assertion is invalid.' };
+  }
+  const deviceId = cleanString(body.deviceId || assertion.deviceId, 80);
+  const publicKey = cleanString(body.devicePublicKey || assertion.publicKey, 1024);
+  if (assertion.deviceId !== deviceId || assertion.publicKey !== publicKey
+      || !new RegExp(`^${DEVICE_ID_PREFIX}[a-f0-9]{64}$`).test(deviceId)
+      || !/^[A-Za-z0-9_-]{40,800}$/.test(publicKey)
+      || !/^[A-Za-z0-9_-]{40,200}$/.test(cleanString(assertion.signature, 240))) {
+    return { ok: false, missing: false, error: 'Device assertion is invalid.' };
+  }
+  let publicKeyBytes;
+  try {
+    publicKeyBytes = decodeBase64UrlBytes(publicKey);
+  } catch {
+    return { ok: false, missing: false, error: 'Device public key is invalid.' };
+  }
+  if (`${DEVICE_ID_PREFIX}${await sha256BytesHex(publicKeyBytes)}` !== deviceId) {
+    return { ok: false, missing: false, error: 'Device identity does not match its public key.' };
+  }
+  const signedAt = Date.parse(cleanString(assertion.signedAt, 80));
+  if (!Number.isFinite(signedAt) || Math.abs(Date.now() - signedAt) > 2 * 60 * 1000
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cleanString(assertion.nonce, 80))) {
+    return { ok: false, missing: false, error: 'Device assertion is expired or invalid.' };
+  }
+  const expectedBindingHash = await deviceBindingHash(binding);
+  if (!(await secureStringEqual(assertion.bindingHash, expectedBindingHash))) {
+    return { ok: false, missing: false, error: 'Device assertion does not match this request.' };
+  }
+  try {
+    const key = await crypto.subtle.importKey('spki', publicKeyBytes, { name: 'Ed25519' }, false, ['verify']);
+    const signatureValid = await crypto.subtle.verify(
+      'Ed25519',
+      key,
+      decodeBase64UrlBytes(assertion.signature),
+      new TextEncoder().encode(deviceAssertionMessage(assertion))
+    );
+    if (!signatureValid) return { ok: false, missing: false, error: 'Device assertion signature is invalid.' };
+  } catch {
+    return { ok: false, missing: false, error: 'Device assertion signature is invalid.' };
+  }
+  return { ok: true, missing: false, deviceId, publicKey, assertion };
 }
 
 function base64Url(bytes) {
@@ -526,6 +830,7 @@ async function launcherProofToken(payload, env) {
 async function launcherProofSigningSelfTest(env) {
   const issuedAtMs = Date.now();
   const launchId = crypto.randomUUID();
+  const selfTestLauncherVersion = '0.0.0-self-test';
   const payload = {
     protocol: LAUNCHER_ATTESTATION_PROTOCOL,
     schemaVersion: 2,
@@ -533,22 +838,27 @@ async function launcherProofSigningSelfTest(env) {
     launchId,
     issuedAt: new Date(issuedAtMs).toISOString(),
     expiresAt: new Date(issuedAtMs + 60 * 1000).toISOString(),
+    reconnectExpiresAt: new Date(issuedAtMs + LAUNCHER_RECONNECT_TTL_MS).toISOString(),
     issuer: LAUNCHER_ATTESTATION_ISSUER,
     audience: LAUNCHER_ATTESTATION_AUDIENCE,
     packId: cleanString(env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora', 80),
     minecraftUsername: 'AHTProofCheck',
     minecraftUuid: '01234567-89ab-4def-8123-456789abcdef',
     installId: 'launcher-proof-status-self-test',
+    launcherVersion: selfTestLauncherVersion,
+    packVersion: 'self-test',
     launcherChannel: 'developer',
     developerClient: true,
     developerClientBypass: true,
-    modIntegrityBypass: true
+    modIntegrityBypass: true,
+    accessGranted: true,
+    networkStatus: 'unknown'
   };
   const signed = await launcherProofToken(payload, env);
   const request = new Request('https://launcher-proof-self-test.invalid/', {
     headers: { Authorization: `Bearer ${signed.token}` }
   });
-  const verified = await verifyLauncherProofRequest(request, env);
+  const verified = await verifyLauncherProofRequest(request, env, { skipVersionPolicy: true });
   return Boolean(
     verified.ok
     && verified.payload?.launchId === payload.launchId
@@ -583,22 +893,55 @@ async function launcherProofStatus(env, origin) {
   }, 200, origin);
 }
 
+function adminTokenSecret(env) {
+  const secret = String(env.ADMIN_TOKEN_SECRET || '');
+  if (secret.length < 32) {
+    throw new Error('ADMIN_TOKEN_SECRET must be configured with at least 32 characters');
+  }
+  return secret;
+}
+
 async function createToken(username, env) {
+  const issuedAt = Date.now();
   const expiresAt = Date.now() + 1000 * 60 * 60 * 12;
-  const payload = base64UrlJson({ username, expiresAt });
-  const signature = await hmac(payload, env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD || env.CURSEFORGE_API_KEY);
+  const payload = base64UrlJson({ schemaVersion: 1, username, issuedAt, expiresAt });
+  const signature = await hmac(payload, adminTokenSecret(env));
   return { token: `${payload}.${signature}`, expiresAt: new Date(expiresAt).toISOString() };
 }
 
-async function verifyToken(request, env) {
+async function adminSession(request, env) {
   const header = request.headers.get('Authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
-  const [payload, signature] = token.split('.');
-  if (!payload || !signature) return false;
-  const expected = await hmac(payload, env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD || env.CURSEFORGE_API_KEY);
-  if (signature !== expected) return false;
-  const decoded = decodeBase64UrlJson(payload);
-  return decoded.expiresAt > Date.now();
+  if (token.length > 2048) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2 || parts.some((part) => !part || !/^[A-Za-z0-9_-]+$/.test(part))) return null;
+  let secret;
+  try {
+    secret = adminTokenSecret(env);
+  } catch {
+    return null;
+  }
+  const expected = await hmac(parts[0], secret);
+  if (!(await secureStringEqual(parts[1], expected))) return null;
+  let decoded;
+  try {
+    decoded = decodeBase64UrlJson(parts[0]);
+  } catch {
+    return null;
+  }
+  const now = Date.now();
+  if (decoded?.schemaVersion !== 1
+      || !/^[A-Za-z0-9_.@-]{1,120}$/.test(String(decoded.username || ''))
+      || !Number.isFinite(Number(decoded.issuedAt))
+      || !Number.isFinite(Number(decoded.expiresAt))
+      || decoded.issuedAt > now + 120000
+      || decoded.expiresAt <= now
+      || decoded.expiresAt - decoded.issuedAt > 12 * 60 * 60 * 1000) return null;
+  return decoded;
+}
+
+async function verifyToken(request, env) {
+  return Boolean(await adminSession(request, env));
 }
 
 async function proxyCurseForge(pathname, env, origin) {
@@ -617,12 +960,41 @@ async function proxyCurseForge(pathname, env, origin) {
   return new Response(response.body, { status: response.status, headers });
 }
 
-async function readBody(request) {
-  const text = await request.text();
-  if (text.length > 1024 * 1024) {
-    throw new Error('Request body is too large');
+async function readBody(request, maxBytes = 1024 * 1024) {
+  const rawLength = String(request.headers.get('Content-Length') || '').trim();
+  if (rawLength && !/^\d+$/.test(rawLength)) {
+    throw new RequestPayloadError(400, 'Content-Length is invalid.');
   }
-  return text ? JSON.parse(text) : {};
+  if (rawLength && Number(rawLength) > maxBytes) {
+    throw new RequestPayloadError(413, 'Request body is too large.');
+  }
+  if (!request.body) return {};
+
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel('request body limit exceeded').catch(() => {});
+        throw new RequestPayloadError(413, 'Request body is too large.');
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new RequestPayloadError(400, 'Request body must be valid JSON.');
+  }
 }
 
 function normalizeMinecraftUsername(username) {
@@ -635,6 +1007,100 @@ function minecraftUsernameKey(username) {
 
 function accountIpv4Key(ipv4, username) {
   return `${ACCOUNT_IPV4_PREFIX}${ipv4}/${username.toLowerCase()}.json`;
+}
+
+function accountUuidKey(minecraftUuid) {
+  return `${ACCOUNT_UUID_PREFIX}${normalizeMinecraftUuid(minecraftUuid)}.json`;
+}
+
+function accountDeviceKey(deviceId, username) {
+  return `${ACCOUNT_DEVICE_PREFIX}${cleanString(deviceId, 80)}/${normalizeMinecraftUsername(username).toLowerCase()}.json`;
+}
+
+function normalizedAccessValue(scope, value = '') {
+  if (scope === 'account') {
+    const username = normalizeMinecraftUsername(value).toLowerCase();
+    return /^[a-z0-9_]{3,16}$/.test(username) ? username : '';
+  }
+  if (scope === 'minecraft_uuid') return normalizeMinecraftUuid(value);
+  if (scope === 'device') {
+    const deviceId = cleanString(value, 80).toLowerCase();
+    return new RegExp(`^${DEVICE_ID_PREFIX}[a-f0-9]{64}$`).test(deviceId) ? deviceId : '';
+  }
+  if (scope === 'ip') return normalizedConnectionIp(value);
+  if (scope === 'ipv4') return ipv4FromHeader(value);
+  return '';
+}
+
+async function accessDecisionKey(scope, value) {
+  return `${ACCESS_DECISION_PREFIX}${scope}/${await sha256Hex(`${scope}\0${value}`)}.json`;
+}
+
+async function readAccessDecision(env, scope, rawValue) {
+  if (!env.AHT_DATA || !ACCESS_SCOPES.has(scope)) return null;
+  const value = normalizedAccessValue(scope, rawValue);
+  if (!value) return null;
+  const object = await env.AHT_DATA.get(await accessDecisionKey(scope, value));
+  const decision = object ? await object.json().catch(() => null) : null;
+  return decision?.active === true && decision?.effect === 'deny' ? decision : null;
+}
+
+async function evaluateAccess(env, identifiers = {}) {
+  const checks = [
+    ['account', identifiers.username],
+    ['minecraft_uuid', identifiers.minecraftUuid],
+    ['device', identifiers.deviceId],
+    ['ip', identifiers.ip],
+    ['ipv4', identifiers.ipv4]
+  ];
+  for (const [scope, value] of checks) {
+    if (!value) continue;
+    const decision = await readAccessDecision(env, scope, value);
+    if (decision) {
+      return {
+        allowed: false,
+        code: 'ACCESS_DENIED',
+        scope,
+        decisionId: cleanString(decision.decisionId || '', 120)
+      };
+    }
+  }
+  if (env.AHT_BLOCK_LIKELY_VPN === 'true' && identifiers.network?.status === 'likely') {
+    return { allowed: false, code: 'NETWORK_POLICY_DENIED', scope: 'network', decisionId: '' };
+  }
+  return { allowed: true, code: 'ACCESS_GRANTED', scope: '', decisionId: '' };
+}
+
+function accessDeniedResponse(access, origin) {
+  return privateJson({
+    error: 'Access to A Hard Time is restricted for this account or device.',
+    code: access?.code || 'ACCESS_DENIED',
+    decisionId: cleanString(access?.decisionId || '', 120)
+  }, 403, origin);
+}
+
+async function indexAccountIdentity(env, record) {
+  const username = normalizeMinecraftUsername(record.username);
+  const minecraftUuid = normalizeMinecraftUuid(record.minecraftUuid);
+  const deviceId = normalizedAccessValue('device', record.deviceId);
+  const indexRecord = {
+    username,
+    normalizedUsername: username.toLowerCase(),
+    minecraftUuid,
+    deviceId,
+    firstSeenAt: record.createdAt || record.updatedAt || new Date().toISOString(),
+    lastSeenAt: record.updatedAt || new Date().toISOString()
+  };
+  if (minecraftUuid) {
+    await env.AHT_DATA.put(accountUuidKey(minecraftUuid), JSON.stringify(indexRecord), {
+      httpMetadata: { contentType: 'application/json' }
+    });
+  }
+  if (deviceId && username) {
+    await env.AHT_DATA.put(accountDeviceKey(deviceId, username), JSON.stringify(indexRecord), {
+      httpMetadata: { contentType: 'application/json' }
+    });
+  }
 }
 
 async function indexAccountIpv4(env, record) {
@@ -664,7 +1130,9 @@ async function registerUser(request, env, origin) {
   if (!env.AHT_DATA) {
     return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
   }
-  const body = await readBody(request);
+  const rateLimited = await enforcePlayerApiRateLimit(request, env, 'register', origin);
+  if (rateLimited) return rateLimited;
+  const body = await readBody(request, 32_768);
   const username = normalizeMinecraftUsername(body.username);
   if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) {
     return json({ error: 'Enter a valid Minecraft username.' }, 400, origin);
@@ -688,6 +1156,16 @@ async function registerUser(request, env, origin) {
     return json({ error: 'Launcher recovery credential is invalid.' }, 400, origin);
   }
   const accountRecoveryVerifier = accountRecoverySecret ? await sha256Hex(accountRecoverySecret) : '';
+  const requestedDeviceId = cleanString(body.deviceId || '', 80).toLowerCase();
+  const device = await verifyDeviceAssertion(body, 'account-registration', {
+    username: username.toLowerCase(),
+    minecraftUuid,
+    installId,
+    deviceId: requestedDeviceId
+  });
+  if (!device.ok && (!device.missing || env.AHT_REQUIRE_DEVICE_ATTESTATION === 'true')) {
+    return privateJson({ error: device.error, code: 'DEVICE_ATTESTATION_REQUIRED' }, 403, origin);
+  }
 
   const key = minecraftUsernameKey(username);
   const existing = await env.AHT_DATA.get(key);
@@ -702,7 +1180,7 @@ async function registerUser(request, env, origin) {
   const secureRecoveryMatched = Boolean(
     storedRecoveryVerifier
     && accountRecoveryVerifier
-    && storedRecoveryVerifier === accountRecoveryVerifier
+    && await secureStringEqual(storedRecoveryVerifier, accountRecoveryVerifier)
   );
   const recovered = Boolean(installChanged && recoveryRequested && secureRecoveryMatched);
   if (installChanged && recoveryRequested && !secureRecoveryMatched) {
@@ -720,16 +1198,48 @@ async function registerUser(request, env, origin) {
 
   const now = new Date().toISOString();
   const clientIp = requestIpv4(request);
+  const network = await requestNetworkAssessment(request, env, clientIp);
+  const existingDeviceId = normalizedAccessValue('device', existingRecord?.deviceId);
+  const incomingDeviceId = device.ok ? device.deviceId : '';
+  if (existingDeviceId && !incomingDeviceId) {
+    return privateJson({ error: 'This registered player requires device verification.', code: 'DEVICE_ATTESTATION_REQUIRED' }, 403, origin);
+  }
+  if (existingDeviceId && incomingDeviceId && existingDeviceId !== incomingDeviceId && !recovered) {
+    return privateJson({ error: 'Device identity does not match this registered launcher.', code: 'DEVICE_IDENTITY_MISMATCH' }, 409, origin);
+  }
+  const existingAccess = await evaluateAccess(env, {
+    username,
+    minecraftUuid: existingMinecraftUuid || minecraftUuid,
+    deviceId: existingDeviceId,
+    ip: clientIp.ip,
+    ipv4: clientIp.ipv4,
+    network
+  });
+  if (!existingAccess.allowed) return accessDeniedResponse(existingAccess, origin);
+  if (incomingDeviceId && incomingDeviceId !== existingDeviceId) {
+    const incomingAccess = await evaluateAccess(env, {
+      username,
+      minecraftUuid: minecraftUuid || existingMinecraftUuid,
+      deviceId: incomingDeviceId,
+      ip: clientIp.ip,
+      ipv4: clientIp.ipv4,
+      network
+    });
+    if (!incomingAccess.allowed) return accessDeniedResponse(incomingAccess, origin);
+  }
   const previousInstallIds = Array.isArray(existingRecord?.previousInstallIds) ? existingRecord.previousInstallIds : [];
   const incomingPlatform = normalizePlatform(body.platform);
   const existingPlatform = normalizePlatform(existingRecord?.platform);
   const record = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     username: existingRecord?.username || username,
     normalizedUsername: username.toLowerCase(),
     minecraftUuid: minecraftUuid || existingMinecraftUuid,
     accountRecoveryVerifier: accountRecoveryVerifier || storedRecoveryVerifier,
     installId,
+    deviceId: incomingDeviceId || existingDeviceId,
+    devicePublicKey: device.ok ? device.publicKey : cleanString(existingRecord?.devicePublicKey || '', 1024),
+    deviceBoundAt: incomingDeviceId && incomingDeviceId !== existingDeviceId ? now : existingRecord?.deviceBoundAt || now,
     packId: cleanString(body.packId || existingRecord?.packId || '', 120),
     appVersion: cleanString(body.appVersion || existingRecord?.appVersion || '', 80),
     platform: incomingPlatform || existingPlatform,
@@ -740,19 +1250,33 @@ async function registerUser(request, env, origin) {
     recoveredAt: recovered ? now : existingRecord?.recoveredAt || '',
     recoveryReason: recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
     previousInstallIds: recovered ? [...new Set([...previousInstallIds, existingRecord.installId].filter(Boolean))].slice(-10) : previousInstallIds,
-    ipv4: clientIp.ipv4,
-    ip: clientIp.ipv4,
-    ipv4Source: clientIp.source,
-    ipv4Available: clientIp.available,
-    pseudoIpv4: clientIp.pseudo,
+    ipv4: clientIp.available ? clientIp.ipv4 : cleanString(existingRecord?.ipv4 || '', 80),
+    ip: clientIp.available ? clientIp.ip : normalizedConnectionIp(existingRecord?.ip || existingRecord?.ipv4),
+    ipVersion: clientIp.available ? clientIp.ipVersion : Number(existingRecord?.ipVersion || 0),
+    ipv4Source: clientIp.available ? clientIp.source : cleanString(existingRecord?.ipv4Source || 'unavailable', 80),
+    ipv4Available: clientIp.available ? clientIp.ipv4Available : Boolean(existingRecord?.ipv4Available),
+    pseudoIpv4: clientIp.available ? clientIp.pseudo : Boolean(existingRecord?.pseudoIpv4),
     userAgent: cleanString(request.headers.get('User-Agent') || '', 600),
-    country: request.cf?.country || ''
+    country: clientIp.available ? network.country : cleanString(existingRecord?.country || '', 8),
+    asn: clientIp.available ? network.asn : Number(existingRecord?.asn || 0),
+    asOrganization: clientIp.available ? network.organization : cleanString(existingRecord?.asOrganization || '', 160),
+    colo: clientIp.available ? network.colo : cleanString(existingRecord?.colo || '', 16),
+    network: clientIp.available ? network : (existingRecord?.network || network)
   };
   await env.AHT_DATA.put(key, JSON.stringify(record), {
     httpMetadata: { contentType: 'application/json' }
   });
   await indexAccountIpv4(env, record);
-  return json({ ok: true, username, minecraftUuid: record.minecraftUuid, key, recovered }, 200, origin);
+  await indexAccountIdentity(env, record);
+  return privateJson({
+    ok: true,
+    username,
+    minecraftUuid: record.minecraftUuid,
+    deviceId: record.deviceId,
+    key,
+    recovered,
+    access: { allowed: true, code: 'ACCESS_GRANTED' }
+  }, 200, origin);
 }
 
 function cleanText(value, maxLength) {
@@ -786,11 +1310,9 @@ function cleanAssetObject(value, allowedTypes = []) {
 }
 
 async function createLauncherProof(request, env, origin) {
-  const declaredLength = Number(request.headers.get('Content-Length') || 0);
-  if (Number.isFinite(declaredLength) && declaredLength > 32_768) {
-    return privateJson({ error: 'Launcher attestation request is too large.' }, 413, origin);
-  }
-  const body = await readBody(request);
+  const rateLimited = await enforcePlayerApiRateLimit(request, env, 'proof', origin);
+  if (rateLimited) return rateLimited;
+  const body = await readBody(request, 32_768);
   if (JSON.stringify(body || {}).length > 32_768) {
     return privateJson({ error: 'Launcher attestation request is too large.' }, 413, origin);
   }
@@ -819,6 +1341,35 @@ async function createLauncherProof(request, env, origin) {
   if (developerModeRequested && !developerAuthorized) {
     return privateJson({ error: 'Developer launcher proof requires developer authentication.' }, 401, origin);
   }
+  const currentLauncherVersion = cleanString(body.launcherVersion || body.appVersion || '', 40);
+  let versionPolicy;
+  try {
+    versionPolicy = await launcherVersionPolicy(env);
+  } catch {
+    return privateJson({
+      error: 'Launcher version policy is temporarily unavailable.',
+      code: 'LAUNCHER_VERSION_POLICY_UNAVAILABLE'
+    }, 503, origin);
+  }
+  if (!launcherVersionAccepted(currentLauncherVersion, versionPolicy)) {
+    const failure = launcherVersionFailure(currentLauncherVersion, versionPolicy);
+    return privateJson(failure, failure.status, origin);
+  }
+  const requestedMinecraftUuid = normalizeMinecraftUuid(body.minecraftUuid);
+  const requestedDeviceId = cleanString(body.deviceId || '', 80).toLowerCase();
+  const device = await verifyDeviceAssertion(body, 'launcher-proof', {
+    protocol: requestedProtocol || LEGACY_LAUNCHER_PROOF_PROTOCOL,
+    launchId: cleanString(body.launchId || '', 80),
+    minecraftUsername: minecraftUsername.toLowerCase(),
+    minecraftUuid: requestedMinecraftUuid,
+    installId,
+    instanceDirHash: cleanString(body.instanceDirHash || '', 80),
+    launcherVersion: currentLauncherVersion,
+    deviceId: requestedDeviceId
+  });
+  if (v2Requested && !device.ok && (!device.missing || env.AHT_REQUIRE_DEVICE_ATTESTATION === 'true')) {
+    return privateJson({ error: device.error, code: 'DEVICE_ATTESTATION_REQUIRED' }, 403, origin);
+  }
   let existingRecord = null;
   if (!developerAuthorized && v2Requested && !env.AHT_DATA) {
     return privateJson({ error: 'Launcher account registration service is not configured.' }, 503, origin);
@@ -829,6 +1380,10 @@ async function createLauncherProof(request, env, origin) {
     if (!existingRecord || existingRecord.installId !== installId) {
       return privateJson({ error: 'Minecraft username is not registered to this launcher install.' }, 403, origin);
     }
+    const registeredDeviceId = normalizedAccessValue('device', existingRecord.deviceId);
+    if (registeredDeviceId && (!device.ok || device.deviceId !== registeredDeviceId)) {
+      return privateJson({ error: 'Device identity does not match this registered launcher.', code: 'DEVICE_IDENTITY_MISMATCH' }, 403, origin);
+    }
     if (v2Requested) {
       const recoverySecret = cleanString(request.headers.get('X-AHT-Launcher-Recovery') || '', 200);
       const recoveryVerifier = recoverySecret && /^[A-Za-z0-9_-]{32,200}$/.test(recoverySecret)
@@ -836,10 +1391,49 @@ async function createLauncherProof(request, env, origin) {
         : '';
       const storedVerifier = cleanString(existingRecord.accountRecoveryVerifier || '', 80);
       const registeredMinecraftUuid = normalizeMinecraftUuid(existingRecord.minecraftUuid);
-      if (!storedVerifier || !recoveryVerifier || !secureStringEqual(storedVerifier, recoveryVerifier) || !registeredMinecraftUuid) {
+      if (!storedVerifier || !recoveryVerifier || !(await secureStringEqual(storedVerifier, recoveryVerifier)) || !registeredMinecraftUuid) {
         return privateJson({ error: 'Minecraft username is not registered to this launcher install with verified account recovery.' }, 403, origin);
       }
     }
+  }
+
+  const clientIp = requestIpv4(request);
+  const network = await requestNetworkAssessment(request, env, clientIp);
+  const access = await evaluateAccess(env, {
+    username: minecraftUsername,
+    minecraftUuid: developerAuthorized ? requestedMinecraftUuid : normalizeMinecraftUuid(existingRecord?.minecraftUuid),
+    deviceId: device.ok ? device.deviceId : normalizedAccessValue('device', existingRecord?.deviceId),
+    ip: clientIp.ip,
+    ipv4: clientIp.ipv4,
+    network
+  });
+  if (!access.allowed) return accessDeniedResponse(access, origin);
+
+  if (existingRecord && !developerAuthorized) {
+    const connectionAvailable = clientIp.available;
+    existingRecord = {
+      ...existingRecord,
+      schemaVersion: Math.max(3, Number(existingRecord.schemaVersion || 0)),
+      deviceId: device.ok ? device.deviceId : existingRecord.deviceId || '',
+      devicePublicKey: device.ok ? device.publicKey : existingRecord.devicePublicKey || '',
+      updatedAt: new Date().toISOString(),
+      ipv4: connectionAvailable ? clientIp.ipv4 : cleanString(existingRecord.ipv4 || '', 80),
+      ip: connectionAvailable ? clientIp.ip : normalizedConnectionIp(existingRecord.ip || existingRecord.ipv4),
+      ipVersion: connectionAvailable ? clientIp.ipVersion : Number(existingRecord.ipVersion || 0),
+      ipv4Source: connectionAvailable ? clientIp.source : cleanString(existingRecord.ipv4Source || 'unavailable', 80),
+      ipv4Available: connectionAvailable ? clientIp.ipv4Available : Boolean(existingRecord.ipv4Available),
+      pseudoIpv4: connectionAvailable ? clientIp.pseudo : Boolean(existingRecord.pseudoIpv4),
+      country: connectionAvailable ? network.country : cleanString(existingRecord.country || '', 8),
+      asn: connectionAvailable ? network.asn : Number(existingRecord.asn || 0),
+      asOrganization: connectionAvailable ? network.organization : cleanString(existingRecord.asOrganization || '', 160),
+      colo: connectionAvailable ? network.colo : cleanString(existingRecord.colo || '', 16),
+      network: connectionAvailable ? network : (existingRecord.network || network)
+    };
+    await env.AHT_DATA.put(minecraftUsernameKey(minecraftUsername), JSON.stringify(existingRecord), {
+      httpMetadata: { contentType: 'application/json' }
+    });
+    await indexAccountIpv4(env, existingRecord);
+    await indexAccountIdentity(env, existingRecord);
   }
 
   const issuedAtMs = Date.now();
@@ -857,6 +1451,7 @@ async function createLauncherProof(request, env, origin) {
     launchId,
     issuedAt: new Date(issuedAtMs).toISOString(),
     expiresAt: new Date(issuedAtMs + LAUNCHER_ATTESTATION_TTL_MS).toISOString(),
+    ...(v2Requested ? { reconnectExpiresAt: new Date(issuedAtMs + LAUNCHER_RECONNECT_TTL_MS).toISOString() } : {}),
     ...(v2Requested ? {
       issuer: LAUNCHER_ATTESTATION_ISSUER,
       audience: LAUNCHER_ATTESTATION_AUDIENCE
@@ -870,14 +1465,17 @@ async function createLauncherProof(request, env, origin) {
     minecraftUsername,
     ...(v2Requested ? { minecraftUuid } : {}),
     installId,
+    deviceId: device.ok ? device.deviceId : normalizedAccessValue('device', existingRecord?.deviceId),
     appVersion: cleanString(body.appVersion, 40),
-    launcherVersion: cleanString(body.launcherVersion || body.appVersion, 40),
+    launcherVersion: currentLauncherVersion,
     platform: cleanString(body.platform, 32),
     arch: cleanString(body.arch, 32),
     launcherChannel: developerAuthorized ? 'developer' : 'player',
     developerClient: developerAuthorized,
     developerClientBypass: developerAuthorized,
     modIntegrityBypass: developerAuthorized,
+    accessGranted: true,
+    networkStatus: network.status,
     instanceDirHash: cleanString(body.instanceDirHash, 80),
     minecraft: v2Requested ? null : (body.minecraft && typeof body.minecraft === 'object' ? body.minecraft : null)
   };
@@ -898,13 +1496,19 @@ function socialActionKey(id) {
   return `${SOCIAL_ACTION_PREFIX}${id}.json`;
 }
 
-function secureStringEqual(left, right) {
-  const a = String(left || '');
-  const b = String(right || '');
-  if (a.length !== b.length) return false;
+async function secureStringEqual(left, right) {
+  const [aBuffer, bBuffer] = await Promise.all([
+    crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(left || ''))),
+    crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(right || '')))
+  ]);
+  const a = new Uint8Array(aBuffer);
+  const b = new Uint8Array(bBuffer);
+  if (typeof crypto.subtle.timingSafeEqual === 'function') {
+    return crypto.subtle.timingSafeEqual(a, b);
+  }
   let difference = 0;
   for (let index = 0; index < a.length; index += 1) {
-    difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
+    difference |= a[index] ^ b[index];
   }
   return difference === 0;
 }
@@ -921,7 +1525,7 @@ function parsedTime(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function verifyLauncherProofRequest(request, env) {
+async function verifyLauncherProofRequest(request, env, options = {}) {
   const authorization = request.headers.get('Authorization') || '';
   const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
   if (token.length > 8192) {
@@ -982,13 +1586,14 @@ async function verifyLauncherProofRequest(request, env) {
       return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
     }
     const expected = await hmac(signingInput, secret);
-    if (!secureStringEqual(parts[2], expected)) {
+    if (!(await secureStringEqual(parts[2], expected))) {
       return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
     }
   }
   const now = Date.now();
   const issuedAt = parsedTime(payload.issuedAt);
   const expiresAt = parsedTime(payload.expiresAt);
+  const reconnectExpiresAt = parsedTime(payload.reconnectExpiresAt);
   const username = normalizeMinecraftUsername(payload.minecraftUsername || payload.username);
   const installId = cleanString(payload.installId, 120);
   const expectedPackId = cleanString(env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora', 80);
@@ -1001,6 +1606,8 @@ async function verifyLauncherProofRequest(request, env) {
     || Boolean(payload.developerClientBypass)
     || Boolean(payload.modIntegrityBypass);
   const minecraftUuid = normalizeMinecraftUuid(payload.minecraftUuid);
+  const deviceId = normalizedAccessValue('device', payload.deviceId);
+  const currentLauncherVersion = cleanString(payload.launcherVersion || payload.appVersion || '', 40);
   const validLaunchId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cleanString(payload.launchId, 80));
   const v2ClaimsValid = !v2 || (
     payload.issuer === LAUNCHER_ATTESTATION_ISSUER
@@ -1008,37 +1615,148 @@ async function verifyLauncherProofRequest(request, env) {
     && payload.jti === payload.launchId
     && validLaunchId
     && Boolean(minecraftUuid)
+    && payload.accessGranted === true
+    && ['likely', 'not_detected', 'unknown'].includes(cleanString(payload.networkStatus, 20))
     && expiresAt - issuedAt <= LAUNCHER_ATTESTATION_TTL_MS
+    && reconnectExpiresAt > expiresAt
+    && reconnectExpiresAt > now
+    && reconnectExpiresAt - issuedAt <= LAUNCHER_RECONNECT_TTL_MS
   );
   if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || !installId
       || cleanString(payload.packId, 80) !== expectedPackId
-      || !issuedAt || !expiresAt || expiresAt <= issuedAt || expiresAt <= now || issuedAt > now + 120000
+      || !issuedAt || !expiresAt || expiresAt <= issuedAt || (!v2 && expiresAt <= now) || issuedAt > now + 120000
       || (hasAnyDeveloperClaim && !developerProof)
       || !v2ClaimsValid) {
     return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
   }
+  let versionPolicy = options.skipVersionPolicy === true
+    ? { necessaryLauncherVersion: currentLauncherVersion, source: 'in-memory-self-test' }
+    : null;
+  if (!versionPolicy) {
+    try {
+      versionPolicy = await launcherVersionPolicy(env);
+    } catch {
+      return {
+        ok: false,
+        status: 503,
+        code: 'LAUNCHER_VERSION_POLICY_UNAVAILABLE',
+        error: 'Launcher version policy is temporarily unavailable.'
+      };
+    }
+  }
+  if (!launcherVersionAccepted(currentLauncherVersion, versionPolicy)) {
+    return launcherVersionFailure(currentLauncherVersion, versionPolicy);
+  }
   if (env.AHT_DATA && !developerProof) {
     const registration = await env.AHT_DATA.get(minecraftUsernameKey(username));
     const record = registration ? await registration.json().catch(() => null) : null;
-    if (!record || record.installId !== installId || (v2 && normalizeMinecraftUuid(record.minecraftUuid) !== minecraftUuid)) {
+    const registeredDeviceId = normalizedAccessValue('device', record?.deviceId);
+    if (!record || record.installId !== installId
+        || (v2 && normalizeMinecraftUuid(record.minecraftUuid) !== minecraftUuid)
+        || (registeredDeviceId && registeredDeviceId !== deviceId)) {
       return { ok: false, status: 403, error: 'This Minecraft username is not registered to this launcher install.' };
     }
+    const access = await evaluateAccess(env, {
+      username,
+      minecraftUuid,
+      deviceId: registeredDeviceId || deviceId,
+      ip: normalizedConnectionIp(record.ip || record.ipv4),
+      ipv4: nativeIpv4FromRecord(record),
+      network: record.network || null
+    });
+    if (!access.allowed) {
+      return { ok: false, status: 403, error: 'Access to A Hard Time is restricted for this account or device.' };
+    }
   }
-  return { ok: true, payload: { ...payload, minecraftUsername: username, ...(v2 ? { minecraftUuid } : {}), installId } };
+  return {
+    ok: true,
+    payload: { ...payload, minecraftUsername: username, ...(v2 ? { minecraftUuid } : {}), installId, deviceId },
+    policy: {
+      currentLauncherVersion,
+      necessaryLauncherVersion: versionPolicy.necessaryLauncherVersion,
+      source: versionPolicy.source
+    }
+  };
+}
+
+async function verifyLauncherProofEndpoint(request, env, origin) {
+  const rateLimited = await enforceProofVerifyRateLimit(request, env, origin);
+  if (rateLimited) return rateLimited;
+  const verified = await verifyLauncherProofRequest(request, env);
+  if (!verified.ok) {
+    return privateJson({
+      ok: false,
+      valid: false,
+      accessGranted: false,
+      code: cleanString(verified.code || '', 80),
+      error: verified.error,
+      ...(verified.currentLauncherVersion ? { currentLauncherVersion: verified.currentLauncherVersion } : {}),
+      ...(verified.necessaryLauncherVersion ? { necessaryLauncherVersion: verified.necessaryLauncherVersion } : {})
+    }, verified.status, origin);
+  }
+  const payload = verified.payload || {};
+  const policy = verified.policy || {};
+  return privateJson({
+    ok: true,
+    valid: true,
+    accessGranted: true,
+    session: {
+      protocol: cleanString(payload.protocol, 80),
+      launchId: cleanString(payload.launchId, 80),
+      minecraftUsername: normalizeMinecraftUsername(payload.minecraftUsername),
+      minecraftUuid: normalizeMinecraftUuid(payload.minecraftUuid),
+      installId: cleanString(payload.installId, 120),
+      deviceId: normalizedAccessValue('device', payload.deviceId),
+      packId: cleanString(payload.packId, 80),
+      launcherVersion: cleanString(payload.launcherVersion, 40),
+      launcherChannel: cleanString(payload.launcherChannel || 'player', 32),
+      issuedAt: cleanString(payload.issuedAt, 80),
+      expiresAt: cleanString(payload.expiresAt, 80),
+      reconnectExpiresAt: cleanString(payload.reconnectExpiresAt, 80)
+    },
+    policy: {
+      currentLauncherVersion: cleanString(policy.currentLauncherVersion, 40),
+      necessaryLauncherVersion: cleanString(policy.necessaryLauncherVersion, 40),
+      source: cleanString(policy.source, 80)
+    }
+  }, 200, origin);
 }
 
 async function readRawBody(request, maxBytes = 1024 * 1024) {
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > maxBytes) {
-    throw new Error('Request body is too large');
+  const rawLength = String(request.headers.get('Content-Length') || '').trim();
+  if (rawLength && !/^\d+$/.test(rawLength)) {
+    throw new RequestPayloadError(400, 'Content-Length is invalid.');
+  }
+  if (rawLength && Number(rawLength) > maxBytes) {
+    throw new RequestPayloadError(413, 'Request body is too large.');
+  }
+  if (!request.body) return '';
+
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel('request body limit exceeded').catch(() => {});
+        throw new RequestPayloadError(413, 'Request body is too large.');
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } finally {
+    reader.releaseLock();
   }
   return text;
 }
 
 async function verifyServerSocialRequest(request, env, bodyText) {
-  const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET
-    || env.ADMIN_TOKEN_SECRET || env.ADMIN_PASSWORD;
-  if (!secret) return false;
+  const secret = env.AHT_SOCIAL_SERVER_SECRET;
+  if (String(secret || '').length < 32) return false;
   const timestamp = request.headers.get('X-AHT-Server-Timestamp') || '';
   const signature = request.headers.get('X-AHT-Server-Signature') || '';
   const timestampMs = Number(timestamp);
@@ -1169,7 +1887,7 @@ async function queueLauncherSocialAction(request, env, origin) {
   if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
   const verified = await verifyLauncherProofRequest(request, env);
   if (!verified.ok) return privateJson({ error: verified.error }, verified.status, origin);
-  const body = await readBody(request);
+  const body = await readBody(request, 8_192);
   const action = cleanString(body.action, 32).toLowerCase();
   const target = normalizeMinecraftUsername(body.target);
   const actor = verified.payload.minecraftUsername;
@@ -1295,7 +2013,7 @@ async function publishUpdateLog(request, env, origin) {
   if (!(await verifyToken(request, env))) {
     return json({ error: 'Unauthorized' }, 401, origin);
   }
-  const body = await readBody(request);
+  const body = await readBody(request, 32_768);
   const title = cleanText(body.title, 120);
   const subtitle = cleanText(body.subtitle, 180);
   const text = cleanText(body.text || body.body, 8000);
@@ -1337,7 +2055,7 @@ function launcherTelemetryEventType(body = {}) {
   return cleanString(body?.event?.type || '', 80).toLowerCase();
 }
 
-async function refreshCanonicalAccountFromLauncherUpdate(env, body, clientIp, receivedAt) {
+async function validateCanonicalAccountForLauncherUpdate(env, body) {
   const username = normalizeMinecraftUsername(body.minecraftUsername);
   if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) {
     return { ok: false, status: 400, error: 'A registered Minecraft username is required for launcher update telemetry.' };
@@ -1349,7 +2067,7 @@ async function refreshCanonicalAccountFromLauncherUpdate(env, body, clientIp, re
   const key = minecraftUsernameKey(username);
   const item = await env.AHT_DATA.get(key);
   const existing = item ? await item.json().catch(() => null) : null;
-  if (!existing || cleanString(existing.installId || '', 200) !== installId) {
+  if (!existing) {
     return { ok: false, status: 403, error: 'Launcher update identity does not match the registered player.' };
   }
 
@@ -1362,37 +2080,23 @@ async function refreshCanonicalAccountFromLauncherUpdate(env, body, clientIp, re
   if (existingMinecraftUuid && incomingMinecraftUuid && existingMinecraftUuid !== incomingMinecraftUuid) {
     return { ok: false, status: 409, error: 'Minecraft UUID does not match this registered player.' };
   }
+  const installMatches = cleanString(existing.installId || '', 200) === installId;
+  // Telemetry is not an account-recovery authority. A public Minecraft UUID is
+  // not a secret and must never be enough to rotate the registered install ID.
+  // Install changes go only through /api/users/register with the recovery
+  // credential, UUID match, and (when bound) device assertion.
+  if (!installMatches) {
+    return { ok: false, status: 403, error: 'Launcher update identity does not match the registered player.' };
+  }
 
-  const incomingPlatform = normalizePlatform(body.platform);
-  const existingPlatform = normalizePlatform(existing.platform);
   const launcherVersion = cleanString(body.appVersion || body.event?.toVersion || body.event?.version || '', 80);
   if (!launcherVersion) {
     return { ok: false, status: 400, error: 'Launcher version is required for launcher update telemetry.' };
   }
-  const record = {
-    ...existing,
-    schemaVersion: Math.max(2, Number(existing.schemaVersion || 0)),
-    username: existing.username || username,
-    normalizedUsername: username.toLowerCase(),
-    minecraftUuid: incomingMinecraftUuid || existingMinecraftUuid,
-    appVersion: launcherVersion,
-    platform: incomingPlatform || existingPlatform,
-    platformRaw: cleanString(body.platform || existing.platformRaw || '', 80),
-    arch: cleanString(body.arch || existing.arch || '', 40),
-    updatedAt: receivedAt,
-    ipv4: clientIp.ipv4,
-    ip: clientIp.ipv4,
-    ipv4Source: clientIp.source,
-    ipv4Available: clientIp.available,
-    pseudoIpv4: clientIp.pseudo,
-    userAgent: cleanString(body.userAgent || existing.userAgent || '', 600),
-    country: cleanString(body.country || existing.country || '', 8)
-  };
-  await env.AHT_DATA.put(key, JSON.stringify(record), {
-    httpMetadata: { contentType: 'application/json' }
-  });
-  await indexAccountIpv4(env, record);
-  return { ok: true, key, record };
+  // Keep telemetry history separate from the authoritative registration. The
+  // registration/proof paths already refresh canonical IP, network, platform,
+  // and version data after stronger recovery/device checks.
+  return { ok: true, key, record: existing };
 }
 
 async function recordLauncherUpdate(env, body, account, clientIp, receivedAt) {
@@ -1416,11 +2120,13 @@ async function recordLauncherUpdate(env, body, account, clientIp, receivedAt) {
     lastReceivedAt: receivedAt,
     minecraftUsername: cleanString(account.username || body.minecraftUsername || '', 16),
     minecraftUuid: normalizeMinecraftUuid(account.minecraftUuid),
+    ip: clientIp.ip,
+    ipVersion: clientIp.ipVersion,
     ipv4: clientIp.ipv4,
     ipv4Source: clientIp.source,
-    ipv4Available: clientIp.available,
+    ipv4Available: clientIp.ipv4Available,
     pseudoIpv4: clientIp.pseudo,
-    platform: normalizePlatform(account.platform || body.platform),
+    platform: normalizePlatform(body.platform || account.platform),
     launcherVersion,
     previousLauncherVersion: cleanString(body.event?.fromVersion || body.event?.previousVersion || '', 80)
   };
@@ -1434,20 +2140,22 @@ async function writeEvent(request, env, origin) {
   if (!env.AHT_DATA) {
     return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
   }
+  const rateLimited = await enforcePlayerApiRateLimit(request, env, 'events', origin);
+  if (rateLimited) return rateLimited;
   if (env.LAUNCHER_WRITE_TOKEN) {
     const header = request.headers.get('Authorization') || '';
-    if (header !== `Bearer ${env.LAUNCHER_WRITE_TOKEN}`) {
+    if (!(await secureStringEqual(header, `Bearer ${env.LAUNCHER_WRITE_TOKEN}`))) {
       return json({ error: 'Unauthorized' }, 401, origin);
     }
   }
-  const body = await readBody(request);
+  const body = await readBody(request, 262_144);
   const receivedAt = new Date().toISOString();
   const day = receivedAt.slice(0, 10);
   const clientIp = requestIpv4(request);
   let accountRefresh = null;
   let launcherUpdate = null;
   if (launcherTelemetryEventType(body) === 'launcher_update_completed') {
-    accountRefresh = await refreshCanonicalAccountFromLauncherUpdate(env, body, clientIp, receivedAt);
+    accountRefresh = await validateCanonicalAccountForLauncherUpdate(env, body);
     if (!accountRefresh.ok) {
       return privateJson({ error: accountRefresh.error }, accountRefresh.status, origin);
     }
@@ -1462,9 +2170,10 @@ async function writeEvent(request, env, origin) {
     platform: normalizePlatform(body.platform),
     receivedAt,
     ipv4: clientIp.ipv4,
-    ip: clientIp.ipv4,
+    ip: clientIp.ip,
+    ipVersion: clientIp.ipVersion,
     ipv4Source: clientIp.source,
-    ipv4Available: clientIp.available,
+    ipv4Available: clientIp.ipv4Available,
     pseudoIpv4: clientIp.pseudo,
     userAgent: cleanString(request.headers.get('User-Agent') || '', 600),
     country: request.cf?.country || ''
@@ -1476,19 +2185,46 @@ async function writeEvent(request, env, origin) {
   return json({
     ok: true,
     key,
-    accountRefreshed: Boolean(accountRefresh?.ok),
+    accountValidated: Boolean(accountRefresh?.ok),
+    accountRefreshed: false,
     launcherUpdateKey: launcherUpdate?.key || ''
   }, 200, origin);
 }
 
 async function login(request, env, origin) {
-  const body = await readBody(request);
-  const usernameOk = body.username && body.username === env.ADMIN_USERNAME;
+  const body = await readBody(request, 4_096);
+  try {
+    adminTokenSecret(env);
+  } catch {
+    return privateJson({ error: 'Admin authentication is not configured.' }, 503, origin);
+  }
+  const submittedUsername = String(body.username || '');
+  const submittedPassword = String(body.password || '');
+  const credentialsBounded = submittedUsername.length <= 120 && submittedPassword.length <= 512;
+  if (env.AHT_ADMIN_RATE_LIMITER?.limit) {
+    let allowed = false;
+    try {
+      const connection = requestIpv4(request);
+      const ipKey = connection.ip || 'unavailable';
+      const result = await env.AHT_ADMIN_RATE_LIMITER.limit({
+        key: `admin-login:${(await sha256Hex(ipKey)).slice(0, 40)}`
+      });
+      allowed = result?.success === true;
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) {
+      const response = privateJson({ error: 'Too many admin login attempts. Try again later.' }, 429, origin);
+      response.headers.set('Retry-After', '60');
+      return response;
+    }
+  }
+  const usernameOk = Boolean(credentialsBounded && submittedUsername && await secureStringEqual(submittedUsername, env.ADMIN_USERNAME));
   let passwordOk = false;
   if (env.ADMIN_PASSWORD_SHA256) {
-    passwordOk = await sha256Hex(body.password || '') === env.ADMIN_PASSWORD_SHA256;
+    passwordOk = credentialsBounded && await secureStringEqual(await sha256Hex(submittedPassword), String(env.ADMIN_PASSWORD_SHA256 || '').toLowerCase());
   } else {
-    passwordOk = body.password && body.password === env.ADMIN_PASSWORD;
+    passwordOk = Boolean(credentialsBounded && submittedPassword && await secureStringEqual(submittedPassword, env.ADMIN_PASSWORD));
   }
   if (!usernameOk || !passwordOk) {
     return privateJson({ error: 'Invalid username or password' }, 401, origin);
@@ -1527,19 +2263,31 @@ async function readR2JsonObjects(env, objects = []) {
 
 function launcherDownloadAdminRecord(item = {}) {
   const ipv4 = nativeIpv4FromRecord(item);
+  const connectionIp = normalizedConnectionIp(item.ip || ipv4);
   const platform = normalizePlatform(item.platform || item.platformLabel || item.platformKey);
+  const network = normalizedNetworkAssessment(item.network || {}, {
+    asn: item.asn,
+    organization: item.asOrganization,
+    country: item.country,
+    colo: item.colo
+  });
   return {
     schemaVersion: Number(item.schemaVersion || 1),
     type: 'launcher_installer_download',
     downloadId: cleanString(item.downloadId || '', 120),
     receivedAt: cleanString(item.receivedAt || '', 80),
-    minecraftUsername: '',
-    minecraftUuid: '',
+    minecraftUsername: cleanString(item.minecraftUsername || item.username || '', 16),
+    minecraftUuid: normalizeMinecraftUuid(item.minecraftUuid),
+    identitySource: cleanString(item.identitySource || '', 40),
     ipv4,
-    ip: ipv4,
-    ipv4Source: ipv4 ? cleanString(item.ipv4Source || 'legacy', 80) : (item.pseudoIpv4 ? 'ipv6-only' : cleanString(item.ipv4Source || 'unavailable', 80)),
+    ip: connectionIp,
+    ipVersion: connectionIp.includes(':') ? 6 : (connectionIp ? 4 : 0),
+    ipv4Source: ipv4
+      ? cleanString(item.ipv4Source || 'legacy', 80)
+      : cleanString(item.ipv4Source || (connectionIp.includes(':') ? 'cloudflare-connecting-ip' : 'unavailable'), 80),
     ipv4Available: Boolean(ipv4),
     pseudoIpv4: Boolean(item.pseudoIpv4),
+    network,
     platform,
     platformLabel: platform,
     platformKey: cleanString(item.platformKey || '', 80),
@@ -1550,17 +2298,63 @@ function launcherDownloadAdminRecord(item = {}) {
 
 function launcherUpdateAdminRecord(item = {}) {
   const ipv4 = nativeIpv4FromRecord(item);
+  const connectionIp = normalizedConnectionIp(item.ip || ipv4);
   return {
     type: 'launcher_update_completed',
     updateId: cleanString(item.updateId || '', 120),
     receivedAt: cleanString(item.receivedAt || item.lastReceivedAt || '', 80),
     minecraftUsername: cleanString(item.minecraftUsername || item.username || '', 16),
     minecraftUuid: normalizeMinecraftUuid(item.minecraftUuid),
+    ip: connectionIp,
     ipv4,
     platform: normalizePlatform(item.platform),
     launcherVersion: cleanString(item.launcherVersion || item.appVersion || '', 80),
-    previousLauncherVersion: cleanString(item.previousLauncherVersion || '', 80)
+    previousLauncherVersion: cleanString(item.previousLauncherVersion || '', 80),
+    source: cleanString(item.source || 'worker-event', 40)
   };
+}
+
+function launcherUpdateIdentity(item = {}) {
+  const username = normalizeMinecraftUsername(item.minecraftUsername || item.username).toLowerCase();
+  const version = cleanString(item.launcherVersion || item.appVersion || '', 80);
+  if (username && version) return `${username}\0${version}`;
+  return `id:${cleanString(item.updateId || '', 120)}`;
+}
+
+function canonicalAccountLauncherUpdate(item = {}) {
+  if (isSyntheticReadinessAccount(item)) return null;
+  const username = normalizeMinecraftUsername(item.username || item.minecraftUsername);
+  const launcherVersion = cleanString(item.appVersion || item.launcherVersion || '', 80);
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || !launcherVersion) return null;
+  return {
+    type: 'launcher_update_completed',
+    updateId: `canonical-account-${username.toLowerCase()}-${launcherVersion}`,
+    receivedAt: cleanString(item.updatedAt || item.createdAt || '', 80),
+    minecraftUsername: username,
+    minecraftUuid: normalizeMinecraftUuid(item.minecraftUuid),
+    ip: normalizedConnectionIp(item.ip || item.ipv4),
+    ipv4: nativeIpv4FromRecord(item),
+    ipv4Source: cleanString(item.ipv4Source || '', 80),
+    platform: normalizePlatform(item.platform),
+    launcherVersion,
+    previousLauncherVersion: '',
+    source: 'canonical-account'
+  };
+}
+
+async function readAllR2JsonObjects(env, prefix) {
+  const records = [];
+  let cursor = '';
+  do {
+    const options = { prefix, limit: 1000 };
+    if (cursor) options.cursor = cursor;
+    const listed = await env.AHT_DATA.list(options);
+    records.push(...await readR2JsonObjects(env, listed.objects || []));
+    const nextCursor = listed.truncated ? String(listed.cursor || '') : '';
+    if (!nextCursor || nextCursor === cursor) break;
+    cursor = nextCursor;
+  } while (true);
+  return records;
 }
 
 function isSyntheticReadinessAccount(item = {}) {
@@ -1569,16 +2363,126 @@ function isSyntheticReadinessAccount(item = {}) {
     || item.installId === 'aht-production-readiness-proof';
 }
 
-function playerAdminRecord(item = {}) {
+function decisionMatchesPlayer(decision = {}, item = {}) {
+  if (decision.active !== true || decision.effect !== 'deny') return false;
+  const values = {
+    account: normalizeMinecraftUsername(item.username || item.minecraftUsername).toLowerCase(),
+    minecraft_uuid: normalizeMinecraftUuid(item.minecraftUuid),
+    device: normalizedAccessValue('device', item.deviceId),
+    ip: normalizedConnectionIp(item.ip || item.ipv4),
+    ipv4: nativeIpv4FromRecord(item)
+  };
+  return values[decision.scope] && values[decision.scope] === normalizedAccessValue(decision.scope, decision.value);
+}
+
+function playerAdminRecord(item = {}, decisions = []) {
   const ipv4 = nativeIpv4FromRecord(item);
+  const connectionIp = normalizedConnectionIp(item.ip || ipv4);
+  const activeDecisions = decisions.filter((decision) => decisionMatchesPlayer(decision, item));
+  const network = normalizedNetworkAssessment(item.network || {}, {
+    asn: item.asn,
+    organization: item.asOrganization,
+    country: item.country,
+    colo: item.colo
+  });
   return {
-    receivedAt: cleanString(item.createdAt || item.updatedAt || '', 80),
+    receivedAt: cleanString(item.updatedAt || item.createdAt || '', 80),
     minecraftUsername: cleanString(item.username || item.minecraftUsername || '', 16),
     minecraftUuid: normalizeMinecraftUuid(item.minecraftUuid),
+    deviceId: normalizedAccessValue('device', item.deviceId),
+    ip: connectionIp,
+    ipVersion: connectionIp.includes(':') ? 6 : (connectionIp ? 4 : 0),
     ipv4,
     platform: normalizePlatform(item.platform),
-    launcherVersion: cleanString(item.appVersion || item.launcherVersion || '', 80)
+    launcherVersion: cleanString(item.appVersion || item.launcherVersion || '', 80),
+    country: cleanString(item.country || '', 8),
+    network,
+    access: {
+      allowed: activeDecisions.length === 0,
+      activeScopes: [...new Set(activeDecisions.map((decision) => decision.scope))],
+      decisionIds: activeDecisions.map((decision) => cleanString(decision.decisionId || '', 120))
+    }
   };
+}
+
+async function listAccessDecisions(env, request, origin) {
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+  if (!(await verifyToken(request, env))) return privateJson({ error: 'Unauthorized' }, 401, origin);
+  const params = new URL(request.url).searchParams;
+  const activeOnly = params.get('active') === 'true';
+  const includeHistory = params.get('history') === 'true';
+  const [decisionObjects, auditObjects] = await Promise.all([
+    readAllR2JsonObjects(env, ACCESS_DECISION_PREFIX),
+    includeHistory ? readAllR2JsonObjects(env, ACCESS_AUDIT_PREFIX) : Promise.resolve([])
+  ]);
+  const decisions = decisionObjects
+    .filter((item) => item && (!activeOnly || item.active === true))
+    .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))
+    .slice(0, 2000);
+  const audit = auditObjects
+    .filter((item) => item?.decision && (!activeOnly || item.decision.active === true))
+    .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')))
+    .slice(0, 2000);
+  return privateJson({
+    decisions,
+    audit,
+    activeOnly,
+    history: includeHistory,
+    count: decisions.length,
+    auditCount: audit.length
+  }, 200, origin);
+}
+
+async function setAccessDecision(request, env, origin) {
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+  const session = await adminSession(request, env);
+  if (!session) return privateJson({ error: 'Unauthorized' }, 401, origin);
+  const body = await readBody(request, 8_192);
+  const action = cleanString(body.action || '', 20).toLowerCase();
+  const scope = cleanString(body.scope || '', 40).toLowerCase();
+  const value = normalizedAccessValue(scope, body.value);
+  const reason = cleanText(body.reason || '', 500);
+  if (!['deny', 'allow'].includes(action) || !ACCESS_SCOPES.has(scope) || !value) {
+    return privateJson({ error: 'A valid access action, scope, and value are required.' }, 400, origin);
+  }
+  if (action === 'deny' && reason.length < 3) {
+    return privateJson({ error: 'A ban reason of at least 3 characters is required.' }, 400, origin);
+  }
+  const key = await accessDecisionKey(scope, value);
+  const existingObject = await env.AHT_DATA.get(key);
+  const existing = existingObject ? await existingObject.json().catch(() => null) : null;
+  const now = new Date().toISOString();
+  const decisionId = existing?.decisionId || (await sha256Hex(`${scope}\0${value}`)).slice(0, 40);
+  const decision = {
+    schemaVersion: 1,
+    decisionId,
+    scope,
+    value,
+    effect: action === 'deny' ? 'deny' : 'allow',
+    active: action === 'deny',
+    reason: reason || (action === 'allow' ? 'Access restored by administrator.' : ''),
+    actor: cleanString(session.username || 'admin', 120),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now
+  };
+  await env.AHT_DATA.put(key, JSON.stringify(decision), {
+    httpMetadata: { contentType: 'application/json' }
+  });
+  const audit = {
+    schemaVersion: 1,
+    type: 'access_decision_changed',
+    auditId: crypto.randomUUID(),
+    action,
+    actor: decision.actor,
+    decision,
+    previous: existing || null,
+    receivedAt: now
+  };
+  const auditKey = `${ACCESS_AUDIT_PREFIX}${now.replaceAll(':', '-')}-${audit.auditId}.json`;
+  await env.AHT_DATA.put(auditKey, JSON.stringify(audit), {
+    httpMetadata: { contentType: 'application/json' }
+  });
+  return privateJson({ ok: true, decision, auditKey }, 200, origin);
 }
 
 async function listLauncherDownloads(env, request, origin) {
@@ -1615,18 +2519,31 @@ async function listLauncherUpdates(env, request, origin) {
   }
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
-  const cursor = cleanString(url.searchParams.get('cursor') || '', 1000);
-  const options = { prefix: LAUNCHER_UPDATE_PREFIX, limit };
-  if (cursor) options.cursor = cursor;
-  const listed = await env.AHT_DATA.list(options);
-  const updates = (await readR2JsonObjects(env, listed.objects || []))
+  const cursorText = cleanString(url.searchParams.get('cursor') || '', 40);
+  const offset = /^\d+$/.test(cursorText) ? Number(cursorText) : 0;
+  const dedicated = (await readAllR2JsonObjects(env, LAUNCHER_UPDATE_PREFIX))
     .filter((item) => item.type === 'launcher_update_completed')
-    .map(launcherUpdateAdminRecord)
-    .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')));
+    .map(launcherUpdateAdminRecord);
+  const canonical = (await readAllR2JsonObjects(env, ACCOUNT_USERNAME_PREFIX))
+    .map(canonicalAccountLauncherUpdate)
+    .filter(Boolean);
+  const merged = new Map();
+  for (const update of dedicated) merged.set(launcherUpdateIdentity(update), update);
+  for (const update of canonical) {
+    const key = launcherUpdateIdentity(update);
+    if (!merged.has(key)) merged.set(key, update);
+  }
+  const ordered = [...merged.values()].sort((left, right) => (
+    String(right.receivedAt || '').localeCompare(String(left.receivedAt || ''))
+      || String(right.minecraftUsername || '').localeCompare(String(left.minecraftUsername || ''))
+  ));
+  const updates = ordered.slice(offset, offset + limit);
+  const nextOffset = offset + updates.length;
+  const hasMore = nextOffset < ordered.length;
   return privateJson({
     updates,
-    cursor: listed.truncated ? listed.cursor || '' : '',
-    hasMore: Boolean(listed.truncated),
+    cursor: hasMore ? String(nextOffset) : '',
+    hasMore,
     appendOnly: true
   }, 200, origin);
 }
@@ -1644,9 +2561,11 @@ async function listPlayerRecords(env, request, origin) {
   const options = { prefix: ACCOUNT_USERNAME_PREFIX, limit };
   if (cursor) options.cursor = cursor;
   const listed = await env.AHT_DATA.list(options);
+  const decisions = (await readAllR2JsonObjects(env, ACCESS_DECISION_PREFIX))
+    .filter((item) => item?.active === true && item?.effect === 'deny');
   const players = (await readR2JsonObjects(env, listed.objects || []))
     .filter((item) => !isSyntheticReadinessAccount(item))
-    .map(playerAdminRecord)
+    .map((item) => playerAdminRecord(item, decisions))
     .filter((item) => item.minecraftUsername)
     .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')));
   return privateJson({
@@ -1780,6 +2699,9 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/launcher-proof') {
         return await createLauncherProof(request, env, origin);
       }
+      if ((request.method === 'GET' || request.method === 'POST') && url.pathname === '/api/launcher-proof/verify') {
+        return await verifyLauncherProofEndpoint(request, env, origin);
+      }
       if (request.method === 'GET' && url.pathname === '/api/social') {
         return await launcherSocialState(request, env, origin);
       }
@@ -1816,6 +2738,12 @@ export default {
       if (request.method === 'GET' && url.pathname === '/admin/player-ipv4-groups') {
         return await listPlayerIpv4Groups(env, request, origin);
       }
+      if (request.method === 'GET' && url.pathname === '/admin/access-decisions') {
+        return await listAccessDecisions(env, request, origin);
+      }
+      if (request.method === 'POST' && url.pathname === '/admin/access-decisions') {
+        return await setAccessDecision(request, env, origin);
+      }
       if (request.method === 'GET' && url.pathname === '/admin/summary') {
         return await summary(env, request, origin);
       }
@@ -1843,6 +2771,7 @@ export default {
           '/api/users/register',
           '/api/launcher-proof/status',
           '/api/launcher-proof',
+          '/api/launcher-proof/verify',
           '/api/social',
           '/api/social/actions',
           '/server/social/sync',
@@ -1854,13 +2783,25 @@ export default {
           '/admin/launcher-updates',
           '/admin/player-records',
           '/admin/player-ipv4-groups',
+          '/admin/access-decisions',
           '/admin/update-logs'
           ]
         }, 200, origin);
       }
       return privateJson({ error: 'Not found' }, 404, origin);
     } catch (error) {
-      return json({ error: error.message }, 500, origin);
+      if (error instanceof RequestPayloadError) {
+        return privateJson({ error: error.message }, error.status, origin);
+      }
+      const requestId = crypto.randomUUID();
+      console.error(JSON.stringify({
+        level: 'error',
+        requestId,
+        method: request.method,
+        pathname: url.pathname,
+        error: cleanString(error?.message || String(error), 1000)
+      }));
+      return privateJson({ error: 'Internal service error.', requestId }, 500, origin);
     }
   }
 };

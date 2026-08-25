@@ -10,6 +10,7 @@ const userData = path.join(root, 'userData');
 const vaultDir = path.join(root, 'developer-secret-vault');
 const secretValue = 'fake-cf-key-persisted';
 const proofSecretValue = 'proof-secret-persisted';
+const socialSecretValue = 'social-server-secret-persisted-at-least-32-bytes';
 const r2AccountValue = 'abc123abc123abc123abc123abc123ab';
 const r2AccessKeyValue = 'r2-access-key-persisted';
 const r2SecretKeyValue = 'r2-secret-key-persisted';
@@ -140,8 +141,8 @@ async function runDeveloperApp(port, task) {
       AHT_TEST_HOOKS: '1',
       AHT_TEST_USER_DATA: userData,
       AHT_DEVELOPER_VAULT_DIR: vaultDir,
-      AHT_DEVELOPER_USERNAME: 'admin',
-      AHT_DEVELOPER_PASSWORD: 'test-dev-password',
+      AHT_DEVELOPER_USERNAME: '',
+      AHT_DEVELOPER_PASSWORD: '',
       AHT_SKIP_REMOTE_DEVELOPER_LOGIN: '1',
       ELECTRON_ENABLE_LOGGING: '0'
     },
@@ -188,22 +189,30 @@ await writeJson(path.join(userData, 'identity.json'), {
   installId: 'smoke-install',
   minecraftUsername: 'SmokeUser'
 });
+await writeJson(path.join(userData, 'developer.credentials.json'), {
+  schemaVersion: 1,
+  username: 'admin',
+  password: 'test-dev-password'
+});
 
 const saved = await runDeveloperApp(basePort, async (client) => {
   await evaluate(client, `
     (() => {
       const input = document.querySelector('#curseforgeApiKeyInput');
       const proofInput = document.querySelector('#launcherProofSecretInput');
+      const socialInput = document.querySelector('#socialServerSecretInput');
       const r2AccountInput = document.querySelector('#r2AccountIdInput');
       const r2AccessInput = document.querySelector('#r2AccessKeyIdInput');
       const r2SecretInput = document.querySelector('#r2SecretAccessKeyInput');
       input.value = ${JSON.stringify(secretValue)};
       proofInput.value = ${JSON.stringify(proofSecretValue)};
+      socialInput.value = ${JSON.stringify(socialSecretValue)};
       r2AccountInput.value = ${JSON.stringify(r2AccountValue)};
       r2AccessInput.value = ${JSON.stringify(r2AccessKeyValue)};
       r2SecretInput.value = ${JSON.stringify(r2SecretKeyValue)};
       input.dispatchEvent(new Event('input', { bubbles: true }));
       proofInput.dispatchEvent(new Event('input', { bubbles: true }));
+      socialInput.dispatchEvent(new Event('input', { bubbles: true }));
       r2AccountInput.dispatchEvent(new Event('input', { bubbles: true }));
       r2AccessInput.dispatchEvent(new Event('input', { bubbles: true }));
       r2SecretInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -212,13 +221,14 @@ const saved = await runDeveloperApp(basePort, async (client) => {
   const saveResult = await evaluate(client, `window.aht.devSaveSecrets(${JSON.stringify({
     curseforgeApiKey: secretValue,
     launcherProofSecret: proofSecretValue,
+    socialServerSecret: socialSecretValue,
     r2AccountId: r2AccountValue,
     r2AccessKeyId: r2AccessKeyValue,
     r2SecretAccessKey: r2SecretKeyValue
   })}).then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
   await sleep(800);
   const result = await evaluate(client, `window.aht.devGetSecrets().then((secrets) => ({ ok: true, secrets })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
-  if (!result.ok || result.secrets?.curseforgeApiKey !== secretValue || result.secrets?.launcherProofSecret !== proofSecretValue) {
+  if (!result.ok || result.secrets?.curseforgeApiKey !== secretValue || result.secrets?.launcherProofSecret !== proofSecretValue || result.secrets?.socialServerSecret !== socialSecretValue) {
     const developerLog = await evaluate(client, `document.querySelector('#developerLog')?.textContent || document.querySelector('#releaseCheckDetail')?.textContent || ''`);
     throw new Error(`Developer secrets did not persist: ${JSON.stringify({ saveResult, result, developerLog })}`);
   }
@@ -226,8 +236,12 @@ const saved = await runDeveloperApp(basePort, async (client) => {
   return result.secrets;
 });
 
-if (saved.curseforgeApiKey !== secretValue || saved.launcherProofSecret !== proofSecretValue || saved.r2AccountId !== r2AccountValue || saved.r2AccessKeyId !== r2AccessKeyValue || saved.r2SecretAccessKey !== r2SecretKeyValue) {
+if (saved.curseforgeApiKey !== secretValue || saved.launcherProofSecret !== proofSecretValue || saved.socialServerSecret !== socialSecretValue || saved.r2AccountId !== r2AccountValue || saved.r2AccessKeyId !== r2AccessKeyValue || saved.r2SecretAccessKey !== r2SecretKeyValue) {
   throw new Error(`Developer secrets did not save before reload: ${JSON.stringify(saved)}`);
+}
+const migratedCredentials = JSON.parse(await fsp.readFile(path.join(userData, 'developer.credentials.json'), 'utf8'));
+if (migratedCredentials.password || migratedCredentials.protectedPassword?.encrypted !== true) {
+  throw new Error(`Legacy developer credentials were not migrated to OS protection: ${JSON.stringify(migratedCredentials)}`);
 }
 
 const vaultSnapshots = await fsp.readdir(path.join(vaultDir, 'snapshots'));
@@ -244,12 +258,13 @@ await fsp.rm(path.join(userData, 'developer.secrets.json'), { force: true });
 await fsp.rm(path.join(userData, 'Local State'), { force: true });
 
 const restored = await runDeveloperApp(basePort + 1, async (client) => {
-  await waitFor(client, `document.querySelector('#curseforgeApiKeyInput').value === ${JSON.stringify(secretValue)} && document.querySelector('#launcherProofSecretInput').value === ${JSON.stringify(proofSecretValue)}`, 'restored developer secrets');
+  await waitFor(client, `document.querySelector('#curseforgeApiKeyInput').value === ${JSON.stringify(secretValue)} && document.querySelector('#launcherProofSecretInput').value === ${JSON.stringify(proofSecretValue)} && document.querySelector('#socialServerSecretInput').value === ${JSON.stringify(socialSecretValue)}`, 'restored developer secrets');
   const afterBlankSave = await evaluate(client, `(async () => {
     await window.aht.devSaveSecrets({
       curseforgeApiKey: '',
       serverSshPassword: '',
       launcherProofSecret: '',
+      socialServerSecret: '',
       githubToken: '',
       r2AccountId: '',
       r2AccessKeyId: '',
@@ -260,6 +275,7 @@ const restored = await runDeveloperApp(basePort + 1, async (client) => {
   return evaluate(client, `(async () => ({
     field: document.querySelector('#curseforgeApiKeyInput').value,
     proofField: document.querySelector('#launcherProofSecretInput').value,
+    socialField: document.querySelector('#socialServerSecretInput').value,
     r2AccountField: document.querySelector('#r2AccountIdInput').value,
     r2AccessField: document.querySelector('#r2AccessKeyIdInput').value,
     r2SecretField: document.querySelector('#r2SecretAccessKeyInput').value,
@@ -269,13 +285,13 @@ const restored = await runDeveloperApp(basePort + 1, async (client) => {
 });
 
 const status = restored.status;
-if (restored.field !== secretValue || restored.proofField !== proofSecretValue || restored.r2AccountField !== r2AccountValue || restored.r2AccessField !== r2AccessKeyValue || restored.r2SecretField !== r2SecretKeyValue) {
+if (restored.field !== secretValue || restored.proofField !== proofSecretValue || restored.socialField !== socialSecretValue || restored.r2AccountField !== r2AccountValue || restored.r2AccessField !== r2AccessKeyValue || restored.r2SecretField !== r2SecretKeyValue) {
   throw new Error(`Developer secret fields were not restored: ${JSON.stringify(restored)}`);
 }
-if (restored.afterBlankSave?.curseforgeApiKey !== secretValue || restored.afterBlankSave?.launcherProofSecret !== proofSecretValue || restored.afterBlankSave?.r2SecretAccessKey !== r2SecretKeyValue) {
+if (restored.afterBlankSave?.curseforgeApiKey !== secretValue || restored.afterBlankSave?.launcherProofSecret !== proofSecretValue || restored.afterBlankSave?.socialServerSecret !== socialSecretValue || restored.afterBlankSave?.r2SecretAccessKey !== r2SecretKeyValue) {
   throw new Error(`Blank developer form save removed existing secrets: ${JSON.stringify(restored.afterBlankSave)}`);
 }
-if (status.config?.developer?.curseforgeApiKey || status.config?.developer?.launcherProofSecret || status.config?.developer?.r2AccessKeyId || status.config?.developer?.r2SecretAccessKey) {
+if (status.config?.developer?.curseforgeApiKey || status.config?.developer?.launcherProofSecret || status.config?.developer?.socialServerSecret || status.config?.developer?.r2AccessKeyId || status.config?.developer?.r2SecretAccessKey) {
   throw new Error(`Developer secrets leaked into launcher config: ${JSON.stringify(status.config.developer)}`);
 }
 
@@ -284,10 +300,12 @@ console.log(JSON.stringify({
   root,
   secretRestored: restored.field === secretValue,
   proofSecretRestored: restored.proofField === proofSecretValue,
+  socialSecretRestored: restored.socialField === socialSecretValue,
   r2SecretsRestored: restored.r2AccountField === r2AccountValue && restored.r2AccessField === r2AccessKeyValue && restored.r2SecretField === r2SecretKeyValue,
   vaultRestoredAfterUserDataReset: restored.afterBlankSave?.curseforgeApiKey === secretValue,
   blankSavePreservedSecrets: restored.afterBlankSave?.r2SecretAccessKey === r2SecretKeyValue,
-  secretStoredOutsideConfig: !status.config?.developer?.curseforgeApiKey && !status.config?.developer?.launcherProofSecret && !status.config?.developer?.r2AccessKeyId && !status.config?.developer?.r2SecretAccessKey,
+  plaintextDeveloperPasswordMigrated: !migratedCredentials.password && migratedCredentials.protectedPassword?.encrypted === true,
+  secretStoredOutsideConfig: !status.config?.developer?.curseforgeApiKey && !status.config?.developer?.launcherProofSecret && !status.config?.developer?.socialServerSecret && !status.config?.developer?.r2AccessKeyId && !status.config?.developer?.r2SecretAccessKey,
   encrypted: Boolean(status.developerSecrets?.encrypted),
   encryptionAvailable: Boolean(status.developerSecrets?.encryptionAvailable)
 }, null, 2));

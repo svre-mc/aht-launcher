@@ -161,25 +161,37 @@ export async function prepareLauncherUpdate(options = {}) {
   const rootUrl = launcherRootUrl(latestUrl);
   const files = await listFiles(artifactsDir);
   const artifactVersion = escapeRegExp(version);
-  const windowsFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Windows-10-11-${artifactVersion}\\.exe$`, 'i'), 'Windows 10/11');
+  const windowsInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Windows-10-11-${artifactVersion}\\.exe$`, 'i'), 'Windows 10/11 installer');
+  const windowsUpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Windows-10-11-${artifactVersion}\\.zip$`, 'i'), 'Windows 10/11 staged update ZIP');
   const macArmUpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-arm64-${artifactVersion}\\.zip$`, 'i'), 'macOS Apple Silicon update ZIP');
   const macX64UpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.zip$`, 'i'), 'macOS Intel update ZIP');
   const macArmInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-arm64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Apple Silicon DMG');
   const macX64InstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Intel DMG');
 
   const platforms = {};
+  const stagedPlatforms = {};
   const uploads = [];
 
-  const windows = await artifactEntry({
-    file: windowsFile,
+  const windowsInstaller = await artifactEntry({
+    file: windowsInstallerFile,
     key: 'win32-x64',
-    label: 'Windows 10/11',
+    label: 'Windows 10/11 installer',
     kind: 'nsis',
     rootUrl,
     installArgs: ['/S']
   });
-  uploads.push(windows.upload);
-  addAliases(platforms, ['win32-x64', 'win32', 'windows', 'windows-x64'], windows.entry);
+  uploads.push(windowsInstaller.upload);
+  addAliases(platforms, ['win32-x64', 'win32', 'windows', 'windows-x64'], windowsInstaller.entry);
+
+  const windowsUpdate = await artifactEntry({
+    file: windowsUpdateFile,
+    key: 'win32-x64',
+    label: 'Windows 10/11 staged update',
+    kind: 'zip',
+    rootUrl
+  });
+  uploads.push(windowsUpdate.upload);
+  addAliases(stagedPlatforms, ['win32-x64', 'win32', 'windows', 'windows-x64'], windowsUpdate.entry);
 
   const macArm = await artifactEntry({
     file: macArmUpdateFile,
@@ -220,7 +232,7 @@ export async function prepareLauncherUpdate(options = {}) {
   uploads.push(macX64Installer.upload);
 
   const downloads = {
-    'windows-x64': { ...windows.entry, url: trackedInstallerUrl(windows.entry.url, 'windows-x64') },
+    'windows-x64': { ...windowsInstaller.entry, url: trackedInstallerUrl(windowsInstaller.entry.url, 'windows-x64') },
     'macos-arm64': { ...macArmInstaller.entry, url: trackedInstallerUrl(macArmInstaller.entry.url, 'macos-arm64') },
     'macos-x64': { ...macX64Installer.entry, url: trackedInstallerUrl(macX64Installer.entry.url, 'macos-x64') }
   };
@@ -239,6 +251,7 @@ export async function prepareLauncherUpdate(options = {}) {
       runId: process.env.GITHUB_RUN_ID || ''
     },
     platforms,
+    stagedPlatforms,
     downloads
   };
 

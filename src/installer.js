@@ -658,7 +658,25 @@ async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) 
   return removeBackupAfterSuccessfulSwap(backupDir, options);
 }
 
-async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, previousManaged, forceRepair, replaceGameSettings, preserveUpdateState, logger, onProgress, progressBase = 0, progressSpan = 100 }) {
+function localManagedStatePath(instanceDir) {
+  return path.join(instanceDir, '.aht-launcher', 'managed-files.json');
+}
+
+function resolvedManagedStatePath(instanceDir, managedStatePath = '') {
+  return managedStatePath ? path.resolve(managedStatePath) : localManagedStatePath(instanceDir);
+}
+
+async function writeManagedState(instanceDir, managedStatePath, managed) {
+  const target = resolvedManagedStatePath(instanceDir, managedStatePath);
+  await writeJsonFile(target, managed);
+  const legacy = localManagedStatePath(instanceDir);
+  if (managedStatePath && path.resolve(target) !== path.resolve(legacy)) {
+    await removeFileIfExists(legacy);
+  }
+  return target;
+}
+
+async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, managedStatePath = '', previousManaged, forceRepair, replaceGameSettings, preserveUpdateState, logger, onProgress, progressBase = 0, progressSpan = 100 }) {
   const inspection = await inspectFullClientZipFile(packZipPath);
   const filesTotal = inspection.fileCount;
   const nextManaged = [];
@@ -730,7 +748,9 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
     await copyPreservedPlayerData(instanceDir, stagingDir, replaceGameSettings, preserveUpdateState, logger, { onProgress, progressBase: 95, progressSpan: 0 });
     await copyCurrentPackToStagingCache(packZipPath, stagingDir, logger, { onProgress, progressBase: 96, progressSpan: 1 });
     await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'installed.json'), installed);
-    await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
+    if (!managedStatePath) {
+      await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
+    }
 
     const removed = previousManaged
       .filter((item) => item?.relativePath && !isGameSettingsRelPath(item.relativePath) && !nextManagedSet.has(item.relativePath))
@@ -748,6 +768,7 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       logger,
       simulateFailure: true
     });
+    const writtenManagedStatePath = await writeManagedState(instanceDir, managedStatePath, nextManaged);
     if (onProgress) {
       onProgress({
         phase: 'Finalizing',
@@ -767,7 +788,8 @@ async function installFullClientZipFromFile({ packZipPath, latest, instanceDir, 
       cleanInstall: true,
       backupRemoved: replacement.backupRemoved,
       backupDir: replacement.backupDir,
-      backupCleanupWarning: replacement.backupCleanupWarning
+      backupCleanupWarning: replacement.backupCleanupWarning,
+      managedStatePath: writtenManagedStatePath
     };
   } finally {
     await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
@@ -947,6 +969,7 @@ async function installClientDeltaFromFile({
   targetManifest,
   latest,
   instanceDir,
+  managedStatePath = '',
   previousManaged,
   previousInstalled,
   replaceGameSettings,
@@ -1093,7 +1116,9 @@ async function installClientDeltaFromFile({
       overrideFileCount: targetManifest.files.length
     };
     await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'installed.json'), installed);
-    await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
+    if (!managedStatePath) {
+      await writeJsonFile(path.join(stagingDir, '.aht-launcher', 'managed-files.json'), nextManaged);
+    }
     if (onProgress) {
       onProgress({ phase: 'Replacing install', completed: 1, total: 1, percent: 94 });
     }
@@ -1104,6 +1129,7 @@ async function installClientDeltaFromFile({
       preservePlayerDataFromBackup: true,
       replaceGameSettings
     });
+    const writtenManagedStatePath = await writeManagedState(instanceDir, managedStatePath, nextManaged);
     if (onProgress) {
       onProgress({ phase: 'Finalizing delta update', completed: 1, total: 1, percent: 95 });
     }
@@ -1121,7 +1147,8 @@ async function installClientDeltaFromFile({
       cleanInstall: false,
       backupRemoved: replacement.backupRemoved,
       backupDir: replacement.backupDir,
-      backupCleanupWarning: replacement.backupCleanupWarning
+      backupCleanupWarning: replacement.backupCleanupWarning,
+      managedStatePath: writtenManagedStatePath
     };
   } finally {
     await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
@@ -1561,6 +1588,7 @@ export async function installPack(options) {
     dryRun = false,
     forceRepair = false,
     replaceGameSettings = false,
+    managedStatePath = '',
     installConcurrency = process.env.AHT_INSTALL_CONCURRENCY || 10,
     onProgress = null,
     logger = console
@@ -1578,7 +1606,7 @@ export async function installPack(options) {
     await recoverInterruptedCleanInstall(instanceDir, logger);
   }
   const previousInstalledPath = path.join(instanceDir, '.aht-launcher', 'installed.json');
-  const previousManagedPath = path.join(instanceDir, '.aht-launcher', 'managed-files.json');
+  const previousManagedPath = resolvedManagedStatePath(instanceDir, managedStatePath);
   const preserveUpdateState = !dryRun && await pathExists(previousInstalledPath);
   const previousInstalled = preserveUpdateState
     ? await readOptionalJson(previousInstalledPath)
@@ -1688,6 +1716,7 @@ export async function installPack(options) {
         targetManifest,
         latest: { ...latest, source: latestSource },
         instanceDir,
+        managedStatePath,
         previousManaged,
         previousInstalled,
         replaceGameSettings,
@@ -1746,6 +1775,7 @@ export async function installPack(options) {
       packZipPath,
       latest: { ...latest, source: latestSource },
       instanceDir,
+      managedStatePath,
       previousManaged,
       forceRepair,
       replaceGameSettings,
@@ -1936,7 +1966,7 @@ export async function installPack(options) {
   };
 
   await writeJsonFile(path.join(instanceDir, '.aht-launcher', 'installed.json'), installed);
-  await writeJsonFile(path.join(instanceDir, '.aht-launcher', 'managed-files.json'), nextManaged);
+  const writtenManagedStatePath = await writeManagedState(instanceDir, managedStatePath, nextManaged);
 
   return {
     dryRun: false,
@@ -1944,6 +1974,7 @@ export async function installPack(options) {
     downloadedModCount: manifestFiles.length,
     overrideFileCount: overrideFiles.length,
     removedStaleCount: removed.length,
-    removedStale: removed
+    removedStale: removed,
+    managedStatePath: writtenManagedStatePath
   };
 }

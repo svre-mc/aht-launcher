@@ -44,7 +44,9 @@ jobs:
             runner: windows-latest
             build_script: dist:regular:windows
             artifact_name: aht-launcher-windows
-            artifact_path: release-builds/windows/*.exe
+            artifact_path: |
+              release-builds/windows/*.exe
+              release-builds/windows/*.zip
           - id: macos
             label: macOS
             runner: macos-14
@@ -55,9 +57,9 @@ jobs:
               release-builds/macos/*.zip
 
     env:
-      CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-      CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      CSC_NAME: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
+      CSC_LINK: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD }}
+      CSC_NAME: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_NAME || secrets.APPLE_DEVELOPER_IDENTITY }}
       APPLE_DEVELOPER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -103,6 +105,38 @@ jobs:
 
       - name: Build ${{ matrix.label }} launcher
         run: npm run ${{ matrix.build_script }}
+
+      - name: Verify Windows Authenticode signatures
+        if: matrix.id == 'windows'
+        shell: pwsh
+        env:
+          SIGNED_RELEASE_REQUIRED: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' && 'true' || 'false' }}
+        run: |
+          $installer = Get-ChildItem -LiteralPath 'release-builds/windows' -Filter '*.exe' -File | Select-Object -First 1
+          if (-not $installer) { throw 'Windows installer was not produced.' }
+          $installerSignature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+          Write-Host "Installer signature: $($installerSignature.Status) $($installerSignature.SignerCertificate.Subject)"
+
+          $archive = Get-ChildItem -LiteralPath 'release-builds/windows' -Filter '*.zip' -File | Select-Object -First 1
+          if (-not $archive) { throw 'Windows staged update ZIP was not produced.' }
+          $expanded = Join-Path $env:RUNNER_TEMP 'aht-signed-update'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $expanded -Force
+          $application = Get-ChildItem -LiteralPath $expanded -Filter 'A Hard Time Launcher Windows.exe' -File -Recurse | Select-Object -First 1
+          if (-not $application) { throw 'Windows staged update does not contain the launcher executable.' }
+          $applicationSignature = Get-AuthenticodeSignature -LiteralPath $application.FullName
+          Write-Host "Application signature: $($applicationSignature.Status) $($applicationSignature.SignerCertificate.Subject)"
+
+          $validSignaturePair = $installerSignature.Status -eq 'Valid' -and $applicationSignature.Status -eq 'Valid'
+          $unsignedSignaturePair = $installerSignature.Status -eq 'NotSigned' -and $applicationSignature.Status -eq 'NotSigned'
+          if (-not $validSignaturePair -and -not $unsignedSignaturePair) {
+            throw 'Refusing to publish Windows artifacts with invalid, untrusted, or inconsistent Authenticode states.'
+          }
+          if ($env:SIGNED_RELEASE_REQUIRED -eq 'true' -and -not $validSignaturePair) {
+            throw 'Windows signing credentials were configured, but both launcher artifacts were not validly signed.'
+          }
+          if ($unsignedSignaturePair) {
+            Write-Warning 'Publishing an explicitly unsigned Windows release because no Windows certificate is configured.'
+          }
 
       - name: Upload ${{ matrix.label }} launcher artifact
         uses: actions/upload-artifact@v4
@@ -188,7 +222,7 @@ jobs:
           fi
           echo "Public GitHub release assets:"
           printf ' - %s\n' "${release_assets[@]}"
-          echo "macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only."
+          echo "Windows and macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only."
 
           for asset in "${release_assets[@]}"; do
             name="$(basename "$asset")"

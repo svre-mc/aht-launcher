@@ -16,8 +16,12 @@ const electronBin = smokeExe || (process.platform === 'win32'
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-defaults-'));
 const userData = path.join(root, 'userData');
 const fakeHome = path.join(root, 'home');
-const fakeAppData = path.join(root, 'appdata');
-const fakeLocalAppData = path.join(root, 'localappdata');
+const fakeAppData = process.platform === 'win32'
+  ? path.join(fakeHome, 'AppData', 'Roaming')
+  : path.join(root, 'appdata');
+const fakeLocalAppData = process.platform === 'win32'
+  ? path.join(fakeHome, 'AppData', 'Local')
+  : path.join(root, 'localappdata');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const minecraftRoot = path.join(root, '.minecraft');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
@@ -137,8 +141,13 @@ const latest = {
   }
 };
 
-await fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true });
-await fsp.mkdir(minecraftRoot, { recursive: true });
+await Promise.all([
+  fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true }),
+  fsp.mkdir(fakeAppData, { recursive: true }),
+  fsp.mkdir(fakeLocalAppData, { recursive: true }),
+  fsp.mkdir(userData, { recursive: true }),
+  fsp.mkdir(minecraftRoot, { recursive: true })
+]);
 if (process.platform === 'win32') {
   await fsp.mkdir(curseForgeRoot, { recursive: true });
   await fsp.writeFile(path.join(curseForgeRoot, 'minecraft.exe'), 'CurseForge Minecraft Launcher fixture', 'utf8');

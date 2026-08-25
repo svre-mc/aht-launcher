@@ -17,8 +17,12 @@ const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
 const fakeHome = path.join(root, 'home');
-const fakeAppData = path.join(root, 'appdata');
-const fakeLocalAppData = path.join(root, 'localappdata');
+const fakeAppData = process.platform === 'win32'
+  ? path.join(fakeHome, 'AppData', 'Roaming')
+  : path.join(root, 'appdata');
+const fakeLocalAppData = process.platform === 'win32'
+  ? path.join(fakeHome, 'AppData', 'Local')
+  : path.join(root, 'localappdata');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -270,7 +274,12 @@ const server = http.createServer((request, response) => {
   response.end(Buffer.from('ok'));
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
-await fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true });
+await Promise.all([
+  fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true }),
+  fsp.mkdir(fakeAppData, { recursive: true }),
+  fsp.mkdir(fakeLocalAppData, { recursive: true }),
+  fsp.mkdir(userData, { recursive: true })
+]);
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
