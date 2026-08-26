@@ -88,6 +88,15 @@ jobs:
       - name: Test professional launch diagnostics
         run: npm run test:launch-diagnostics
 
+      - name: Test signed launcher proof
+        run: npm run test:launcher-proof
+
+      - name: Test access controls
+        run: npm run test:access-control
+
+      - name: Test launcher-state push
+        run: npm run test:launcher-state-push
+
       - name: Show macOS signing mode
         if: matrix.id == 'macos'
         run: |

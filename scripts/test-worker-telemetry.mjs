@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import worker from '../cloudflare/curseforge-proxy-worker.js';
+import { createDeviceAssertion, createDeviceCredential } from '../src/deviceIdentity.js';
+import { launcherProofDeviceBinding } from '../src/launcherProof.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import {
   TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
@@ -75,6 +77,29 @@ const env = {
     }
   }
 };
+
+const testRigDevice = createDeviceCredential();
+function testRigV2ProofBody(overrides = {}) {
+  const body = {
+    protocol: 'aht-launcher-attestation-v2',
+    launchId: crypto.randomUUID(),
+    minecraftUsername: 'TestRig',
+    minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
+    installId: 'install-b',
+    packId: 'a-hard-time-dregora',
+    appVersion: '0.1.0',
+    launcherVersion: '0.1.0',
+    instanceDirHash: 'abc123',
+    deviceId: testRigDevice.deviceId,
+    devicePublicKey: testRigDevice.publicKey,
+    ...overrides
+  };
+  body.deviceAssertion = createDeviceAssertion(testRigDevice, {
+    purpose: 'launcher-proof',
+    binding: launcherProofDeviceBinding(body)
+  });
+  return body;
+}
 
 objects.set('launcher/latest.json', JSON.stringify({
   schemaVersion: 1,
@@ -387,27 +412,35 @@ if (oldRecoveredProofResponse.status !== 403) {
   throw new Error(`Recovered username should reject the old install proof, got ${oldRecoveredProofResponse.status}`);
 }
 
+let launcherStateBindingRefreshes = 0;
+env.AHT_LAUNCHER_STATE = {
+  idFromName(name) { return name; },
+  get() {
+    return {
+      async fetch() {
+        launcherStateBindingRefreshes += 1;
+        return Response.json({ ok: true, changed: true, revision: 'a'.repeat(64) });
+      }
+    };
+  }
+};
+
 const launcherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
     'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345'
   },
-  body: JSON.stringify({
-    protocol: 'aht-launcher-attestation-v2',
+  body: JSON.stringify(testRigV2ProofBody({
     launchId: 'launch-proof-test',
     username: 'TestRig',
-    minecraftUsername: 'TestRig',
     minecraftUuid: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
-    installId: 'install-b',
     packId: 'client-controlled-pack-id',
     packVersion: '2.8.2',
     installedVersion: '2.8.2',
-    appVersion: '0.1.0',
     platform: 'win32',
-    arch: 'x64',
-    instanceDirHash: 'abc123'
-  })
+    arch: 'x64'
+  }))
 });
 if (
   !launcherProof.trusted
@@ -424,8 +457,10 @@ if (
   || launcherProof.payload.packId !== 'a-hard-time-dregora'
   || launcherProof.payload.issuer !== 'aht-launcher-worker'
   || launcherProof.payload.audience !== 'aht-minecraft-server'
+  || launcherProof.payload.launcherVersionAuthority !== 'worker-policy-matched-device-assertion'
   || launcherProof.payload.jti !== launcherProof.payload.launchId
   || launcherProof.payload.launchId === 'launch-proof-test'
+  || launcherStateBindingRefreshes !== 1
 ) {
   throw new Error(`Launcher proof signing failed: ${JSON.stringify(launcherProof)}`);
 }
@@ -433,12 +468,7 @@ if (
 const missingRecoveryProofResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    protocol: 'aht-launcher-attestation-v2',
-    minecraftUsername: 'TestRig',
-    installId: 'install-b',
-    appVersion: '0.1.0'
-  })
+  body: JSON.stringify(testRigV2ProofBody())
 }), env, {});
 if (missingRecoveryProofResponse.status !== 403) {
   throw new Error(`v2 player proof without account recovery was accepted: ${missingRecoveryProofResponse.status}`);
@@ -448,8 +478,8 @@ const fallbackProofResponse = await worker.fetch(new Request('https://worker.tes
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    minecraftUsername: 'TestRig',
-    installId: 'install-b',
+    minecraftUsername: 'SharedTwo',
+    installId: 'shared-install-two',
     appVersion: '0.1.0'
   })
 }), {
@@ -466,8 +496,8 @@ const curseForgeOnlyProofResponse = await worker.fetch(new Request('https://work
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    minecraftUsername: 'TestRig',
-    installId: 'install-b',
+    minecraftUsername: 'SharedTwo',
+    installId: 'shared-install-two',
     appVersion: '0.1.0'
   })
 }), {
@@ -857,19 +887,15 @@ if (
 const developerLauncherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...auth },
-  body: JSON.stringify({
-    protocol: 'aht-launcher-attestation-v2',
-    minecraftUsername: 'TestRig',
+  body: JSON.stringify(testRigV2ProofBody({
     minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
     installId: 'developer-install-not-registered',
     launcherChannel: 'developer',
     developerClient: true,
     developerClientBypass: true,
     modIntegrityBypass: true,
-    packId: 'a-hard-time-dregora',
-    appVersion: '0.1.0',
     installedVersion: '2.8.2'
-  })
+  }))
 });
 if (
   developerLauncherProof.payload.launcherChannel !== 'developer'
@@ -898,7 +924,7 @@ if (wrongKidSocialResponse.status !== 401) {
 const wrongConfiguredKidResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345' },
-  body: JSON.stringify({ protocol: 'aht-launcher-attestation-v2', minecraftUsername: 'TestRig', installId: 'install-b', appVersion: '0.1.0' })
+  body: JSON.stringify(testRigV2ProofBody())
 }), { ...env, LAUNCHER_ATTESTATION_KEY_ID: 'wrong-key-id' }, {});
 const wrongConfiguredKid = await wrongConfiguredKidResponse.json();
 if (wrongConfiguredKidResponse.status !== 500

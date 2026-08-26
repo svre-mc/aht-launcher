@@ -9,6 +9,7 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
+import net.minecraftforge.fml.common.event.FMLServerStartedEvent;
 import net.minecraftforge.fml.common.event.FMLServerStoppingEvent;
 import net.minecraftforge.fml.common.network.NetworkRegistry;
 import net.minecraftforge.fml.common.network.simpleimpl.SimpleNetworkWrapper;
@@ -16,6 +17,8 @@ import net.minecraftforge.fml.relauncher.Side;
 import org.apache.logging.log4j.Logger;
 
 import java.io.File;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -30,30 +33,45 @@ import java.util.concurrent.CompletableFuture;
 public class PackVersionLock {
     public static final String MODID = "ahtversionlock";
     public static final String NAME = "AHT Launcher Lock";
-    public static final String VERSION = "1.1.0";
+    public static final String VERSION = "1.2.0";
 
-    private static final String DEFAULT_VERIFICATION_URL =
-            "https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify";
+    private static final String DEFAULT_STATE_WEBSOCKET_URL =
+            "wss://aht-curseforge-proxy.mysticgamer312.workers.dev/server/launcher-state";
     private static final String DEFAULT_UPDATE_MESSAGE =
             "Current Launcher Version: {current}\nNecessary Launcher Version: {necessary}\n"
                     + "Update A Hard Time Launcher, restart it, and reconnect.";
     private static final String DEFAULT_INVALID_MESSAGE =
             "A valid A Hard Time Launcher session is required. Restart the launcher and reconnect.";
     private static final String DEFAULT_UNAVAILABLE_MESSAGE =
-            "A Hard Time Launcher verification is temporarily unavailable. Please reconnect shortly.";
+            "A Hard Time Launcher policy is temporarily unavailable. Please reconnect shortly.";
 
     public static Logger LOG;
     public static SimpleNetworkWrapper NETWORK;
 
     private static final JoinSessionRegistry SESSIONS = new JoinSessionRegistry();
-    private static String verificationUrl = DEFAULT_VERIFICATION_URL;
+    private static final LocalProofVerifier.SnapshotProvider POLICY_SNAPSHOTS =
+            new LocalProofVerifier.SnapshotProvider() {
+                @Override
+                public ServerPolicySnapshot current() {
+                    return ServerStateClient.currentSnapshot();
+                }
+
+                @Override
+                public String currentRevision() {
+                    return ServerStateClient.currentRevision();
+                }
+            };
+    private static String stateWebSocketUrl = DEFAULT_STATE_WEBSOCKET_URL;
+    private static String stateServerTokenEnvironmentVariable = "AHT_LAUNCHER_STATE_TOKEN";
+    private static String stateServerToken = "";
+    private static String attestationPublicKeySha256 = "";
     private static String requiredPackId = "a-hard-time-dregora";
     private static String updateRequiredMessage = DEFAULT_UPDATE_MESSAGE;
     private static String invalidProofMessage = DEFAULT_INVALID_MESSAGE;
     private static String verificationUnavailableMessage = DEFAULT_UNAVAILABLE_MESSAGE;
     private static int timeoutTicks = 300;
-    private static int connectTimeoutMillis = 3000;
-    private static int readTimeoutMillis = 5000;
+    private static int stateConnectTimeoutMillis = 10000;
+    private static int stateHeartbeatMillis = 30000;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
@@ -75,19 +93,53 @@ public class PackVersionLock {
     }
 
     @Mod.EventHandler
+    public void serverStarted(FMLServerStartedEvent event) {
+        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
+        if (server != null && server.isDedicatedServer()) {
+            ServerStateClient.start(
+                    stateWebSocketUrl,
+                    resolvedStateServerToken(),
+                    attestationPublicKeySha256,
+                    requiredPackId,
+                    stateConnectTimeoutMillis,
+                    stateHeartbeatMillis
+            );
+        }
+    }
+
+    @Mod.EventHandler
     public void serverStopping(FMLServerStoppingEvent event) {
         SESSIONS.clearAll();
-        RemoteProofVerifier.cancelQueuedWork();
+        LocalProofVerifier.cancelQueuedWork();
+        ServerStateClient.stop();
     }
 
     private static void loadConfig(File configFile) {
         Configuration config = new Configuration(configFile);
         config.load();
-        verificationUrl = config.getString(
-                "verificationUrl",
+        stateWebSocketUrl = config.getString(
+                "stateWebSocketUrl",
                 "general",
-                verificationUrl,
-                "Exact HTTPS launcher-proof verification endpoint."
+                stateWebSocketUrl,
+                "Exact WSS endpoint for the one persistent, server-only signed policy channel."
+        ).trim();
+        stateServerTokenEnvironmentVariable = config.getString(
+                "stateServerTokenEnvironmentVariable",
+                "general",
+                stateServerTokenEnvironmentVariable,
+                "Preferred environment variable containing the server-only channel token."
+        ).trim();
+        stateServerToken = config.getString(
+                "stateServerToken",
+                "general",
+                stateServerToken,
+                "Server-only fallback token. Never copy this config to a player client."
+        ).trim();
+        attestationPublicKeySha256 = config.getString(
+                "attestationPublicKeySha256",
+                "general",
+                attestationPublicKeySha256,
+                "Pinned lowercase SHA-256 of the Worker's RSA public-key SPKI."
         ).trim();
         requiredPackId = config.getString(
                 "requiredPackId",
@@ -101,23 +153,23 @@ public class PackVersionLock {
                 timeoutTicks,
                 40,
                 1200,
-                "Ticks to wait after login for live launcher-proof verification."
+                "Ticks to wait after login for signed local launcher-proof verification."
         );
-        connectTimeoutMillis = config.getInt(
-                "connectTimeoutMillis",
+        stateConnectTimeoutMillis = config.getInt(
+                "stateConnectTimeoutMillis",
                 "general",
-                connectTimeoutMillis,
-                500,
-                15000,
-                "Worker connection timeout in milliseconds."
+                stateConnectTimeoutMillis,
+                1000,
+                30000,
+                "TLS/WebSocket connection timeout in milliseconds."
         );
-        readTimeoutMillis = config.getInt(
-                "readTimeoutMillis",
+        stateHeartbeatMillis = config.getInt(
+                "stateHeartbeatMillis",
                 "general",
-                readTimeoutMillis,
-                500,
-                15000,
-                "Worker response timeout in milliseconds."
+                stateHeartbeatMillis,
+                10000,
+                300000,
+                "WebSocket liveness heartbeat in milliseconds; this does not read launcher policy."
         );
         updateRequiredMessage = decodeNewlines(config.getString(
                 "updateRequiredMessage",
@@ -135,10 +187,16 @@ public class PackVersionLock {
                 "verificationUnavailableMessage",
                 "general",
                 encodeNewlines(verificationUnavailableMessage),
-                "Fail-closed disconnect message when the verification service is unavailable."
+                "Fail-closed disconnect message when the signed policy channel is unavailable."
         ));
-        if (!RemoteProofVerifier.isVerificationUrlAllowedForTests(verificationUrl)) {
-            LOG.error("AHT Launcher Lock verificationUrl is invalid; reconnects will fail closed.");
+        if (!ServerStateClient.isEndpointAllowedForTests(stateWebSocketUrl)) {
+            LOG.error("AHT Launcher Lock stateWebSocketUrl is invalid; reconnects will fail closed.");
+        }
+        if (!stateServerTokenEnvironmentVariable.matches("[A-Za-z_][A-Za-z0-9_]{0,79}")) {
+            LOG.error("AHT Launcher Lock stateServerTokenEnvironmentVariable is invalid; reconnects will fail closed.");
+        }
+        if (!attestationPublicKeySha256.matches("[a-f0-9]{64}")) {
+            LOG.error("AHT Launcher Lock attestationPublicKeySha256 is missing or invalid; reconnects will fail closed.");
         }
         if (requiredPackId.isEmpty() || requiredPackId.length() > 80) {
             LOG.error("AHT Launcher Lock requiredPackId is invalid; reconnects will fail closed.");
@@ -171,24 +229,23 @@ public class PackVersionLock {
             return;
         }
 
-        CompletableFuture<RemoteProofVerifier.Result> verification = RemoteProofVerifier.verifyAsync(
-                verificationUrl,
+        CompletableFuture<LocalProofVerifier.Result> verification = LocalProofVerifier.verifyAsync(
                 message.token,
                 player.getName(),
                 playerId,
                 requiredPackId,
-                connectTimeoutMillis,
-                readTimeoutMillis
+                remoteIp(player),
+                POLICY_SNAPSHOTS
         );
         verification.whenComplete((result, error) -> scheduleVerificationResult(
                 playerId,
                 connectionId,
-                error == null && result != null ? result : RemoteProofVerifier.Result.unavailable()
+                error == null && result != null ? result : LocalProofVerifier.Result.unavailable()
         ));
     }
 
     private static void scheduleVerificationResult(final UUID playerId, final UUID connectionId,
-                                                   final RemoteProofVerifier.Result result) {
+                                                   final LocalProofVerifier.Result result) {
         final MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
         if (server == null || !server.isDedicatedServer() || server.isServerStopped()) return;
         server.addScheduledTask(new Runnable() {
@@ -200,7 +257,7 @@ public class PackVersionLock {
     }
 
     private static void completeVerification(MinecraftServer server, UUID playerId, UUID connectionId,
-                                             RemoteProofVerifier.Result result) {
+                                             LocalProofVerifier.Result result) {
         EntityPlayerMP player = server.getPlayerList() == null
                 ? null : server.getPlayerList().getPlayerByUUID(playerId);
         if (player == null || player.connection == null) {
@@ -209,8 +266,9 @@ public class PackVersionLock {
         }
         if (result.accepted) {
             if (SESSIONS.accept(playerId, connectionId)) {
-                LOG.info("{} passed live launcher verification (current {}, necessary {}).",
-                        player.getName(), result.currentLauncherVersion, result.necessaryLauncherVersion);
+                LOG.info("{} passed signed local launcher verification (current {}, necessary {}, policy {}).",
+                        player.getName(), result.currentLauncherVersion, result.necessaryLauncherVersion,
+                        result.policyRevision.substring(0, 12));
             }
             return;
         }
@@ -267,5 +325,29 @@ public class PackVersionLock {
 
     private static String decodeNewlines(String value) {
         return value == null ? "" : value.replace("\\n", "\n");
+    }
+
+    private static String resolvedStateServerToken() {
+        String value = "";
+        if (stateServerTokenEnvironmentVariable.matches("[A-Za-z_][A-Za-z0-9_]{0,79}")) {
+            try {
+                value = System.getenv(stateServerTokenEnvironmentVariable);
+            } catch (SecurityException ignored) {
+                value = "";
+            }
+        }
+        value = value == null ? "" : value.trim();
+        return value.isEmpty() ? stateServerToken : value;
+    }
+
+    private static String remoteIp(EntityPlayerMP player) {
+        try {
+            SocketAddress remote = player.connection.netManager.getRemoteAddress();
+            if (!(remote instanceof InetSocketAddress)) return "";
+            InetSocketAddress address = (InetSocketAddress) remote;
+            return address.getAddress() == null ? "" : address.getAddress().getHostAddress();
+        } catch (RuntimeException ignored) {
+            return "";
+        }
     }
 }

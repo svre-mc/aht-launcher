@@ -126,7 +126,7 @@ await assert.rejects(
 );
 
 const oldWorkerConfig = { ...config, instanceDir: path.join(root, 'Old Worker') };
-const oldWorker = await writeLauncherProof({
+await assert.rejects(writeLauncherProof({
   config: oldWorkerConfig,
   identity,
   latest,
@@ -143,9 +143,7 @@ const oldWorker = await writeLauncherProof({
       }, { legacy: true })
     };
   }
-});
-assert.equal(oldWorker.protocol, 'aht-launcher-proof-v1', 'new launcher must accept an exact remote v1 fallback');
-assert.equal(oldWorker.source, 'worker');
+}), /did not match the request/i, 'new launcher must reject legacy v1/HS256 proofs');
 
 async function expectRejected(name, mutate) {
   const caseConfig = { ...config, instanceDir: path.join(root, name) };
@@ -173,6 +171,10 @@ await expectRejected('Opposite Channel', (_fixture, payload) => workerLauncherPr
   modIntegrityBypass: true
 }));
 await expectRejected('Token Body Mismatch', (fixture) => ({ ...fixture, payload: { ...fixture.payload, packId: 'poisoned-pack' } }));
+await expectRejected('Version Claims Mismatch', (_fixture, payload) => workerLauncherProofFixture({
+  ...payload,
+  appVersion: '0.0.1'
+}));
 await expectRejected('Short Validity', (_fixture, payload) => {
   const issuedAt = new Date();
   return workerLauncherProofFixture({
@@ -199,7 +201,7 @@ console.log(JSON.stringify({
   keyId: proof.header.kid,
   workerLaunchIdAccepted: proof.payload.launchId === workerLaunchId,
   recoveryHeaderOnly: true,
-  remoteV1Fallback: oldWorker.protocol,
+  remoteV1Rejected: true,
   localTrustedSigningDisabled: true,
   malformedResponsesRejected: 4,
   packLocalMirrorRemoved: true,

@@ -2990,22 +2990,36 @@ async function identityPayload(config = null) {
       };
       await writeJsonFile(identityPath(), nextIdentity);
     } else if (detectedUsername && (!sameUsername || (detectedMinecraftUuid && !currentMinecraftUuid))) {
-      try {
-        const registered = await registerMinecraftUsernameInFlight(config, nextIdentity, detectedUsername, {
-          mode: sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher',
-          minecraftUuid: detectedMinecraftUuid,
-          skipLauncherAuthSync: true
-        });
-        nextIdentity = await loadIdentity();
-        nextIdentity.minecraftUsernameSyncWarning = '';
-        nextIdentity.minecraftLauncherDetectedUsername = registered.username || detectedUsername;
-      } catch (error) {
-        nextIdentity = {
-          ...nextIdentity,
-          minecraftLauncherDetectedUsername: detectedUsername,
-          minecraftUsernameSyncWarning: error.message || String(error)
-        };
-        await writeJsonFile(identityPath(), nextIdentity);
+      // Another concurrent status request may have completed the same import
+      // while this request was inspecting Minecraft Launcher files. Re-read the
+      // atomic identity before creating a second remote registration request.
+      const freshIdentity = await loadIdentity();
+      const freshUsername = normalizeMinecraftUsername(freshIdentity.minecraftUsername);
+      const freshMinecraftUuid = normalizeMinecraftUuid(
+        freshIdentity.minecraftUuid || freshIdentity.minecraftUUID
+      );
+      const alreadyImported = freshUsername.toLowerCase() === detectedUsername.toLowerCase()
+        && (!detectedMinecraftUuid || freshMinecraftUuid === detectedMinecraftUuid);
+      if (alreadyImported) {
+        nextIdentity = freshIdentity;
+      } else {
+        try {
+          const registered = await registerMinecraftUsernameInFlight(config, freshIdentity, detectedUsername, {
+            mode: sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher',
+            minecraftUuid: detectedMinecraftUuid,
+            skipLauncherAuthSync: true
+          });
+          nextIdentity = await loadIdentity();
+          nextIdentity.minecraftUsernameSyncWarning = '';
+          nextIdentity.minecraftLauncherDetectedUsername = registered.username || detectedUsername;
+        } catch (error) {
+          nextIdentity = {
+            ...freshIdentity,
+            minecraftLauncherDetectedUsername: detectedUsername,
+            minecraftUsernameSyncWarning: error.message || String(error)
+          };
+          await writeJsonFile(identityPath(), nextIdentity);
+        }
       }
     }
   }
@@ -9172,12 +9186,17 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
   } else {
     const serverLockConfig = await fs.readFile(serverLockPath, 'utf8');
     const hasPackId = serverLockConfig.includes(`S:requiredPackId=${latest.packId}`);
-    const hasVerifier = serverLockConfig.includes('S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify');
+    const hasStateChannel = serverLockConfig.includes('S:stateWebSocketUrl=wss://aht-curseforge-proxy.mysticgamer312.workers.dev/server/launcher-state');
+    const hasPublicKeyPin = serverLockConfig.includes('S:attestationPublicKeySha256=');
+    const hasServerOnlyToken = serverLockConfig.includes('S:stateServerToken=')
+      && serverLockConfig.includes('S:stateServerTokenEnvironmentVariable=AHT_LAUNCHER_STATE_TOKEN');
+    const hasNoPerPlayerVerifier = !serverLockConfig.includes('/api/launcher-proof/verify')
+      && !serverLockConfig.includes('S:verificationUrl=');
     const hasReconnectMessage = serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}');
-    if (hasPackId && hasVerifier && hasReconnectMessage) {
+    if (hasPackId && hasStateChannel && hasPublicKeyPin && hasServerOnlyToken && hasNoPerPlayerVerifier && hasReconnectMessage) {
       add('ok', 'server launcher lock config matches release', path.relative(outDir, serverLockPath));
     } else {
-      add('error', 'server launcher lock config mismatch', `Expected live proof verification for ${latest.packId}`);
+      add('error', 'server launcher lock config mismatch', `Expected signed launcher-state push configuration for ${latest.packId}`);
     }
   }
 

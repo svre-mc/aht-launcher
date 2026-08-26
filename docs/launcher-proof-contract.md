@@ -14,6 +14,7 @@ The launcher requests a short-lived account attestation from the Cloudflare Work
 - Fixed audience: `aht-minecraft-server`
 - Fixed default pack ID: `a-hard-time-dregora`
 - Maximum lifetime: 10 minutes
+- Maximum same-player reconnect window: 24 hours
 - Compact JWS limits: 8192 total characters; 1024 header, 6144 payload, and 1024 signature characters
 
 `LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8` must be installed with `wrangler secret put`; it must never be committed, written to launcher configuration, packaged into an installer, logged, or copied to the Minecraft client/server. The server receives only the public SPKI key.
@@ -26,7 +27,7 @@ For a player-channel v2 request, the Worker requires all of the following:
 2. The registered launcher `installId`.
 3. The account recovery credential in the `X-AHT-Launcher-Recovery` request header, matching the verifier already stored with the registration.
 4. A valid Minecraft UUID stored in that registration.
-5. When the account is device-bound (or `AHT_REQUIRE_DEVICE_ATTESTATION=true`), a fresh Ed25519 `aht-device-assertion-v1` bound to the exact launch request.
+5. Every v2 proof requires a fresh Ed25519 `aht-device-assertion-v1` bound to the exact launch request, including the launcher version. The Worker never signs a v2 proof from a bare version claim.
 6. No active account, Minecraft UUID, device, or connection-IP restriction and no enabled network policy denial.
 
 The recovery credential is request-only. It is never included in the request JSON, signed payload, proof file, response, or logs. The Worker ignores a client-supplied UUID and signs the UUID from its registration record.
@@ -54,6 +55,7 @@ The Worker generates `jti`, `launchId`, `issuedAt`, and `expiresAt`. `jti` and `
   "installId": "<launcher install id>",
   "deviceId": "ahtd_<SHA-256 of Ed25519 public key>",
   "launcherVersion": "<launcher version>",
+  "launcherVersionAuthority": "worker-policy-matched-device-assertion",
   "launcherChannel": "player",
   "developerClient": false,
   "developerClientBypass": false,
@@ -63,11 +65,13 @@ The Worker generates `jti`, `launchId`, `issuedAt`, and `expiresAt`. `jti` and `
 }
 ```
 
-The proof document has `trusted: true` and `source: "worker"`. Its `token` is the compact JWS. The launcher performs strict structural and request/response checks, but the Minecraft server is the enforcement authority and must verify the RSA signature.
+The proof document has `trusted: true` and `source: "worker"`. Its `token` is the compact JWS. The launcher performs strict structural and request/response checks, but the Minecraft server is the enforcement authority and verifies the RSA signature locally.
 
-For immediate restriction checks, the server may send the compact token as `Authorization: Bearer <token>` to `GET /api/launcher-proof/verify`. The Worker verifies the signature, expiry, current account registration, device binding, and current account/UUID/device/IP access decisions. A server that verifies only the RSA signature locally must accept that a newly issued restriction can take effect no later than the proof's ten-minute expiry; it should use the Worker verification endpoint when immediate revocation is required.
+The game server does not call `/api/launcher-proof/verify` for player joins. It holds one authenticated WebSocket to `/server/launcher-state`. A Cloudflare Queue fed by the exact R2 `launcher/latest.json` object-create notification refreshes one Durable Object, which revision-deduplicates and pushes a separately signed `aht-server-state-v1` snapshot. Registration and access-decision changes refresh the same snapshot. A reconnect to the state channel performs a full R2 reconciliation before sending state, so an offline server catches up before it can accept new joins.
 
-The Worker-authoritative claims are the account username/UUID binding, install/recovery/device binding, access decision, key/header, IDs, times, issuer, audience, pack ID, and channel authorization. Version, platform, architecture, instance-path hash, and Minecraft-loader context originate in the launcher request; a valid signature prevents later alteration but does not independently prove those client observations.
+The pushed snapshot contains the current required launcher version, hashed account-to-install/device bindings, hashed active account/UUID/device/IP restrictions, and VPN policy. It contains no raw player identifiers. Existing players are not rechecked when a new revision arrives; every new connection uses the latest atomic in-memory revision.
+
+The launcher version is not accepted as a raw game-client field. Before the Worker issues an RSA proof, it verifies a fresh Ed25519 device assertion whose signed binding includes the launcher version, account, UUID, install, launch request, instance hash, and device ID, then requires that version to exactly equal the authoritative release policy. The RSA proof marks this as `worker-policy-matched-device-assertion`. The server requires that authority marker and RSA signature, then requires the signed version to exactly equal the separately signed pushed policy. This is software/device-key attestation, not TPM or kernel attestation; a fully privileged local attacker remains outside this threat model.
 
 ## JVM properties and proof files
 
@@ -92,16 +96,13 @@ The server must fail closed unless all checks pass:
 2. Verify `SHA256withRSA` with the configured public SPKI key.
 3. Require protocol/schema, issuer, audience, pack ID, username, Minecraft UUID, channel, and boolean claims to match the joining session.
 4. Require `accessGranted === true` and a recognized network-status value. When device attestation is required, also require a valid `ahtd_` device identifier. Treat all other values as denial, not as a warning.
-5. Require a valid issue/expiry window no longer than 10 minutes and reject future or expired tokens.
+5. Require a valid issue/expiry window no longer than 10 minutes, a reconnect window no longer than 24 hours, and reject future or reconnect-expired tokens.
 6. Require `jti === launchId`, both formatted as a UUID.
-7. Record `jti` with the authenticated Minecraft UUID and expiry in a bounded replay cache. A reconnect by that same UUID may reuse the still-valid proof; reuse by any different UUID is rejected.
+7. Hash the signed username/UUID/install/device claims and require an exact pushed registration binding; hash the actual connection IP and all signed access identifiers and reject active pushed restrictions.
+8. Compare only the signed `launcherVersion` with the separately signed pushed `necessaryLauncherVersion`. Never compare or accept an unsigned version packet.
 
 Client integrity reports remain signals; they are not allowed to create or alter an attestation.
 
-## Rolling v1 compatibility
+## Legacy compatibility
 
-Old launchers omit the v2 protocol and therefore receive legacy `aht-launcher-proof-v1`/HS256 responses while the compatibility window is open. A new launcher explicitly requests v2, but accepts an exact remote v1 response from an old Worker. It never creates a local HMAC proof and rejects `source: "local-hmac"`.
-
-Roll out in this order: deploy the v2-capable server verifier first with ordinary-player strict enforcement disabled; configure its public key; deploy the Worker with the matching private key while retaining remote v1 issuance for old launchers; then distribute launcher 0.1.85. Enable strict ordinary-player v2 enforcement only after the Worker, server public key, and launcher population are confirmed. The launcher and Worker compatibility window does not make the server upgrade optional.
-
-Keep the legacy `LAUNCHER_PROOF_SECRET` only as long as old launchers and old server verification must be supported. It is not used for v2. Remove the v1 issuance and verification path after the rollout population is upgraded.
+The Worker retains the old `/api/launcher-proof/verify` and v1 issuance code only for controlled compatibility during rollout. Launcher Lock 1.2.0 never sends a player proof to that endpoint and never accepts HS256/v1 locally. New joins require the exact v2 RSA proof and pushed v1 server-state protocol.

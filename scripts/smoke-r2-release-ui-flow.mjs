@@ -393,7 +393,7 @@ try {
     throw new Error(`Player update failed after UI publish: ${JSON.stringify(updateResult)}`);
   }
   for (const requiredPath of [
-    path.join(instanceDir, 'mods', 'aht-version-lock-1.1.0.jar'),
+    path.join(instanceDir, 'mods', 'aht-version-lock-1.2.0.jar'),
     path.join(instanceDir, 'config', 'aht-ui-test.cfg'),
     path.join(instanceDir, 'resourcepacks', 'aht-ui-test.zip'),
     path.join(instanceDir, 'scripts', 'aht-ui.zs')

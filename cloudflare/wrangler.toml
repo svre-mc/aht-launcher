@@ -1,7 +1,7 @@
 name = "aht-curseforge-proxy"
 account_id = "04235a5734219bed31fa93dec6e3ffb6"
 main = "curseforge-proxy-worker.js"
-compatibility_date = "2026-06-01"
+compatibility_date = "2026-08-25"
 workers_dev = true
 keep_vars = true
 send_metrics = false
@@ -23,8 +23,25 @@ required = [
   "CURSEFORGE_API_KEY",
   "LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8",
   "LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI",
-  "LAUNCHER_PROOF_SECRET"
+  "LAUNCHER_PROOF_SECRET",
+  "AHT_LAUNCHER_STATE_SERVER_TOKEN"
 ]
+
+[[durable_objects.bindings]]
+name = "AHT_LAUNCHER_STATE"
+class_name = "LauncherStateHub"
+
+[[migrations]]
+tag = "launcher-state-v1"
+new_sqlite_classes = ["LauncherStateHub"]
+
+[[queues.consumers]]
+queue = "aht-launcher-release-events"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "aht-launcher-release-events-dlq"
+max_concurrency = 1
 
 [[ratelimits]]
 name = "AHT_ADMIN_RATE_LIMITER"

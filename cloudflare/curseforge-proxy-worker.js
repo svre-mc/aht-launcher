@@ -46,6 +46,17 @@ const LAUNCHER_ATTESTATION_ISSUER = 'aht-launcher-worker';
 const LAUNCHER_ATTESTATION_AUDIENCE = 'aht-minecraft-server';
 const LAUNCHER_ATTESTATION_TTL_MS = 10 * 60 * 1000;
 const LAUNCHER_RECONNECT_TTL_MS = 24 * 60 * 60 * 1000;
+const LAUNCHER_SERVER_STATE_PROTOCOL = 'aht-server-state-v1';
+const LAUNCHER_SERVER_STATE_AUDIENCE = 'aht-minecraft-server-state';
+const LAUNCHER_SERVER_STATE_TYPE = 'AHT-SERVER-STATE';
+const LAUNCHER_SERVER_STATE_DO_NAME = 'production';
+const LAUNCHER_SERVER_STATE_MAX_ACCOUNTS = 2000;
+const LAUNCHER_SERVER_STATE_MAX_DENIALS = 2000;
+const LAUNCHER_SERVER_STATE_MAX_PAYLOAD_BYTES = 900 * 1024;
+const LAUNCHER_SERVER_STATE_MAX_TOKEN_CHARS = 1400 * 1024;
+const LAUNCHER_SERVER_STATE_PATH = '/server/launcher-state';
+const LAUNCHER_SERVER_STATE_INTERNAL_HEADER = 'X-AHT-Launcher-State-Internal';
+const LAUNCHER_SERVER_STATE_AUTHORIZED_HEADER = 'X-AHT-Launcher-State-Authorized';
 
 class RequestPayloadError extends Error {
   constructor(status, message) {
@@ -451,13 +462,39 @@ async function serveReleaseObject(request, env, origin, context = null) {
   return new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
 }
 
-async function readLauncherManifest(env) {
+async function readLauncherManifestWithMetadata(env) {
   const bucket = releaseBucket(env);
   if (!bucket) throw new Error('AHT_RELEASES R2 binding is not configured');
   const object = await bucket.get('launcher/latest.json');
   if (!object) throw new Error('Launcher update manifest is not available');
   if (Number(object.size || 0) > 256 * 1024) throw new Error('Launcher update manifest is too large');
-  return object.json();
+  return {
+    manifest: await object.json(),
+    etag: cleanString(object.httpEtag || object.etag || '', 160)
+  };
+}
+
+async function enforceLauncherStateRateLimit(request, env, origin) {
+  if (!env.AHT_ADMIN_RATE_LIMITER?.limit) return null;
+  const connection = requestIpv4(request);
+  const ipKey = connection.ip || 'unavailable';
+  let allowed = false;
+  try {
+    const result = await env.AHT_ADMIN_RATE_LIMITER.limit({
+      key: `launcher-state:${(await sha256Hex(ipKey)).slice(0, 40)}`
+    });
+    allowed = result?.success === true;
+  } catch {
+    allowed = false;
+  }
+  if (allowed) return null;
+  const response = privateJson({ error: 'Too many launcher-state connection attempts.' }, 429, origin);
+  response.headers.set('Retry-After', '60');
+  return response;
+}
+
+async function readLauncherManifest(env) {
+  return (await readLauncherManifestWithMetadata(env)).manifest;
 }
 
 function parsedLauncherVersion(value = '') {
@@ -496,9 +533,33 @@ async function launcherVersionPolicy(env) {
   return { necessaryLauncherVersion, source: 'launcher/latest.json' };
 }
 
+async function launcherVersionPolicyState(env) {
+  const configuredFloor = cleanString(env.AHT_REQUIRED_LAUNCHER_VERSION || '', 40);
+  if (configuredFloor) {
+    if (!parsedLauncherVersion(configuredFloor)) throw new Error('AHT_REQUIRED_LAUNCHER_VERSION is invalid');
+    return {
+      necessaryLauncherVersion: configuredFloor,
+      source: 'configured-floor',
+      manifestEtag: ''
+    };
+  }
+  const { manifest, etag } = await readLauncherManifestWithMetadata(env);
+  const necessaryLauncherVersion = cleanString(manifest?.version || manifest?.currentVersion || '', 40);
+  if (manifest?.schemaVersion !== 1 || manifest?.product !== 'aht-launcher'
+      || manifest?.required !== true || !parsedLauncherVersion(necessaryLauncherVersion)) {
+    throw new Error('Launcher update manifest is not a required production manifest');
+  }
+  return {
+    necessaryLauncherVersion,
+    source: 'launcher/latest.json',
+    manifestEtag: etag || await sha256Hex(canonicalJson(manifest))
+  };
+}
+
 function launcherVersionAccepted(currentLauncherVersion, policy) {
-  const comparison = compareLauncherVersions(currentLauncherVersion, policy?.necessaryLauncherVersion || '');
-  return comparison !== null && comparison >= 0;
+  const current = cleanString(currentLauncherVersion || '', 40);
+  const necessary = cleanString(policy?.necessaryLauncherVersion || '', 40);
+  return Boolean(parsedLauncherVersion(current) && parsedLauncherVersion(necessary) && current === necessary);
 }
 
 function launcherVersionFailure(currentLauncherVersion, policy) {
@@ -788,24 +849,7 @@ async function launcherProofToken(payload, env) {
     if (keyId !== LAUNCHER_ATTESTATION_KEY_ID) {
       throw new Error(`LAUNCHER_ATTESTATION_KEY_ID must be ${LAUNCHER_ATTESTATION_KEY_ID}`);
     }
-    const header = { alg: 'RS256', typ: 'AHT-LAUNCHER-ATTESTATION', kid: keyId };
-    const encodedHeader = base64UrlJson(header);
-    const encodedPayload = base64UrlJson(payload);
-    const signingInput = `${encodedHeader}.${encodedPayload}`;
-    const key = await attestationPrivateKey(env);
-    const signature = base64Url(new Uint8Array(await crypto.subtle.sign(
-      'RSASSA-PKCS1-v1_5',
-      key,
-      new TextEncoder().encode(signingInput)
-    )));
-    const token = `${signingInput}.${signature}`;
-    if (token.length > 8192) throw new Error('Launcher attestation token exceeds the 8 KiB size limit');
-    return {
-      token,
-      header,
-      payload,
-      signature: { alg: 'RS256', kid: header.kid, value: signature }
-    };
+    return signRs256Token(payload, env, 'AHT-LAUNCHER-ATTESTATION', 4608, 8192);
   }
   const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET;
   if (!secret) {
@@ -827,6 +871,35 @@ async function launcherProofToken(payload, env) {
   };
 }
 
+async function signRs256Token(payload, env, type, maxPayloadBytes, maxTokenChars) {
+  const payloadText = JSON.stringify(payload || {});
+  if (payloadText.length > maxPayloadBytes) {
+    throw new Error(`${type} payload exceeds its size limit`);
+  }
+  const keyId = cleanString(env.LAUNCHER_ATTESTATION_KEY_ID || LAUNCHER_ATTESTATION_KEY_ID, 120);
+  if (keyId !== LAUNCHER_ATTESTATION_KEY_ID) {
+    throw new Error(`LAUNCHER_ATTESTATION_KEY_ID must be ${LAUNCHER_ATTESTATION_KEY_ID}`);
+  }
+  const header = { alg: 'RS256', typ: type, kid: keyId };
+  const encodedHeader = base64UrlJson(header);
+  const encodedPayload = base64Url(new TextEncoder().encode(payloadText));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const key = await attestationPrivateKey(env);
+  const signature = base64Url(new Uint8Array(await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    key,
+    new TextEncoder().encode(signingInput)
+  )));
+  const token = `${signingInput}.${signature}`;
+  if (token.length > maxTokenChars) throw new Error(`${type} token exceeds its size limit`);
+  return {
+    token,
+    header,
+    payload,
+    signature: { alg: 'RS256', kid: header.kid, value: signature }
+  };
+}
+
 async function launcherProofSigningSelfTest(env) {
   const issuedAtMs = Date.now();
   const launchId = crypto.randomUUID();
@@ -845,7 +918,9 @@ async function launcherProofSigningSelfTest(env) {
     minecraftUsername: 'AHTProofCheck',
     minecraftUuid: '01234567-89ab-4def-8123-456789abcdef',
     installId: 'launcher-proof-status-self-test',
+    appVersion: selfTestLauncherVersion,
     launcherVersion: selfTestLauncherVersion,
+    launcherVersionAuthority: 'worker-policy-matched-device-assertion',
     packVersion: 'self-test',
     launcherChannel: 'developer',
     developerClient: true,
@@ -1079,6 +1154,203 @@ function accessDeniedResponse(access, origin) {
   }, 403, origin);
 }
 
+async function launcherAttestationPublicMaterial(env) {
+  const spki = pemBytes(env.LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI, 'PUBLIC KEY');
+  await attestationPublicKey(env);
+  return {
+    spkiBase64Url: base64Url(spki),
+    sha256: await sha256BytesHex(spki)
+  };
+}
+
+async function launcherProofPublicKey(env, origin) {
+  const keyId = cleanString(env.LAUNCHER_ATTESTATION_KEY_ID || LAUNCHER_ATTESTATION_KEY_ID, 120);
+  if (keyId !== LAUNCHER_ATTESTATION_KEY_ID) {
+    return privateJson({ error: 'Launcher attestation key ID is invalid.' }, 503, origin);
+  }
+  try {
+    const material = await launcherAttestationPublicMaterial(env);
+    return privateJson({
+      ok: true,
+      protocol: LAUNCHER_ATTESTATION_PROTOCOL,
+      algorithm: 'RS256',
+      keyId,
+      spkiBase64Url: material.spkiBase64Url,
+      sha256: material.sha256
+    }, 200, origin);
+  } catch {
+    return privateJson({ error: 'Launcher attestation verification key is not configured.' }, 503, origin);
+  }
+}
+
+async function launcherServerAccountBinding(record = {}) {
+  const username = normalizeMinecraftUsername(record.username || record.minecraftUsername);
+  const normalizedUsername = username.toLowerCase();
+  const minecraftUuid = normalizeMinecraftUuid(record.minecraftUuid);
+  const installId = cleanString(record.installId || '', 120);
+  const deviceId = normalizedAccessValue('device', record.deviceId);
+  if (!/^[a-z0-9_]{3,16}$/.test(normalizedUsername)
+      || !minecraftUuid || !installId || !deviceId || isSyntheticReadinessAccount(record)) {
+    return null;
+  }
+  return {
+    accountDigest: await sha256Hex(`account\0${normalizedUsername}`),
+    bindingDigest: await sha256Hex(
+      `binding-v1\0${normalizedUsername}\0${minecraftUuid}\0${installId}\0${deviceId}`
+    )
+  };
+}
+
+async function launcherServerAccessDenial(decision = {}) {
+  const scope = cleanString(decision.scope || '', 40).toLowerCase();
+  const value = normalizedAccessValue(scope, decision.value);
+  if (decision.active !== true || decision.effect !== 'deny' || !ACCESS_SCOPES.has(scope) || !value) {
+    return null;
+  }
+  return { scope, digest: await sha256Hex(`${scope}\0${value}`) };
+}
+
+async function readLauncherServerStateRecords(env, prefix, maximum) {
+  const records = [];
+  let cursor = '';
+  const seenCursors = new Set();
+  do {
+    const options = { prefix, limit: Math.min(1000, maximum + 1 - records.length) };
+    if (options.limit <= 0) throw new Error(`Launcher server state ${prefix} limit exceeded`);
+    if (cursor) options.cursor = cursor;
+    const listed = await env.AHT_DATA.list(options);
+    const objects = listed.objects || [];
+    if (records.length + objects.length > maximum) {
+      throw new Error(`Launcher server state ${prefix} limit exceeded`);
+    }
+    for (let offset = 0; offset < objects.length; offset += 6) {
+      records.push(...await readR2JsonObjects(env, objects.slice(offset, offset + 6)));
+    }
+    if (!listed.truncated) break;
+    const nextCursor = String(listed.cursor || '');
+    if (!nextCursor || seenCursors.has(nextCursor)) throw new Error(`Launcher server state ${prefix} listing stalled`);
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (true);
+  return records;
+}
+
+async function buildLauncherServerStatePayload(env) {
+  if (!env.AHT_DATA) throw new Error('AHT_DATA R2 binding is not configured');
+  const [policy, keyMaterial] = await Promise.all([
+    launcherVersionPolicyState(env),
+    launcherAttestationPublicMaterial(env)
+  ]);
+  const accountRecords = await readLauncherServerStateRecords(
+    env, ACCOUNT_USERNAME_PREFIX, LAUNCHER_SERVER_STATE_MAX_ACCOUNTS
+  );
+  const decisionRecords = await readLauncherServerStateRecords(
+    env, ACCESS_DECISION_PREFIX, LAUNCHER_SERVER_STATE_MAX_DENIALS
+  );
+  const eligibleAccounts = accountRecords.filter((record) => !isSyntheticReadinessAccount(record));
+  if (eligibleAccounts.length > LAUNCHER_SERVER_STATE_MAX_ACCOUNTS) {
+    throw new Error('Launcher server state account limit exceeded');
+  }
+  if (decisionRecords.length > LAUNCHER_SERVER_STATE_MAX_DENIALS) {
+    throw new Error('Launcher server state access-decision limit exceeded');
+  }
+
+  const accountMap = new Map();
+  for (const binding of (await Promise.all(eligibleAccounts.map(launcherServerAccountBinding))).filter(Boolean)) {
+    const existing = accountMap.get(binding.accountDigest);
+    if (existing && existing !== binding.bindingDigest) {
+      throw new Error('Launcher server state contains conflicting account bindings');
+    }
+    accountMap.set(binding.accountDigest, binding.bindingDigest);
+  }
+  const denialMap = new Map();
+  for (const denial of (await Promise.all(decisionRecords.map(launcherServerAccessDenial))).filter(Boolean)) {
+    denialMap.set(`${denial.scope}:${denial.digest}`, denial);
+  }
+
+  const core = {
+    protocol: LAUNCHER_SERVER_STATE_PROTOCOL,
+    schemaVersion: 1,
+    issuer: LAUNCHER_ATTESTATION_ISSUER,
+    audience: LAUNCHER_SERVER_STATE_AUDIENCE,
+    keyId: LAUNCHER_ATTESTATION_KEY_ID,
+    attestationKeySha256: keyMaterial.sha256,
+    packId: cleanString(env.LAUNCHER_PROOF_PACK_ID || 'a-hard-time-dregora', 80),
+    necessaryLauncherVersion: policy.necessaryLauncherVersion,
+    policySource: policy.source,
+    manifestEtag: cleanString(policy.manifestEtag || '', 160),
+    blockLikelyVpn: env.AHT_BLOCK_LIKELY_VPN === 'true',
+    accountBindings: [...accountMap.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([accountDigest, bindingDigest]) => ({ accountDigest, bindingDigest })),
+    accessDenials: [...denialMap.values()]
+      .sort((left, right) => left.scope.localeCompare(right.scope) || left.digest.localeCompare(right.digest))
+  };
+  const revision = await sha256Hex(canonicalJson(core));
+  return {
+    ...core,
+    revision,
+    issuedAt: new Date().toISOString()
+  };
+}
+
+async function signLauncherServerState(payload, env) {
+  const signed = await signRs256Token(
+    payload,
+    env,
+    LAUNCHER_SERVER_STATE_TYPE,
+    LAUNCHER_SERVER_STATE_MAX_PAYLOAD_BYTES,
+    LAUNCHER_SERVER_STATE_MAX_TOKEN_CHARS
+  );
+  const keyMaterial = await launcherAttestationPublicMaterial(env);
+  return {
+    schemaVersion: 1,
+    protocol: LAUNCHER_SERVER_STATE_PROTOCOL,
+    revision: payload.revision,
+    issuedAt: payload.issuedAt,
+    token: signed.token,
+    publicKeySpki: keyMaterial.spkiBase64Url
+  };
+}
+
+function launcherServerStateStub(env) {
+  if (!env.AHT_LAUNCHER_STATE?.idFromName || !env.AHT_LAUNCHER_STATE?.get) return null;
+  return env.AHT_LAUNCHER_STATE.get(env.AHT_LAUNCHER_STATE.idFromName(LAUNCHER_SERVER_STATE_DO_NAME));
+}
+
+async function notifyLauncherServerState(env, reason, required = false) {
+  const stub = launcherServerStateStub(env);
+  if (!stub) {
+    if (required) throw new Error('AHT_LAUNCHER_STATE Durable Object binding is not configured');
+    return { ok: false, skipped: true, revision: '' };
+  }
+  const response = await stub.fetch('https://aht-launcher-state.internal/refresh', {
+    method: 'POST',
+    headers: {
+      [LAUNCHER_SERVER_STATE_INTERNAL_HEADER]: '1',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ reason: cleanString(reason || 'state-change', 80) })
+  });
+  if (!response.ok) throw new Error(`Launcher server state refresh failed with ${response.status}`);
+  const result = await response.json();
+  if (result?.ok !== true || !/^[a-f0-9]{64}$/.test(String(result.revision || ''))) {
+    throw new Error('Launcher server state refresh returned an invalid revision');
+  }
+  return result;
+}
+
+function launcherServerStateMessage(state) {
+  return JSON.stringify({
+    type: 'launcher-server-state',
+    protocol: LAUNCHER_SERVER_STATE_PROTOCOL,
+    schemaVersion: 1,
+    revision: state.revision,
+    token: state.token,
+    publicKeySpki: state.publicKeySpki
+  });
+}
+
 async function indexAccountIdentity(env, record) {
   const username = normalizeMinecraftUsername(record.username);
   const minecraftUuid = normalizeMinecraftUuid(record.minecraftUuid);
@@ -1268,6 +1540,7 @@ async function registerUser(request, env, origin) {
   });
   await indexAccountIpv4(env, record);
   await indexAccountIdentity(env, record);
+  const launcherState = await notifyLauncherServerState(env, recovered ? 'account-recovered' : 'account-registered');
   return privateJson({
     ok: true,
     username,
@@ -1275,7 +1548,8 @@ async function registerUser(request, env, origin) {
     deviceId: record.deviceId,
     key,
     recovered,
-    access: { allowed: true, code: 'ACCESS_GRANTED' }
+    access: { allowed: true, code: 'ACCESS_GRANTED' },
+    launcherStateRevision: launcherState.revision || ''
   }, 200, origin);
 }
 
@@ -1341,7 +1615,17 @@ async function createLauncherProof(request, env, origin) {
   if (developerModeRequested && !developerAuthorized) {
     return privateJson({ error: 'Developer launcher proof requires developer authentication.' }, 401, origin);
   }
-  const currentLauncherVersion = cleanString(body.launcherVersion || body.appVersion || '', 40);
+  const reportedLauncherVersion = cleanString(body.launcherVersion || '', 40);
+  const reportedAppVersion = cleanString(body.appVersion || '', 40);
+  if (v2Requested && (!parsedLauncherVersion(reportedLauncherVersion)
+      || reportedLauncherVersion !== reportedAppVersion)) {
+    return privateJson({
+      error: 'Launcher version claims are missing or inconsistent.',
+      code: 'LAUNCHER_VERSION_CLAIM_INVALID'
+    }, 400, origin);
+  }
+  const currentLauncherVersion = v2Requested
+    ? reportedLauncherVersion : cleanString(body.launcherVersion || body.appVersion || '', 40);
   let versionPolicy;
   try {
     versionPolicy = await launcherVersionPolicy(env);
@@ -1367,10 +1651,14 @@ async function createLauncherProof(request, env, origin) {
     launcherVersion: currentLauncherVersion,
     deviceId: requestedDeviceId
   });
-  if (v2Requested && !device.ok && (!device.missing || env.AHT_REQUIRE_DEVICE_ATTESTATION === 'true')) {
+  // A v2 proof is authoritative only when the claimed launcher version is
+  // covered by a fresh device signature. Never issue a v2 token from a bare
+  // client version string, even during account-registration compatibility.
+  if (v2Requested && !device.ok) {
     return privateJson({ error: device.error, code: 'DEVICE_ATTESTATION_REQUIRED' }, 403, origin);
   }
   let existingRecord = null;
+  let accountBindingRefreshRequired = false;
   if (!developerAuthorized && v2Requested && !env.AHT_DATA) {
     return privateJson({ error: 'Launcher account registration service is not configured.' }, 503, origin);
   }
@@ -1384,6 +1672,8 @@ async function createLauncherProof(request, env, origin) {
     if (registeredDeviceId && (!device.ok || device.deviceId !== registeredDeviceId)) {
       return privateJson({ error: 'Device identity does not match this registered launcher.', code: 'DEVICE_IDENTITY_MISMATCH' }, 403, origin);
     }
+    accountBindingRefreshRequired = existingRecord.launcherStateBindingPending === true
+      || Boolean(v2Requested && device.ok && !registeredDeviceId);
     if (v2Requested) {
       const recoverySecret = cleanString(request.headers.get('X-AHT-Launcher-Recovery') || '', 200);
       const recoveryVerifier = recoverySecret && /^[A-Za-z0-9_-]{32,200}$/.test(recoverySecret)
@@ -1429,11 +1719,22 @@ async function createLauncherProof(request, env, origin) {
       colo: connectionAvailable ? network.colo : cleanString(existingRecord.colo || '', 16),
       network: connectionAvailable ? network : (existingRecord.network || network)
     };
+    existingRecord.launcherStateBindingPending = accountBindingRefreshRequired;
     await env.AHT_DATA.put(minecraftUsernameKey(minecraftUsername), JSON.stringify(existingRecord), {
       httpMetadata: { contentType: 'application/json' }
     });
     await indexAccountIpv4(env, existingRecord);
     await indexAccountIdentity(env, existingRecord);
+    if (accountBindingRefreshRequired) {
+      // The first device binding must reach the server snapshot before its proof
+      // can be used. Persisting the pending bit makes a failed refresh retryable
+      // instead of leaving an issued proof ahead of server policy.
+      await notifyLauncherServerState(env, 'account-device-bound', true);
+      existingRecord = { ...existingRecord, launcherStateBindingPending: false };
+      await env.AHT_DATA.put(minecraftUsernameKey(minecraftUsername), JSON.stringify(existingRecord), {
+        httpMetadata: { contentType: 'application/json' }
+      });
+    }
   }
 
   const issuedAtMs = Date.now();
@@ -1468,6 +1769,8 @@ async function createLauncherProof(request, env, origin) {
     deviceId: device.ok ? device.deviceId : normalizedAccessValue('device', existingRecord?.deviceId),
     appVersion: cleanString(body.appVersion, 40),
     launcherVersion: currentLauncherVersion,
+    launcherVersionAuthority: v2Requested && device.ok
+      ? 'worker-policy-matched-device-assertion' : 'legacy-client-claim',
     platform: cleanString(body.platform, 32),
     arch: cleanString(body.arch, 32),
     launcherChannel: developerAuthorized ? 'developer' : 'player',
@@ -1616,6 +1919,8 @@ async function verifyLauncherProofRequest(request, env, options = {}) {
     && validLaunchId
     && Boolean(minecraftUuid)
     && payload.accessGranted === true
+    && payload.launcherVersionAuthority === 'worker-policy-matched-device-assertion'
+    && cleanString(payload.appVersion || '', 40) === currentLauncherVersion
     && ['likely', 'not_detected', 'unknown'].includes(cleanString(payload.networkStatus, 20))
     && expiresAt - issuedAt <= LAUNCHER_ATTESTATION_TTL_MS
     && reconnectExpiresAt > expiresAt
@@ -2482,7 +2787,13 @@ async function setAccessDecision(request, env, origin) {
   await env.AHT_DATA.put(auditKey, JSON.stringify(audit), {
     httpMetadata: { contentType: 'application/json' }
   });
-  return privateJson({ ok: true, decision, auditKey }, 200, origin);
+  const launcherState = await notifyLauncherServerState(env, `access-${action}`);
+  return privateJson({
+    ok: true,
+    decision,
+    auditKey,
+    launcherStateRevision: launcherState.revision || ''
+  }, 200, origin);
 }
 
 async function listLauncherDownloads(env, request, origin) {
@@ -2665,7 +2976,140 @@ async function summary(env, request, origin) {
   return json({ date: day, counts }, 200, origin);
 }
 
+export class LauncherStateHub {
+  constructor(context, env) {
+    this.context = context;
+    this.env = env;
+    this.refreshChain = Promise.resolve();
+  }
+
+  async refreshState(reason = 'refresh') {
+    const operation = this.refreshChain.catch(() => {}).then(async () => {
+      const payload = await buildLauncherServerStatePayload(this.env);
+      const previous = await this.context.storage.get('signedLauncherServerState');
+      if (previous?.revision === payload.revision
+          && typeof previous.token === 'string' && typeof previous.publicKeySpki === 'string') {
+        return { state: previous, changed: false };
+      }
+      const state = {
+        ...(await signLauncherServerState(payload, this.env)),
+        reason: cleanString(reason || 'refresh', 80)
+      };
+      await this.context.storage.put('signedLauncherServerState', state);
+      const message = launcherServerStateMessage(state);
+      for (const socket of this.context.getWebSockets()) {
+        try {
+          socket.send(message);
+        } catch {
+          try { socket.close(1011, 'state delivery failed'); } catch {}
+        }
+      }
+      return { state, changed: true };
+    });
+    this.refreshChain = operation;
+    return operation;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === 'POST' && url.pathname === '/refresh') {
+      if (request.headers.get(LAUNCHER_SERVER_STATE_INTERNAL_HEADER) !== '1') {
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      const body = await readBody(request, 4096);
+      const result = await this.refreshState(cleanString(body.reason || 'refresh', 80));
+      return Response.json({
+        ok: true,
+        changed: result.changed,
+        revision: result.state.revision
+      });
+    }
+    if (request.method === 'GET' && url.pathname === '/connect') {
+      if (request.headers.get(LAUNCHER_SERVER_STATE_AUTHORIZED_HEADER) !== '1') {
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (String(request.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
+        return new Response('WebSocket upgrade required', { status: 426, headers: { Upgrade: 'websocket' } });
+      }
+      const result = await this.refreshState('server-connected');
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.context.acceptWebSocket(server);
+      server.send(launcherServerStateMessage(result.state));
+      return new Response(null, { status: 101, webSocket: client });
+    }
+    return Response.json({ error: 'Not found' }, { status: 404 });
+  }
+
+  async webSocketMessage(socket, message) {
+    if (typeof message === 'string' && message === 'ping') {
+      socket.send('pong');
+    }
+  }
+
+  async webSocketClose(socket, code, reason) {
+    try { socket.close(code, reason); } catch {}
+  }
+
+  async webSocketError(socket) {
+    try { socket.close(1011, 'socket error'); } catch {}
+  }
+}
+
+async function launcherServerStateWebSocket(request, env, origin) {
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || url.pathname !== LAUNCHER_SERVER_STATE_PATH || url.search || url.hash) {
+    return privateJson({ error: 'Not found' }, 404, origin);
+  }
+  if (String(request.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
+    return new Response('WebSocket upgrade required', {
+      status: 426,
+      headers: { ...corsHeaders(origin), Upgrade: 'websocket', 'Cache-Control': 'private, no-store' }
+    });
+  }
+  const rateLimited = await enforceLauncherStateRateLimit(request, env, origin);
+  if (rateLimited) return rateLimited;
+  const configuredToken = String(env.AHT_LAUNCHER_STATE_SERVER_TOKEN || '');
+  if (configuredToken.length < 32) {
+    return privateJson({ error: 'Launcher state server authentication is not configured.' }, 503, origin);
+  }
+  const authorization = request.headers.get('Authorization') || '';
+  const suppliedToken = authorization.startsWith('Bearer ')
+    ? authorization.slice('Bearer '.length).trim() : '';
+  if (suppliedToken.length > 512 || !(await secureStringEqual(suppliedToken, configuredToken))) {
+    return privateJson({ error: 'Launcher state server authentication failed.' }, 401, origin);
+  }
+  const stub = launcherServerStateStub(env);
+  if (!stub) return privateJson({ error: 'Launcher state service is not configured.' }, 503, origin);
+  const forwarded = new Request('https://aht-launcher-state.internal/connect', request);
+  forwarded.headers.delete('Authorization');
+  forwarded.headers.delete('Cookie');
+  forwarded.headers.set(LAUNCHER_SERVER_STATE_AUTHORIZED_HEADER, '1');
+  const userAgent = cleanString(request.headers.get('User-Agent') || '', 240);
+  if (userAgent) forwarded.headers.set('User-Agent', userAgent);
+  return stub.fetch(forwarded);
+}
+
+function isLauncherManifestQueueMessage(message) {
+  const body = message?.body || {};
+  return cleanString(body?.object?.key || body?.key || '', 512) === 'launcher/latest.json';
+}
+
 export default {
+  async queue(batch, env) {
+    const relevant = [];
+    for (const message of batch?.messages || []) {
+      if (isLauncherManifestQueueMessage(message)) relevant.push(message);
+      else if (typeof message?.ack === 'function') message.ack();
+    }
+    if (!relevant.length) return;
+    await notifyLauncherServerState(env, 'launcher-manifest-updated', true);
+    for (const message of relevant) {
+      if (typeof message?.ack === 'function') message.ack();
+    }
+  },
+
   async fetch(request, env, context) {
     const origin = request.headers.get('Origin') || '*';
     if (request.method === 'OPTIONS') {
@@ -2674,6 +3118,9 @@ export default {
 
     const url = new URL(request.url);
     try {
+      if (url.pathname === LAUNCHER_SERVER_STATE_PATH) {
+        return await launcherServerStateWebSocket(request, env, origin);
+      }
       if (request.method === 'GET' || request.method === 'HEAD') {
         const releaseResponse = await serveReleaseObject(request, env, origin, context);
         if (releaseResponse) {
@@ -2695,6 +3142,9 @@ export default {
       }
       if (request.method === 'GET' && url.pathname === '/api/launcher-proof/status') {
         return await launcherProofStatus(env, origin);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/launcher-proof/public-key') {
+        return await launcherProofPublicKey(env, origin);
       }
       if (request.method === 'POST' && url.pathname === '/api/launcher-proof') {
         return await createLauncherProof(request, env, origin);
@@ -2770,8 +3220,10 @@ export default {
           '/api/events',
           '/api/users/register',
           '/api/launcher-proof/status',
+          '/api/launcher-proof/public-key',
           '/api/launcher-proof',
           '/api/launcher-proof/verify',
+          '/server/launcher-state',
           '/api/social',
           '/api/social/actions',
           '/server/social/sync',
