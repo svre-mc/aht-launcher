@@ -157,7 +157,7 @@ async function assertLayout(client, label) {
       const clippedButtons = visibleButtons
         .filter((button) => button.scrollWidth > button.clientWidth + 3 || button.scrollHeight > button.clientHeight + 3)
         .map(describe);
-      const critical = [...document.querySelectorAll('.app-frame, .sidebar, .workspace, .topbar, .profile-card, .game-tile, .hero-panel, .news-grid, .quick-actions, .launch-strip, .settings-panel, .downloads-panel, .modal-card, .status-pill')]
+      const critical = [...document.querySelectorAll('.app-frame, .sidebar, .workspace, .topbar, .profile-card, .game-tile, .hero-panel, .news-grid, .news-view-header, .news-feed-grid, .quick-actions, .launch-strip, .settings-panel, .downloads-panel, .modal-card, .status-pill')]
         .filter(visible)
         .filter((el) => {
           const rect = el.getBoundingClientRect();
@@ -165,7 +165,7 @@ async function assertLayout(client, label) {
         })
         .map(describe);
       const workspace = document.querySelector('.workspace');
-      const responsiveContent = [...document.querySelectorAll('.hero-art, .news-grid, .quick-actions, .launch-strip')]
+      const responsiveContent = [...document.querySelectorAll('.hero-art, .news-grid, .news-view-header, .news-feed-grid, .quick-actions, .launch-strip')]
         .filter(visible)
         .map(describe);
       const workspaceWidth = workspace?.clientWidth || 0;
@@ -318,6 +318,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_APP_DEFAULTS: tempDefaults,
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_OPEN_EXTERNAL_ECHO: '1',
     AHT_TEST_USER_DATA: userData,
     ELECTRON_ENABLE_LOGGING: '0'
   },
@@ -538,6 +539,37 @@ try {
     throw new Error(`Saved or synced identity was not reflected in the player UI: ${JSON.stringify(identityProof)}`);
   }
   await waitFor(client, "document.querySelector('#updateLogGrid')?.hidden === false", 'layout update logs');
+  await click(client, '#newsTab');
+  const newsNavigationProof = await waitFor(client, `
+    (() => {
+      const cards = [...document.querySelectorAll('#newsFeedGrid .feature-card')];
+      return document.querySelector('.view.active')?.id === 'news' && cards.length === 3 ? {
+        activeView: document.querySelector('.view.active')?.id || '',
+        activeTab: document.querySelector('#newsTab')?.classList.contains('active') || false,
+        packSelected: document.querySelector('#gameTileButton')?.classList.contains('active') || false,
+        count: cards.length,
+        latest: document.querySelector('#newsLatestLabel')?.textContent?.trim() || ''
+      } : false;
+    })()
+  `, 'dedicated News navigation');
+  if (!newsNavigationProof.activeTab || !newsNavigationProof.packSelected || newsNavigationProof.latest !== 'Update 9.9.9') {
+    throw new Error(`News navigation must retain pack context and show the live update feed: ${JSON.stringify(newsNavigationProof)}`);
+  }
+  const externalLinkProof = await evaluate(client, `
+    Promise.all([window.aht.openExternal('store'), window.aht.openExternal('unapproved')]).then(([allowed, denied]) => ({ allowed, denied }))
+  `);
+  if (
+    externalLinkProof.allowed?.ok !== true
+    || externalLinkProof.allowed?.captured !== true
+    || externalLinkProof.allowed?.target !== 'https://ahardtime.net/shop'
+    || externalLinkProof.denied?.ok !== false
+    || externalLinkProof.denied?.opened !== false
+  ) {
+    throw new Error(`External-link allowlist did not permit only the official AHT store: ${JSON.stringify(externalLinkProof)}`);
+  }
+  await click(client, '#storeTab');
+  await click(client, '#gameTab');
+  await waitFor(client, "document.querySelector('.view.active')?.id === 'player'", 'return to Game after News and Store checks');
 
   const sidebarProgressProof = await evaluate(client, `
     (() => {
@@ -639,6 +671,9 @@ try {
     await click(client, '.nav [data-tab="player"]');
     reports.push(await assertLayout(client, `${size.name}-player`));
     screenshots.push(await captureScreenshot(client, `${size.name}-player`));
+    await click(client, '.nav [data-tab="news"]');
+    reports.push(await assertLayout(client, `${size.name}-news`));
+    screenshots.push(await captureScreenshot(client, `${size.name}-news`));
     await click(client, '.nav [data-tab="settings"]');
     reports.push(await assertLayout(client, `${size.name}-settings`));
     screenshots.push(await captureScreenshot(client, `${size.name}-settings`));

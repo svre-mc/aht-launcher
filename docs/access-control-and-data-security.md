@@ -17,7 +17,7 @@ Administrators can restrict or restore:
 - cryptographic device-install identifier; or
 - the current native IPv4 or IPv6 address.
 
-Every change requires an administrator session, records the reason and actor, updates a current decision record, and writes an append-only audit event. Restrictions are checked before registration refresh and before launch-proof issuance. Account, UUID, device, IP, and IPv4 restrictions are also pushed as normalized SHA-256 digests whenever an administrator changes them. New connections are checked locally against the latest signed in-memory revision; already connected players are deliberately not kicked.
+Every change requires an administrator session, records the reason and actor, updates a current decision record, and writes an append-only audit event. Restrictions are checked before registration refresh and before launch-proof issuance. Account, UUID, and device restrictions are checked again when a Worker endpoint verifies an already-issued player proof, limiting revocation delay.
 
 Telemetry is not an identity-recovery authority. In particular, an update event cannot rotate an account's registered install merely by presenting the account's public Minecraft UUID. Install recovery remains confined to the registration endpoint and requires the stored recovery credential, matching UUID, and the bound device assertion when present.
 
@@ -45,7 +45,6 @@ Required secrets:
 - `ADMIN_PASSWORD` or `ADMIN_PASSWORD_SHA256`
 - `ADMIN_TOKEN_SECRET` with at least 32 characters and no fallback to another secret
 - `AHT_SOCIAL_SERVER_SECRET` with at least 32 characters when server social synchronization is enabled
-- `AHT_LAUNCHER_STATE_SERVER_TOKEN` with at least 32 random characters; configure the same value only on the dedicated server
 
 Rollout and optional policy values:
 
@@ -55,9 +54,6 @@ Rollout and optional policy values:
 - `AHT_BLOCK_LIKELY_VPN=true` only after reviewing classification quality and the appeal path. It is disabled by default.
 - `AHT_ADMIN_RATE_LIMITER` as an optional Cloudflare Workers Rate Limiting binding. The example allows ten attempts per administrator username per minute in each Cloudflare location; a configured limiter fails closed if its binding errors.
 - `AHT_PLAYER_API_RATE_LIMITER` as an optional per-connection-IP limit for registration, proof issuance, and telemetry writes. The example allows 120 requests per minute in each Cloudflare location; a configured limiter fails closed if its binding errors.
-- `AHT_LAUNCHER_STATE` as the singleton `LauncherStateHub` SQLite Durable Object binding.
-- `aht-launcher-release-events` as the Queue consumer, with `aht-launcher-release-events-dlq` as its dead-letter queue.
-- An R2 `object-create` notification on the exact `launcher/latest.json` prefix to `aht-launcher-release-events`. Queue delivery is at least once; the Durable Object content revision makes duplicate delivery one effective push.
 
 R2 organization:
 
@@ -86,14 +82,15 @@ No implementation can guarantee a zero-detection result on every scanning websit
 - avoiding packers, obfuscators, hidden persistence, shell injection, serial-number scraping, and unsigned self-updaters; and
 - submitting false-positive disputes to the detecting vendor with the signed artifact and hash rather than changing behavior to evade detection.
 
-The GitHub workflow supports `WINDOWS_CERTIFICATE_BASE64`, `WINDOWS_CERTIFICATE_PASSWORD`, and `WINDOWS_CERTIFICATE_NAME` and verifies signed artifacts when those credentials are configured. The project owner has explicitly accepted unsigned Windows releases; that exception must remain visible in release evidence because unsigned installers carry higher SmartScreen and false-positive risk.
+The GitHub workflow accepts `WINDOWS_CERTIFICATE_BASE64`, `WINDOWS_CERTIFICATE_PASSWORD`, and `WINDOWS_CERTIFICATE_NAME`, verifies both the installer and staged-update executable with `Get-AuthenticodeSignature`, and fails before publication or artifact handoff if either status is not `Valid`. Local developer builds remain independent of that public release gate.
 
 ## Operator rollout
 
-1. Create the live and dead-letter Queues, deploy the Worker/SQLite Durable Object, and attach the exact R2 launcher-manifest notification.
-2. Configure the attestation keys, the dedicated launcher-state server token, and the three rate-limit bindings.
-3. Pin the public SPKI SHA-256 in the server-only config and provide the matching channel token through `AHT_LAUNCHER_STATE_TOKEN` or the server-only fallback setting.
-4. Deploy Launcher Lock 1.2.0 as one reviewed, byte-identical paired JAR to the client pack and server.
-5. Confirm the server receives a signed policy revision, then exercise a version-floor update and account/UUID/device/IP restrict/restore while retaining audit evidence.
-6. Confirm an existing player remains connected, an outdated reconnect gets both current/necessary versions, and a current signed reconnect succeeds without any `/api/launcher-proof/verify` request.
-7. Keep `AHT_REQUIRE_DEVICE_ATTESTATION=true` so new account registrations are device-bound too. V2 proof issuance itself always requires a fresh device assertion and never accepts a bare client version claim.
+1. Deploy the Worker, configure a dedicated 32+ character `ADMIN_TOKEN_SECRET`, and attach the optional player/admin rate-limit bindings before public rollout.
+2. Configure the attestation keys and, if used, the dedicated social-server secret.
+3. Deploy the device-capable launcher while `AHT_REQUIRE_DEVICE_ATTESTATION` is unset.
+4. Confirm new player records show a device ID and that VPN status accurately remains `unknown` without intelligence.
+5. Exercise restrict/restore for a test account, UUID, device, and IP; retain the audit evidence.
+6. Upgrade the server verifier to call `GET /api/launcher-proof/verify` with the compact proof token and confirm a newly restricted account invalidates an otherwise unexpired session. Local RSA verification remains available, but it cannot observe a new restriction until the proof expires.
+7. Set `AHT_REQUIRE_DEVICE_ATTESTATION=true` only after the compatibility population is acceptable.
+8. Configure and verify Windows code-signing secrets before publishing. Do not publish an unsigned production installer.

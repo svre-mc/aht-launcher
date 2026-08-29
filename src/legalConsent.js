@@ -48,8 +48,6 @@ export async function legalConsentStatus({ appRoot, consentPath, identity = {}, 
     && consent.affirmed === true
     && consent.termsVersion === documents.termsVersion
     && consent.privacyVersion === documents.privacyVersion
-    && consent.termsSha256 === documents.termsSha256
-    && consent.privacySha256 === documents.privacySha256
   );
   const identityCreatedAt = Date.parse(String(identity.createdAt || ''));
   const effectiveAt = Date.parse(LEGAL_EFFECTIVE_AT);

@@ -3,7 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { prepareLauncherUpdate } from './prepare-launcher-update.mjs';
 import { uploadR2Plan } from './upload-r2-plan.mjs';
-import { REQUIRED_DOWNLOAD_KEYS, validateLauncherUpdateManifest } from './validate-launcher-update-manifest.mjs';
+import {
+  assertLauncherReleaseAdvance,
+  compareLauncherReleaseVersions,
+  REQUIRED_DOWNLOAD_KEYS,
+  validateLauncherUpdateManifest
+} from './validate-launcher-update-manifest.mjs';
 
 const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aht-launcher-update-manifest-'));
 const artifacts = path.join(root, 'artifacts');
@@ -42,6 +47,18 @@ const validation = validateLauncherUpdateManifest(manifest, {
   requireStagedWindows: true
 });
 assert(validation.ok, `generated launcher manifest failed reusable validation: ${validation.errors.join('; ')}`);
+assert(compareLauncherReleaseVersions('7.8.10', '7.8.9') === 1, 'launcher version comparison must be numeric, not lexical');
+assert(compareLauncherReleaseVersions('7.8.9', '7.8.9') === 0, 'equal launcher versions must compare equal');
+assertLauncherReleaseAdvance({ ...manifest, version: '7.8.10' }, manifest);
+for (const candidateVersion of ['7.8.9', '7.8.8']) {
+  let immutableRejected = false;
+  try {
+    assertLauncherReleaseAdvance({ ...manifest, version: candidateVersion }, manifest);
+  } catch (error) {
+    immutableRejected = String(error?.message || error).includes('already published');
+  }
+  assert(immutableRejected, `published launcher ${candidateVersion} must not be replaceable`);
+}
 const requiredDownloadKeys = REQUIRED_DOWNLOAD_KEYS;
 assert(uploadScript.includes("process.platform === 'win32' && /\\.cmd$/i.test(command)"), 'Windows R2 upload must shell-wrap npx.cmd');
 assert(manifest.version === '7.8.9', 'manifest version mismatch');

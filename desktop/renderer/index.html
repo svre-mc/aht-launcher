@@ -13,8 +13,6 @@
       <div class="brand">
         <div class="brand-mark bill-art"><span>AHT</span></div>
         <div class="brand-copy">
-          <strong>A Hard Time</strong>
-          <span>Launcher</span>
           <small id="launcherVersionLabel" class="launcher-version">Launcher v-</small>
         </div>
       </div>
@@ -66,19 +64,25 @@
 
     <section class="workspace">
       <header class="topbar">
-        <nav class="nav">
-          <button class="tab nav-item active" data-tab="player">Game</button>
-          <button class="tab nav-item" data-tab="settings">Settings</button>
-          <button id="developerTab" class="tab nav-item" data-tab="developer" hidden>Developer</button>
+        <nav class="nav" aria-label="Launcher navigation">
+          <button id="gameTab" class="tab nav-item active" type="button" data-tab="player">Game</button>
+          <button id="newsTab" class="tab nav-item" type="button" data-tab="news">News</button>
+          <button id="storeTab" class="nav-item nav-item-external" type="button" data-external-destination="store" aria-label="Open the A Hard Time store in your browser">
+            <span>Store</span><span class="nav-icon icon-external-link" aria-hidden="true"></span>
+          </button>
+          <button class="tab nav-item" type="button" data-tab="settings">Settings</button>
+          <button id="developerTab" class="tab nav-item" type="button" data-tab="developer" hidden>Developer</button>
         </nav>
 
         <button id="profileFriendsButton" class="profile-card" type="button" aria-haspopup="dialog" aria-controls="friendsOverlay" aria-label="Open friends" hidden>
           <div class="profile-avatar bill-art"><span>AHT</span></div>
           <div class="profile-copy">
             <strong id="playerLabelView">Player</strong>
-            <span id="syncStatus"><span class="online-dot"></span>Sync -</span>
+            <span id="syncStatus"><span class="online-dot"></span>Online<span class="profile-chevron" aria-hidden="true"></span></span>
           </div>
-          <span id="profileFriendsBadge" class="notification-badge" aria-live="polite" hidden></span>
+          <span class="profile-controls">
+            <span id="profileFriendsBadge" class="notification-badge" aria-live="polite" hidden></span>
+          </span>
         </button>
       </header>
 
@@ -128,6 +132,44 @@
         </section>
 
 
+      </section>
+
+      <section id="news" class="view news-view">
+        <div class="news-view-shell">
+          <header class="news-view-header">
+            <div>
+              <p class="eyebrow">A Hard Time Dispatch</p>
+              <h1>News</h1>
+              <p>Release notes, development updates, and important launcher announcements.</p>
+            </div>
+            <div class="news-feed-state" aria-label="Live update feed">
+              <span class="news-feed-dot" aria-hidden="true"></span>
+              <span>Live update feed</span>
+              <strong id="newsLatestLabel">Checking</strong>
+            </div>
+          </header>
+          <div id="newsFeedGrid" class="news-feed-grid" aria-label="All update logs" hidden></div>
+          <div id="newsEmptyState" class="news-empty-state">
+            <span class="news-empty-mark">AHT</span>
+            <h2>No news is available yet</h2>
+            <p>The launcher will show release notes here as soon as they are published.</p>
+          </div>
+        </div>
+        <div id="updateLogOverlay" class="news-article-surface" hidden>
+          <article class="update-log-dialog" aria-labelledby="updateLogModalTitle">
+            <header class="update-log-article-header">
+              <button id="updateLogCloseButton" class="update-log-back" type="button" aria-label="Back to launcher news"><span aria-hidden="true">&#171;</span> Back</button>
+              <span id="updateLogModalMeta" class="update-log-modal-meta">Update Log</span>
+              <h2 id="updateLogModalTitle">Update Log</h2>
+              <p id="updateLogModalSubtitle"></p>
+            </header>
+            <header id="updateLogHero" class="update-log-hero">
+              <span class="update-log-hero-label">A Hard Time</span>
+            </header>
+            <button id="updateLogWatchButton" class="update-log-watch" type="button" hidden><span class="button-icon icon-play" aria-hidden="true"></span>Watch video</button>
+            <section id="updateLogArticleBody" class="update-log-article-body"></section>
+          </article>
+        </div>
       </section>
 
       <section id="settings" class="view">
@@ -619,19 +661,6 @@
       <pre id="launcherUpdateLog" class="log launcher-update-log"></pre>
       <button id="launcherUpdateNowButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update Launcher</button>
     </section>
-  </div>
-  <div id="updateLogOverlay" class="overlay update-log-overlay" hidden>
-    <article class="update-log-dialog" role="dialog" aria-modal="true" aria-labelledby="updateLogModalTitle">
-      <button id="updateLogCloseButton" class="modal-icon-button update-log-close" type="button" aria-label="Close update log"><span class="button-icon icon-close" aria-hidden="true"></span></button>
-      <header id="updateLogHero" class="update-log-hero">
-        <div class="update-log-hero-copy">
-          <span id="updateLogModalMeta" class="update-log-modal-meta">Update Log</span>
-          <h2 id="updateLogModalTitle">Update Log</h2>
-          <p id="updateLogModalSubtitle"></p>
-        </div>
-      </header>
-      <section id="updateLogArticleBody" class="update-log-article-body"></section>
-    </article>
   </div>
   <div id="updateLogVideoOverlay" class="overlay update-log-video-overlay" hidden>
     <section class="update-log-video-dialog" role="dialog" aria-modal="true" aria-label="Update log video">

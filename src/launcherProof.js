@@ -69,12 +69,15 @@ function launcherProofDocumentReasons(proof, {
   const protocol = cleanString(payload.protocol || '', 80);
   const proofProtocol = cleanString(proof?.protocol || '', 80);
   const v2 = protocol === LAUNCHER_PROOF_PROTOCOL && proofProtocol === LAUNCHER_PROOF_PROTOCOL;
+  const legacyV1 = protocol === LEGACY_LAUNCHER_PROOF_PROTOCOL
+    && proofProtocol === LEGACY_LAUNCHER_PROOF_PROTOCOL;
 
   if (proof?.trusted !== true) reasons.push('proof is not trusted');
   if (proof?.source !== 'worker') reasons.push('proof source is not trusted');
   if (expectedSource && proof?.source !== expectedSource) reasons.push('proof source mismatch');
-  if (!v2) reasons.push('protocol mismatch');
-  if (proof?.schemaVersion !== 2 || payload.schemaVersion !== 2) {
+  if (!v2 && !legacyV1) reasons.push('protocol mismatch');
+  if ((v2 && (proof?.schemaVersion !== 2 || payload.schemaVersion !== 2))
+      || (legacyV1 && (proof?.schemaVersion !== 1 || payload.schemaVersion !== 1))) {
     reasons.push('schemaVersion mismatch');
   }
   if (tokenText.length > 8192
@@ -112,18 +115,18 @@ function launcherProofDocumentReasons(proof, {
     if (payload.audience !== LAUNCHER_ATTESTATION_AUDIENCE) reasons.push('audience mismatch');
     if (payload.packId !== LAUNCHER_ATTESTATION_PACK_ID) reasons.push('pack mismatch');
     if (payload.accessGranted !== true) reasons.push('access denied');
-    if (payload.launcherVersionAuthority !== 'worker-policy-matched-device-assertion') {
-      reasons.push('launcher version authority mismatch');
-    }
-    if (cleanString(payload.appVersion || '', 40) !== cleanString(payload.launcherVersion || '', 40)) {
-      reasons.push('launcher version claims mismatch');
-    }
     if (!['likely', 'not_detected', 'unknown'].includes(cleanString(payload.networkStatus || '', 20))) reasons.push('network status mismatch');
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cleanString(payload.jti || '', 80))) {
       reasons.push('jti mismatch');
     }
     if (payload.jti !== payload.launchId) reasons.push('jti mismatch');
     if (!normalizeMinecraftUuid(payload.minecraftUuid || '')) reasons.push('Minecraft UUID mismatch');
+  } else if (legacyV1 && (
+    proof?.header?.alg !== 'HS256'
+    || proof?.header?.typ !== 'AHT-LAUNCHER-PROOF'
+    || proof?.header?.kid !== LEGACY_LAUNCHER_PROOF_KEY_ID
+  )) {
+    reasons.push('header metadata mismatch');
   }
   if (
     proof?.signature?.alg !== proof?.header?.alg
@@ -269,7 +272,9 @@ export async function inspectLauncherProof({
     && expectedProofServiceBaseUrl
     && workerServiceBaseUrl(proof?.proofServiceBaseUrl || '') !== expectedProofServiceBaseUrl
   ) reasons.push('proof signing service mismatch');
-  const expectedKeyId = LAUNCHER_ATTESTATION_KEY_ID;
+  const expectedKeyId = payload.protocol === LEGACY_LAUNCHER_PROOF_PROTOCOL
+    ? LEGACY_LAUNCHER_PROOF_KEY_ID
+    : LAUNCHER_ATTESTATION_KEY_ID;
   if (cleanString(proof?.header?.kid || '', 120) !== expectedKeyId) reasons.push('proof key mismatch');
 
   return {
@@ -352,8 +357,9 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
   const responsePayload = body.payload;
   const responseProtocol = cleanString(responsePayload?.protocol || body?.protocol || '', 80);
   const responseIsV2 = responseProtocol === LAUNCHER_PROOF_PROTOCOL;
+  const responseIsLegacyV1 = responseProtocol === LEGACY_LAUNCHER_PROOF_PROTOCOL;
   const mismatches = [];
-  if (!responseIsV2) mismatches.push('protocol');
+  if (!responseIsV2 && !responseIsLegacyV1) mismatches.push('protocol');
   const compareString = (field, max = 80, caseInsensitive = false) => {
     const expected = cleanString(payload?.[field] || '', max);
     const actual = cleanString(responsePayload?.[field] || '', max);
@@ -361,7 +367,9 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
       mismatches.push(field);
     }
   };
-  if (cleanString(responsePayload?.packId || '', 80) !== LAUNCHER_ATTESTATION_PACK_ID) mismatches.push('packId');
+  if (responseIsLegacyV1) compareString('launchId', 80);
+  if (responseIsLegacyV1) compareString('packId', 80);
+  else if (cleanString(responsePayload?.packId || '', 80) !== LAUNCHER_ATTESTATION_PACK_ID) mismatches.push('packId');
   compareString('packVersion', 80);
   compareString('latestVersion', 80);
   compareString('installedVersion', 80);
@@ -372,8 +380,6 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
   }
   compareString('installId', 120);
   if (payload?.deviceId) compareString('deviceId', 80);
-  compareString('launcherVersion', 40);
-  compareString('appVersion', 40);
   compareString('instanceDirHash', 80);
   compareString('launcherChannel', 32);
   for (const field of ['developerClient', 'developerClientBypass', 'modIntegrityBypass']) {
@@ -385,7 +391,7 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
     expectedSource: 'worker',
     minValidityMs: 2 * 60 * 1000
   }));
-  const expectedKeyId = LAUNCHER_ATTESTATION_KEY_ID;
+  const expectedKeyId = responseIsLegacyV1 ? LEGACY_LAUNCHER_PROOF_KEY_ID : LAUNCHER_ATTESTATION_KEY_ID;
   if (cleanString(body.header?.kid || '', 120) !== expectedKeyId) {
     mismatches.push('proof key mismatch');
   }
@@ -395,7 +401,7 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
   return {
     ...body,
     protocol: responseProtocol,
-    schemaVersion: 2,
+    schemaVersion: responseIsV2 ? 2 : 1,
     trusted: true,
     source: 'worker'
   };

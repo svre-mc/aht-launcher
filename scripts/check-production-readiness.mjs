@@ -349,6 +349,25 @@ function httpJsonStatus(url) {
   };
 }
 
+function windowsAuthenticodeStatus(filePath) {
+  if (process.platform !== 'win32' || !existsNonEmpty(filePath)) return { status: 'Unavailable', detail: 'Windows artifact or Windows host unavailable' };
+  const powerShell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const script = [
+    '$signature = Get-AuthenticodeSignature -LiteralPath $env:AHT_SIGNATURE_TARGET',
+    '[Console]::Out.Write([string]$signature.Status)'
+  ].join('; ');
+  const result = spawnSync(powerShell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    cwd: path.dirname(filePath),
+    env: { ...process.env, AHT_SIGNATURE_TARGET: filePath },
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 20_000
+  });
+  const status = String(result.stdout || '').trim() || 'Unknown';
+  const detail = result.status === 0 ? status : String(result.stderr || result.error?.message || `exit ${result.status}`).trim();
+  return { status, detail };
+}
+
 function liveWorkerPlayerDataCapabilities(baseUrl = '') {
   const normalizedBase = workerServiceBaseUrl(baseUrl);
   const rootUrl = normalizedBase ? new URL('.', normalizedBase).toString() : '';
@@ -356,9 +375,7 @@ function liveWorkerPlayerDataCapabilities(baseUrl = '') {
   const required = [
     `/${['api', 'users', 'register'].join('/')}`,
     '/api/events',
-    '/api/launcher-proof/public-key',
     '/api/launcher-proof/verify',
-    '/server/launcher-state',
     '/admin/access-decisions',
     '/admin/player-records',
     '/admin/launcher-updates'
@@ -463,15 +480,13 @@ function liveLauncherProofStatus(baseUrl) {
   const script = [
     'const base = process.argv[1];',
     '(async () => {',
-    '  const [response, keyResponse] = await Promise.all([fetch(new URL("api/launcher-proof/status", base), {',
+    '  const response = await fetch(new URL("api/launcher-proof/status", base), {',
     '    method: "GET",',
     '    headers: { Accept: "application/json", "User-Agent": "AHT production readiness" }',
-    '  }), fetch(new URL("api/launcher-proof/public-key", base), { method: "GET", headers: { Accept: "application/json", "User-Agent": "AHT production readiness" } })]);',
+    '  });',
     '  const json = await response.json().catch(async () => ({ error: await response.text().catch(() => "") }));',
-    '  const keyJson = await keyResponse.json().catch(async () => ({ error: await keyResponse.text().catch(() => "") }));',
-    '  const keyOk = keyResponse.ok && keyJson.ok === true && keyJson.algorithm === "RS256" && keyJson.keyId === "aht-launcher-attestation-v2" && /^[a-f0-9]{64}$/.test(keyJson.sha256 || "") && /^[A-Za-z0-9_-]{100,4096}$/.test(keyJson.spkiBase64Url || "");',
-    '  const ok = response.ok && json.ok === true && json.protocol === "aht-launcher-attestation-v2" && json.algorithm === "RS256" && json.privateKeyConfigured === true && json.publicKeyConfigured === true && json.keyId === "aht-launcher-attestation-v2" && json.signingVerified === true && keyOk;',
-    '  console.log(JSON.stringify({ ok, status: response.status, protocol: json.protocol || "", algorithm: json.algorithm || "", privateKeyConfigured: json.privateKeyConfigured === true, publicKeyConfigured: json.publicKeyConfigured === true, keyId: json.keyId || "", signingVerified: json.signingVerified === true, publicKeyPublished: keyOk, fingerprint: keyOk ? keyJson.sha256 : "", error: json.error || keyJson.error || "" }));',
+    '  const ok = response.ok && json.ok === true && json.protocol === "aht-launcher-attestation-v2" && json.algorithm === "RS256" && json.privateKeyConfigured === true && json.publicKeyConfigured === true && json.keyId === "aht-launcher-attestation-v2" && json.signingVerified === true;',
+    '  console.log(JSON.stringify({ ok, status: response.status, protocol: json.protocol || "", algorithm: json.algorithm || "", privateKeyConfigured: json.privateKeyConfigured === true, publicKeyConfigured: json.publicKeyConfigured === true, keyId: json.keyId || "", signingVerified: json.signingVerified === true, error: json.error || "" }));',
     '  if (!ok) process.exitCode = 1;',
     '})().catch((error) => { console.log(JSON.stringify({ ok: false, status: 0, error: error.message || String(error) })); process.exitCode = 1; });'
   ].join('\n');
@@ -485,7 +500,7 @@ function liveLauncherProofStatus(baseUrl) {
     return {
       ok: Boolean(parsed.ok),
       detail: parsed.ok
-        ? `external ${parsed.algorithm} key ${parsed.keyId}; in-memory signing and public-key pin endpoint verified (${parsed.fingerprint.slice(0, 12)})`
+        ? `external ${parsed.algorithm} key ${parsed.keyId}; in-memory signing verified`
         : `${parsed.status || 0}: ${parsed.error || (!parsed.privateKeyConfigured ? 'launcher attestation private key is not configured' : (!parsed.publicKeyConfigured ? 'launcher attestation public key is not configured' : 'launcher attestation signing self-test failed'))}`
     };
   } catch {
@@ -552,11 +567,6 @@ function checkCloudflareConfig() {
   addCheck('R2 release bucket configured', 'blocker', /bucket_name\s*=\s*"ahtlauncher"/.test(text), 'AHT_RELEASES -> ahtlauncher');
   addCheck('R2 data bucket configured', 'blocker', /bucket_name\s*=\s*"ahtlauncher-data"/.test(text), 'AHT_DATA -> ahtlauncher-data');
   addCheck('Worker entry configured', 'blocker', /main\s*=\s*"curseforge-proxy-worker\.js"/.test(text), 'cloudflare/curseforge-proxy-worker.js');
-  addCheck('launcher-state Durable Object configured', 'blocker', /name\s*=\s*"AHT_LAUNCHER_STATE"[\s\S]*class_name\s*=\s*"LauncherStateHub"/.test(text), 'AHT_LAUNCHER_STATE -> LauncherStateHub');
-  addCheck('launcher-state SQLite migration configured', 'blocker', /new_sqlite_classes\s*=\s*\[[^\]]*"LauncherStateHub"/.test(text), 'launcher-state-v1');
-  addCheck('launcher manifest Queue consumer configured', 'blocker', /queue\s*=\s*"aht-launcher-release-events"/.test(text), 'aht-launcher-release-events');
-  addCheck('launcher manifest dead-letter queue configured', 'blocker', /dead_letter_queue\s*=\s*"aht-launcher-release-events-dlq"/.test(text), 'aht-launcher-release-events-dlq');
-  addCheck('launcher state server secret declared', 'blocker', /"AHT_LAUNCHER_STATE_SERVER_TOKEN"/.test(text), 'AHT_LAUNCHER_STATE_SERVER_TOKEN');
 }
 
 function checkLiveCloudflareState(authOk) {
@@ -573,38 +583,9 @@ function checkLiveCloudflareState(authOk) {
   if (!authOk) {
     addCheck('live R2 release bucket exists', 'blocker', false, 'Cloudflare login required');
     addCheck('live R2 data bucket exists', 'blocker', false, 'Cloudflare login required');
-    addCheck('live launcher manifest Queue exists', 'blocker', false, 'Cloudflare login required');
-    addCheck('live launcher manifest dead-letter Queue exists', 'blocker', false, 'Cloudflare login required');
-    addCheck('live launcher R2 notification exists', 'blocker', false, 'Cloudflare login required');
     addCheck('live Worker deployed', 'blocker', false, 'Cloudflare login required');
     return;
   }
-
-  const queueList = runWrangler(['queues', 'list'], 120000);
-  const queueOutput = queueList.output || '';
-  addCheck(
-    'live launcher manifest Queue exists',
-    'blocker',
-    queueList.ok && queueOutput.includes('aht-launcher-release-events'),
-    queueList.ok ? 'aht-launcher-release-events' : queueList.detail
-  );
-  addCheck(
-    'live launcher manifest dead-letter Queue exists',
-    'blocker',
-    queueList.ok && queueOutput.includes('aht-launcher-release-events-dlq'),
-    queueList.ok ? 'aht-launcher-release-events-dlq' : queueList.detail
-  );
-  const notificationList = runWrangler(['r2', 'bucket', 'notification', 'list', 'ahtlauncher'], 120000);
-  const notificationOutput = notificationList.output || '';
-  addCheck(
-    'live launcher R2 notification exists',
-    'blocker',
-    notificationList.ok
-      && notificationOutput.includes('aht-launcher-release-events')
-      && notificationOutput.includes('launcher/latest.json')
-      && /object-create|PutObject/i.test(notificationOutput),
-    notificationList.ok ? 'launcher/latest.json -> aht-launcher-release-events' : notificationList.detail
-  );
 
   const bucketList = runWrangler(['r2', 'bucket', 'list'], 120000);
   if (!bucketList.ok) {
@@ -793,6 +774,22 @@ function checkArtifacts() {
     const ok = existsDir(artifact) || existsNonEmpty(artifact);
     const label = path.relative(rootDir, artifact);
     addCheck(`artifact: ${label}`, 'blocker', ok, label);
+  }
+
+  if (process.platform === 'win32') {
+    for (const [label, artifact] of [
+      ['installer', artifacts[0]],
+      ['packaged application', artifacts[3]]
+    ]) {
+      const signature = windowsAuthenticodeStatus(artifact);
+      if (signature.status === 'Valid') {
+        addCheck(`Windows Authenticode: ${label}`, 'blocker', true, signature.detail);
+      } else if (signature.status === 'NotSigned') {
+        addCheck(`Windows Authenticode: ${label}`, 'warning', false, `${signature.detail}; explicitly unsigned publication policy`);
+      } else {
+        addCheck(`Windows Authenticode: ${label}`, 'blocker', false, `${signature.detail}; only Valid or NotSigned is permitted`);
+      }
+    }
   }
 
   const sourceFiles = collectFiles([

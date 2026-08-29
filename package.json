@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.87",
+  "version": "0.1.88",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -19,7 +19,6 @@
     "test:windows-handoff": "node scripts/test-windows-minecraft-handoff.mjs",
     "test:telemetry": "node scripts/test-worker-telemetry.mjs",
     "test:access-control": "node scripts/test-access-control.mjs",
-    "test:launcher-state-push": "node scripts/test-launcher-state-push.mjs",
     "test:managed-security": "node scripts/test-managed-security-state.mjs",
     "test:social-client": "node scripts/test-social-client.mjs",
     "test:social-worker": "node scripts/test-worker-social.mjs",
@@ -45,6 +44,8 @@
     "test:github-workflow": "node scripts/test-github-workflow-dispatch.mjs",
     "test:release-targets": "node scripts/test-release-target-isolation.mjs",
     "test:r2-direct-upload": "node scripts/test-r2-direct-upload-config.mjs",
+    "test:r2-retention": "node scripts/test-r2-retention.mjs",
+    "r2:retention": "node scripts/r2-retention.mjs",
     "test:server-transfer-plan": "node scripts/smoke-server-transfer-plan.mjs",
     "test:mod-only-changes": "node scripts/smoke-mod-only-changes.mjs",
     "test:play-gate": "node scripts/smoke-play-integrity-gate.mjs",
@@ -73,6 +74,8 @@
     "test:close-during-update": "node scripts/smoke-close-during-update.mjs",
     "verify:local": "node scripts/verify-local.mjs",
     "verify:installed-player": "node scripts/verify-installed-player.mjs",
+    "security:audit": "npm audit --audit-level=high && npm audit signatures",
+    "check:launcher-release": "node scripts/check-launcher-release-immutability.mjs",
     "check:production": "node scripts/check-production-readiness.mjs",
     "check:production:strict": "node scripts/check-production-readiness.mjs --strict",
     "cloudflare:login": "wrangler login",
@@ -88,13 +91,13 @@
     "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.0",
     "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.1075.0",
     "@aws-sdk/lib-storage": "^3.1075.0",
-    "electron": "^42.5.0",
+    "electron": "^42.10.1",
     "electron-builder": "^26.15.3",
     "lucide-static": "^1.21.0",
     "ssh2": "^1.17.0",
@@ -148,5 +151,8 @@
       "include": "build/windows-installer.nsh",
       "license": "legal/TERMS_OF_SERVICE.txt"
     }
+  },
+  "allowScripts": {
+    "electron@42.10.1": true
   }
 }

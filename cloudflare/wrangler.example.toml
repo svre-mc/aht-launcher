@@ -1,6 +1,6 @@
 name = "aht-curseforge-proxy"
 main = "curseforge-proxy-worker.js"
-compatibility_date = "2026-08-25"
+compatibility_date = "2026-06-01"
 workers_dev = true
 keep_vars = true
 
@@ -13,27 +13,6 @@ keep_vars = true
 # wrangler secret put ADMIN_PASSWORD
 # wrangler secret put ADMIN_TOKEN_SECRET
 # wrangler secret put AHT_SOCIAL_SERVER_SECRET
-# Generate a dedicated random value of at least 32 bytes. Configure the same
-# value only on the dedicated game server; never package it with the client.
-# wrangler secret put AHT_LAUNCHER_STATE_SERVER_TOKEN
-
-[[durable_objects.bindings]]
-name = "AHT_LAUNCHER_STATE"
-class_name = "LauncherStateHub"
-
-[[migrations]]
-tag = "launcher-state-v1"
-new_sqlite_classes = ["LauncherStateHub"]
-
-# Create both queues first, then attach an R2 object-create notification for
-# the exact launcher/latest.json key to aht-launcher-release-events.
-[[queues.consumers]]
-queue = "aht-launcher-release-events"
-max_batch_size = 10
-max_batch_timeout = 5
-max_retries = 5
-dead_letter_queue = "aht-launcher-release-events-dlq"
-max_concurrency = 1
 
 # Optional Cloudflare Workers Rate Limiting binding for admin login attempts.
 # Choose a positive namespace ID unique to this limit in your Cloudflare account.

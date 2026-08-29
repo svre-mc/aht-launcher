@@ -19,6 +19,36 @@ function isObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function releaseVersionParts(value = '') {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value || '').trim());
+  if (!match) {
+    throw new Error(`Launcher release version must be numeric major.minor.patch: ${value || 'missing'}`);
+  }
+  return match.slice(1).map((part) => Number(part));
+}
+
+export function compareLauncherReleaseVersions(left = '', right = '') {
+  const leftParts = releaseVersionParts(left);
+  const rightParts = releaseVersionParts(right);
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] !== rightParts[index]) return leftParts[index] > rightParts[index] ? 1 : -1;
+  }
+  return 0;
+}
+
+export function assertLauncherReleaseAdvance(candidate = {}, live = {}) {
+  if (String(candidate.product || '') !== 'aht-launcher' || String(live.product || '') !== 'aht-launcher') {
+    throw new Error('Launcher release immutability requires two aht-launcher manifests.');
+  }
+  const comparison = compareLauncherReleaseVersions(candidate.version, live.version);
+  if (comparison <= 0) {
+    throw new Error(
+      `Launcher ${live.version} is already published. Refusing to replace it with ${candidate.version}; bump package.json and publish a new version.`
+    );
+  }
+  return { ok: true, candidateVersion: candidate.version, liveVersion: live.version };
+}
+
 function isLocalhostUrl(url) {
   return ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
 }

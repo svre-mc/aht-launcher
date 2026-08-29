@@ -34,7 +34,6 @@ function parseArgs(argv = process.argv.slice(2)) {
   }
   return args;
 }
-
 function cleanBaseUrl(value) {
   const url = new URL(String(value || DEFAULT_BASE_URL));
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {

@@ -109,6 +109,7 @@ if (!window.aht) {
       recommendedInstanceDir: "C:\\AHT\\A Hard Time Developer",
       defaultInstanceDir: "C:\\AHT\\A Hard Time Developer",
       instanceExists: true,
+      gameSettingsPresent: true,
       cacheModsDir: "C:\\AHT\\fallback-cache\\mods",
       cacheModsExists: true,
       localReleaseLatest: "D:\\AHT\\dist-r2\\latest.json",
@@ -168,6 +169,7 @@ if (!window.aht) {
     };
     mockStatus.setup = {
       instanceExists: true,
+      gameSettingsPresent: true,
       latestConfigured: true,
       canAutoConfigure: false,
       minecraftAccountReuseAvailable: false
@@ -239,6 +241,7 @@ if (!window.aht) {
     }),
     legalAccept: async () => ({ ok: true, acceptedAt: new Date().toISOString() }),
     appExit: async () => ({ ok: true }),
+    openExternal: async (destination) => ({ ok: destination === "store", opened: destination === "store", destination, target: destination === "store" ? "https://ahardtime.net/shop" : "" }),
     socialList: async () => ({
       available: true,
       actionsAvailable: true,
@@ -561,6 +564,11 @@ const els = {
   launcherUpdateNowButton: $("#launcherUpdateNowButton"),
   activityPanel: $("#activityPanel"),
   updateLogGrid: $("#updateLogGrid"),
+  newsView: $("#news"),
+  newsFeedGrid: $("#newsFeedGrid"),
+  newsEmptyState: $("#newsEmptyState"),
+  newsLatestLabel: $("#newsLatestLabel"),
+  externalLinks: [...document.querySelectorAll("[data-external-destination]")],
   statusBadge: $("#statusBadge"),
   versionLine: $("#versionLine"),
   syncStatus: $("#syncStatus"),
@@ -765,6 +773,7 @@ const els = {
   updateLogModalSubtitle: $("#updateLogModalSubtitle"),
   updateLogArticleBody: $("#updateLogArticleBody"),
   updateLogCloseButton: $("#updateLogCloseButton"),
+  updateLogWatchButton: $("#updateLogWatchButton"),
   updateLogVideoOverlay: $("#updateLogVideoOverlay"),
   updateLogVideoStage: $("#updateLogVideoStage"),
   updateLogVideoCloseButton: $("#updateLogVideoCloseButton"),
@@ -836,6 +845,7 @@ let friendsRequestId = 0;
 let friendsSocialState = null;
 const friendsActionRefreshTimers = new Set();
 let currentLegalState = null;
+let activeUpdateLog = null;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
 const TOAST_MAX_LIFETIME_MS = 4000;
@@ -852,8 +862,68 @@ function setBadge(text, state = "") {
 function setSyncLine(text) {
   els.syncStatus.textContent = "";
   const dot = document.createElement("span");
-  dot.className = "online-dot";
-  els.syncStatus.append(dot, document.createTextNode(text));
+  dot.className = `online-dot${text === "Offline" ? " offline" : ""}`;
+  const chevron = document.createElement("span");
+  chevron.className = "profile-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  els.syncStatus.append(dot, document.createTextNode(text), chevron);
+}
+
+const POINTER_LIGHT_SELECTOR = [
+  ".brand",
+  ".nav",
+  ".nav-item",
+  ".game-tile:not(.coming-soon)",
+  ".profile-card",
+  ".sidebar-download",
+  ".ghost-button",
+  ".button:not(.modal-icon-button)",
+  ".facts > div",
+  ".feature-card",
+  ".feature-copy-button"
+].join(", ");
+
+function installPointerLighting() {
+  let active = new Set();
+  const staticTargets = document.querySelectorAll(POINTER_LIGHT_SELECTOR);
+  staticTargets.forEach((element) => element.classList.add("pointer-light-surface"));
+
+  const clear = () => {
+    for (const element of active) element.classList.remove("is-pointer-lit");
+    active = new Set();
+  };
+
+  document.addEventListener("pointermove", (event) => {
+    const next = new Set();
+    let element = event.target instanceof Element ? event.target : null;
+    while (element && element !== document.documentElement) {
+      if (element.matches(POINTER_LIGHT_SELECTOR)) {
+        element.classList.add("pointer-light-surface", "is-pointer-lit");
+        const rect = element.getBoundingClientRect();
+        element.style.setProperty("--pointer-x", `${event.clientX - rect.left}px`);
+        element.style.setProperty("--pointer-y", `${event.clientY - rect.top}px`);
+        next.add(element);
+      }
+      element = element.parentElement;
+    }
+    for (const previous of active) {
+      if (!next.has(previous)) previous.classList.remove("is-pointer-lit");
+    }
+    active = next;
+  }, { passive: true });
+  document.addEventListener("pointerleave", clear);
+  window.addEventListener("blur", clear);
+  document.addEventListener("focusin", (event) => {
+    const element = event.target instanceof Element ? event.target.closest(POINTER_LIGHT_SELECTOR) : null;
+    if (!element) return;
+    element.classList.add("pointer-light-surface", "is-pointer-lit");
+    element.style.setProperty("--pointer-x", "50%");
+    element.style.setProperty("--pointer-y", "50%");
+  });
+  document.addEventListener("focusout", (event) => {
+    const element = event.target instanceof Element ? event.target.closest(POINTER_LIGHT_SELECTOR) : null;
+    element?.classList.remove("is-pointer-lit");
+  });
 }
 
 function syncSetupNotice() {
@@ -928,8 +998,19 @@ function displayPackName(name) {
   return value || String(name || "A Hard Time");
 }
 
-function updateLogSummary() {
-  return "Read more...";
+function updateLogSummary(value, limit = 150) {
+  const text = String(value || "")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/^#{1,3}\s+/gm, "")
+    .replace(/^[-*]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "Open the full release notes.";
+  const cap = Math.max(60, Number(limit) || 150);
+  if (text.length <= cap) return text;
+  const clipped = text.slice(0, cap + 1);
+  const boundary = clipped.lastIndexOf(" ");
+  return `${clipped.slice(0, boundary > cap * 0.62 ? boundary : cap).trim()}...`;
 }
 
 function updateLogText(log) {
@@ -994,11 +1075,21 @@ function updateLogMeta(log) {
   return log?.publishedAt ? shortDateTime(log.publishedAt) : "Update Log";
 }
 
+function updateLogDetailMeta(log) {
+  const parts = [updateLogMeta(log)];
+  if (log?.version && log?.publishedAt) parts.push(shortDateTime(log.publishedAt));
+  return parts.filter(Boolean).join("  /  ");
+}
+
 function closeUpdateLog() {
   if (!els.updateLogOverlay) return;
   els.updateLogOverlay.hidden = true;
+  els.newsView?.classList.remove("article-open");
   els.updateLogHero.style.backgroundImage = "";
   els.updateLogArticleBody.innerHTML = "";
+  if (els.updateLogWatchButton) els.updateLogWatchButton.hidden = true;
+  activeUpdateLog = null;
+  document.body.classList.remove("update-log-open");
 }
 
 function closeUpdateLogVideo() {
@@ -1072,21 +1163,27 @@ function renderUpdateLogArticleText(parent, text) {
 function openUpdateLog(log) {
   if (!els.updateLogOverlay) return;
   closeUpdateLogVideo();
+  activateTab("news");
+  activeUpdateLog = log;
   const imageUrl = updateLogImageUrl(log);
-  els.updateLogModalMeta.textContent = updateLogMeta(log);
+  els.updateLogModalMeta.textContent = updateLogDetailMeta(log);
   els.updateLogModalTitle.textContent = log?.title || "AHT Update Feed";
   els.updateLogModalSubtitle.textContent = String(log?.subtitle || "").trim();
   els.updateLogModalSubtitle.hidden = !els.updateLogModalSubtitle.textContent;
   els.updateLogHero.classList.toggle("has-image", Boolean(imageUrl));
-  els.updateLogHero.style.backgroundImage = imageUrl ? `linear-gradient(180deg, rgba(20, 25, 27, 0.1), rgba(20, 25, 27, 0.88)), url("${imageUrl.replace(/"/g, "%22")}")` : "";
+  els.updateLogHero.style.backgroundImage = imageUrl ? `linear-gradient(180deg, rgba(5, 8, 9, 0.04), rgba(5, 8, 9, 0.22)), url("${imageUrl.replace(/"/g, "%22")}"), url("assets/aht-cover.png")` : "";
   renderUpdateLogArticleText(els.updateLogArticleBody, updateLogText(log));
+  if (els.updateLogWatchButton) els.updateLogWatchButton.hidden = !updateLogPlayable(log);
   els.updateLogOverlay.hidden = false;
+  els.newsView?.classList.add("article-open");
+  els.updateLogOverlay.scrollTop = 0;
+  document.body.classList.add("update-log-open");
+  window.setTimeout(() => els.updateLogCloseButton?.focus(), 0);
 }
 
 function openUpdateLogVideo(log) {
   const playable = updateLogPlayable(log);
   if (!playable || !els.updateLogVideoOverlay) return;
-  closeUpdateLog();
   els.updateLogVideoStage.innerHTML = "";
   if (playable.type === "youtube") {
     const iframe = document.createElement("iframe");
@@ -1108,49 +1205,69 @@ function openUpdateLogVideo(log) {
   els.updateLogVideoOverlay.hidden = false;
 }
 
-function renderUpdateLogs(logs = []) {
-  const items = Array.isArray(logs) ? logs.slice(0, 3) : [];
-  els.updateLogGrid.innerHTML = "";
-  els.updateLogGrid.hidden = items.length === 0;
-  if (!items.length) return;
-
+function buildUpdateLogCard(log, index, surface = "home") {
   const artClasses = ["aht-art", "patch-art", "sync-art"];
-  for (const [index, log] of items.entries()) {
-    const playable = updateLogPlayable(log);
-    const imageUrl = updateLogImageUrl(log);
-    const card = document.createElement("article");
-    card.className = `feature-card ${index === 0 ? "large" : ""} ${playable ? "is-playable" : ""}`.trim();
+  const playable = updateLogPlayable(log);
+  const imageUrl = updateLogImageUrl(log);
+  const card = document.createElement("article");
+  card.className = `feature-card ${index === 0 ? "large" : ""} ${playable ? "is-playable" : ""} ${surface === "news" ? "news-feed-card" : "home-news-card"}`.trim();
 
-    const art = document.createElement("button");
-    art.type = "button";
-    art.className = `feature-art feature-art-button ${imageUrl ? "has-image" : (artClasses[index] || "patch-art")}`;
-    art.setAttribute("aria-label", playable ? `Play ${log?.title || "update video"}` : `Read ${log?.title || "update log"}`);
-    if (imageUrl) art.style.backgroundImage = `linear-gradient(180deg, rgba(10, 12, 12, 0.08), rgba(10, 12, 12, 0.42)), url("${imageUrl.replace(/"/g, "%22")}")`;
-    art.addEventListener("click", () => playable ? openUpdateLogVideo(log) : openUpdateLog(log));
-    if (playable) {
-      const glyph = document.createElement("div");
-      glyph.className = "play-glyph";
-      const icon = document.createElement("span");
-      icon.className = "button-icon icon-play";
-      icon.setAttribute("aria-hidden", "true");
-      glyph.appendChild(icon);
-      art.appendChild(glyph);
+  const art = document.createElement("button");
+  art.type = "button";
+  art.className = `feature-art feature-art-button ${imageUrl ? "has-image" : (artClasses[index % artClasses.length] || "patch-art")}`;
+  art.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
+  if (imageUrl) art.style.backgroundImage = `linear-gradient(180deg, rgba(10, 12, 12, 0.04), rgba(10, 12, 12, 0.36)), url("${imageUrl.replace(/"/g, "%22")}")`;
+  art.addEventListener("click", () => openUpdateLog(log));
+  if (playable) {
+    const glyph = document.createElement("div");
+    glyph.className = "play-glyph";
+    const icon = document.createElement("span");
+    icon.className = "button-icon icon-play";
+    icon.setAttribute("aria-hidden", "true");
+    glyph.appendChild(icon);
+    art.appendChild(glyph);
+  }
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "feature-copy feature-copy-button";
+  copy.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
+  copy.addEventListener("click", () => openUpdateLog(log));
+  const meta = document.createElement("span");
+  meta.className = "feature-meta";
+  const title = document.createElement("strong");
+  const body = document.createElement("p");
+  body.className = "feature-summary";
+  const cta = document.createElement("span");
+  cta.className = "feature-cta";
+  meta.textContent = updateLogDetailMeta(log);
+  title.textContent = log?.title || "AHT Update Feed";
+  body.textContent = updateLogSummary(log?.text || log?.body || "", surface === "news" ? 220 : 120);
+  cta.textContent = "Read article  ›";
+  copy.append(meta, title, body, cta);
+  card.append(art, copy);
+  return card;
+}
+
+function renderUpdateLogs(logs = []) {
+  const allItems = Array.isArray(logs) ? logs.slice(0, 12) : [];
+  const homeItems = allItems.slice(0, 3);
+  els.updateLogGrid.innerHTML = "";
+  els.updateLogGrid.hidden = homeItems.length === 0;
+  for (const [index, log] of homeItems.entries()) {
+    els.updateLogGrid.appendChild(buildUpdateLogCard(log, index, "home"));
+  }
+
+  if (els.newsFeedGrid) {
+    els.newsFeedGrid.innerHTML = "";
+    els.newsFeedGrid.hidden = allItems.length === 0;
+    for (const [index, log] of allItems.entries()) {
+      els.newsFeedGrid.appendChild(buildUpdateLogCard(log, index, "news"));
     }
-
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "feature-copy feature-copy-button";
-    copy.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
-    copy.addEventListener("click", () => openUpdateLog(log));
-    const meta = document.createElement("span");
-    const title = document.createElement("strong");
-    const body = document.createElement("p");
-    meta.textContent = updateLogMeta(log);
-    title.textContent = log?.title || "AHT Update Feed";
-    body.textContent = updateLogSummary(log?.text || log?.body || "");
-    copy.append(meta, title, body);
-    card.append(art, copy);
-    els.updateLogGrid.appendChild(card);
+  }
+  if (els.newsEmptyState) els.newsEmptyState.hidden = allItems.length > 0;
+  if (els.newsLatestLabel) {
+    els.newsLatestLabel.textContent = allItems.length ? updateLogMeta(allItems[0]) : "No published updates";
   }
 }
 
@@ -1650,7 +1767,7 @@ function launchBlockedBadge(status = currentStatus) {
   if (status?.launchReady) return { text: "Ready", state: "ok" };
   const reason = playerSafeBlockedReason(status);
   if (status?.updateBlockedReason || /Update package is not ready/i.test(reason)) return { text: "Update unavailable", state: "warn" };
-  if (status?.integrity?.counts?.corrupted > 0 || /Repair required|corrupt|mod file issue/i.test(reason)) return { text: "Repair needed", state: "warn" };
+  if (status?.integrity?.counts?.corrupted > 0 || /Repair required|corrupt|managed file issue|mod file issue/i.test(reason)) return { text: "Repair needed", state: "warn" };
   if (status?.updateRequired || /^Update required/i.test(reason)) return { text: "Update required", state: "warn" };
   if (!status?.installed || /Install the pack before playing/i.test(reason)) return { text: "Not Installed", state: "warn" };
   if (status?.latestError || /Release feed|update service|latest\.json|metadata/i.test(reason)) return { text: "Service unavailable", state: "warn" };
@@ -3517,7 +3634,7 @@ function renderStatus(status) {
     refreshFriendsNotification();
     friendsNotificationTimer = window.setInterval(refreshFriendsNotification, 15000);
   }
-  setSyncLine(status.config.sync?.enabled === false ? "Sync off" : "Sync on");
+  setSyncLine(status.config.sync?.enabled === false ? "Offline" : "Online");
   els.developerTab.hidden = !status.developerMode;
   els.developerTileButton.hidden = !status.developerMode;
   syncSetupNotice();
@@ -3621,12 +3738,32 @@ function activateTab(name) {
   activeTabName = name;
   els.tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === name));
   els.gameTiles.forEach((tile) => {
-    const sameTab = tile.dataset.tab === name;
+    const sameTab = tile.dataset.tab === "player"
+      ? ["player", "news", "settings"].includes(name)
+      : tile.dataset.tab === name;
     const samePack = !tile.dataset.pack || tile.dataset.pack === activeSidebarPack;
     tile.classList.toggle("active", sameTab && samePack);
   });
   els.views.forEach((view) => view.classList.toggle("active", view.id === name));
   syncSetupNotice();
+}
+
+async function openExternalDestination(button) {
+  const destination = String(button?.dataset?.externalDestination || "").trim();
+  if (!destination || !window.aht?.openExternal || button.disabled) return;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try {
+    const result = await window.aht.openExternal(destination);
+    if (!result?.ok || !result?.opened) {
+      throw new Error(result?.error || "The link could not be opened.");
+    }
+  } catch (error) {
+    showToast("Store could not be opened", cleanErrorMessage(error), "error");
+  } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
 }
 
 function focusActivityPanel(message) {
@@ -3746,6 +3883,10 @@ function closeUpdateOptions() {
 }
 
 function openUpdateOptions() {
+  if (!currentStatus?.setup?.gameSettingsPresent) {
+    startUpdate(false);
+    return;
+  }
   if (!els.updateOptionsOverlay) {
     startUpdate(false);
     return;
@@ -3930,6 +4071,7 @@ async function applyRecommendedSetup() {
 }
 
 els.tabs.forEach((tab) => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
+els.externalLinks.forEach((button) => button.addEventListener("click", () => openExternalDestination(button)));
 els.gameTiles.forEach((tile) => tile.addEventListener("click", async () => {
   const nextPack = tile.dataset.pack || activeSidebarPack;
   if (nextPack !== activeSidebarPack && (updatePoll || lastUpdateState?.running)) {
@@ -4257,17 +4399,17 @@ els.pickUpdateLogVideoButton.addEventListener("click", async () => {
   if (file) els.updateLogVideoInput.value = file;
 });
 els.updateLogCloseButton.addEventListener("click", () => closeUpdateLog());
+if (els.updateLogWatchButton) {
+  els.updateLogWatchButton.addEventListener("click", () => openUpdateLogVideo(activeUpdateLog));
+}
 els.updateLogVideoCloseButton.addEventListener("click", () => closeUpdateLogVideo());
-els.updateLogOverlay.addEventListener("click", (event) => {
-  if (event.target === els.updateLogOverlay) closeUpdateLog();
-});
 els.updateLogVideoOverlay.addEventListener("click", (event) => {
   if (event.target === els.updateLogVideoOverlay) closeUpdateLogVideo();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    closeUpdateLog();
-    closeUpdateLogVideo();
+    if (!els.updateLogVideoOverlay.hidden) closeUpdateLogVideo();
+    else if (!els.updateLogOverlay.hidden) closeUpdateLog();
   }
 });
 els.scanLauncherBuildsButton.addEventListener("click", () => scanLauncherBuilds());
@@ -4754,6 +4896,7 @@ els.bucketInput.addEventListener("input", () => {
   updateReleaseUploadState();
 });
 
+installPointerLighting();
 void loadLegalGate();
 refresh().catch((error) => {
   const message = cleanErrorMessage(error);

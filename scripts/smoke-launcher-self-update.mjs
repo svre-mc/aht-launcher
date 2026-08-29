@@ -361,7 +361,16 @@ try {
     const failedRestart = await evaluate(client, '(async () => ({ log: document.querySelector("#launcherUpdateLog")?.textContent, state: await window.aht.getLauncherUpdateState() }))()').catch(() => null);
     const prepared = failedRestart?.state?.lastResult?.preparedRestart || stagedProof.state.lastResult.preparedRestart || {};
     const helperLog = prepared.logPath && fs.existsSync(prepared.logPath) ? fs.readFileSync(prepared.logPath, 'utf8') : '';
-    throw new Error(`${error.message}: ${JSON.stringify({ failedRestart, helperLog })}`);
+    const helperPayload = prepared.payloadPath && fs.existsSync(prepared.payloadPath)
+      ? JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'))
+      : null;
+    const helperPayloadProof = helperPayload ? {
+      mode: helperPayload.mode,
+      testStartOnly: helperPayload.testStartOnly,
+      testStartOnlyType: typeof helperPayload.testStartOnly,
+      handoffNonceMatches: helperPayload.handoffNonce === prepared.handoffNonce
+    } : null;
+    throw new Error(`${error.message}: ${JSON.stringify({ failedRestart, helperLog, helperPayloadProof })}`);
   }
   const proof = await evaluate(client, `(async () => ({
     hidden: document.querySelector('#launcherUpdateOverlay').hidden,

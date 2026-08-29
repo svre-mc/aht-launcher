@@ -151,7 +151,7 @@ async function stopProcessesUnder(root) {
   }).catch(() => {});
 }
 
-const nonce = crypto.randomBytes(12).toString('hex');
+const nonce = crypto.randomBytes(16).toString('hex');
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-launcher-update-transaction-'));
 const resolvedTempBase = `${path.resolve(os.tmpdir())}${path.sep}`.toLowerCase();
 if (!`${path.resolve(tempRoot)}${path.sep}`.toLowerCase().startsWith(resolvedTempBase)) {
@@ -253,6 +253,35 @@ try {
   };
   await writeJson(payloadPath, payload);
   const payloadSha256 = await sha256File(payloadPath);
+  const scriptSha256 = await sha256File(helperPath);
+  const bootstrapScriptSha256 = await sha256File(bootstrapPath);
+  const preparedRestart = {
+    strategy: 'windows-staged-helper',
+    mode: payload.mode,
+    helperDir: handoffDir,
+    payloadPath,
+    payloadSha256,
+    scriptPath: helperPath,
+    scriptSha256,
+    bootstrapScriptPath: bootstrapPath,
+    bootstrapScriptSha256,
+    logPath,
+    bootstrapLogPath,
+    ackPath,
+    pendingPath,
+    pendingFailurePath,
+    handoffNonce: nonce,
+    relaunchDeveloper: sameVersionDeveloperReinstall,
+    expectedVersion,
+    installDir,
+    stagingDir,
+    backupDir,
+    failedCandidateDir,
+    targetRelativePath: targetExeName,
+    receiptPath,
+    receiptSha256,
+    treeSha256: staged.receipt.treeSha256
+  };
   await writeJson(pendingPath, {
     schemaVersion: 2,
     product: 'aht-launcher',
@@ -262,12 +291,7 @@ try {
     downloadedPath: archivePath,
     artifact: { size: (await fs.stat(archivePath)).size, sha256: archiveSha256 },
     installingStartedAt: new Date().toISOString(),
-    preparedRestart: {
-      strategy: 'windows-staged-helper',
-      handoffNonce: nonce,
-      ackPath,
-      backupDir
-    }
+    preparedRestart
   });
 
   const helperStartedAt = Date.now();
@@ -287,7 +311,7 @@ try {
     '-ExpectedPayloadSha256',
     payloadSha256,
     '-ExpectedHelperSha256',
-    await sha256File(helperPath)
+    scriptSha256
   ], {
     windowsHide: true,
     timeout: 20_000,

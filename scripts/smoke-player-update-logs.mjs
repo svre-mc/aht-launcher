@@ -13,6 +13,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-update-logs-'));
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
+const screenshotDir = path.join(root, 'screenshots');
 const updateLogRequests = [];
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
@@ -153,6 +154,14 @@ async function waitFor(client, expression, label, attempts = 160) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+async function captureScreenshot(client, name) {
+  await fsp.mkdir(screenshotDir, { recursive: true });
+  const result = await client.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  const file = path.join(screenshotDir, `${name}.png`);
+  await fsp.writeFile(file, Buffer.from(result.data, 'base64'));
+  return file;
+}
+
 await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
   instanceDir,
@@ -204,6 +213,7 @@ const child = spawn(electronBin, electronArgs, {
 
 let client;
 try {
+  const screenshots = [];
   const target = await waitForTarget();
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
@@ -242,8 +252,8 @@ try {
   if (!proof.cards[0].large || proof.cards.slice(1).some((card) => card.large)) {
     throw new Error(`Only the newest update log should be the large card: ${JSON.stringify(proof)}`);
   }
-  if (proof.cards.some((card) => card.body !== 'Read more...')) {
-    throw new Error(`Cards should only show the compact Read more text: ${JSON.stringify(proof)}`);
+  if (proof.cards.some((card) => card.body.length < 24 || card.body === 'Read more...')) {
+    throw new Error(`Home cards should show useful, compact update excerpts: ${JSON.stringify(proof)}`);
   }
   if (proof.cards.some((card) => !card.hasCopyButton || !card.hasArtButton)) {
     throw new Error(`Update-log cards should be clickable through art and title areas: ${JSON.stringify(proof)}`);
@@ -251,8 +261,37 @@ try {
   if (JSON.stringify(proof.cards.map((card) => card.playable)) !== JSON.stringify([true, false, true])) {
     throw new Error(`Play buttons should only render for logs with media: ${JSON.stringify(proof)}`);
   }
+  await evaluate(client, `document.querySelector('#newsTab').click(); true`);
+  await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && document.querySelectorAll('#newsFeedGrid .feature-card').length === 4", 'dedicated News view');
+  const newsProof = await evaluate(client, `({
+    activeView: document.querySelector('.view.active')?.id || '',
+    activeTab: document.querySelector('#newsTab')?.classList.contains('active') || false,
+    activePack: document.querySelector('#gameTileButton')?.classList.contains('active') || false,
+    count: document.querySelectorAll('#newsFeedGrid .feature-card').length,
+    titles: [...document.querySelectorAll('#newsFeedGrid .feature-card strong')].map((node) => node.textContent || ''),
+    latest: document.querySelector('#newsLatestLabel')?.textContent || ''
+  })`);
+  if (newsProof.activeView !== 'news' || !newsProof.activeTab || !newsProof.activePack || newsProof.count !== 4 || !newsProof.titles.includes('Old hidden') || newsProof.latest !== 'Update 2.8.4') {
+    throw new Error(`Dedicated News view did not render the full ordered player-safe feed: ${JSON.stringify(newsProof)}`);
+  }
+  screenshots.push(await captureScreenshot(client, 'news-view'));
+  await evaluate(client, `document.querySelector('#gameTab').click(); true`);
+  await waitFor(client, "document.querySelector('.view.active')?.id === 'player'", 'return to Game view');
   await evaluate(client, `document.querySelector('#updateLogGrid .feature-card:first-child .feature-art-button').click(); true`);
-  await waitFor(client, "!document.querySelector('#updateLogVideoOverlay').hidden && document.querySelector('#updateLogVideoStage iframe')", 'YouTube video overlay');
+  await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && !document.querySelector('#updateLogOverlay').hidden && document.querySelector('#updateLogModalTitle')?.textContent === 'Launcher Stability Patch'", 'home card routed to its News article');
+  const homeArticleProof = await evaluate(client, `({
+    activeView: document.querySelector('.view.active')?.id || '',
+    activeTab: document.querySelector('#newsTab')?.classList.contains('active') || false,
+    articleOpen: document.querySelector('#news')?.classList.contains('article-open') || false,
+    title: document.querySelector('#updateLogModalTitle')?.textContent || '',
+    watchHidden: document.querySelector('#updateLogWatchButton')?.hidden ?? true,
+    videoHidden: document.querySelector('#updateLogVideoOverlay')?.hidden ?? true
+  })`);
+  if (homeArticleProof.activeView !== 'news' || !homeArticleProof.activeTab || !homeArticleProof.articleOpen || homeArticleProof.title !== 'Launcher Stability Patch' || homeArticleProof.watchHidden || !homeArticleProof.videoHidden) {
+    throw new Error(`Home news card did not open the exact article inside the News tab: ${JSON.stringify(homeArticleProof)}`);
+  }
+  await evaluate(client, `document.querySelector('#updateLogWatchButton').click(); true`);
+  await waitFor(client, "!document.querySelector('#updateLogVideoOverlay').hidden && document.querySelector('#updateLogVideoStage iframe')", 'article YouTube video overlay');
   const videoProof = await evaluate(client, `({
     hidden: document.querySelector('#updateLogVideoOverlay').hidden,
     iframeSrc: document.querySelector('#updateLogVideoStage iframe')?.src || ''
@@ -262,8 +301,12 @@ try {
   }
   await evaluate(client, `document.querySelector('#updateLogVideoCloseButton').click(); true`);
   await waitFor(client, "document.querySelector('#updateLogVideoOverlay').hidden", 'closed video overlay');
+  await evaluate(client, `document.querySelector('#updateLogCloseButton').click(); true`);
+  await waitFor(client, "document.querySelector('#updateLogOverlay').hidden && document.querySelector('.view.active')?.id === 'news'", 'returned to News feed');
+  await evaluate(client, `document.querySelector('#gameTab').click(); true`);
+  await waitFor(client, "document.querySelector('.view.active')?.id === 'player'", 'return to Game view for second card');
   await evaluate(client, `document.querySelector('#updateLogGrid .feature-card:nth-child(2) .feature-copy-button').click(); true`);
-  await waitFor(client, "!document.querySelector('#updateLogOverlay').hidden && document.querySelector('#updateLogArticleBody')?.textContent.includes('Non-playable logs should open')", 'full update-log article overlay');
+  await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && !document.querySelector('#updateLogOverlay').hidden && document.querySelector('#updateLogArticleBody')?.textContent.includes('Non-playable logs should open')", 'full update-log article in News');
   const articleProof = await evaluate(client, `({
     title: document.querySelector('#updateLogModalTitle')?.textContent || '',
     subtitleHidden: document.querySelector('#updateLogModalSubtitle')?.hidden,
@@ -274,16 +317,29 @@ try {
   if (articleProof.title !== 'Third newest' || articleProof.subtitleHidden || !articleProof.body.includes('Second visible update log') || !articleProof.articleImage.includes('/update-media/body-shot.webp') || articleProof.articleCaption !== 'Patch comparison') {
     throw new Error(`Full update-log article did not render expected content: ${JSON.stringify(articleProof)}`);
   }
-  if (!updateLogRequests.some((query) => query.includes('limit=3'))) {
-    throw new Error(`Player did not request update logs with limit=3: ${JSON.stringify(updateLogRequests)}`);
+  screenshots.push(await captureScreenshot(client, 'news-article'));
+  const backProof = await evaluate(client, `({
+    label: document.querySelector('#updateLogCloseButton')?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+    articleOpen: document.querySelector('#news')?.classList.contains('article-open') || false,
+    activeView: document.querySelector('.view.active')?.id || ''
+  })`);
+  if (!/Back/i.test(backProof.label) || !backProof.articleOpen || backProof.activeView !== 'news') {
+    throw new Error(`Full update-log article must use a clear Back affordance inside the News tab: ${JSON.stringify(backProof)}`);
+  }
+  await evaluate(client, `document.querySelector('#updateLogCloseButton').click(); true`);
+  await waitFor(client, "document.querySelector('#updateLogOverlay').hidden && !document.querySelector('#news')?.classList.contains('article-open') && document.querySelector('.view.active')?.id === 'news'", 'returned from full article to News feed');
+  if (!updateLogRequests.some((query) => query.includes('limit=12'))) {
+    throw new Error(`Player did not request enough update logs for the News view: ${JSON.stringify(updateLogRequests)}`);
   }
 
   console.log(JSON.stringify({
     ok: true,
     root,
+    screenshots,
     requestQueries: updateLogRequests,
     titles,
     cardCount: proof.count,
+    newsCardCount: newsProof.count,
     playable: proof.cards.map((card) => card.playable),
     hidden: proof.hidden
   }, null, 2));

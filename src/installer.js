@@ -64,25 +64,6 @@ function yieldToEventLoop() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-const TRANSIENT_RENAME_ERROR_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
-
-async function renameWithTransientRetry(source, dest, { attempts = 10 } = {}) {
-  let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      await fs.rename(source, dest);
-      return;
-    } catch (error) {
-      lastError = error;
-      if (!TRANSIENT_RENAME_ERROR_CODES.has(String(error?.code || '').toUpperCase()) || attempt === attempts) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(50 * attempt, 500)));
-    }
-  }
-  throw lastError;
-}
-
 function zipEntryIsFile(entry) {
   return entry && !String(entry.fileName || '').endsWith('/');
 }
@@ -612,7 +593,7 @@ async function recoverInterruptedCleanInstall(instanceDir, logger) {
     removedBackups = await removeInstallSiblings(backupDirs, logger, 'backup');
   } else if (backupDirs.length) {
     const [newestBackup, ...olderBackups] = backupDirs;
-    await renameWithTransientRetry(newestBackup.abs, resolvedInstanceDir);
+    await fs.rename(newestBackup.abs, resolvedInstanceDir);
     restoredBackup = newestBackup.abs;
     removedBackups = await removeInstallSiblings(olderBackups, logger, 'backup');
   }
@@ -648,14 +629,14 @@ async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) 
   await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
   try {
     if (await pathExists(resolvedInstanceDir)) {
-      await renameWithTransientRetry(resolvedInstanceDir, backupDir);
+      await fs.rename(resolvedInstanceDir, backupDir);
       oldInstallMoved = true;
     }
-    await renameWithTransientRetry(resolvedStagingDir, resolvedInstanceDir);
+    await fs.rename(resolvedStagingDir, resolvedInstanceDir);
     stagedInstallActive = true;
   } catch (error) {
     if (oldInstallMoved && !stagedInstallActive && !(await pathExists(resolvedInstanceDir)) && await pathExists(backupDir)) {
-      await renameWithTransientRetry(backupDir, resolvedInstanceDir).catch(() => {});
+      await fs.rename(backupDir, resolvedInstanceDir).catch(() => {});
     }
     throw error;
   }

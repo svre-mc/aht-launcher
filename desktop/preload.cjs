@@ -33,7 +33,8 @@ const playerApi = {
   selectJson: () => ipcRenderer.invoke('dialog:json'),
   selectZip: () => ipcRenderer.invoke('dialog:zip'),
   selectFolder: (defaultPath = '') => ipcRenderer.invoke('dialog:folder', defaultPath),
-  openPath: (target) => ipcRenderer.invoke('shell:openPath', target)
+  openPath: (target) => ipcRenderer.invoke('shell:openPath', target),
+  openExternal: (destination) => ipcRenderer.invoke('shell:openExternal', destination)
 };
 
 const developerApi = {

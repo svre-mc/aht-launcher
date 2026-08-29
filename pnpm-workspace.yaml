@@ -1,0 +1,7 @@
+allowBuilds:
+  cpu-features: true
+  electron: true
+  electron-winstaller: true
+  esbuild: set this to true or false
+  ssh2: true
+  workerd: set this to true or false

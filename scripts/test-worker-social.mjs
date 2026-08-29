@@ -1,7 +1,5 @@
 import crypto from 'node:crypto';
 import worker from '../cloudflare/curseforge-proxy-worker.js';
-import { createDeviceAssertion, createDeviceCredential } from '../src/deviceIdentity.js';
-import { launcherProofDeviceBinding } from '../src/launcherProof.js';
 import {
   TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
   TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI
@@ -76,58 +74,34 @@ async function serverSync(payload, expectedStatus = 200, signed = true) {
   return jsonRequest('/server/social/sync', { method: 'POST', headers, body }, expectedStatus);
 }
 
-const socialDevice = createDeviceCredential();
-const socialRegistration = {
-  username: 'SocialUser',
-  minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
-  installId: 'social-install',
-  packId: 'a-hard-time-dregora',
-  deviceId: socialDevice.deviceId,
-  devicePublicKey: socialDevice.publicKey
-};
-socialRegistration.deviceAssertion = createDeviceAssertion(socialDevice, {
-  purpose: 'account-registration',
-  binding: {
-    username: 'socialuser',
-    minecraftUuid: socialRegistration.minecraftUuid,
-    installId: socialRegistration.installId,
-    deviceId: socialRegistration.deviceId
-  }
-});
 await jsonRequest('/api/users/register', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
     'X-AHT-Launcher-Recovery': 'social_recovery_secret_1234567890123456'
   },
-  body: JSON.stringify(socialRegistration)
+  body: JSON.stringify({
+    username: 'SocialUser',
+    minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
+    installId: 'social-install',
+    packId: 'a-hard-time-dregora'
+  })
 });
 
-const socialProofBody = {
-  protocol: 'aht-launcher-attestation-v2',
-  launchId: crypto.randomUUID(),
-  minecraftUsername: 'SocialUser',
-  minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
-  installId: 'social-install',
-  packId: 'a-hard-time-dregora',
-  appVersion: '0.1.86',
-  launcherVersion: '0.1.86',
-  installedVersion: '2.8.60',
-  instanceDirHash: 'social-test-instance',
-  deviceId: socialDevice.deviceId,
-  devicePublicKey: socialDevice.publicKey
-};
-socialProofBody.deviceAssertion = createDeviceAssertion(socialDevice, {
-  purpose: 'launcher-proof',
-  binding: launcherProofDeviceBinding(socialProofBody)
-});
 const proof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
     'X-AHT-Launcher-Recovery': 'social_recovery_secret_1234567890123456'
   },
-  body: JSON.stringify(socialProofBody)
+  body: JSON.stringify({
+    protocol: 'aht-launcher-attestation-v2',
+    minecraftUsername: 'SocialUser',
+    installId: 'social-install',
+    packId: 'a-hard-time-dregora',
+    appVersion: '0.1.86',
+    installedVersion: '2.8.60'
+  })
 });
 assert(proof.trusted && proof.token, 'Launcher proof was not issued.');
 

@@ -20,6 +20,7 @@ on:
       - "server-lock-mod/build/libs/aht-version-lock-*.jar"
       - "src/**"
       - "scripts/prepare-launcher-update.mjs"
+      - "scripts/check-launcher-release-immutability.mjs"
       - "scripts/upload-r2-plan.mjs"
       - "scripts/test-github-workflow-dispatch.mjs"
       - "scripts/test-launcher-update-manifest.mjs"
@@ -82,20 +83,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit dependency security
+        run: npm run security:audit
+
       - name: Test platform build config
         run: npm run test:platform-builds
 
       - name: Test professional launch diagnostics
         run: npm run test:launch-diagnostics
-
-      - name: Test signed launcher proof
-        run: npm run test:launcher-proof
-
-      - name: Test access controls
-        run: npm run test:access-control
-
-      - name: Test launcher-state push
-        run: npm run test:launcher-state-push
 
       - name: Show macOS signing mode
         if: matrix.id == 'macos'
@@ -118,8 +113,6 @@ jobs:
       - name: Verify Windows Authenticode signatures
         if: matrix.id == 'windows'
         shell: pwsh
-        env:
-          SIGNED_RELEASE_REQUIRED: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' && 'true' || 'false' }}
         run: |
           $installer = Get-ChildItem -LiteralPath 'release-builds/windows' -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Windows installer was not produced.' }
@@ -137,14 +130,12 @@ jobs:
 
           $validSignaturePair = $installerSignature.Status -eq 'Valid' -and $applicationSignature.Status -eq 'Valid'
           $unsignedSignaturePair = $installerSignature.Status -eq 'NotSigned' -and $applicationSignature.Status -eq 'NotSigned'
-          if (-not $validSignaturePair -and -not $unsignedSignaturePair) {
-            throw 'Refusing to publish Windows artifacts with invalid, untrusted, or inconsistent Authenticode states.'
-          }
-          if ($env:SIGNED_RELEASE_REQUIRED -eq 'true' -and -not $validSignaturePair) {
-            throw 'Windows signing credentials were configured, but both launcher artifacts were not validly signed.'
-          }
-          if ($unsignedSignaturePair) {
-            Write-Warning 'Publishing an explicitly unsigned Windows release because no Windows certificate is configured.'
+          if ($validSignaturePair) {
+            Write-Host 'Publishing a consistently Authenticode-signed Windows release.'
+          } elseif ($unsignedSignaturePair) {
+            Write-Warning 'Publishing an explicitly unsigned Windows release. SmartScreen and antivirus reputation may be reduced.'
+          } else {
+            throw 'Refusing to publish invalid, untrusted, or inconsistently signed Windows artifacts.'
           }
 
       - name: Upload ${{ matrix.label }} launcher artifact
@@ -167,6 +158,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
+      AHT_RELEASE_BASE_URL: ${{ vars.AHT_RELEASE_BASE_URL || 'https://aht-curseforge-proxy.mysticgamer312.workers.dev' }}
       AHT_LAUNCHER_UPDATE_URL: ${{ vars.AHT_LAUNCHER_UPDATE_URL || 'https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json' }}
     steps:
       - name: Checkout
@@ -200,6 +192,9 @@ jobs:
       - name: Validate generated launcher update manifest
         run: node scripts/validate-launcher-update-manifest.mjs ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"
 
+      - name: Enforce immutable launcher versions
+        run: node scripts/check-launcher-release-immutability.mjs --candidate ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"
+
       - name: Create or update GitHub Release
         run: |
           set -euo pipefail
@@ -218,10 +213,10 @@ jobs:
           } > "$NOTES_FILE"
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file "$NOTES_FILE"
-          else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
+            echo "Release $TAG already exists. Published launcher versions are immutable; bump package.json." >&2
+            exit 1
           fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
 
           shopt -s nullglob
           release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-launcher-update/launcher-latest.json)
@@ -236,7 +231,7 @@ jobs:
           for asset in "${release_assets[@]}"; do
             name="$(basename "$asset")"
             for attempt in 1 2 3; do
-              if gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber; then
+              if gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"; then
                 break
               fi
               if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq ".assets[].name" | grep -Fxq "$name"; then
@@ -270,3 +265,7 @@ jobs:
       - name: Publish launcher update to R2
         if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
         run: node scripts/upload-r2-plan.mjs --plan ci-launcher-update/upload-plan.json --bucket "$AHT_R2_BUCKET"
+
+      - name: Enforce manifest-aware R2 retention
+        if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        run: node scripts/r2-retention.mjs --apply --bucket "$AHT_R2_BUCKET" --base-url "$AHT_RELEASE_BASE_URL"

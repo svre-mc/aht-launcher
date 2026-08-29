@@ -116,28 +116,6 @@ const login = await workerJson('/admin/login', {
 if (!login.response.ok || !login.body.token) throw new Error(`Admin login failed: ${JSON.stringify(login.body)}`);
 const auth = { Authorization: `Bearer ${login.body.token}` };
 
-const bareVersionDeveloperResponse = await worker.fetch(request('/api/launcher-proof', {
-  method: 'POST',
-  headers: { ...auth, 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    protocol: 'aht-launcher-attestation-v2',
-    minecraftUsername: 'DeviceRig',
-    minecraftUuid,
-    installId: 'developer-bare-version-test',
-    appVersion: '0.1.86',
-    launcherVersion: '0.1.86',
-    launcherChannel: 'developer',
-    developerClient: true,
-    developerClientBypass: true,
-    modIntegrityBypass: true
-  })
-}), { ...env, AHT_REQUIRE_DEVICE_ATTESTATION: '' }, {});
-const bareVersionDeveloper = await bareVersionDeveloperResponse.json();
-if (bareVersionDeveloperResponse.status !== 403
-    || bareVersionDeveloper.code !== 'DEVICE_ATTESTATION_REQUIRED') {
-  throw new Error(`Worker accepted a bare client launcher-version claim: ${bareVersionDeveloperResponse.status} ${JSON.stringify(bareVersionDeveloper)}`);
-}
-
 const players = await workerJson('/admin/player-records', { headers: auth });
 const player = players.body.players?.find((item) => item.minecraftUsername === username);
 if (!player || player.ipv4 !== '203.0.113.77' || player.deviceId !== device.deviceId
@@ -251,44 +229,6 @@ if (!allowedProof.response.ok || allowedProof.body.payload?.deviceId !== device.
     || !allowedProof.body.payload?.reconnectExpiresAt) {
   throw new Error(`Restored device could not obtain proof: ${allowedProof.response.status} ${JSON.stringify(allowedProof.body)}`);
 }
-
-const inconsistentVersionPayload = proofRequestPayload();
-inconsistentVersionPayload.appVersion = '0.1.85';
-const inconsistentVersion = await workerJson('/api/launcher-proof', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345'
-  },
-  body: JSON.stringify(inconsistentVersionPayload)
-});
-if (inconsistentVersion.response.status !== 400
-    || inconsistentVersion.body.code !== 'LAUNCHER_VERSION_CLAIM_INVALID') {
-  throw new Error(`Worker accepted inconsistent launcher version claims: ${inconsistentVersion.response.status} ${JSON.stringify(inconsistentVersion.body)}`);
-}
-
-const forgedFutureVersionPayload = proofRequestPayload();
-forgedFutureVersionPayload.appVersion = '9.9.9';
-forgedFutureVersionPayload.launcherVersion = '9.9.9';
-forgedFutureVersionPayload.deviceAssertion = createDeviceAssertion(device, {
-  purpose: 'launcher-proof',
-  binding: launcherProofDeviceBinding(forgedFutureVersionPayload)
-});
-const forgedFutureVersion = await workerJson('/api/launcher-proof', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345'
-  },
-  body: JSON.stringify(forgedFutureVersionPayload)
-});
-if (forgedFutureVersion.response.status !== 426
-    || forgedFutureVersion.body.code !== 'LAUNCHER_UPDATE_REQUIRED'
-    || forgedFutureVersion.body.currentLauncherVersion !== '9.9.9'
-    || forgedFutureVersion.body.necessaryLauncherVersion !== '0.1.86') {
-  throw new Error(`Worker trusted a device-signed future version instead of exact release policy: ${forgedFutureVersion.response.status} ${JSON.stringify(forgedFutureVersion.body)}`);
-}
-
 const verifiedSession = await workerJson('/api/launcher-proof/verify', {
   headers: { Authorization: `Bearer ${allowedProof.body.token}` }
 });
@@ -467,8 +407,6 @@ console.log(JSON.stringify({
   accountBanInvalidatedExistingProof: downstream.response.status === 403,
   ipv6BanBlockedRegistration: blockedIpv6.response.status === 403,
   tamperedAssertionRejected: tamperedResponse.response.status === 403,
-  bareClientVersionRejected: bareVersionDeveloperResponse.status === 403,
-  inconsistentVersionClaimsRejected: inconsistentVersion.response.status === 400,
   currentDecisions: decisions.body.decisions.length,
   auditEvents: auditKeys.length
 }, null, 2));

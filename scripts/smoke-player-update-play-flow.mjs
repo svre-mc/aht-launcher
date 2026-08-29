@@ -478,11 +478,30 @@ try {
     throw new Error(`Fresh player should need install before update: ${JSON.stringify(before)}`);
   }
 
-  const updateResult = await evaluate(client, `
-    window.aht.startUpdate({ forceRepair: false, replaceGameSettings: false })
-      .then((result) => ({ ok: true, result }))
-      .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
-  `);
+  await evaluate(client, `refresh().then(() => true)`);
+  await waitFor(client, `(() => {
+    const button = document.querySelector('#updateButton');
+    return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+  })()`, 'fresh player Update button');
+  const firstInstallPromptProof = await evaluate(client, `(() => {
+    const overlay = document.querySelector('#updateOptionsOverlay');
+    const button = document.querySelector('#updateButton');
+    const beforeHidden = overlay?.hidden === true;
+    button?.click();
+    return {
+      beforeHidden,
+      afterHidden: overlay?.hidden === true,
+      settingsPresent: ${JSON.stringify(Boolean(before.setup?.gameSettingsPresent))}
+    };
+  })()`);
+  if (!firstInstallPromptProof.beforeHidden || !firstInstallPromptProof.afterHidden || firstInstallPromptProof.settingsPresent) {
+    throw new Error(`First-ever install incorrectly opened the keep-settings prompt: ${JSON.stringify(firstInstallPromptProof)}`);
+  }
+  const updateResult = await waitFor(client, `
+    window.aht.getStatus().then((status) => status.installed?.version === '7.7.7'
+      ? ({ ok: true, result: { installed: status.installed } })
+      : false)
+  `, 'fresh player UI update without settings prompt');
   if (!updateResult.ok || updateResult.result?.installed?.version !== '7.7.7') {
     throw new Error(`Fresh player update failed: ${JSON.stringify(updateResult)}`);
   }

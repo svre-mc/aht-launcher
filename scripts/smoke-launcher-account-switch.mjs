@@ -4,7 +4,6 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 
 const port = Number(process.argv[2] || 10190);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -127,7 +126,6 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   latestUrl: `${workerEndpoint}/latest.json`,
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
-  launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-attestation-v2' },
   developer: { adminBaseUrl: `${workerEndpoint}/`, r2Bucket: 'ahtlauncher' },
   minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 },
   playCommand: { command: '', args: [], cwd: instanceDir }
@@ -145,17 +143,6 @@ const server = http.createServer(async (request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify({ packId: 'a-hard-time-dregora', name: 'A Hard Time', version: '2.8.4', required: true, zip: { url: 'packs/a-hard-time-2.8.4.zip' } }));
-    return;
-  }
-  if (url.pathname === '/api/launcher-proof' && request.method === 'POST') {
-    const body = JSON.parse(await new Promise((resolve) => {
-      let text = '';
-      request.on('data', (chunk) => { text += chunk; });
-      request.on('end', () => resolve(text || '{}'));
-    }));
-    response.statusCode = 200;
-    response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify(workerLauncherProofFixture(body)));
     return;
   }
   if (url.pathname === '/api/users/register') {
@@ -200,7 +187,6 @@ const child = spawn(electronBin, electronArgs, {
   env: {
     ...process.env,
     AHT_TEST_HOOKS: '1',
-    AHT_APP_DEFAULTS: path.join(userData, 'launcher.config.json'),
     AHT_TEST_USER_DATA: userData,
     ELECTRON_ENABLE_LOGGING: '0'
   },

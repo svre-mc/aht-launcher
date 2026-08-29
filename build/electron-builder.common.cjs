@@ -15,7 +15,9 @@ const developerOnlyNodeModules = [
 ];
 
 const files = [
-  'build/**/*',
+  // Installer/build sources are not runtime payload. Shipping them inside
+  // app.asar adds avoidable process/registry signatures for AV scanners.
+  'build/icon.png',
   'pack-fixes/**/*',
   'desktop/**/*',
   'src/**/*',

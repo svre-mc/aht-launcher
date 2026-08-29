@@ -476,15 +476,16 @@ try {
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
   `);
-  if (playResult.ok || !/Repair required.*mod file issue/i.test(playResult.message || '')) {
-    throw new Error(`Play IPC failure path did not surface the corrupted mod file: ${JSON.stringify(playResult)}`);
+  if (playResult.ok || !/Repair required.*managed file issue/i.test(playResult.message || '')) {
+    throw new Error(`Play IPC failure path did not surface the corrupted managed files: ${JSON.stringify(playResult)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
-  if (after.launchReady || !/Repair required.*mod file issue/i.test(after.launchBlockedReason || '')) {
+  if (after.launchReady || !/Repair required.*managed file issue/i.test(after.launchBlockedReason || '')) {
     throw new Error(`Status did not stay blocked after play integrity scan: ${JSON.stringify(after)}`);
   }
-  if (after.integrity?.counts?.corrupted !== 1 || after.integrity?.changed?.[0]?.path !== 'mods/aht-integrity-test.jar') {
-    throw new Error(`Integrity state did not record the corrupted file: ${JSON.stringify(after.integrity)}`);
+  const changedPaths = (after.integrity?.changed || []).map((entry) => entry.path).sort();
+  if (after.integrity?.counts?.corrupted !== 2 || JSON.stringify(changedPaths) !== JSON.stringify(['config/aht-integrity-test.cfg', 'mods/aht-integrity-test.jar'])) {
+    throw new Error(`Integrity state did not record both corrupted managed files: ${JSON.stringify(after.integrity)}`);
   }
   const blockedPlayUi = await evaluate(client, `(() => {
     renderStatus(${JSON.stringify(after)});
@@ -496,7 +497,7 @@ try {
   }
 
   const persistedIntegrity = JSON.parse(fs.readFileSync(integrityStatePath, 'utf8'));
-  if (persistedIntegrity.source !== 'play-check' || persistedIntegrity.counts?.corrupted !== 1) {
+  if (persistedIntegrity.source !== 'play-check' || persistedIntegrity.counts?.corrupted !== 2) {
     throw new Error(`Play check integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
   }
   if (!persistedIntegrity.fingerprint?.digest || persistedIntegrity.checkMode !== 'full-hash') {
@@ -509,7 +510,7 @@ try {
     throw new Error(`Direct failed Play did not write exactly one timestamped report: ${JSON.stringify(firstFailureReports)}`);
   }
   const firstFailureText = fs.readFileSync(path.join(launchLogsDir, firstFailureReports[0]), 'utf8');
-  for (const expected of ['Result: FAILED', 'LIKELY CAUSE', 'LAUNCH PROCESS', 'REQUIREMENTS', 'PC AND RUNTIME', 'Repair required. 1 mod file issue found']) {
+  for (const expected of ['Result: FAILED', 'LIKELY CAUSE', 'LAUNCH PROCESS', 'REQUIREMENTS', 'PC AND RUNTIME', 'Repair required. 2 managed file issues found']) {
     if (!firstFailureText.includes(expected)) {
       throw new Error(`Failed Play report is missing ${expected}: ${firstFailureText.slice(0, 1200)}`);
     }
@@ -565,6 +566,7 @@ try {
     throw new Error(`UI failed Play did not create its own timestamped report: ${JSON.stringify(uiFailureReports)}`);
   }
 
+  await fsp.writeFile(path.join(instanceDir, 'config', 'aht-integrity-test.cfg'), expectedContent, 'utf8');
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
   await fsp.rm(fakeLauncherMarker, { force: true });
   const cleanPlayResult = await evaluate(client, `

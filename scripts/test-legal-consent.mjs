@@ -54,6 +54,13 @@ assert.equal(current.required, false);
 assert.equal(current.accepted, true);
 
 const stored = JSON.parse(await fs.readFile(consentPath, 'utf8'));
+stored.termsSha256 = 'legacy-or-repackaged-terms-hash';
+stored.privacySha256 = 'legacy-or-repackaged-privacy-hash';
+await fs.writeFile(consentPath, JSON.stringify(stored));
+const unchangedVersions = await legalConsentStatus({ appRoot, consentPath, identity: {} });
+assert.equal(unchangedVersions.required, false, 'unchanged legal versions must not re-prompt after packaging-only text changes');
+assert.equal(unchangedVersions.accepted, true);
+
 stored.termsVersion = 'old';
 await fs.writeFile(consentPath, JSON.stringify(stored));
 const changed = await legalConsentStatus({ appRoot, consentPath, identity: {} });

@@ -8,7 +8,6 @@ const pureChecks = [
   ['test:worker'],
   ['test:telemetry'],
   ['test:access-control'],
-  ['test:launcher-state-push'],
   ['test:social-client'],
   ['test:social-worker'],
   ['test:legal-consent'],

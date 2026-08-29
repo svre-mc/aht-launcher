@@ -12,6 +12,7 @@ import yauzl from 'yauzl';
 import {
   CLIENT_DELTA_FORMAT,
   CLIENT_DELTA_METADATA_ENTRY,
+  CLIENT_GAME_SETTINGS_FILES,
   CLIENT_MANIFEST_FORMAT,
   CLIENT_PACK_FORMAT,
   CLIENT_PACK_METADATA_ENTRY,
@@ -55,7 +56,11 @@ import {
   setLaunchRequirement,
   writeLaunchReport
 } from '../src/launchDiagnostics.js';
-import { selectLauncherArtifact, validateLauncherUpdateManifest } from '../src/launcherUpdateManifest.js';
+import {
+  assertLauncherReleaseAdvance,
+  selectLauncherArtifact,
+  validateLauncherUpdateManifest
+} from '../src/launcherUpdateManifest.js';
 import {
   removeWindowsLauncherBackupDirectory,
   stageWindowsLauncherUpdate,
@@ -113,6 +118,9 @@ const LAUNCHER_WORKFLOW_DEFAULTS = {
   branch: 'main',
   workflow: 'build-macos.yml'
 };
+const PLAYER_EXTERNAL_DESTINATIONS = Object.freeze({
+  store: 'https://ahardtime.net/shop'
+});
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -2637,6 +2645,9 @@ async function setupRecommendations(config = null) {
   const cacheModsDir = detectedInstanceDir && await pathExists(path.join(detectedInstanceDir, 'mods'))
     ? path.join(detectedInstanceDir, 'mods')
     : '';
+  const gameSettingsPresent = (await Promise.all(
+    CLIENT_GAME_SETTINGS_FILES.map((fileName) => pathExists(path.join(current.instanceDir, fileName)))
+  )).some(Boolean);
   return {
     configPath: configPath(),
     detectedInstanceDir,
@@ -2649,6 +2660,7 @@ async function setupRecommendations(config = null) {
     minecraftAccountFileCount: detectedMinecraftAuth.files.length,
     detectedMinecraftUsername: detectedMinecraftAuth.preferredUsername || '',
     instanceExists: Boolean(await firstExistingDirectory([current.instanceDir])),
+    gameSettingsPresent,
     cacheModsDir,
     cacheModsExists: Boolean(cacheModsDir),
     localReleaseLatest,
@@ -2990,36 +3002,22 @@ async function identityPayload(config = null) {
       };
       await writeJsonFile(identityPath(), nextIdentity);
     } else if (detectedUsername && (!sameUsername || (detectedMinecraftUuid && !currentMinecraftUuid))) {
-      // Another concurrent status request may have completed the same import
-      // while this request was inspecting Minecraft Launcher files. Re-read the
-      // atomic identity before creating a second remote registration request.
-      const freshIdentity = await loadIdentity();
-      const freshUsername = normalizeMinecraftUsername(freshIdentity.minecraftUsername);
-      const freshMinecraftUuid = normalizeMinecraftUuid(
-        freshIdentity.minecraftUuid || freshIdentity.minecraftUUID
-      );
-      const alreadyImported = freshUsername.toLowerCase() === detectedUsername.toLowerCase()
-        && (!detectedMinecraftUuid || freshMinecraftUuid === detectedMinecraftUuid);
-      if (alreadyImported) {
-        nextIdentity = freshIdentity;
-      } else {
-        try {
-          const registered = await registerMinecraftUsernameInFlight(config, freshIdentity, detectedUsername, {
-            mode: sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher',
-            minecraftUuid: detectedMinecraftUuid,
-            skipLauncherAuthSync: true
-          });
-          nextIdentity = await loadIdentity();
-          nextIdentity.minecraftUsernameSyncWarning = '';
-          nextIdentity.minecraftLauncherDetectedUsername = registered.username || detectedUsername;
-        } catch (error) {
-          nextIdentity = {
-            ...freshIdentity,
-            minecraftLauncherDetectedUsername: detectedUsername,
-            minecraftUsernameSyncWarning: error.message || String(error)
-          };
-          await writeJsonFile(identityPath(), nextIdentity);
-        }
+      try {
+        const registered = await registerMinecraftUsernameInFlight(config, nextIdentity, detectedUsername, {
+          mode: sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher',
+          minecraftUuid: detectedMinecraftUuid,
+          skipLauncherAuthSync: true
+        });
+        nextIdentity = await loadIdentity();
+        nextIdentity.minecraftUsernameSyncWarning = '';
+        nextIdentity.minecraftLauncherDetectedUsername = registered.username || detectedUsername;
+      } catch (error) {
+        nextIdentity = {
+          ...nextIdentity,
+          minecraftLauncherDetectedUsername: detectedUsername,
+          minecraftUsernameSyncWarning: error.message || String(error)
+        };
+        await writeJsonFile(identityPath(), nextIdentity);
       }
     }
   }
@@ -3745,7 +3743,7 @@ function integrityBlockReason(integrity) {
     if (counts.missing) parts.push(`${counts.missing} missing`);
     if (counts.added) parts.push(`${counts.added} extra`);
     const detail = parts.length ? ` (${parts.join(', ')})` : '';
-    return `Repair required. ${counts.corrupted} mod file issue${counts.corrupted === 1 ? '' : 's'} found${detail}.`;
+    return `Repair required. ${counts.corrupted} managed file issue${counts.corrupted === 1 ? '' : 's'} found${detail}.`;
   }
   return '';
 }
@@ -4200,6 +4198,7 @@ function setupForRenderer(setup = {}) {
   }
   return {
     instanceExists: Boolean(setup.instanceExists),
+    gameSettingsPresent: Boolean(setup.gameSettingsPresent),
     latestConfigured: Boolean(setup.latestConfigured),
     canAutoConfigure: Boolean(setup.canAutoConfigure),
     minecraftAccountReuseAvailable: Boolean(setup.minecraftAccountReuseAvailable)
@@ -4339,7 +4338,7 @@ async function getStatus(configOverride = null, packValue = 'stable') {
     latestError = error.message;
   }
   try {
-    updateLogs = await readUpdateLogs(config, 3);
+    updateLogs = await readUpdateLogs(config, 12);
   } catch (error) {
     updateLogsError = error.message;
   }
@@ -5019,8 +5018,6 @@ async function readWindowsLauncherProductVersion(filePath) {
   const result = await spawnCaptured(windowsPowerShellPath(), [
     '-NoProfile',
     '-NonInteractive',
-    '-ExecutionPolicy',
-    'Bypass',
     '-Command',
     script
   ], {
@@ -7927,6 +7924,65 @@ function githubCommand() {
   return commandOnPath(name) || name;
 }
 
+async function windowsAuthenticodeStatus(filePath) {
+  if (process.platform !== 'win32') {
+    throw new Error('Windows launcher publication must run on Windows so Authenticode can be verified.');
+  }
+  const script = [
+    "$signature = Get-AuthenticodeSignature -LiteralPath $env:AHT_SIGNATURE_TARGET",
+    '[Console]::Out.Write([string]$signature.Status)'
+  ].join('; ');
+  const result = await spawnCaptured(windowsPowerShellPath(), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    script
+  ], {
+    cwd: path.dirname(filePath),
+    env: { ...process.env, AHT_SIGNATURE_TARGET: filePath },
+    timeoutMs: 20_000
+  });
+  return String(result.stdout || '').trim();
+}
+
+async function assertWindowsLauncherPublishSignatureState(artifacts = []) {
+  if (process.env.AHT_TEST_HOOKS === '1') return { ok: true, testOnly: true };
+  const installer = artifacts.find((entry) => entry.key === 'win32-x64' && entry.kind === 'nsis');
+  if (!installer?.file) throw new Error('A Windows NSIS installer is required for launcher publication.');
+  const installerPath = path.resolve(installer.file);
+  const status = await windowsAuthenticodeStatus(installerPath);
+  if (status !== 'Valid' && status !== 'NotSigned') {
+    throw new Error(`Refusing to publish Windows launcher ${path.basename(installerPath)}: Authenticode status is ${status || 'unknown'}; only Valid or explicitly unsigned NotSigned artifacts are permitted.`);
+  }
+  return {
+    ok: true,
+    installer: path.basename(installerPath),
+    status,
+    explicitlyUnsigned: status === 'NotSigned'
+  };
+}
+
+async function assertLauncherPublishAdvance(latestUrl, candidateManifest) {
+  let liveManifest;
+  try {
+    liveManifest = await fetchRemoteJson(latestUrl);
+  } catch (error) {
+    if (/failed:\s+404\b/i.test(String(error?.message || error))) {
+      return { ok: true, firstRelease: true, candidateVersion: candidateManifest.version, liveVersion: null };
+    }
+    throw new Error(`Could not prove launcher release immutability: ${error.message || error}`);
+  }
+  const validation = validateLauncherUpdateManifest(liveManifest, {
+    latestUrl,
+    requireStagedWindows: true,
+    allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
+  });
+  if (!validation.ok) {
+    throw new Error(`Live launcher manifest is invalid: ${validation.errors.join('; ')}`);
+  }
+  return assertLauncherReleaseAdvance(candidateManifest, liveManifest);
+}
+
 async function resolveGithubToken(payload = {}) {
   const explicit = String(payload.githubToken || payload.token || '').trim();
   if (explicit) return { token: explicit, source: 'input' };
@@ -8166,11 +8222,13 @@ async function syncLauncherUpdate(payload = {}) {
     throw new Error(`Cloud preflight failed: ${summary}`);
   }
   const artifacts = launcherArtifactDescriptors(payload);
+  await assertWindowsLauncherPublishSignatureState(artifacts);
   const { manifest, uploads } = await buildLauncherUpdateManifest({
     version: payload.version,
     publicLatestUrl: launcherLatestUrl,
     artifacts
   });
+  await assertLauncherPublishAdvance(launcherLatestUrl, manifest);
   const staging = path.join(app.getPath('userData'), 'launcher-update-staging', normalizedVersion(manifest.version));
   const manifestPath = path.join(staging, 'launcher', 'latest.json');
   await writeJsonFile(manifestPath, manifest);
@@ -9186,21 +9244,16 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
   } else {
     const serverLockConfig = await fs.readFile(serverLockPath, 'utf8');
     const hasPackId = serverLockConfig.includes(`S:requiredPackId=${latest.packId}`);
-    const hasStateChannel = serverLockConfig.includes('S:stateWebSocketUrl=wss://aht-curseforge-proxy.mysticgamer312.workers.dev/server/launcher-state');
-    const hasPublicKeyPin = serverLockConfig.includes('S:attestationPublicKeySha256=');
-    const hasServerOnlyToken = serverLockConfig.includes('S:stateServerToken=')
-      && serverLockConfig.includes('S:stateServerTokenEnvironmentVariable=AHT_LAUNCHER_STATE_TOKEN');
-    const hasNoPerPlayerVerifier = !serverLockConfig.includes('/api/launcher-proof/verify')
-      && !serverLockConfig.includes('S:verificationUrl=');
+    const hasVerifier = serverLockConfig.includes('S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify');
     const hasReconnectMessage = serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}');
-    if (hasPackId && hasStateChannel && hasPublicKeyPin && hasServerOnlyToken && hasNoPerPlayerVerifier && hasReconnectMessage) {
+    if (hasPackId && hasVerifier && hasReconnectMessage) {
       add('ok', 'server launcher lock config matches release', path.relative(outDir, serverLockPath));
     } else {
-      add('error', 'server launcher lock config mismatch', `Expected signed launcher-state push configuration for ${latest.packId}`);
+      add('error', 'server launcher lock config mismatch', `Expected live proof verification for ${latest.packId}`);
     }
   }
 
-  const serverLockModRef = latest.serverLock?.modPath || 'server/mods/aht-version-lock-1.1.0.jar';
+  const serverLockModRef = latest.serverLock?.modPath || 'server/mods/aht-version-lock-1.1.1.jar';
   const serverLockModPath = localReleasePath(outDir, serverLockModRef);
   if (!serverLockModPath) {
     add('warning', 'server launcher lock jar is remote-only', serverLockModRef);
@@ -9469,10 +9522,6 @@ function windowsPowerShellExecutable() {
   );
 }
 
-function encodedPowerShell(script) {
-  return Buffer.from(String(script || ''), 'utf16le').toString('base64');
-}
-
 function testWindowsProcessStatePath() {
   return process.env.AHT_TEST_HOOKS === '1'
     ? String(process.env.AHT_TEST_WINDOWS_PROCESS_STATE_PATH || '').trim()
@@ -9534,15 +9583,16 @@ async function windowsMinecraftLauncherProcessSnapshot(options = {}) {
       records: testState.records.filter(isKnownWindowsMinecraftLauncher).map(normalizeWindowsLauncherRecord)
     };
   }
+  const snapshotScript = buildWindowsMinecraftProcessSnapshotPowerShell({
+    includeStoreRoots: options.includeStoreRoots !== false,
+    processNames: options.processNames
+  });
   const result = await spawnCaptured(windowsPowerShellExecutable(), [
     '-NoLogo',
     '-NoProfile',
     '-NonInteractive',
-    '-EncodedCommand',
-    encodedPowerShell(buildWindowsMinecraftProcessSnapshotPowerShell({
-      includeStoreRoots: options.includeStoreRoots !== false,
-      processNames: options.processNames
-    }))
+    '-Command',
+    snapshotScript
   ], { timeoutMs: 20_000 });
   const parsed = JSON.parse(String(result.stdout || '').trim() || '{}');
   return {
@@ -9756,8 +9806,8 @@ async function focusWindowsMinecraftLauncher(record) {
       '-NoLogo',
       '-NoProfile',
       '-NonInteractive',
-      '-EncodedCommand',
-      encodedPowerShell(script)
+      '-Command',
+      script
     ], { timeoutMs: 10_000 });
     return JSON.parse(String(result.stdout || '').trim() || '{}');
   } catch {
@@ -10594,6 +10644,50 @@ ipcMain.handle('shell:openPath', async (_event, target) => {
     error,
     captured: false
   };
+});
+ipcMain.handle('shell:openExternal', async (_event, destination) => {
+  const key = String(destination || '').trim().toLowerCase();
+  const target = PLAYER_EXTERNAL_DESTINATIONS[key] || '';
+  if (!target) {
+    return {
+      ok: false,
+      opened: false,
+      destination: key,
+      target: '',
+      error: 'That launcher link is not approved.',
+      captured: false
+    };
+  }
+  if (process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_OPEN_EXTERNAL_ECHO === '1') {
+    return {
+      ok: true,
+      opened: true,
+      destination: key,
+      target,
+      error: '',
+      captured: true
+    };
+  }
+  try {
+    await shell.openExternal(target);
+    return {
+      ok: true,
+      opened: true,
+      destination: key,
+      target,
+      error: '',
+      captured: false
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      opened: false,
+      destination: key,
+      target,
+      error: String(error?.message || error || 'The link could not be opened.'),
+      captured: false
+    };
+  }
 });
 ipcMain.handle('setup:recommend', async () => setupForRenderer(await setupRecommendations()));
 ipcMain.handle('setup:apply', async () => applyRecommendedSetup());

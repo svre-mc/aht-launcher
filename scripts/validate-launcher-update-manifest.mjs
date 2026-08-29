@@ -3,13 +3,22 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  assertLauncherReleaseAdvance,
+  compareLauncherReleaseVersions,
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,
   REQUIRED_STAGED_WINDOWS_KEYS,
   validateLauncherUpdateManifest
 } from '../src/launcherUpdateManifest.js';
 
-export { REQUIRED_DOWNLOAD_KEYS, REQUIRED_PLATFORM_KEYS, REQUIRED_STAGED_WINDOWS_KEYS, validateLauncherUpdateManifest };
+export {
+  assertLauncherReleaseAdvance,
+  compareLauncherReleaseVersions,
+  REQUIRED_DOWNLOAD_KEYS,
+  REQUIRED_PLATFORM_KEYS,
+  REQUIRED_STAGED_WINDOWS_KEYS,
+  validateLauncherUpdateManifest
+};
 
 function parseArgs(argv = process.argv.slice(2)) {
   const args = { manifestPath: '' };

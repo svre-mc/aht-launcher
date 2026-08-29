@@ -28,13 +28,29 @@ function progressEmitter(options = {}, defaultPhase = 'Scanning files') {
   };
 }
 
-function normalizeManagedModFiles(managed = []) {
+function normalizeManagedFiles(managed = []) {
   return managed
     .map((item) => ({
       ...item,
       relativePath: normalizeRelPath(String(item?.relativePath || ''))
     }))
+    .filter((item) => item.relativePath);
+}
+
+function normalizeManagedModFiles(managed = []) {
+  return normalizeManagedFiles(managed)
     .filter((item) => item.relativePath.startsWith('mods/'));
+}
+
+function managedFiles(managed = [], requiredManaged = []) {
+  const byPath = new Map();
+  for (const item of normalizeManagedFiles(managed)) {
+    byPath.set(item.relativePath, item);
+  }
+  for (const item of normalizeManagedFiles(requiredManaged)) {
+    byPath.set(item.relativePath, item);
+  }
+  return [...byPath.values()];
 }
 
 function managedModFiles(managed = [], requiredManaged = []) {
@@ -395,9 +411,11 @@ export async function scanLocalChanges(instanceDir, options = {}) {
 
 export async function scanManagedIntegrity(instanceDir, options = {}) {
   const limit = options.limit || 500;
-  const managed = managedModFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
+  const loadedManaged = await loadManaged(instanceDir, options);
+  const managed = managedFiles(loadedManaged, options.requiredManaged || []);
+  const managedMods = managedModFiles(loadedManaged, options.requiredManaged || []);
   const managedToCheck = managed.filter((item) => item.relativePath);
-  const managedSet = new Set(managed.map((item) => item.relativePath));
+  const managedModSet = new Set(managedMods.map((item) => item.relativePath));
   const changed = [];
   const missing = [];
   const progressPhase = 'Verifying installed files';
@@ -442,10 +460,10 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
   }
 
   reportProgress('Scanning extra mods', managedToCheck.length, managedToCheck.length);
-  const added = await scanAddedModFiles(instanceDir, managedSet, limit, { yieldEvery: 25 });
+  const added = await scanAddedModFiles(instanceDir, managedModSet, limit, { yieldEvery: 25 });
   reportProgress('Integrity scan complete', managedToCheck.length, managedToCheck.length);
   const corruptCount = changed.length + missing.length + added.length;
-  const fingerprint = await captureFingerprintFromManaged(instanceDir, managed, options);
+  const fingerprint = await captureFingerprintFromManaged(instanceDir, managedMods, options);
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,

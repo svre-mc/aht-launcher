@@ -263,7 +263,7 @@ export function diagnoseLaunchFailure(attempt) {
       actions: ['Check the internet connection and try again.', 'Allow A Hard Time Launcher through firewall or security software if it is being blocked.']
     };
   }
-  if (key === 'integrity' || /Repair required|corrupt|mod file issue/i.test(message)) {
+  if (key === 'integrity' || /Repair required|corrupt|managed file issue|mod file issue/i.test(message)) {
     return {
       cause: 'One or more managed modpack files are missing or do not match the published AHT pack.',
       actions: ['Run Repair in the AHT Launcher.', 'Do not manually delete saves, playerdata, or configuration folders.']
