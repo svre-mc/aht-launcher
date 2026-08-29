@@ -27,6 +27,7 @@ const LAUNCHER_SOCIAL_ACTIONS = new Set([
 const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
 const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64']);
+const RELEASE_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
 const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/';
 const ACCOUNT_USERNAME_PREFIX = 'accounts/usernames/';
@@ -404,6 +405,70 @@ function releaseNotFound(key, origin) {
   return json({ error: 'Release object not found', key }, 404, origin);
 }
 
+async function enforceReleaseRateLimit(request, env, origin) {
+  if (!env.AHT_PLAYER_API_RATE_LIMITER?.limit) return null;
+  const connection = requestIpv4(request);
+  const ipKey = connection.ip || 'unavailable';
+  let allowed = false;
+  try {
+    const result = await env.AHT_PLAYER_API_RATE_LIMITER.limit({
+      key: `release:${(await sha256Hex(ipKey)).slice(0, 40)}`
+    });
+    allowed = result?.success === true;
+  } catch {
+    allowed = false;
+  }
+  if (allowed) return null;
+  const response = privateJson({ error: 'Too many release download requests. Try again shortly.' }, 429, origin);
+  response.headers.set('Retry-After', '60');
+  return response;
+}
+
+function releaseCacheRequest(request, key) {
+  const url = new URL(request.url);
+  url.pathname = `/${key}`;
+  url.search = '';
+  url.hash = '';
+  return new Request(url.toString(), { method: 'GET' });
+}
+
+function releaseResponseForOrigin(response, origin, method) {
+  const headers = new Headers(response.headers);
+  headers.set('Access-Control-Allow-Origin', origin || '*');
+  return new Response(method === 'HEAD' ? null : response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+async function readReleaseCache(request, key, origin, method) {
+  const cache = globalThis.caches?.default;
+  if (!cache?.match) return null;
+  try {
+    const cached = await cache.match(releaseCacheRequest(request, key));
+    return cached ? releaseResponseForOrigin(cached, origin, method) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeReleaseCache(request, key, response, context) {
+  const cache = globalThis.caches?.default;
+  if (!cache?.put) return;
+  const cacheResponse = response.clone();
+  cacheResponse.headers.set('Access-Control-Allow-Origin', '*');
+  const write = cache.put(releaseCacheRequest(request, key), cacheResponse).catch((error) => {
+    console.error(JSON.stringify({
+      message: 'release cache put failed',
+      key,
+      error: error instanceof Error ? error.message : String(error)
+    }));
+  });
+  if (context?.waitUntil) context.waitUntil(write);
+  else await write;
+}
+
 async function serveReleaseObject(request, env, origin, context = null) {
   const requestUrl = new URL(request.url);
   const pathname = requestUrl.pathname;
@@ -420,7 +485,14 @@ async function serveReleaseObject(request, env, origin, context = null) {
     return json({ error: 'Invalid release path' }, 400, origin);
   }
 
+  const rateLimited = await enforceReleaseRateLimit(request, env, origin);
+  if (rateLimited) return rateLimited;
+
   const rangeHeader = request.headers.get('Range') || '';
+  if (!rangeHeader) {
+    const cached = await readReleaseCache(request, key, origin, method);
+    if (cached) return cached;
+  }
   let range = null;
   let object = null;
   let objectSize = 0;
@@ -439,7 +511,9 @@ async function serveReleaseObject(request, env, origin, context = null) {
       ? metadata
       : await bucket.get(key, { range: { offset: range.offset, length: range.length } });
   } else {
-    object = await bucket.get(key);
+    object = method === 'HEAD' && typeof bucket.head === 'function'
+      ? await bucket.head(key)
+      : await bucket.get(key);
   }
 
   if (!object) {
@@ -459,7 +533,11 @@ async function serveReleaseObject(request, env, origin, context = null) {
     else await write;
   }
   const headers = releaseHeaders(key, origin, object, range);
-  return new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
+  const response = new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
+  if (!range && method === 'GET' && Number(object.size || 0) <= RELEASE_CACHE_MAX_BYTES) {
+    await writeReleaseCache(request, key, response, context);
+  }
+  return response;
 }
 
 async function readLauncherManifestWithMetadata(env) {

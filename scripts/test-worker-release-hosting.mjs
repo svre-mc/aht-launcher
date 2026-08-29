@@ -1,6 +1,22 @@
 import worker from '../cloudflare/curseforge-proxy-worker.js';
+import assert from 'node:assert/strict';
 
 const encoder = new TextEncoder();
+const releaseReads = new Map();
+const cacheStore = new Map();
+Object.defineProperty(globalThis, 'caches', {
+  configurable: true,
+  value: {
+    default: {
+      async match(request) {
+        return cacheStore.get(request.url)?.clone() || undefined;
+      },
+      async put(request, response) {
+        cacheStore.set(request.url, response.clone());
+      }
+    }
+  }
+});
 const store = new Map([
   ['latest.json', { value: JSON.stringify({ name: 'AHT', version: '2.8.1' }), contentType: 'application/json; charset=utf-8' }],
   ['ptb/latest.json', { value: JSON.stringify({ name: 'AHT PTB', version: '2.9.0-ptb.1' }), contentType: 'application/json; charset=utf-8' }],
@@ -40,6 +56,7 @@ const env = {
       return record ? objectFor(key, record) : null;
     },
     async get(key, options = {}) {
+      releaseReads.set(key, Number(releaseReads.get(key) || 0) + 1);
       const record = store.get(key);
       return record ? objectFor(key, record, options) : null;
     }
@@ -48,6 +65,11 @@ const env = {
     async put() {},
     async list() {
       return { objects: [] };
+    }
+  },
+  AHT_PLAYER_API_RATE_LIMITER: {
+    async limit() {
+      return { success: true };
     }
   }
 };
@@ -171,5 +193,26 @@ results.push(await check('root', new Request('https://worker.test/'), {
   status: 200,
   contentType: 'application/json'
 }));
+
+cacheStore.clear();
+const cacheProbeKey = 'launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe';
+const readsBeforeCacheProbe = Number(releaseReads.get(cacheProbeKey) || 0);
+await check('normalized cache query one', new Request(`https://worker.test/${cacheProbeKey}?probe=one`), {
+  status: 200,
+  length: '3'
+});
+await check('normalized cache query two', new Request(`https://worker.test/${cacheProbeKey}?probe=two`), {
+  status: 200,
+  length: '3'
+});
+assert.equal(Number(releaseReads.get(cacheProbeKey) || 0) - readsBeforeCacheProbe, 1, 'normalized cache key should avoid a second R2 read');
+
+const readsBeforeRateLimit = Number(releaseReads.get('packs/range-test.zip') || 0);
+const blocked = await worker.fetch(new Request('https://worker.test/packs/range-test.zip'), {
+  ...env,
+  AHT_PLAYER_API_RATE_LIMITER: { async limit() { return { success: false }; } }
+}, {});
+assert.equal(blocked.status, 429, 'release limiter should reject abusive request bursts');
+assert.equal(Number(releaseReads.get('packs/range-test.zip') || 0), readsBeforeRateLimit, 'rate limit should run before R2');
 
 console.log(JSON.stringify(results, null, 2));
