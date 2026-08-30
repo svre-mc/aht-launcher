@@ -27,6 +27,10 @@ const LAUNCHER_SOCIAL_ACTIONS = new Set([
 const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
 const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64']);
+const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;
+const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;
+const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH = '/launcher-installer-download-limit';
+const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER = 'X-AHT-Launcher-Installer-Limit-Internal';
 const RELEASE_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
 const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/';
@@ -72,7 +76,7 @@ function corsHeaders(origin) {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-AHT-Launcher-Recovery, X-AHT-Server-Timestamp, X-AHT-Server-Signature',
-    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified',
+    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified, Retry-After, X-AHT-Download-Limit, X-AHT-Download-Remaining, X-AHT-Download-Reset',
     'Cache-Control': 'private, max-age=60',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
@@ -469,6 +473,26 @@ async function writeReleaseCache(request, key, response, context) {
   else await write;
 }
 
+async function authorizeTaggedLauncherInstallerArtifact(request, env, origin, key, context) {
+  const requestUrl = new URL(request.url);
+  const platformKey = cleanString(requestUrl.searchParams.get('aht_download') || '', 80);
+  if (request.method !== 'GET' || !LAUNCHER_DOWNLOAD_KEYS.has(platformKey) || !key.startsWith('launcher/files/')) {
+    return { response: null, quota: null };
+  }
+
+  let manifest;
+  try {
+    manifest = await readLauncherManifest(env);
+  } catch (error) {
+    console.error('launcher installer manifest authorization failed', error);
+    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+  }
+  const artifact = manifest?.downloads?.[platformKey];
+  const expectedKey = safeReleaseKey(`/${artifact?.path || ''}`);
+  if (!artifact || expectedKey !== key) return { response: null, quota: null };
+  return authorizeLauncherInstallerDelivery(request, env, origin, platformKey, manifest, artifact, context);
+}
+
 async function serveReleaseObject(request, env, origin, context = null) {
   const requestUrl = new URL(request.url);
   const pathname = requestUrl.pathname;
@@ -491,7 +515,11 @@ async function serveReleaseObject(request, env, origin, context = null) {
   const rangeHeader = request.headers.get('Range') || '';
   if (!rangeHeader) {
     const cached = await readReleaseCache(request, key, origin, method);
-    if (cached) return cached;
+    if (cached) {
+      const authorization = await authorizeTaggedLauncherInstallerArtifact(request, env, origin, key, context);
+      if (authorization.response) return authorization.response;
+      return withLauncherInstallerQuotaHeaders(cached, authorization.quota);
+    }
   }
   let range = null;
   let object = null;
@@ -519,20 +547,12 @@ async function serveReleaseObject(request, env, origin, context = null) {
   if (!object) {
     return releaseNotFound(key, origin);
   }
-  const installerDownloadKey = cleanString(requestUrl.searchParams.get('aht_download') || '', 80);
-  if (method === 'GET' && LAUNCHER_DOWNLOAD_KEYS.has(installerDownloadKey) && key.startsWith('launcher/files/')) {
-    const write = readLauncherManifest(env)
-      .then((manifest) => {
-        const artifact = manifest?.downloads?.[installerDownloadKey];
-        const expectedKey = safeReleaseKey(`/${artifact?.path || ''}`);
-        if (!artifact || expectedKey !== key) return null;
-        return recordLauncherInstallerDownload(request, env, installerDownloadKey, manifest, artifact);
-      })
-      .catch((error) => console.error('launcher download telemetry failed', error));
-    if (context?.waitUntil) context.waitUntil(write);
-    else await write;
-  }
+  const authorization = await authorizeTaggedLauncherInstallerArtifact(request, env, origin, key, context);
+  if (authorization.response) return authorization.response;
   const headers = releaseHeaders(key, origin, object, range);
+  for (const [name, value] of Object.entries(launcherInstallerQuotaHeaders(authorization.quota))) {
+    headers[name] = value;
+  }
   const response = new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
   if (!range && method === 'GET' && Number(object.size || 0) <= RELEASE_CACHE_MAX_BYTES) {
     await writeReleaseCache(request, key, response, context);
@@ -651,6 +671,131 @@ function launcherVersionFailure(currentLauncherVersion, policy) {
   };
 }
 
+function launcherInstallerPersonIdentity(request) {
+  const requestUrl = new URL(request.url);
+  const minecraftUuid = normalizeMinecraftUuid(
+    requestUrl.searchParams.get('aht_uuid')
+      || request.headers.get('X-AHT-Minecraft-UUID')
+      || ''
+  );
+  if (minecraftUuid) return { kind: 'minecraft-uuid', value: minecraftUuid };
+
+  const minecraftUsername = normalizeMinecraftUsername(
+    requestUrl.searchParams.get('aht_player')
+      || requestUrl.searchParams.get('aht_username')
+      || request.headers.get('X-AHT-Minecraft-Username')
+      || ''
+  );
+  if (/^[A-Za-z0-9_]{3,16}$/.test(minecraftUsername)) {
+    return { kind: 'minecraft-username', value: minecraftUsername.toLowerCase() };
+  }
+
+  const connection = requestIpv4(request);
+  if (connection.available && connection.ip) {
+    return { kind: 'network-ip', value: connection.ip };
+  }
+  return null;
+}
+
+function launcherInstallerQuotaHeaders(quota) {
+  if (!quota) return {};
+  return {
+    'X-AHT-Download-Limit': String(LAUNCHER_INSTALLER_DOWNLOAD_LIMIT),
+    'X-AHT-Download-Remaining': String(quota.remaining),
+    'X-AHT-Download-Reset': String(Math.ceil(quota.resetAt / 1000))
+  };
+}
+
+function withLauncherInstallerQuotaHeaders(response, quota) {
+  if (!quota) return response;
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(launcherInstallerQuotaHeaders(quota))) {
+    headers.set(name, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+function launcherInstallerLimitUnavailable(origin) {
+  return privateJson({
+    error: 'Launcher download authorization is temporarily unavailable.',
+    code: 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_UNAVAILABLE'
+  }, 503, origin);
+}
+
+async function enforceLauncherInstallerDownloadLimit(request, env, origin) {
+  const identity = launcherInstallerPersonIdentity(request);
+  const namespace = env.AHT_LAUNCHER_STATE;
+  if (!identity || !namespace?.idFromName || !namespace?.get) {
+    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+  }
+
+  let response;
+  let result;
+  try {
+    const identityHash = await sha256Hex(`${identity.kind}\0${identity.value}`);
+    const stub = namespace.get(namespace.idFromName(`launcher-installer-download:${identityHash}`));
+    if (!stub?.fetch) return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+    response = await stub.fetch(`https://aht-launcher-state.internal${LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH}`, {
+      method: 'POST',
+      headers: { [LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER]: '1' }
+    });
+    result = await response.json();
+  } catch (error) {
+    console.error('launcher installer limit check failed', error);
+    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+  }
+
+  const requestedRetryAfter = Math.ceil(Number(result?.retryAfterSeconds));
+  const retryAfter = Number.isFinite(requestedRetryAfter) && requestedRetryAfter > 0
+    ? Math.max(1, Math.min(Math.ceil(LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS / 1000), requestedRetryAfter))
+    : Math.ceil(LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS / 1000);
+  if (response.status === 429 && result?.code === 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT') {
+    const limited = privateJson({
+      error: `Launcher downloads are limited to ${LAUNCHER_INSTALLER_DOWNLOAD_LIMIT} per person during the 24 hours after the first download.`,
+      code: 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT',
+      limit: LAUNCHER_INSTALLER_DOWNLOAD_LIMIT,
+      remaining: 0,
+      resetAt: Number(result.resetAt || 0)
+    }, 429, origin);
+    limited.headers.set('Retry-After', String(retryAfter));
+    for (const [name, value] of Object.entries(launcherInstallerQuotaHeaders({
+      remaining: 0,
+      resetAt: Number(result.resetAt || Date.now() + retryAfter * 1000)
+    }))) {
+      limited.headers.set(name, value);
+    }
+    return { response: limited, quota: null };
+  }
+
+  const quota = {
+    count: Number(result?.count),
+    remaining: Number(result?.remaining),
+    resetAt: Number(result?.resetAt)
+  };
+  if (!response.ok || result?.ok !== true
+      || !Number.isInteger(quota.count) || quota.count < 1 || quota.count > LAUNCHER_INSTALLER_DOWNLOAD_LIMIT
+      || !Number.isInteger(quota.remaining) || quota.remaining < 0 || quota.remaining >= LAUNCHER_INSTALLER_DOWNLOAD_LIMIT
+      || quota.count + quota.remaining !== LAUNCHER_INSTALLER_DOWNLOAD_LIMIT
+      || !Number.isFinite(quota.resetAt) || quota.resetAt <= Date.now()) {
+    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+  }
+  return { response: null, quota };
+}
+
+async function authorizeLauncherInstallerDelivery(request, env, origin, platformKey, manifest, artifact, context = null) {
+  const authorization = await enforceLauncherInstallerDownloadLimit(request, env, origin);
+  if (authorization.response) return authorization;
+  const write = recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact)
+    .catch((error) => console.error('launcher download telemetry failed', error));
+  if (context?.waitUntil) context.waitUntil(write);
+  else await write;
+  return authorization;
+}
+
 async function recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact) {
   if (!env.AHT_DATA) return null;
   const receivedAt = new Date().toISOString();
@@ -722,11 +867,19 @@ async function launcherInstallerDownload(request, env, origin, platformKey, cont
   const exists = typeof bucket.head === 'function' ? await bucket.head(key) : await bucket.get(key);
   if (!exists) return releaseNotFound(key, origin);
 
+  let quota = null;
   if (request.method === 'GET') {
-    const write = recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact)
-      .catch((error) => console.error('launcher download telemetry failed', error));
-    if (context?.waitUntil) context.waitUntil(write);
-    else await write;
+    const authorization = await authorizeLauncherInstallerDelivery(
+      request,
+      env,
+      origin,
+      platformKey,
+      manifest,
+      artifact,
+      context
+    );
+    if (authorization.response) return authorization.response;
+    quota = authorization.quota;
   }
 
   const location = new URL(`/${key}`, request.url).toString();
@@ -734,6 +887,7 @@ async function launcherInstallerDownload(request, env, origin, platformKey, cont
     status: 302,
     headers: {
       ...corsHeaders(origin),
+      ...launcherInstallerQuotaHeaders(quota),
       'Cache-Control': 'private, no-store',
       Location: location
     }
@@ -2389,6 +2543,130 @@ async function listUpdateLogs(env, request, origin, requireAuth = false) {
   return json({ logs }, 200, origin);
 }
 
+function updateLogLikePrefix(logId) {
+  return `update-log-likes/${logId}/`;
+}
+
+function updateLogLikeKey(logId, deviceId) {
+  return `${updateLogLikePrefix(logId)}${deviceId}.json`;
+}
+
+async function findUpdateLogObject(env, logId) {
+  let cursor = '';
+  do {
+    const options = { prefix: 'update-logs/', limit: 1000 };
+    if (cursor) options.cursor = cursor;
+    const listed = await env.AHT_DATA.list(options);
+    const match = (listed.objects || []).find((object) => object.key.endsWith(`-${logId}.json`));
+    if (match) return match;
+    if (!listed.truncated) return null;
+    cursor = String(listed.cursor || '');
+    if (!cursor) return null;
+  } while (true);
+}
+
+async function countUpdateLogLikes(env, logId) {
+  let total = 0;
+  let cursor = '';
+  do {
+    const options = { prefix: updateLogLikePrefix(logId), limit: 1000 };
+    if (cursor) options.cursor = cursor;
+    const listed = await env.AHT_DATA.list(options);
+    total += (listed.objects || []).length;
+    if (!listed.truncated) return total;
+    cursor = String(listed.cursor || '');
+    if (!cursor) throw new Error('Update-log like listing stalled.');
+  } while (true);
+}
+
+async function reconcileUpdateLogLikeCount(env, objectKey) {
+  const idMatch = objectKey.match(/-([0-9a-f-]{36})\.json$/i);
+  const logId = idMatch?.[1]?.toLowerCase() || '';
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const item = await env.AHT_DATA.get(objectKey);
+    if (!item) return null;
+    const log = await item.json().catch(() => null);
+    if (!log) return null;
+    const likes = await countUpdateLogLikes(env, logId);
+    const updated = { ...log, likes };
+    if (Number(log.likes || 0) === likes) return updated;
+    const options = { httpMetadata: { contentType: 'application/json' } };
+    if (item.etag) options.onlyIf = { etagMatches: item.etag };
+    const stored = await env.AHT_DATA.put(objectKey, JSON.stringify(updated), options);
+    // R2 returns null only when a conditional write loses a race. Test doubles
+    // and older bindings may return undefined after a successful write.
+    if (stored !== null) return updated;
+  }
+  return null;
+}
+
+async function likeUpdateLog(request, env, origin, routeLogId) {
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT news storage is not configured.' }, 503, origin);
+  }
+  const rateLimited = await enforcePlayerApiRateLimit(request, env, 'news-like', origin);
+  if (rateLimited) return rateLimited;
+  const logId = cleanString(routeLogId || '', 40).toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(logId)) {
+    return privateJson({ error: 'That news article is not available.' }, 404, origin);
+  }
+  const body = await readBody(request, 16_384);
+  const username = normalizeMinecraftUsername(body.username);
+  const requestedDeviceId = cleanString(body.deviceId || '', 80).toLowerCase();
+  const binding = {
+    logId,
+    username: username.toLowerCase(),
+    deviceId: requestedDeviceId
+  };
+  if (cleanString(body.logId || '', 40).toLowerCase() !== logId || !/^[A-Za-z0-9_]{3,16}$/.test(username)) {
+    return privateJson({ error: 'The news like request is invalid.' }, 400, origin);
+  }
+  const device = await verifyDeviceAssertion(body, 'update-log-like', binding);
+  if (!device.ok) {
+    return privateJson({ error: device.error, code: 'DEVICE_ATTESTATION_REQUIRED' }, 403, origin);
+  }
+  const registrationItem = await env.AHT_DATA.get(minecraftUsernameKey(username));
+  const registration = registrationItem ? await registrationItem.json().catch(() => null) : null;
+  if (!registration
+      || cleanString(registration.deviceId || '', 80).toLowerCase() !== device.deviceId
+      || cleanString(registration.devicePublicKey || '', 1024) !== device.publicKey) {
+    return privateJson({ error: 'This launcher device is not registered to that Minecraft account.' }, 403, origin);
+  }
+  const logObject = await findUpdateLogObject(env, logId);
+  if (!logObject) return privateJson({ error: 'That news article is not available.' }, 404, origin);
+
+  const likeKey = updateLogLikeKey(logId, device.deviceId);
+  const existingLike = await env.AHT_DATA.head(likeKey);
+  if (existingLike) {
+    const item = await env.AHT_DATA.get(logObject.key);
+    const log = item ? await item.json().catch(() => null) : null;
+    return privateJson({
+      ok: true,
+      logId,
+      liked: true,
+      likes: Math.max(0, Number(log?.likes || 0))
+    }, 200, origin);
+  }
+  const stored = await env.AHT_DATA.put(likeKey, JSON.stringify({
+    schemaVersion: 1,
+    logId,
+    username,
+    deviceId: device.deviceId,
+    likedAt: new Date().toISOString()
+  }), {
+    httpMetadata: { contentType: 'application/json' },
+    onlyIf: { etagDoesNotMatch: '*' }
+  });
+  // A concurrent identical request can win this conditional write. Either
+  // result still represents the same single per-device like object.
+  if (stored === null && !(await env.AHT_DATA.head(likeKey))) {
+    return privateJson({ error: 'The news like could not be saved.' }, 503, origin);
+  }
+  const updatedLog = await reconcileUpdateLogLikeCount(env, logObject.key);
+  const likes = updatedLog ? Number(updatedLog.likes || 0) : await countUpdateLogLikes(env, logId);
+  return privateJson({ ok: true, logId, liked: true, likes }, 200, origin);
+}
+
 async function publishUpdateLog(request, env, origin) {
   if (!env.AHT_DATA) {
     return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
@@ -2423,6 +2701,7 @@ async function publishUpdateLog(request, env, origin) {
     version,
     image,
     media,
+    likes: 0,
     publishedAt,
     author: cleanText(body.author || 'admin', 80)
   };
@@ -3059,6 +3338,55 @@ export class LauncherStateHub {
     this.context = context;
     this.env = env;
     this.refreshChain = Promise.resolve();
+    this.downloadLimitChain = Promise.resolve();
+  }
+
+  async consumeLauncherInstallerDownload() {
+    const operation = this.downloadLimitChain.catch(() => {}).then(async () => {
+      const now = Date.now();
+      const storageKey = 'launcherInstallerDownloadWindow';
+      const previous = await this.context.storage.get(storageKey);
+      let firstDownloadAt = Number(previous?.firstDownloadAt);
+      let count = Number(previous?.count);
+      const validWindow = Number.isFinite(firstDownloadAt)
+        && firstDownloadAt > 0
+        && firstDownloadAt <= now
+        && Number.isInteger(count)
+        && count >= 1
+        && count <= LAUNCHER_INSTALLER_DOWNLOAD_LIMIT
+        && now < firstDownloadAt + LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS;
+      if (!validWindow) {
+        firstDownloadAt = now;
+        count = 0;
+      }
+
+      const resetAt = firstDownloadAt + LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS;
+      if (count >= LAUNCHER_INSTALLER_DOWNLOAD_LIMIT) {
+        return {
+          ok: false,
+          code: 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT',
+          count,
+          remaining: 0,
+          resetAt,
+          retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000))
+        };
+      }
+
+      const nextCount = count + 1;
+      await this.context.storage.put(storageKey, {
+        schemaVersion: 1,
+        firstDownloadAt,
+        count: nextCount
+      });
+      return {
+        ok: true,
+        count: nextCount,
+        remaining: LAUNCHER_INSTALLER_DOWNLOAD_LIMIT - nextCount,
+        resetAt
+      };
+    });
+    this.downloadLimitChain = operation;
+    return operation;
   }
 
   async refreshState(reason = 'refresh') {
@@ -3090,6 +3418,19 @@ export class LauncherStateHub {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (request.method === 'POST' && url.pathname === LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH) {
+      if (request.headers.get(LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER) !== '1') {
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      const result = await this.consumeLauncherInstallerDownload();
+      return Response.json(result, {
+        status: result.ok ? 200 : 429,
+        headers: {
+          'Cache-Control': 'private, no-store',
+          ...(result.ok ? {} : { 'Retry-After': String(result.retryAfterSeconds) })
+        }
+      });
+    }
     if (request.method === 'POST' && url.pathname === '/refresh') {
       if (request.headers.get(LAUNCHER_SERVER_STATE_INTERNAL_HEADER) !== '1') {
         return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -3241,6 +3582,10 @@ export default {
       }
       if (request.method === 'GET' && url.pathname === '/api/update-logs') {
         return await listUpdateLogs(env, request, origin, false);
+      }
+      const updateLogLikeMatch = url.pathname.match(/^\/api\/update-logs\/([0-9a-f-]{36})\/like$/i);
+      if (request.method === 'POST' && updateLogLikeMatch) {
+        return await likeUpdateLog(request, env, origin, updateLogLikeMatch[1]);
       }
       if (request.method === 'POST' && url.pathname === '/admin/login') {
         return await login(request, env, origin);

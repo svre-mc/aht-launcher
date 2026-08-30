@@ -230,7 +230,13 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
-await writeJson(path.join(userData, 'identity.json'), { installId: 'smoke-install' });
+await writeJson(path.join(userData, 'identity.json'), {
+  installId: 'smoke-install',
+  createdAt: new Date().toISOString(),
+  minecraftUsername: 'SmokeUser',
+  usernameRegisteredAt: new Date().toISOString(),
+  usernameRegistrationMode: 'minecraft-launcher'
+});
 await writeJson(curseForgeStorageFile, {
   'minecraft-settings': JSON.stringify({
     minecraftRoot: path.dirname(curseForgeRoot)
@@ -449,13 +455,14 @@ try {
     await fsp.rm(path.join(initialLaunchLogsDir, name), { force: true });
   }
   await evaluate(client, `document.querySelector('#toastStack').replaceChildren(); true`);
-  const registration = await evaluate(client, `
-    window.aht.accountRegister('SmokeUser')
-      .then((result) => ({ ok: true, result }))
-      .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
+  const usernameSurfaceAbsent = await evaluate(client, `
+    !document.querySelector('#accountOverlay')
+      && !document.querySelector('#minecraftUsernameInput')
+      && !document.querySelector('#playerLabelInput')
+      && typeof window.aht.accountRegister === 'undefined'
   `);
-  if (!registration.ok || !registration.result?.ok) {
-    throw new Error(`Smoke player account registration failed: ${JSON.stringify(registration)}`);
+  if (!usernameSurfaceAbsent) {
+    throw new Error('The Play integrity flow exposed a manual username control or API.');
   }
   await writeJson(integrityStatePath, {
     generatedAt: new Date(Date.now() + 60_000).toISOString(),

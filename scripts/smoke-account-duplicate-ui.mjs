@@ -131,8 +131,23 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   developer: { adminBaseUrl: `${workerEndpoint}/`, defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
-  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144, autoImportAccount: false },
+  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144, autoImportAccount: true, syncDefaultRoots: false },
   playCommand: { command: '', args: [], cwd: instanceDir }
+});
+await writeJson(path.join(mcRoot, 'launcher_accounts.json'), {
+  activeAccountLocalId: 'taken-account',
+  accounts: {
+    'taken-account': {
+      type: 'Xbox',
+      minecraftProfile: { name: 'TakenUser_1' }
+    }
+  }
+});
+await writeJson(path.join(userData, 'account-recovery', 'takenuser_1.json'), {
+  schemaVersion: 1,
+  username: 'TakenUser_1',
+  secret: recoverySecrets.get('takenuser_1'),
+  createdAt: '2026-08-03T00:00:00.000Z'
 });
 
 const server = http.createServer(async (request, response) => {
@@ -184,142 +199,65 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     ELECTRON_ENABLE_LOGGING: '0'
   },
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true
 });
+let childOutput = '';
+const captureChildOutput = (chunk) => {
+  childOutput = `${childOutput}${String(chunk)}`.slice(-8000);
+};
+child.stdout?.on('data', captureChildOutput);
+child.stderr?.on('data', captureChildOutput);
 
 let client;
 try {
-  const target = await waitForTarget();
+  const target = await Promise.race([
+    waitForTarget(),
+    new Promise((_, reject) => child.once('exit', (code, signal) => reject(new Error(`Electron exited before the debugger target (code ${code}, signal ${signal || 'none'}). ${childOutput}`))))
+  ]);
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && document.querySelector('#accountOverlay')", 'account DOM');
-  await waitFor(client, "document.querySelector('#accountOverlay').hidden === false", 'account overlay visible');
-
-  await evaluate(client, `
-    (() => {
-      document.querySelector('#minecraftUsernameInput').value = 'TakenUser_1';
-      document.querySelector('#accountForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    })()
-  `);
-  const duplicateProof = await waitFor(client, `
-    (() => {
-      const error = document.querySelector('#accountError').textContent.trim();
-      return /not available/i.test(error) && document.querySelector('#accountOverlay').hidden === false
-        ? { error, overlayHidden: document.querySelector('#accountOverlay').hidden }
-        : false;
-    })()
-  `, 'duplicate username error');
-  const duplicateAfterRefresh = await evaluate(client, `
-    window.aht.getStatus()
-      .then((status) => {
-        renderStatus(status);
-        return {
-          error: document.querySelector('#accountError').textContent.trim(),
-          overlayHidden: document.querySelector('#accountOverlay').hidden
-        };
-      })
-  `);
-  if (!/not available/i.test(duplicateAfterRefresh.error || '') || duplicateAfterRefresh.overlayHidden) {
-    throw new Error(`Duplicate username error was not preserved after status refresh: ${JSON.stringify(duplicateAfterRefresh)}`);
-  }
-
-  await evaluate(client, `
-    (() => {
-      document.querySelector('#minecraftUsernameInput').value = 'FreshUser_1';
-      document.querySelector('#accountForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    })()
-  `);
-  await waitFor(client, "document.querySelector('#accountOverlay').hidden === true && document.querySelector('#playerLabelView').textContent === 'FreshUser_1'", 'successful username registration');
-  const status = await evaluate(client, 'window.aht.getStatus()');
-  const identity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
-  if (status.identity?.minecraftUsername !== 'FreshUser_1' || identity.minecraftUsername !== 'FreshUser_1') {
-    throw new Error(`Successful retry did not persist username: ${JSON.stringify({ status: status.identity, identity })}`);
-  }
-  if (requests.length !== 2 || requests[0].username !== 'TakenUser_1' || requests[1].username !== 'FreshUser_1') {
-    throw new Error(`Unexpected username registration requests before recovery: ${JSON.stringify(requests)}`);
-  }
-
-  await writeJson(path.join(mcRoot, 'launcher_accounts.json'), {
-    activeAccountLocalId: 'taken-account',
-    accounts: {
-      'taken-account': {
-        type: 'Xbox',
-        minecraftProfile: { name: 'TakenUser_1' }
-      }
-    }
-  });
-  await writeJson(path.join(userData, 'account-recovery', 'takenuser_1.json'), {
-    schemaVersion: 1,
-    username: 'TakenUser_1',
-    secret: recoverySecrets.get('takenuser_1'),
-    createdAt: '2026-08-03T00:00:00.000Z'
-  });
-  const configPath = path.join(userData, 'launcher.config.json');
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  config.minecraftLauncher = {
-    ...config.minecraftLauncher,
-    enabled: true,
-    rootDir: mcRoot,
-    autoImportAccount: true
-  };
-  await writeJson(configPath, config);
-  const recovery = await evaluate(client, `window.aht.accountRegister('TakenUser_1')`);
+  await waitFor(client, "document.readyState === 'complete' && window.aht", 'launcher DOM');
+  const recovery = await waitFor(client, `
+    window.aht.getStatus().then((status) => status.identity?.minecraftUsername === 'TakenUser_1'
+      ? ({
+          status,
+          playerLabel: document.querySelector('#playerLabelView')?.textContent || '',
+          usernameSurfaceAbsent: !document.querySelector('#accountOverlay')
+            && !document.querySelector('#minecraftUsernameInput')
+            && !document.querySelector('#playerLabelInput')
+            && typeof window.aht.accountRegister === 'undefined'
+        })
+      : false)
+  `, 'automatic Minecraft Launcher account recovery');
   const recoveredIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
+  const storedConfig = JSON.parse(fs.readFileSync(path.join(userData, 'launcher.config.json'), 'utf8'));
   const takenRequests = requests.filter((item) => item.username === 'TakenUser_1');
-  if (!recovery?.ok || recoveredIdentity.minecraftUsername !== 'TakenUser_1' || recoveredIdentity.usernameRegistrationMode !== 'minecraft-launcher-recovery') {
+  if (
+    !recovery?.usernameSurfaceAbsent
+    || recovery.playerLabel !== 'TakenUser_1'
+    || recovery.status?.config?.minecraftLauncher?.enabled !== true
+    || storedConfig.minecraftLauncher?.enabled !== true
+    || recoveredIdentity.minecraftUsername !== 'TakenUser_1'
+    || recoveredIdentity.usernameRegistrationMode !== 'minecraft-launcher'
+  ) {
     throw new Error(`Minecraft Launcher username recovery did not persist: ${JSON.stringify({ recovery, recoveredIdentity })}`);
   }
-  if (requests.length !== 4 || takenRequests.length !== 3 || takenRequests[2].minecraftAccountMatched !== true || takenRequests[2].recoverExistingUsername !== true) {
+  if (takenRequests.length !== 2 || takenRequests[1].minecraftAccountMatched !== true || takenRequests[1].recoverExistingUsername !== true) {
     throw new Error(`Recovery did not retry with a Minecraft Launcher account match: ${JSON.stringify(requests)}`);
-  }
-
-  await writeJson(path.join(mcRoot, 'launcher_accounts.json'), {
-    activeAccountLocalId: 'disabled-profile-account',
-    accounts: {
-      'disabled-profile-account': {
-        type: 'Xbox',
-        minecraftProfile: { name: 'DisabledProf' }
-      }
-    }
-  });
-  await writeJson(path.join(userData, 'account-recovery', 'disabledprof.json'), {
-    schemaVersion: 1,
-    username: 'DisabledProf',
-    secret: recoverySecrets.get('disabledprof'),
-    createdAt: '2026-08-03T00:00:00.000Z'
-  });
-  config.minecraftLauncher = {
-    ...config.minecraftLauncher,
-    enabled: false,
-    rootDir: mcRoot,
-    autoImportAccount: true
-  };
-  await writeJson(configPath, config);
-  const disabledProfileRecovery = await evaluate(client, `window.aht.accountRegister('DisabledProf')`);
-  const disabledProfileIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
-  const disabledProfileRequests = requests.filter((item) => item.username === 'DisabledProf');
-  if (
-    !disabledProfileRecovery?.ok
-    || disabledProfileIdentity.minecraftUsername !== 'DisabledProf'
-    || disabledProfileIdentity.usernameRegistrationMode !== 'minecraft-launcher-recovery'
-    || disabledProfileRequests.length !== 2
-    || disabledProfileRequests[1].minecraftAccountMatched !== true
-    || disabledProfileRequests[1].recoverExistingUsername !== true
-  ) {
-    throw new Error(`Disabled Minecraft profile toggle blocked account recovery: ${JSON.stringify({ disabledProfileRecovery, disabledProfileIdentity, disabledProfileRequests })}`);
   }
 
   console.log(JSON.stringify({
     ok: true,
     root,
-    duplicateProof,
-    duplicateAfterRefresh,
-    registeredUsername: disabledProfileIdentity.minecraftUsername,
-    recoveryMode: disabledProfileIdentity.usernameRegistrationMode,
+    usernameSurfaceAbsent: recovery.usernameSurfaceAbsent,
+    profileForcedEnabled: storedConfig.minecraftLauncher.enabled,
+    registeredUsername: recoveredIdentity.minecraftUsername,
+    recoveryMode: recoveredIdentity.usernameRegistrationMode,
     requests: requests.map((item) => ({ username: item.username, installId: item.installId, packId: item.packId, recovered: Boolean(item.recoverExistingUsername && item.minecraftAccountMatched) }))
-  }, null, 2));} finally {
+  }, null, 2));
+} finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});
     client.close();

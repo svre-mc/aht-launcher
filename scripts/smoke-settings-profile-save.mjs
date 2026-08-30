@@ -145,7 +145,8 @@ await writeJson(defaultsPath, {
   instanceDir,
   latestUrl: latestPath,
   minecraftLauncher: {
-    enabled: true,
+    enabled: false,
+    closeLauncherWhenGameStarts: false,
     rootDir: minecraftRoot,
     profileId: 'a-hard-time-dregora',
     profileName: 'A Hard Time',
@@ -199,7 +200,8 @@ try {
   }
   const consumedJavaSelection = JSON.parse(await fsp.readFile(path.join(userData, 'installer-java8-selection.json'), 'utf8'));
   if (
-    status.config?.minecraftLauncher?.java8InstallOverride !== true
+    status.config?.minecraftLauncher?.enabled !== true
+    || status.config?.minecraftLauncher?.java8InstallOverride !== true
     || status.java8Runtime?.installOverride !== true
     || consumedJavaSelection.allowManagedJava8 !== true
     || !consumedJavaSelection.consumedAt
@@ -264,12 +266,23 @@ try {
   const java8SettingsProof = await evaluate(client, `
     (() => {
       activateTab('settings');
+      const closeInput = document.querySelector('#closeLauncherWhenGameStartsInput');
+      if (closeInput) closeInput.checked = true;
       const serialized = serializeSettings().minecraftLauncher;
       return {
         cardPresent: Boolean(document.querySelector('#java8RuntimeCard')),
         inputPresent: Boolean(document.querySelector('#java8InstallInput')),
         diagnosticsPresent: Boolean(document.querySelector('#copyLaunchDiagnosticsButton')),
         serializesOverride: Object.prototype.hasOwnProperty.call(serialized, 'java8InstallOverride'),
+        profileToggleAbsent: !document.querySelector('#minecraftProfileEnabledInput'),
+        closeSettingPresent: Boolean(closeInput),
+        closeSettingLabel: closeInput?.closest('label')?.textContent?.trim() || '',
+        serializedProfileEnabled: serialized.enabled,
+        serializedCloseSetting: serialized.closeLauncherWhenGameStarts,
+        usernameSurfaceAbsent: !document.querySelector('#accountOverlay')
+          && !document.querySelector('#minecraftUsernameInput')
+          && !document.querySelector('#playerLabelInput')
+          && typeof window.aht.accountRegister === 'undefined',
         bodyMentionsReadyJava: /Compatible Java 8 is ready|AHT-managed Java 8 is ready/i.test(document.body.textContent)
       };
     })()
@@ -280,6 +293,12 @@ try {
     || java8SettingsProof.inputPresent
     || java8SettingsProof.diagnosticsPresent
     || java8SettingsProof.serializesOverride
+    || !java8SettingsProof.profileToggleAbsent
+    || !java8SettingsProof.closeSettingPresent
+    || java8SettingsProof.closeSettingLabel !== 'Close launcher when game starts'
+    || java8SettingsProof.serializedProfileEnabled !== true
+    || java8SettingsProof.serializedCloseSetting !== true
+    || !java8SettingsProof.usernameSurfaceAbsent
     || java8SettingsProof.bodyMentionsReadyJava
   ) {
     throw new Error(`Java 8 runtime details leaked back into Game Settings: ${JSON.stringify({ java8SettingsProof, java8Runtime: status.java8Runtime })}`);
@@ -290,6 +309,8 @@ try {
       ...status.config,
       minecraftLauncher: {
         ...status.config.minecraftLauncher,
+        enabled: false,
+        closeLauncherWhenGameStarts: true,
         memoryMb: 8192
       },
       playCommand: {
@@ -300,6 +321,15 @@ try {
   `);
   if (!saveResult?.profileUpdated) {
     throw new Error(`Settings save did not update Minecraft profile: ${JSON.stringify(saveResult)}`);
+  }
+  const storedConfig = JSON.parse(await fsp.readFile(path.join(userData, 'launcher.config.json'), 'utf8'));
+  if (
+    saveResult.config?.minecraftLauncher?.enabled !== true
+    || saveResult.config?.minecraftLauncher?.closeLauncherWhenGameStarts !== true
+    || storedConfig.minecraftLauncher?.enabled !== true
+    || storedConfig.minecraftLauncher?.closeLauncherWhenGameStarts !== true
+  ) {
+    throw new Error(`Settings save did not force profile integration or persist the close preference: ${JSON.stringify({ saveResult: saveResult.config?.minecraftLauncher, stored: storedConfig.minecraftLauncher })}`);
   }
 
   const profiles = JSON.parse(await fsp.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));

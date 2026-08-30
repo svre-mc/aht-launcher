@@ -958,7 +958,7 @@ async function profileStateForRoot({ config, latest = null, installed = null, ro
     extraRoots: allAuthRoots.filter((candidate) => launcherRootKey(candidate) !== launcherRootKey(rootDir))
   });
   return {
-    enabled: config.minecraftLauncher?.enabled !== false,
+    enabled: true,
     rootDir,
     profilesPath,
     profileId,

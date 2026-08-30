@@ -212,7 +212,10 @@ try {
         mode: status.identity.usernameRegistrationMode,
         detected: status.identity.minecraftLauncherDetectedUsername,
         warning: status.identity.minecraftUsernameSyncWarning || '',
-        accountHidden: document.querySelector('#accountOverlay').hidden
+        usernameSurfaceAbsent: !document.querySelector('#accountOverlay')
+          && !document.querySelector('#minecraftUsernameInput')
+          && !document.querySelector('#playerLabelInput')
+          && typeof window.aht.accountRegister === 'undefined'
       };
     })()
   `);
@@ -220,6 +223,7 @@ try {
     proof.minecraftUsername !== 'StunningWolf22'
     || proof.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef'
     || proof.mode !== 'minecraft-launcher'
+    || !proof.usernameSurfaceAbsent
     || proof.warning
   ) {
     throw new Error(`Active Minecraft Launcher account did not replace old AHT username: ${JSON.stringify(proof)}`);

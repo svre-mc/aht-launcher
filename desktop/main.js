@@ -248,6 +248,7 @@ function loadR2DirectUploadModule() {
   return r2DirectUploadModulePromise;
 }
 let mainWindow = null;
+let closeOnGameStartWatchGeneration = 0;
 let updateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let validatedPendingLauncherUpdateKey = '';
@@ -587,6 +588,7 @@ function launchDiagnosticIpc(handler) {
       const result = await handler(event, payload, attempt);
       completeLaunchAttempt(attempt, 'HANDOFF CONFIRMED');
       await persistLaunchAttempt(attempt, attempt.runtimeConfig || fallbackConfig).catch(() => null);
+      armCloseLauncherWhenGameStarts(attempt.runtimeConfig || fallbackConfig, attempt);
       return result;
     } catch (error) {
       markFailedLaunchRequirement(attempt);
@@ -759,6 +761,56 @@ async function minecraftLaunchDiagnostic(config = null) {
     profileId: minecraft.profileId || '',
     roots: rootDiagnostics
   };
+}
+
+function minecraftInstanceLogAdvancedAfterBaseline(current = null, baseline = null, startedAt = '') {
+  const latestLog = (current?.files || []).find((item) => item?.label === 'Minecraft latest.log');
+  if (!latestLog) return false;
+  const previous = (baseline?.files || []).find((item) => samePath(item?.file || '', latestLog.file || ''));
+  if (previous) {
+    return Number(latestLog.size || 0) > Number(previous.size || 0)
+      || Number(latestLog.mtimeMs || 0) > Number(previous.mtimeMs || 0);
+  }
+  const startMs = Date.parse(String(startedAt || ''));
+  return Number.isFinite(startMs) && Number(latestLog.mtimeMs || 0) >= startMs - 1000;
+}
+
+function minecraftLauncherSignalStartsConfiguredModpack(line = '', instanceDir = '') {
+  if (!/Starting game in folder/i.test(String(line || '')) || !String(instanceDir || '').trim()) return false;
+  const normalizedLine = String(line).replace(/\\/g, '/').toLowerCase();
+  const normalizedInstance = path.resolve(instanceDir).replace(/\\/g, '/').toLowerCase();
+  return normalizedLine.includes(normalizedInstance);
+}
+
+function armCloseLauncherWhenGameStarts(config = {}, attempt = {}) {
+  const generation = ++closeOnGameStartWatchGeneration;
+  if (config.minecraftLauncher?.closeLauncherWhenGameStarts !== true) return;
+  const pollMs = process.env.AHT_TEST_HOOKS === '1' ? 100 : 1500;
+  const timeoutMs = process.env.AHT_TEST_HOOKS === '1' ? 15_000 : 2 * 60 * 60 * 1000;
+  const deadline = Date.now() + timeoutMs;
+  void (async () => {
+    while (generation === closeOnGameStartWatchGeneration && Date.now() < deadline) {
+      await sleep(pollMs);
+      if (generation !== closeOnGameStartWatchGeneration) return;
+      const launcherDiagnostic = await minecraftLaunchDiagnostic(config).catch(() => null);
+      const launcherSignals = minecraftSignalsForLaunch(launcherDiagnostic, attempt);
+      const gameStartedFromLauncher = launcherSignals.some((line) => minecraftLauncherSignalStartsConfiguredModpack(
+        line,
+        config.instanceDir || attempt.instanceDir
+      ));
+      const instanceDiagnostic = await minecraftInstanceSignalDiagnostic(config.instanceDir || attempt.instanceDir).catch(() => null);
+      const gameStartedFromInstance = minecraftInstanceLogAdvancedAfterBaseline(
+        instanceDiagnostic,
+        attempt.minecraftInstanceSignalBaseline,
+        attempt.startedAt
+      );
+      if (!gameStartedFromLauncher && !gameStartedFromInstance) continue;
+      if (generation === closeOnGameStartWatchGeneration) app.quit();
+      return;
+    }
+  })().catch((error) => {
+    recordErrorDiagnostic('launcher:closeOnGameStart', error, { attemptId: attempt.attemptId || '' });
+  });
 }
 
 async function manualLaunchDiagnostic(payload = {}) {
@@ -1752,6 +1804,7 @@ function defaultConfig() {
     },
     minecraftLauncher: {
       enabled: true,
+      closeLauncherWhenGameStarts: false,
       rootDir: defaultMinecraftRoot(),
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
@@ -1818,6 +1871,7 @@ function configForPack(baseConfig, packValue = 'stable') {
     },
     minecraftLauncher: {
       ...baseConfig.minecraftLauncher,
+      enabled: true,
       profileId: target.profileId,
       profileName: target.profileName
     },
@@ -2170,6 +2224,8 @@ function mergeConfig(defaults, stored) {
   if (merged.minecraftLauncher?.profileName === 'A Hard Time Dregora') {
     merged.minecraftLauncher.profileName = 'A Hard Time';
   }
+  merged.minecraftLauncher.enabled = true;
+  merged.minecraftLauncher.closeLauncherWhenGameStarts = merged.minecraftLauncher.closeLauncherWhenGameStarts === true;
   if (!trustedMinecraftOpenCommandAllowed()) {
     merged.minecraftLauncher.openCommand = '';
     merged.minecraftLauncher.openArgs = [];
@@ -2424,6 +2480,11 @@ async function loadConfig() {
     config.minecraftLauncher.memoryMb = DEFAULT_MINECRAFT_MEMORY_MB;
     changed = true;
   }
+  if (stored.minecraftLauncher?.enabled !== true || config.minecraftLauncher.enabled !== true) {
+    config.minecraftLauncher.enabled = true;
+    changed = true;
+  }
+  config.minecraftLauncher.closeLauncherWhenGameStarts = config.minecraftLauncher.closeLauncherWhenGameStarts === true;
   if (installerJava8Selection) {
     config.minecraftLauncher = {
       ...config.minecraftLauncher,
@@ -2506,6 +2567,8 @@ async function saveConfig(nextConfig) {
     minecraftLauncher: { ...current.minecraftLauncher, ...nextConfig.minecraftLauncher },
     playCommand: { ...current.playCommand, ...nextConfig.playCommand }
   };
+  merged.minecraftLauncher.enabled = true;
+  merged.minecraftLauncher.closeLauncherWhenGameStarts = merged.minecraftLauncher.closeLauncherWhenGameStarts === true;
   if (!trustedMinecraftOpenCommandAllowed()) {
     merged.minecraftLauncher.openCommand = '';
     merged.minecraftLauncher.openArgs = [];
@@ -2530,6 +2593,9 @@ async function saveConfig(nextConfig) {
   delete merged.developer.r2AccessKeyId;
   delete merged.developer.r2SecretAccessKey;
   await writeJsonFile(configPath(), configForStorage(merged));
+  if (!merged.minecraftLauncher.closeLauncherWhenGameStarts) {
+    closeOnGameStartWatchGeneration += 1;
+  }
   return merged;
 }
 
@@ -2539,10 +2605,6 @@ async function readInstalledPack(config) {
 }
 
 async function refreshMinecraftLauncherProfile(config) {
-  if (config.minecraftLauncher?.enabled === false) {
-    return { profileUpdated: false, profileSkipped: 'Minecraft Launcher profile is disabled.' };
-  }
-
   const installed = await readInstalledPack(config);
   let latest = null;
   let latestError = '';
@@ -2877,7 +2939,7 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
     } catch (refreshError) {
       if (isUsernameUnavailableError(refreshError)) {
         await clearUnavailableMinecraftUsername(username, refreshError.message || String(refreshError));
-        throw new Error('That username is not available. Enter an available Minecraft username to continue.');
+        throw new Error('That Minecraft account could not be registered. Sign into a different account in Minecraft Launcher and retry.');
       }
       throw new Error(`Launcher proof registration refresh failed: ${refreshError.message || refreshError}`);
     }
@@ -3625,6 +3687,54 @@ async function readUpdateLogs(config, limit = 3) {
   return Array.isArray(body.logs) ? body.logs : [];
 }
 
+async function likeUpdateLog(logId) {
+  const normalizedLogId = String(logId || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalizedLogId)) {
+    throw new Error('That news article is not available.');
+  }
+  const config = await minecraftLauncherRuntimeConfig(await loadConfig());
+  const identity = await identityPayload(config);
+  const username = normalizeMinecraftUsername(identity.minecraftUsername);
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) {
+    throw new Error('Set up your Minecraft username before liking news.');
+  }
+  const base = accountBaseUrl(config);
+  if (!base) throw new Error('The AHT news service is not connected.');
+  const url = new URL(`api/update-logs/${encodeURIComponent(normalizedLogId)}/like`, base.endsWith('/') ? base : `${base}/`);
+  const deviceCredential = await loadDeviceCredential();
+  const binding = {
+    logId: normalizedLogId,
+    username: username.toLowerCase(),
+    deviceId: deviceCredential.deviceId
+  };
+  const response = await fetch(url, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      ...binding,
+      devicePublicKey: deviceCredential.publicKey,
+      deviceAssertion: createDeviceAssertion(deviceCredential, {
+        purpose: 'update-log-like',
+        binding
+      })
+    })
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `${response.status} ${response.statusText}`);
+  }
+  return {
+    ok: true,
+    logId: normalizedLogId,
+    liked: body.liked === true,
+    likes: Math.max(0, Number(body.likes) || 0)
+  };
+}
+
 function integrityStatePath(config) {
   return path.join(instanceSecurityStateDir(config), 'integrity.json');
 }
@@ -3847,16 +3957,7 @@ async function installMinecraftProfileLoaders(profile, { config, latest, install
 }
 
 function evaluateLaunchState(config, latest, latestError, installed, minecraftProfile = null, integrity = null, options = {}) {
-  const profileEnabled = config.minecraftLauncher?.enabled !== false;
-  const playConfigured = profileEnabled;
-  if (!playConfigured) {
-    return {
-      playConfigured,
-      launchReady: false,
-      launchMode: 'none',
-      launchBlockedReason: 'Minecraft Launcher profile integration is disabled.'
-    };
-  }
+  const playConfigured = true;
 
   const java8Runtime = options.java8Runtime || null;
   if (java8Runtime && !java8Runtime.usable && !java8Runtime.installSupported) {
@@ -4486,45 +4587,43 @@ async function runUpdate(forceRepair = false, options = {}) {
       logger: { log: (line) => appendOperationLine(updateState, line) }
     });
     let latestAfterInstall = null;
-    if (config.minecraftLauncher?.enabled !== false) {
-      try {
-        latestAfterInstall = await readLatest(config);
-        const launcherProof = await writeSerializedRegisteredLauncherProof({
-          config: launcherConfig,
-          latest: latestAfterInstall,
-          installed: result.installed,
-          identity
-        });
-        result.launcherProof = {
-          proofFile: launcherProof.proofFile || '',
-          trusted: Boolean(launcherProof.trusted),
-          source: launcherProof.source || ''
-        };
-        let profile = await ensureMinecraftLauncherProfile({
-          config: launcherConfig,
-          latest: latestAfterInstall,
-          installed: result.installed
-        });
-        const assetLines = [];
-        updateState.progress = { phase: 'Repairing Minecraft 1.12.2 runtime', completed: 0, total: 1, percent: 96 };
-        result.minecraftAssets = await ensureMinecraftLauncherAssets({
-          config: launcherConfig,
-          latest: latestAfterInstall,
-          installed: result.installed,
-          profile,
-          logger: { log: (line) => assetLines.push(String(line)) }
-        });
-        appendOperationLines(updateState, assetLines);
-        profile = await installMinecraftProfileLoaders(profile, {
-          config: launcherConfig,
-          latest: latestAfterInstall,
-          installed: result.installed,
-          operationState: updateState
-        });
-        result.minecraftProfile = profile;
-      } catch (error) {
-        throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
-      }
+    try {
+      latestAfterInstall = await readLatest(config);
+      const launcherProof = await writeSerializedRegisteredLauncherProof({
+        config: launcherConfig,
+        latest: latestAfterInstall,
+        installed: result.installed,
+        identity
+      });
+      result.launcherProof = {
+        proofFile: launcherProof.proofFile || '',
+        trusted: Boolean(launcherProof.trusted),
+        source: launcherProof.source || ''
+      };
+      let profile = await ensureMinecraftLauncherProfile({
+        config: launcherConfig,
+        latest: latestAfterInstall,
+        installed: result.installed
+      });
+      const assetLines = [];
+      updateState.progress = { phase: 'Repairing Minecraft 1.12.2 runtime', completed: 0, total: 1, percent: 96 };
+      result.minecraftAssets = await ensureMinecraftLauncherAssets({
+        config: launcherConfig,
+        latest: latestAfterInstall,
+        installed: result.installed,
+        profile,
+        logger: { log: (line) => assetLines.push(String(line)) }
+      });
+      appendOperationLines(updateState, assetLines);
+      profile = await installMinecraftProfileLoaders(profile, {
+        config: launcherConfig,
+        latest: latestAfterInstall,
+        installed: result.installed,
+        operationState: updateState
+      });
+      result.minecraftProfile = profile;
+    } catch (error) {
+      throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
     }
     updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };
     const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall, {
@@ -10053,15 +10152,20 @@ async function openMinecraftLauncher(config, options = {}) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1120,
+    width: 1432,
     height: 760,
-    minWidth: 900,
-    minHeight: 620,
+    minWidth: 1432,
+    maxWidth: 1432,
+    minHeight: 760,
+    maxHeight: 760,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
     backgroundColor: '#f5f5f7',
     title: 'A Hard Time Launcher',
     icon: path.join(appRoot, 'build', 'icon.png'),
     autoHideMenuBar: true,
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: path.join(appRoot, 'desktop', 'preload.cjs'),
       contextIsolation: true,
@@ -10167,13 +10271,23 @@ ipcMain.handle('launcher:updateState', async () => {
   await hydratePendingLauncherUpdateState();
   return launcherUpdateStateForRenderer(launcherUpdateState);
 });
-ipcMain.handle('account:register', async (_event, username) => registerMinecraftUsername(username));
 ipcMain.handle('legal:status', diagnosticIpc('legal:status', async () => launcherLegalStatus()));
 ipcMain.handle('legal:accept', diagnosticIpc('legal:accept', async (_event, payload = {}) => acceptLauncherLegal(payload)));
 ipcMain.handle('app:exit', async () => {
   app.quit();
   return { ok: true };
 });
+ipcMain.handle('window:minimize', async (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (window && !window.isDestroyed()) window.minimize();
+  return { ok: true };
+});
+ipcMain.handle('window:close', async (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (window && !window.isDestroyed()) window.close();
+  return { ok: true };
+});
+ipcMain.handle('update-log:like', diagnosticIpc('update-log:like', async (_event, payload = {}) => likeUpdateLog(payload.logId)));
 ipcMain.handle('social:list', diagnosticIpc('social:list', async () => {
   const context = await socialRequestContext();
   return fetchSocialState(context);

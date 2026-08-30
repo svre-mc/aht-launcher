@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,6 +12,10 @@ const rendererApp = readText(new URL('../desktop/renderer/app.js', import.meta.u
 const preloadScript = readText(new URL('../desktop/preload.cjs', import.meta.url));
 const rendererHtml = readText(new URL('../desktop/renderer/index.html', import.meta.url));
 const rendererCss = readText(new URL('../desktop/renderer/style.css', import.meta.url));
+const rendererPolishCss = readText(new URL('../desktop/renderer/polish.css', import.meta.url));
+const benderLicense = readText(new URL('../desktop/renderer/assets/fonts/Bender-OFL-1.1.txt', import.meta.url));
+const benderFontFiles = ['Bender-Regular.otf', 'Bender-Light.otf', 'Bender-Bold.otf']
+  .map((name) => new URL(`../desktop/renderer/assets/fonts/${name}`, import.meta.url));
 const externalLinkIcon = readText(new URL('../desktop/renderer/icons/external-link.svg', import.meta.url));
 const desktopMain = readText(new URL('../desktop/main.js', import.meta.url));
 const installerSource = readText(new URL('../src/installer.js', import.meta.url));
@@ -22,6 +27,8 @@ const releaseWorkflow = readText(new URL('../.github/workflows/build-macos.yml',
 const verifyLocalScript = readText(new URL('../scripts/verify-local.mjs', import.meta.url));
 const smokePlayerDefaults = readText(new URL('../scripts/smoke-player-defaults-feed.mjs', import.meta.url));
 const smokePlayerLayout = readText(new URL('../scripts/smoke-player-layout.mjs', import.meta.url));
+const smokeStartupTransition = readText(new URL('../scripts/smoke-startup-sidebar-transition.mjs', import.meta.url));
+const smokePlayerUpdateLogs = readText(new URL('../scripts/smoke-player-update-logs.mjs', import.meta.url));
 const smokePlayerUpdatePlay = readText(new URL('../scripts/smoke-player-update-play-flow.mjs', import.meta.url));
 const smokePlayIntegrityGate = readText(new URL('../scripts/smoke-play-integrity-gate.mjs', import.meta.url));
 const smokeCloseDuringUpdate = readText(new URL('../scripts/smoke-close-during-update.mjs', import.meta.url));
@@ -129,6 +136,13 @@ function pngDimensions(relativePath) {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
+function fileSha256(relativePath) {
+  return createHash('sha256')
+    .update(fs.readFileSync(new URL(`../${relativePath}`, import.meta.url)))
+    .digest('hex')
+    .toUpperCase();
+}
+
 function icoLayers(relativePath) {
   const bytes = fs.readFileSync(new URL(`../${relativePath}`, import.meta.url));
   const count = bytes.readUInt16LE(4);
@@ -166,6 +180,18 @@ assert(preloadScript.includes('const developerApi = {') && preloadScript.include
 assert(preloadScript.includes('process.isMainFrame === true') && rendererHtml.includes('Content-Security-Policy') && rendererHtml.includes("object-src 'none'") && rendererHtml.includes("script-src 'self'"), 'Launcher IPC must be exposed only to the main frame under a restrictive renderer CSP.');
 assert(desktopMain.includes('sandbox: true') && desktopMain.includes('webviewTag: false') && desktopMain.includes("setWindowOpenHandler(() => ({ action: 'deny' }))") && desktopMain.includes("on('will-navigate', (event) => event.preventDefault())"), 'The Electron window must be sandboxed and block untrusted top-level navigation and popup windows.');
 assert(rendererHtml.includes('id="newsTab"') && rendererHtml.includes('id="newsFeedGrid"') && rendererApp.includes('els.newsFeedGrid.appendChild(buildUpdateLogCard'), 'Player News must be a real launcher view backed by the player-safe update-log feed.');
+assert(
+  rendererHtml.includes('polish.css')
+    && rendererPolishCss.includes('font-family: "AHT Bender"')
+    && rendererPolishCss.includes('--bsg-primary: #fffff3')
+    && rendererPolishCss.includes('--bsg-secondary: #aaaaaa')
+    && rendererPolishCss.includes('width: 664px')
+    && rendererPolishCss.includes('height: 373px')
+    && rendererPolishCss.includes('grid-template-columns: 250px minmax(0, 1fr)')
+    && benderFontFiles.every((resource) => fs.statSync(resource).size > 0)
+    && benderLicense.includes('SIL OPEN FONT LICENSE Version 1.1'),
+  'The player shell must package the licensed Bender family and preserve the directly measured BSG typography, colors, and News geometry.'
+);
 assert(rendererHtml.includes('id="storeTab"') && rendererHtml.includes('data-external-destination="store"') && rendererCss.includes('.icon-external-link') && externalLinkIcon.includes('<svg'), 'The top navigation must expose a polished Store destination with an external-link icon.');
 assert(preloadScript.includes("openExternal: (destination) => ipcRenderer.invoke('shell:openExternal', destination)") && desktopMain.includes("store: 'https://ahardtime.net/shop'") && desktopMain.includes("ipcMain.handle('shell:openExternal'") && desktopMain.includes('PLAYER_EXTERNAL_DESTINATIONS[key]'), 'External player links must resolve through a main-process destination allowlist containing the official AHT store.');
 assert(desktopMain.includes("process.env.AHT_TEST_OPEN_EXTERNAL_ECHO === '1'") && desktopMain.includes("updateLogs = await readUpdateLogs(config, 12)"), 'Store navigation and the full News feed must have deterministic test coverage without opening a browser.');
@@ -173,6 +199,19 @@ assert(rendererApp.includes('iframe.setAttribute("sandbox", "allow-scripts allow
 assert(preloadScript.includes("devPlayerRecords: (payload) => ipcRenderer.invoke('dev:playerRecords'") && preloadScript.includes("devLauncherUpdates: (payload) => ipcRenderer.invoke('dev:launcherUpdates'"), 'Developer preload must expose current player records and launcher-update history only through developer IPC.');
 assert(workerSource.includes("const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/'") && workerSource.includes("'/admin/player-records'") && workerSource.includes("'/admin/launcher-updates'") && workerSource.includes('currentOnly: true'), 'Worker must expose canonical current players and dedicated launcher updates without historical IP joins.');
 assert(workerSource.includes('canonicalAccountLauncherUpdate') && workerSource.includes('readAllR2JsonObjects') && workerSource.includes('identitySource') && workerSource.includes('aht_player'), 'Worker player-data reads must retain explicit download identities and surface current canonical launcher versions when dedicated update telemetry is missing.');
+assert(
+  workerSource.includes('const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;')
+  && workerSource.includes('const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;')
+  && workerSource.includes('launcherInstallerPersonIdentity')
+  && workerSource.includes('launcher-installer-download:${identityHash}')
+  && workerSource.includes('this.downloadLimitChain')
+  && workerSource.includes("code: 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT'")
+  && workerTelemetryTest.includes('concurrentAccepted !== 7 || concurrentDenied !== 5')
+  && workerTelemetryTest.includes('Untagged launcher self-updates must stay unlimited and uncounted.')
+  && workerTelemetryTest.includes("method: 'HEAD'")
+  && workerTelemetryTest.includes('firstDownloadAt: Date.now() - (24 * 60 * 60 * 1000) - 1'),
+  'Worker must atomically allow seven installer downloads in one anchored 24-hour window while excluding self-updates and HEAD checks.'
+);
 assert(desktopMain.includes('preferredMinecraftUuid') && desktopMain.includes('minecraftUuid: detectedMinecraftUuid') && desktopMain.includes("type: 'launcher_update_completed'") && desktopMain.includes('result?.launcherUpdateKey'), 'Regular launcher identity must capture the active Minecraft UUID and record each confirmed launcher version through the dedicated update contract.');
 assert(workerSource.includes('recovered && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)') && desktopMain.includes('launcherVersionTelemetryInFlight.delete(key)'), 'Account recovery must require the stored Minecraft UUID, and transient launcher-update telemetry failures must be retryable in the same launcher process.');
 assert(desktopMain.includes('remoteRegistrationConfirmedAt') && desktopMain.includes('remoteRegistrationNeedsRefresh') && desktopMain.includes('registerMinecraftUsernameInFlight') && desktopMain.includes('Player data sync unavailable:'), 'Player identities saved before a Worker/API outage must retry remote registration once and preserve a clear sync warning without deleting the local identity.');
@@ -237,6 +276,8 @@ assert(
   && developerLauncherReinstallSmoke.includes('const developerDefaultsPath')
   && developerLauncherReinstallSmoke.includes('const playerDefaultsPath')
   && developerLauncherReinstallSmoke.includes('playerDefaultsBytes.equals(regularConfigBytes)')
+  && developerLauncherReinstallSmoke.includes('closeLauncherWhenGameStarts: false,')
+  && !developerLauncherReinstallSmoke.includes('minecraftLauncher: { enabled: false')
   && developerLauncherReinstallSmoke.includes('storedRegularConfig.launcherUpdate?.latestUrl !== forbiddenLiveFeed')
   && developerLauncherReinstallSmoke.includes("method: String(request.method || 'GET').toUpperCase()")
   && developerLauncherReinstallSmoke.includes("url: String(request.url || '')")
@@ -273,7 +314,17 @@ assert(desktopMain.includes('function configureTestRemoteDebugPort()') && deskto
 assert(desktopMain.includes('function writeTestStartupProbe') && desktopMain.includes('AHT_TEST_STARTUP_PROBE_PATH'), 'Packaged startup diagnostics must be gated behind AHT_TEST_HOOKS and an explicit probe path.');
 assert(smokePlayerUpdatePlay.includes('AHT_TEST_REMOTE_DEBUG_PORT: String(port)') && smokePlayerUpdatePlay.includes('AHT_TEST_STARTUP_PROBE_PATH: startupProbePath') && smokePlayerUpdatePlay.includes('? [`--user-data-dir=${userData}`]'), 'Installed player update/play smoke must use the gated main-process remote-debug hook and startup probe.');
 assert(smokePlayerDefaults.includes('const minecraftRoot = path.join(root, \'.minecraft\')') && smokePlayerDefaults.includes('enabled: true') && smokePlayerDefaults.includes('rootDir: minecraftRoot'), 'Player defaults smoke must exercise enabled Minecraft Launcher profile integration against an isolated temp root.');
-assert(smokePlayerLayout.includes('const minecraftRoot = path.join(root, \'.minecraft\')') && smokePlayerLayout.includes('enabled: true') && smokePlayerLayout.includes('minecraftProfileEnabledInput') && smokePlayerLayout.includes('Player layout did not render Minecraft profile integration as enabled'), 'Player layout smoke must visually prove Minecraft Launcher profile integration is enabled.');
+assert(smokePlayerLayout.includes('const minecraftRoot = path.join(root, \'.minecraft\')') && smokePlayerLayout.includes('serializedEnabled') && smokePlayerLayout.includes('closeLauncherWhenGameStartsInput') && smokePlayerLayout.includes('profileToggleAbsent'), 'Player layout smoke must prove Minecraft profile integration is forced and the replacement close setting is present.');
+assert(
+  !rendererHtml.includes('id="accountOverlay"')
+  && !rendererHtml.includes('id="minecraftUsernameInput"')
+  && !rendererHtml.includes('id="playerLabelInput"')
+  && !preloadScript.includes('accountRegister')
+  && !desktopMain.includes("ipcMain.handle('account:register'")
+  && rendererHtml.includes('id="closeLauncherWhenGameStartsInput"')
+  && rendererHtml.includes('Close launcher when game starts'),
+  'The launcher must have no manual Minecraft username surface/API and must replace the profile toggle with the close-on-game-start setting.'
+);
 const verifyInstalledPlayer = readText(new URL('../scripts/verify-installed-player.mjs', import.meta.url));
 for (const installedPlayerCheck of [
   'test:player-defaults',
@@ -295,7 +346,7 @@ for (const installedPlayerCheck of [
 assert(rendererApp.includes('window.aht.selectFolder(els.instanceInput.value.trim() || currentStatus?.config?.instanceDir || "")'), 'Modpack Folder Browse must open at the folder path currently listed in Game Settings.');
 assert(!rendererApp.includes('els.pickInstanceButton.addEventListener("click", async () => {\n    const folder = await window.aht.selectFolder();'), 'Modpack Folder Browse must not call selectFolder without a default path.');
 assert(rendererHtml.includes('id="openInstancePathButton"') && rendererHtml.includes('id="openMinecraftRootPathButton"') && rendererApp.includes('async function openFolderPath') && rendererApp.includes('result?.error'), 'Game Settings must provide professional Open controls for both exact folder paths and surface native open failures.');
-assert(rendererApp.includes('setUnavailable(els.playButton, playBusy || updateRunning)') && !rendererApp.includes('setUnavailable(els.playButton, playBusy || launcherUpdateRequired || !status.launchReady'), 'Blocked Play must remain clickable so main-process launch diagnostics can write a timestamped report and expose the copy action.');
+assert(rendererApp.includes('function renderPrimaryAction(status = currentStatus)') && rendererApp.includes('const installMode = !status?.installed?.version') && rendererApp.includes('const unavailable = packageActionMode') && rendererApp.includes(': actionBusy;') && !rendererApp.includes('!status?.launchReady'), 'The single primary action must distinguish Install from Update while keeping blocked Play clickable for main-process diagnostics.');
 assert(!rendererApp.includes('Config error'), 'Renderer must not show the technical Config error label in player or developer UI.');
 assert(!rendererApp.includes('packageTarget') && !rendererApp.includes('build - ${platformProfile'), 'Renderer settings subtitle must not expose package/build target jargon in the player UI.');
 assert(!rendererApp.includes('server owner') && !desktopMain.includes('server owner'), 'Player-facing update/feed messages must not use internal server-owner wording.');
@@ -392,20 +443,63 @@ assert(rendererCss.includes('assets/launcher-background.png'), 'Launcher backgro
 assert(rendererCss.includes('body:not(.dev-mode) .workspace'), 'Player background must be owned by the regular launcher workspace.');
 assert(!rendererCss.includes('.hero-panel::before') && !rendererCss.includes('.hero-panel::after') && !rendererCss.includes('.hero-art::after'), 'Player background must not be covered by decorative hero overlays.');
 assert(rendererHtml.includes('id="scanButton"') && rendererHtml.includes('icon-wrench') && rendererHtml.includes('Repair') && !rendererHtml.includes('Scan files'), 'Player quick action must be labeled Repair, not Scan files.');
+assert(rendererHtml.includes('icon-settings') && rendererHtml.includes('Game Settings'), 'Player settings quick action must use the reference capitalization and gear icon.');
+assert(!rendererHtml.includes('id="updateButton"') && rendererHtml.includes('id="playButton"') && rendererHtml.includes('data-action-mode="play"') && rendererApp.includes('els.playButton.dataset.actionMode === "install" || currentStatus?.updateRequired') && rendererApp.includes('openUpdateOptions();'), 'Player footer must expose one action that becomes Install for missing packs, Update for outdated packs, and Play when ready.');
+assert(!rendererHtml.includes('<dt>Installed</dt>') && !rendererHtml.includes('<dt>Latest</dt>') && !rendererHtml.includes('<dt>Local Changes</dt>') && rendererHtml.includes('class="launch-game-info"'), 'Player footer must use BSG-style game information instead of the old Installed/Latest/Local Changes dashboard.');
+assert(rendererHtml.includes('<strong>Game version:</strong>') && !rendererHtml.includes('id="launchGameEdition"') && !rendererHtml.includes('id="launchServerStatus"') && !rendererApp.includes('launchGameEdition') && !rendererApp.includes('launchServerStatus'), 'Player footer must expose only Game version; Game edition and Server must not be rendered or updated.');
+assert(!rendererHtml.includes('id="playerPackTitle"') && !rendererHtml.includes('id="versionLine"') && !rendererApp.includes('playerPackTitle') && !rendererApp.includes('versionLine'), 'Player hero must never restore the removed A Hard Time, A Hard Time PTB, or Not Installed labels.');
+assert(rendererHtml.includes('class="footer-game-logo"') && rendererHtml.includes('assets/aht-vine-logo.png') && rendererPolishCss.includes('left: 34px;') && rendererPolishCss.includes('width: 565px;') && rendererPolishCss.includes('height: 190px;') && rendererPolishCss.includes('bottom: 0;') && rendererPolishCss.includes('top: -27px;') && rendererPolishCss.includes('width: 600px;') && rendererPolishCss.includes('padding: 0 12px 0 28px;') && rendererPolishCss.includes('padding: 0 14px 0 28px;'), 'Player footer must use the supplied vine logo at the larger inset/lowered footprint and move Game version/quick actions substantially right.');
+assert(rendererHtml.includes('<div class="footer-game-logo">') && rendererHtml.indexOf('<img src="assets/aht-vine-logo.png" alt="A Hard Time">') > rendererHtml.indexOf('<div class="footer-game-logo">') && !rendererPolishCss.includes('.footer-game-logo { background:'), 'The supplied vine logo must remain a dedicated foreground image independent of launcher background artwork.');
+assert(rendererPolishCss.includes('.news-card-headline') && rendererPolishCss.includes('.feature-copy strong::after { content: none; }') && rendererPolishCss.includes('background-size: cover, 112% auto, 112% auto;') && rendererPolishCss.includes('url("assets/launcher-background.png") 48% 59% / cover no-repeat;'), 'Player News must keep one inline BSG headline chevron, cinematic hero crop, and real-art fallback thumbnails.');
+const downloadsPolishStart = rendererPolishCss.indexOf('/* Downloads keeps the quiet BSG surface');
+const downloadsPolishEnd = rendererPolishCss.indexOf('.feature-copy .feature-meta', downloadsPolishStart);
+const downloadsPolish = rendererPolishCss.slice(downloadsPolishStart, downloadsPolishEnd);
+assert(downloadsPolishStart >= 0 && downloadsPolishEnd > downloadsPolishStart && !downloadsPolish.includes('115deg') && !downloadsPolish.includes('135deg'), 'Downloads final-cascade styling must remove both long diagonal decoration lines.');
+assert(rendererPolishCss.includes('width: 575px;') && rendererPolishCss.includes('grid-template-columns: 282px 293px;') && rendererPolishCss.includes('width: 293px;') && rendererPolishCss.includes('height: 68px;') && rendererPolishCss.includes('inset: 0 -36px 0 0;') && rendererPolishCss.includes('#000 72%') && rendererPolishCss.includes('rgba(0, 0, 0, 0.16) 94%') && rendererPolishCss.includes('width: auto;') && rendererPolishCss.includes('border-radius: 2px;') && rendererPolishCss.includes('clip-path: none;') && !rendererPolishCss.includes('.launch-strip::after') && rendererPolishCss.includes('top: -231px;') && rendererPolishCss.includes('right: -252px;') && rendererPolishCss.includes('width: 809px;') && rendererPolishCss.includes('height: 413px;') && rendererPolishCss.includes('assets/bsg-button-huge-light-1.png') && rendererPolishCss.includes('assets/bsg-button-huge-light-2.png') && rendererPolishCss.includes('mix-blend-mode: screen;') && rendererPolishCss.includes('mix-blend-mode: color-dodge;') && rendererPolishCss.includes('.quick-actions .ghost-button') && rendererPolishCss.includes('border: 0;') && rendererPolishCss.includes('#playButton.is-install-action') && !rendererPolishCss.includes('.launch-actions:hover:has(#playButton:not(.is-disabled))'), 'Player footer must preserve the shortened/faded BSG panel, exact static native two-layer bloom, two-pixel primary-action corners, and Install state.');
+assert(rendererPolishCss.includes('linear-gradient(180deg, #b89d6b 0%, #987c51 43%, #705a3e 72%, #4d4032 100%)') && rendererPolishCss.includes('linear-gradient(180deg, #a4a681 0%, #858868 43%, #646b50 72%, #414a3b 100%)') && !rendererPolishCss.includes('linear-gradient(180deg, rgba(190, 61, 51, 0.98)') && !rendererPolishCss.includes('linear-gradient(180deg, rgba(116, 164, 88, 0.98)'), 'Update and Install must use the muted launcher ochre/sage palette without the former saturated red/green fills.');
+const startupLoaderHtml = rendererHtml.slice(rendererHtml.indexOf('id="startupLoader"'), rendererHtml.indexOf('<main class="app-frame"'));
+const sidebarSwitchLoaderStart = rendererHtml.indexOf('id="sidebarSwitchLoader"');
+const sidebarSwitchLoaderHtml = rendererHtml.slice(sidebarSwitchLoaderStart, rendererHtml.indexOf('</div>', sidebarSwitchLoaderStart) + '</div>'.length);
+assert(rendererHtml.includes('<body class="is-booting">') && rendererHtml.includes('id="startupLoader"') && rendererHtml.includes('class="app-frame" aria-hidden="true" inert') && rendererApp.includes('async function bootstrapLauncher()') && rendererApp.includes('STARTUP_ESSENTIAL_TIMEOUT_MS') && rendererApp.includes('if (!currentStatus) renderInitialStatusError(error);') && rendererPolishCss.includes('body.is-booting .app-frame') && rendererPolishCss.includes('.money-loader-system'), 'Startup must fail closed behind an opaque loading screen until status, legal, font, window, and image work settles, with a bounded recovery reveal.');
+assert(startupLoaderHtml.includes('class="startup-money-system money-loader-system"') && startupLoaderHtml.includes('class="startup-money-logo" src="assets/aht-bill-transparent.png"') && !startupLoaderHtml.includes('news-loader-globe') && (startupLoaderHtml.match(/startup-orbit-star startup-orbit-star-/g) || []).length === 8 && rendererPolishCss.includes('perspective: 260px;') && rendererPolishCss.includes('@keyframes startup-star-orbit-a') && rendererPolishCss.includes('@keyframes startup-star-orbit-b') && rendererPolishCss.includes('@keyframes startup-star-orbit-c'), 'The bottom-right startup indicator must use the AHT money logo with eight independently phased white stars moving on varied 3D planetary paths, never the former globe icon.');
+assert(sidebarSwitchLoaderHtml.includes('class="sidebar-switch-loader money-loader-system"') && sidebarSwitchLoaderHtml.includes('class="startup-money-logo" src="assets/aht-bill-transparent.png"') && !sidebarSwitchLoaderHtml.includes('news-loader-globe') && (sidebarSwitchLoaderHtml.match(/startup-orbit-star startup-orbit-star-/g) || []).length === 8 && smokeStartupTransition.includes('Game-mode switching did not reuse the exact startup money-and-stars loader'), 'Game-mode switching must reuse the exact startup bill, ring, eight-star markup, shared geometry, and 3D orbital animation rather than the former globe loader.');
+assert(rendererHtml.includes('id="sidebarSwitchLoader"') && rendererApp.includes('SIDEBAR_SWITCH_EXIT_DELAY_MS = 50') && rendererApp.includes('SIDEBAR_SWITCH_EXIT_MS = 180') && rendererApp.includes('SIDEBAR_SWITCH_LOAD_HOLD_MS = 180') && rendererApp.includes('SIDEBAR_SWITCH_ENTER_MS = 330') && rendererApp.includes('refresh(nextPack, { renderGate: exitGate })') && rendererPolishCss.includes('.workspace > .view.sidebar-view-leaving') && rendererPolishCss.includes('.workspace > .view.sidebar-view-entering.sidebar-view-entering-active') && rendererPolishCss.includes('.workspace.is-sidebar-switching:not(.is-sidebar-switch-entering) .sidebar-switch-loader'), 'Sidebar switches must preserve the measured BSG immediate-selection, opacity-exit, loader-hold, and opacity-entry phases without moving the fixed shell.');
+assert(packageScripts['test:startup-transition'] === 'node scripts/smoke-startup-sidebar-transition.mjs' && smokeStartupTransition.includes("Input.dispatchMouseEvent', { type: 'mousePressed'") && smokeStartupTransition.includes('statusStillPending') && smokeStartupTransition.includes('Outgoing view did not use the measured opacity-only fade') && smokeStartupTransition.includes('Install and Update palettes were not distinct'), 'The startup/switch contract must have true-pointer source and installed-EXE smoke coverage for partial-load suppression, transition phases, and both primary-action palettes.');
+assert(rendererHtml.indexOf('id="statusBadge"') > rendererHtml.indexOf('class="launch-state-data"') && rendererPolishCss.includes('.launch-state-data { display: none; }'), 'Internal status text must remain available to diagnostics without appearing in the hero top-right.');
+assert(rendererPolishCss.includes('-webkit-user-select: none;') && rendererPolishCss.includes('-webkit-user-drag: none;') && rendererApp.includes('document.addEventListener("selectstart"') && rendererApp.includes('document.addEventListener("dragstart"') && rendererApp.includes('String(event.key).toLowerCase() === "a"'), 'The launcher shell must block Ctrl+A, drag selection, and artwork dragging while preserving editable fields.');
 assert(desktopMain.includes('CLIENT_GAME_SETTINGS_FILES.map') && desktopMain.includes('gameSettingsPresent') && rendererApp.includes('if (!currentStatus?.setup?.gameSettingsPresent)'), 'First install must skip the preserve-settings prompt when no player settings exist, using main-process filesystem truth.');
 assert(localChangesSource.includes('const managed = managedFiles(loadedManaged') && localChangesSource.includes('const managedMods = managedModFiles(loadedManaged') && !rendererApp.includes('managedFiles(loadedManaged'), 'Managed integrity must validate the full protected manifest in the filesystem owner while keeping extra-file monitoring scoped to mods.');
-assert(rendererHtml.includes('id="updateLogOverlay" class="news-article-surface"') && rendererHtml.indexOf('id="updateLogOverlay"') > rendererHtml.indexOf('<section id="news"') && rendererApp.includes('activateTab("news");') && rendererApp.includes('art.addEventListener("click", () => openUpdateLog(log))'), 'Home news cards must switch to News and open their exact in-tab article instead of a detached overlay or video.');
-assert(rendererApp.includes('function installPointerLighting()') && rendererCss.includes('radial-gradient(\n    150px circle at var(--pointer-x) var(--pointer-y)') && rendererCss.includes('.game-tile.active::before'), 'Launcher chrome must implement pointer-positioned BSG-style white bloom and a persistent selected-game glow.');
+assert(rendererHtml.includes('id="updateLogOverlay" class="news-article-surface"') && rendererHtml.indexOf('id="updateLogOverlay"') > rendererHtml.indexOf('<section id="news"') && rendererApp.includes('activateTab("news");') && rendererApp.includes('card.addEventListener("click", () => openUpdateLog(log))'), 'Home news cards must switch to News and open their exact in-tab article through one full-card action.');
+assert(rendererApp.includes('let updateLogReturnContext = null;') && rendererApp.includes('tab: activeTabName === "news" ? "news" : "player"') && rendererApp.includes('packKey: activeSidebarPack') && rendererApp.includes('returnContext.tab === "player"') && rendererApp.includes('activateTab("player", { preserveNewsArticleTransition: true });') && rendererApp.includes('const backDestination = updateLogReturnContext?.tab === "player" ? "Game" : "News";') && rendererApp.includes('if (els.updateLogBottomBackButton) els.updateLogBottomBackButton.addEventListener("click", () => closeUpdateLog());') && smokePlayerUpdateLogs.includes("homeArticleProof.backLabel !== 'Back to Game'") && smokePlayerUpdateLogs.includes("backProof.ariaLabel !== 'Back to News'") && smokePlayerUpdateLogs.includes("'returned from home article to PTB Game home'") && smokePlayerUpdateLogs.includes("'returned from full article to PTB News feed'"), 'Article Back must retain its opening route: Game-card articles return to that selected pack Game home, while News-feed articles return to that selected pack News feed through the shared Back handler.');
+assert(!rendererHtml.includes('class="news-view-header"') && !rendererHtml.includes('class="news-feed-state"') && !rendererHtml.includes('id="newsLatestLabel"') && !rendererHtml.includes('id="updateLogWatchButton"') && rendererHtml.includes('id="updateLogHeroPlay"'), 'News must use the restrained article stream without dashboard badges, redundant read buttons, or a separate watch button.');
+assert(rendererApp.includes('document.createElement(surface === "news" ? "article" : "button")') && rendererApp.includes('openButton.className = "news-card-open"') && rendererApp.includes('likeButton.className = "news-like-button news-card-like"') && !rendererApp.includes('feature-copy-button') && !rendererApp.includes('feature-art-button') && !rendererApp.includes('feature-cta'), 'News entries must expose separate accessible article and like actions without nested buttons or redundant CTAs.');
+assert(rendererApp.includes('function buildNewsFeatureCarousel') && rendererApp.includes('function selectNewsCarouselSlide') && rendererApp.includes('function playNewsCarouselMedia') && rendererApp.includes('function transitionNewsSurface') && rendererHtml.includes('class="news-transition-loader"') && rendererHtml.includes('id="updateLogInlineMedia"') && rendererPolishCss.includes('.news-carousel-caption') && rendererPolishCss.includes('filter: brightness(1.1);') && rendererPolishCss.includes('.news-feed-card:active') && rendererPolishCss.includes('.update-log-article-footer {'), 'News must preserve the measured BSG carousel, inline-media, transition-loader, thumbnail-brightness, and static press-state interaction contract.');
+assert(!rendererApp.includes('installPointerLighting') && !rendererApp.includes('POINTER_LIGHT_SELECTOR') && !rendererCss.includes('.pointer-light-surface') && !rendererCss.includes('--pointer-x') && rendererCss.includes('.game-tile.active::before {\n  content: none;'), 'Launcher chrome must not create a cursor-following spotlight or clipped rectangular bloom.');
+assert(desktopMain.includes('width: 1432') && desktopMain.includes('height: 760') && desktopMain.includes('minWidth: 1432') && desktopMain.includes('maxWidth: 1432') && desktopMain.includes('minHeight: 760') && desktopMain.includes('maxHeight: 760') && desktopMain.includes('resizable: false') && desktopMain.includes('maximizable: false') && desktopMain.includes('fullscreenable: false') && desktopMain.includes('frame: false'), 'Player launcher must be a fixed 1432x760 frameless window with no resize, maximize, or fullscreen path.');
+assert(rendererHtml.includes('id="windowMinimizeButton"') && rendererHtml.includes('id="windowCloseButton"') && preloadScript.includes('windowMinimize') && preloadScript.includes('windowClose') && desktopMain.includes("ipcMain.handle('window:minimize'") && desktopMain.includes("ipcMain.handle('window:close'"), 'Frameless launcher must provide isolated custom minimize and close controls.');
 const brandHtml = rendererHtml.slice(rendererHtml.indexOf('<div class="brand">'), rendererHtml.indexOf('<div class="game-list">'));
 assert(!brandHtml.includes('<strong>A Hard Time</strong>') && !brandHtml.includes('<span>Launcher</span>') && brandHtml.includes('id="launcherVersionLabel"'), 'Top-left branding must keep only the backlit logo and running Launcher version text.');
 assert(!rendererHtml.includes('AHT account') && rendererHtml.includes('id="syncStatus"><span class="online-dot"></span>Online') && rendererCss.includes('.profile-card:focus-visible') && rendererCss.includes('border: 0;'), 'Top-right profile must use borderless player/Online treatment with the adjacent dropdown arrow.');
-assert(rendererCss.includes('.feature-art.aht-art::after') && !rendererCss.includes('\n.aht-art::after'), 'AHT cover-art title overlay must only apply to large update-log art, not sidebar thumbnails.');
+assert(!rendererCss.includes('.feature-art.aht-art::after') && !rendererCss.includes('content: "A HARD TIME";'), 'The first news-card artwork must never synthesize an A HARD TIME text overlay.');
 assert(rendererCss.includes('.feature-art.aht-art::before') && !rendererCss.includes('\n.aht-art::before'), 'AHT cover-art lighting overlay must only apply to large update-log art, not sidebar thumbnails.');
 assert(fs.existsSync(new URL('../desktop/renderer/assets/aht-cover.png', import.meta.url)), 'Full cover art asset must exist.');
 assert(fs.existsSync(new URL('../desktop/renderer/assets/aht-bill-transparent.png', import.meta.url)), 'Transparent bill art asset must exist.');
 assert(fs.existsSync(new URL('../desktop/renderer/assets/launcher-background.png', import.meta.url)), 'Launcher background asset must exist.');
+assert(fs.existsSync(new URL('../desktop/renderer/assets/aht-vine-logo.png', import.meta.url)), 'Supplied A Hard Time vine footer logo must exist.');
+assert(fs.existsSync(new URL('../desktop/renderer/assets/bsg-button-huge-light-1.png', import.meta.url)) && fs.existsSync(new URL('../desktop/renderer/assets/bsg-button-huge-light-2.png', import.meta.url)), 'The native BSG footer bloom assets must exist.');
 const launcherBackgroundSize = pngDimensions('desktop/renderer/assets/launcher-background.png');
 assert(launcherBackgroundSize.width === 2240 && launcherBackgroundSize.height === 1520, `Launcher background must be pre-cropped to 2x the default launcher ratio, got ${launcherBackgroundSize.width}x${launcherBackgroundSize.height}.`);
+const vineLogoSize = pngDimensions('desktop/renderer/assets/aht-vine-logo.png');
+assert(vineLogoSize.width === 2240 && vineLogoSize.height === 1088, `Supplied vine footer logo must retain its original 2240x1088 canvas, got ${vineLogoSize.width}x${vineLogoSize.height}.`);
+assert(fileSha256('desktop/renderer/assets/aht-vine-logo.png') === '68F31F78CF0A9B5780CEB92E41DBEED4FD92A532CA2FEC50C1821D323AED3872', 'Supplied vine footer logo must remain byte-identical to the user asset.');
+for (const [relativePath, expectedSha256] of [
+  ['desktop/renderer/assets/bsg-button-huge-light-1.png', 'A2BF4736D2C80F99602F2507A55F005B542F72E560391A9AE532F48F828AAD1E'],
+  ['desktop/renderer/assets/bsg-button-huge-light-2.png', 'BDD12A413444DAB8DA35FAB614DCA3853D9CEB3D40EB08A16F76CAF764E0DC40']
+]) {
+  const size = pngDimensions(relativePath);
+  assert(size.width === 809 && size.height === 413, `${relativePath} must retain the native 809x413 BSG footprint.`);
+  assert(fileSha256(relativePath) === expectedSha256, `${relativePath} must remain byte-identical to the native BSG bloom asset.`);
+}
 assert(pngColorType('build/icon.png') === 6, 'Windows app icon PNG must preserve alpha transparency.');
 assert(pngColorType('build/icon-mac.png') === 6, 'macOS app icon PNG must preserve alpha transparency.');
 assert(pngColorType('desktop/renderer/assets/aht-bill-transparent.png') === 6, 'Transparent bill art must be an alpha PNG.');
@@ -650,10 +744,25 @@ assert(
 );
 assert(desktopMain.includes('backupConfigBeforeCurseForgeMigration(file)') && desktopMain.includes('fsSync.constants.COPYFILE_EXCL'), 'Persisted CurseForge root self-heal must make a one-time rollback backup first.');
 assert(desktopMain.includes("process.env.AHT_TEST_OPEN_PATH_ECHO === '1'") && desktopMain.includes("ipcMain.handle('shell:openPath'") && desktopMain.includes('captured: true'), 'Open-folder IPC must expose a deterministic captured test contract without opening the OS shell.');
-assert(desktopMain.includes('const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();') && !desktopMain.includes("if (!rootDir || config.minecraftLauncher?.enabled === false)"), 'Minecraft account recovery must still inspect signed-in launcher accounts when the profile toggle is disabled or stale.');
+assert(desktopMain.includes('const rootDir = config.minecraftLauncher?.rootDir || defaultMinecraftRoot();') && !desktopMain.includes("if (!rootDir || config.minecraftLauncher?.enabled === false)"), 'Minecraft account recovery must inspect signed-in launcher accounts without a user-disable branch.');
 const forgeInstaller = readText(new URL('../src/forgeInstaller.js', import.meta.url));
 const minecraftLauncherProfileSource = readText(new URL('../src/minecraftLauncherProfile.js', import.meta.url));
 const packagedPlayerDefaults = JSON.parse(readText(new URL('../config/app.defaults.json', import.meta.url)));
+assert(
+  packagedPlayerDefaults.minecraftLauncher?.enabled === true
+  && packagedPlayerDefaults.minecraftLauncher?.closeLauncherWhenGameStarts === false
+  && desktopMain.includes('merged.minecraftLauncher.enabled = true;')
+  && desktopMain.includes('config.minecraftLauncher.enabled = true;')
+  && !desktopMain.includes('Minecraft Launcher profile integration is disabled.'),
+  'Minecraft profile integration must be forced in defaults, config migration, save normalization, and launch readiness.'
+);
+assert(
+  desktopMain.includes('function armCloseLauncherWhenGameStarts')
+  && desktopMain.includes('minecraftLauncherSignalStartsConfiguredModpack')
+  && desktopMain.includes('minecraftInstanceLogAdvancedAfterBaseline')
+  && smokePlayerUpdatePlay.includes('A fresh modpack game-start signal did not close AHT Launcher'),
+  'Close-on-game-start must wait for a fresh modpack startup signal and have an end-to-end Play-flow proof.'
+);
 assert(desktopMain.includes('javaCacheDir') || forgeInstaller.includes('ensureManagedJava8Runtime'), 'Forge installer must have managed Java 8 fallback for stale jre-legacy certificates.');
 assert(forgeInstaller.includes('windowsJavaInstallRoots') && forgeInstaller.includes('Eclipse Adoptium'), 'Forge installer must prefer installed Temurin/Adoptium Java 8 before stale bundled Minecraft Java.');
 assert(

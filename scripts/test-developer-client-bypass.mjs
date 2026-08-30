@@ -237,19 +237,19 @@ try {
         updateRequired: status.updateRequired,
         launchReady: status.launchReady,
         launchBlockedReason: status.launchBlockedReason,
-        updateDisabled: document.querySelector('#updateButton')?.getAttribute('aria-disabled') === 'true',
-        playDisabled: document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'true',
+        primaryMode: document.querySelector('#playButton')?.dataset.actionMode || '',
+        primaryDisabled: document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'true',
         badge: document.querySelector('#statusBadge')?.textContent || '',
         installed: status.installed || null,
         latest: status.latest?.version || ''
       } : false;
     })
-  `, 'developer not-installed update gate');
+  `, 'developer not-installed install gate');
   if (!notInstalledProof.updateRequired || notInstalledProof.launchReady || !/Install the pack before playing/i.test(notInstalledProof.launchBlockedReason || '')) {
-    throw new Error(`Developer not-installed modpack status should require Update before Play: ${JSON.stringify(notInstalledProof)}`);
+    throw new Error(`Developer not-installed modpack status should require Install before Play: ${JSON.stringify(notInstalledProof)}`);
   }
-  if (notInstalledProof.updateDisabled || notInstalledProof.playDisabled) {
-    throw new Error(`Developer not-installed modpack should keep Play clickable so the failed attempt can create a support report: ${JSON.stringify(notInstalledProof)}`);
+  if (notInstalledProof.primaryMode !== 'install' || notInstalledProof.primaryDisabled) {
+    throw new Error(`Developer not-installed modpack should expose one enabled primary Install action: ${JSON.stringify(notInstalledProof)}`);
   }
 
   console.log(JSON.stringify({

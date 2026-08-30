@@ -168,7 +168,9 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, 'document.readyState === "complete" && window.aht', 'player DOM');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await waitFor(client, 'document.readyState === "complete" && window.aht && !document.body.classList.contains("is-booting") && document.querySelector("#startupLoader")?.hidden', 'fully revealed player DOM');
   const proof = await evaluate(client, `
     (async () => {
       const status = await window.aht.getStatus();
@@ -334,5 +336,7 @@ try {
     client.close();
   }
   child.kill();
-  await new Promise((resolve) => server.close(resolve));
+  const closePromise = new Promise((resolve) => server.close(resolve));
+  server.closeAllConnections?.();
+  await closePromise;
 }

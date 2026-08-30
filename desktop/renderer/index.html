@@ -6,9 +6,32 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http://127.0.0.1:* http://localhost:*; media-src 'self' blob: data: https: http://127.0.0.1:* http://localhost:*; frame-src https://www.youtube.com; connect-src 'self'">
   <title>A Hard Time Launcher</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="polish.css">
 </head>
-<body>
-  <main class="app-frame">
+<body class="is-booting">
+  <div id="startupLoader" class="startup-loader" role="status" aria-live="polite" aria-label="Loading A Hard Time Launcher">
+    <div class="startup-loader-content">
+      <img class="startup-loader-logo" src="assets/aht-vine-logo.png" alt="A Hard Time">
+      <div class="startup-loader-status">
+        <span class="startup-loader-label">Loading launcher</span>
+        <span class="startup-loader-rule" aria-hidden="true"></span>
+      </div>
+    </div>
+    <div class="startup-money-system money-loader-system" aria-hidden="true">
+      <span class="startup-money-ring"></span>
+      <img class="startup-money-logo" src="assets/aht-bill-transparent.png" alt="">
+      <span class="startup-orbit-star startup-orbit-star-one"></span>
+      <span class="startup-orbit-star startup-orbit-star-two"></span>
+      <span class="startup-orbit-star startup-orbit-star-three"></span>
+      <span class="startup-orbit-star startup-orbit-star-four"></span>
+      <span class="startup-orbit-star startup-orbit-star-five"></span>
+      <span class="startup-orbit-star startup-orbit-star-six"></span>
+      <span class="startup-orbit-star startup-orbit-star-seven"></span>
+      <span class="startup-orbit-star startup-orbit-star-eight"></span>
+    </div>
+  </div>
+
+  <main class="app-frame" aria-hidden="true" inert>
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark bill-art"><span>AHT</span></div>
@@ -84,6 +107,10 @@
             <span id="profileFriendsBadge" class="notification-badge" aria-live="polite" hidden></span>
           </span>
         </button>
+        <div class="window-controls" aria-label="Window controls">
+          <button id="windowMinimizeButton" class="window-control window-minimize" type="button" aria-label="Minimize launcher"><span aria-hidden="true"></span></button>
+          <button id="windowCloseButton" class="window-control window-close" type="button" aria-label="Close launcher"><span aria-hidden="true"></span></button>
+        </div>
       </header>
 
       <section id="setupNotice" class="setup-notice" hidden>
@@ -99,34 +126,34 @@
 
       <section id="player" class="view active">
         <section class="hero-panel">
-          <div class="hero-art">
-            <div class="hero-copy">
-              <h1 id="playerPackTitle">A Hard Time</h1>
-              <div id="versionLine" class="subline">Loading</div>
-            </div>
-            <div id="statusBadge" class="status-pill">Checking</div>
-          </div>
+          <div class="hero-art" aria-hidden="true"></div>
 
           <div id="updateLogGrid" class="news-grid update-log-grid" aria-label="Update logs" hidden></div>
         </section>
 
+        <div class="footer-game-logo">
+          <img src="assets/aht-vine-logo.png" alt="A Hard Time">
+        </div>
+
         <section class="quick-actions">
           <button id="scanButton" class="ghost-button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
-          <button class="ghost-button tab" data-tab="settings"><span class="button-icon icon-settings" aria-hidden="true"></span>Game settings</button>
+          <button class="ghost-button tab" data-tab="settings"><span class="button-icon icon-settings" aria-hidden="true"></span>Game Settings</button>
         </section>
 
         <section class="launch-strip">
-          <div class="version-stack">
-            <dl class="facts compact">
-              <div><dt>Installed</dt><dd id="installedVersion">-</dd></div>
-              <div><dt>Latest</dt><dd id="latestVersion">-</dd></div>
-              <div><dt>Local Changes</dt><dd id="diffSummary">-</dd></div>
-            </dl>
+          <div class="launch-game-info" aria-label="Selected game information">
+            <div><strong>Game version:</strong><span id="launchGameVersion">Not installed</span></div>
+          </div>
+
+          <div class="launch-state-data" hidden aria-hidden="true">
+            <span id="statusBadge" class="status-pill">Checking</span>
+            <span id="installedVersion">-</span>
+            <span id="latestVersion">-</span>
+            <span id="diffSummary">-</span>
           </div>
 
           <div class="launch-actions">
-            <button id="updateButton" class="button primary is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-download" aria-hidden="true"></span>Update</button>
-            <button id="playButton" class="button strong is-disabled" aria-disabled="true" tabindex="-1"><span class="button-icon icon-play" aria-hidden="true"></span>Play</button>
+            <button id="playButton" class="button strong is-disabled" data-action-mode="play" aria-disabled="true" tabindex="-1"><span class="button-icon icon-play" aria-hidden="true"></span><span class="primary-action-label">Play</span></button>
             <button id="copyLatestLaunchReportButton" class="launch-report-action" type="button" hidden>Copy latest launch report</button>
           </div>
         </section>
@@ -136,18 +163,6 @@
 
       <section id="news" class="view news-view">
         <div class="news-view-shell">
-          <header class="news-view-header">
-            <div>
-              <p class="eyebrow">A Hard Time Dispatch</p>
-              <h1>News</h1>
-              <p>Release notes, development updates, and important launcher announcements.</p>
-            </div>
-            <div class="news-feed-state" aria-label="Live update feed">
-              <span class="news-feed-dot" aria-hidden="true"></span>
-              <span>Live update feed</span>
-              <strong id="newsLatestLabel">Checking</strong>
-            </div>
-          </header>
           <div id="newsFeedGrid" class="news-feed-grid" aria-label="All update logs" hidden></div>
           <div id="newsEmptyState" class="news-empty-state">
             <span class="news-empty-mark">AHT</span>
@@ -155,19 +170,39 @@
             <p>The launcher will show release notes here as soon as they are published.</p>
           </div>
         </div>
+        <div class="news-transition-loader" aria-hidden="true">
+          <span class="news-loader-globe"></span>
+          <span class="news-loader-dot news-loader-dot-one"></span>
+          <span class="news-loader-dot news-loader-dot-two"></span>
+          <span class="news-loader-dot news-loader-dot-three"></span>
+        </div>
         <div id="updateLogOverlay" class="news-article-surface" hidden>
           <article class="update-log-dialog" aria-labelledby="updateLogModalTitle">
             <header class="update-log-article-header">
               <button id="updateLogCloseButton" class="update-log-back" type="button" aria-label="Back to launcher news"><span aria-hidden="true">&#171;</span> Back</button>
-              <span id="updateLogModalMeta" class="update-log-modal-meta">Update Log</span>
               <h2 id="updateLogModalTitle">Update Log</h2>
               <p id="updateLogModalSubtitle"></p>
+              <div class="update-log-article-meta-row">
+                <span id="updateLogModalMeta" class="update-log-modal-meta">Update Log</span>
+                <button id="updateLogLikeButton" class="news-like-button" type="button" aria-label="Like this news article">
+                  <span class="news-like-icon" aria-hidden="true"></span><span id="updateLogLikeCount">0</span>
+                </button>
+              </div>
             </header>
-            <header id="updateLogHero" class="update-log-hero">
-              <span class="update-log-hero-label">A Hard Time</span>
-            </header>
-            <button id="updateLogWatchButton" class="update-log-watch" type="button" hidden><span class="button-icon icon-play" aria-hidden="true"></span>Watch video</button>
+            <div class="update-log-hero-frame">
+              <button id="updateLogHero" class="update-log-hero" type="button" aria-label="Update artwork" disabled>
+                <span class="update-log-hero-label">A Hard Time</span>
+                <span id="updateLogHeroPlay" class="update-log-hero-play" aria-hidden="true" hidden><span class="button-icon icon-play"></span></span>
+              </button>
+              <div id="updateLogInlineMedia" class="update-log-inline-media" hidden></div>
+            </div>
             <section id="updateLogArticleBody" class="update-log-article-body"></section>
+            <footer class="update-log-article-footer">
+              <button id="updateLogBottomBackButton" class="update-log-footer-link" type="button"><span aria-hidden="true">&#171;</span> Back</button>
+              <button id="updateLogBottomLikeButton" class="news-like-button update-log-footer-like" type="button" aria-label="Like this news article">
+                <span class="news-like-icon" aria-hidden="true"></span><span data-like-count="true">0</span>
+              </button>
+            </footer>
           </article>
         </div>
       </section>
@@ -204,7 +239,6 @@
               <label class="span-2 player-technical" hidden>Latest Feed <span class="browse"><input id="latestUrlInput" type="text"><button id="pickLatestButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label class="player-technical" hidden>CurseForge Proxy <input id="proxyUrlInput" type="url"></label>
               <label class="player-technical" hidden>Sync URL <input id="syncUrlInput" type="url"></label>
-              <label class="player-technical" hidden>Player Label <input id="playerLabelInput" type="text"></label>
               <label class="span-2">Modpack Folder <span class="browse path-actions"><input id="instanceInput" type="text"><button id="openInstancePathButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Open</button><button id="pickInstanceButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label class="span-2">Minecraft Launcher Folder <span class="browse path-actions"><input id="minecraftRootInput" type="text"><button id="openMinecraftRootPathButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Open</button><button id="pickMinecraftRootButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label>Launcher Profile Name <input id="minecraftProfileNameInput" type="text"></label>
@@ -216,7 +250,7 @@
               <label class="player-technical" hidden>Play Args <input id="playArgsInput" type="text"></label>
             </div>
             <div class="settings-row">
-              <label class="switch"><input id="minecraftProfileEnabledInput" type="checkbox"><span></span>Minecraft profile</label>
+              <label class="switch"><input id="closeLauncherWhenGameStartsInput" type="checkbox"><span></span>Close launcher when game starts</label>
               <label class="switch player-technical" hidden><input id="syncEnabledInput" type="checkbox"><span></span>Sync enabled</label>
               <label class="switch player-technical" hidden><input id="sendChangesInput" type="checkbox"><span></span>Send local changes</label>
               <button id="openInstanceButton" class="button compact player-technical" hidden><span class="button-icon icon-folder" aria-hidden="true"></span>Open Instance</button>
@@ -485,6 +519,19 @@
           </section>
         </section>
       </section>
+
+      <div id="sidebarSwitchLoader" class="sidebar-switch-loader money-loader-system" aria-hidden="true">
+        <span class="startup-money-ring"></span>
+        <img class="startup-money-logo" src="assets/aht-bill-transparent.png" alt="">
+        <span class="startup-orbit-star startup-orbit-star-one"></span>
+        <span class="startup-orbit-star startup-orbit-star-two"></span>
+        <span class="startup-orbit-star startup-orbit-star-three"></span>
+        <span class="startup-orbit-star startup-orbit-star-four"></span>
+        <span class="startup-orbit-star startup-orbit-star-five"></span>
+        <span class="startup-orbit-star startup-orbit-star-six"></span>
+        <span class="startup-orbit-star startup-orbit-star-seven"></span>
+        <span class="startup-orbit-star startup-orbit-star-eight"></span>
+      </div>
     </section>
   </main>
 
@@ -611,18 +658,6 @@
         <button id="updateOptionsUpdateButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update</button>
       </div>
     </section>
-  </div>
-  <div id="accountOverlay" class="overlay account-overlay" hidden>
-    <form id="accountForm" class="account-dialog" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
-      <div>
-        <p class="eyebrow">Minecraft Profile</p>
-        <h2 id="accountTitle">Minecraft Username</h2>
-        <span class="account-copy">No password. AHT only needs a Minecraft username if it cannot find one in Minecraft Launcher.</span>
-      </div>
-      <label>Username <input id="minecraftUsernameInput" type="text" maxlength="16" autocomplete="username" spellcheck="false"></label>
-      <div id="accountError" class="account-error" aria-live="polite"></div>
-      <button id="accountCreateButton" class="button primary compact" type="submit"><span class="button-icon icon-login" aria-hidden="true"></span>Continue</button>
-    </form>
   </div>
   <div id="legalOverlay" class="overlay legal-overlay" hidden>
     <section class="legal-dialog" role="dialog" aria-modal="true" aria-labelledby="legalTitle">

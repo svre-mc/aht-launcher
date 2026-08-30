@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.88",
+  "version": "0.1.93",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -29,6 +29,7 @@
     "test:player-privacy": "node scripts/test-player-privacy.mjs",
     "test:player-defaults": "node scripts/smoke-player-defaults-feed.mjs",
     "test:player-layout": "node scripts/smoke-player-layout.mjs",
+    "test:startup-transition": "node scripts/smoke-startup-sidebar-transition.mjs",
     "test:settings-profile": "node scripts/smoke-settings-profile-save.mjs",
     "test:write-defaults": "node scripts/smoke-write-player-defaults-button.mjs",
     "test:developer-secret": "node scripts/smoke-developer-secret-persistence.mjs",

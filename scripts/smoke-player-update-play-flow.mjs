@@ -312,6 +312,13 @@ await writeJson(defaultsPath, {
   },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
+await writeJson(path.join(userData, 'identity.json'), {
+  installId: 'fresh-player-install',
+  createdAt: new Date().toISOString(),
+  minecraftUsername: 'FreshPlayer',
+  usernameRegisteredAt: new Date().toISOString(),
+  usernameRegistrationMode: 'minecraft-launcher'
+});
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), {});
 await writeJson(path.join(syncedMcRoot, 'versions', versionId, `${versionId}.json`), {});
 
@@ -415,6 +422,9 @@ const child = spawn(electronBin, electronArgs, {
   stdio: 'ignore',
   windowsHide: true
 });
+const childExitPromise = new Promise((resolve) => {
+  child.once('exit', (code, signal) => resolve({ code, signal }));
+});
 
 let client;
 try {
@@ -428,13 +438,14 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
-  const registration = await evaluate(client, `
-    window.aht.accountRegister('FreshPlayer')
-      .then((result) => ({ ok: true, result }))
-      .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
+  const usernameSurfaceAbsent = await evaluate(client, `
+    !document.querySelector('#accountOverlay')
+      && !document.querySelector('#minecraftUsernameInput')
+      && !document.querySelector('#playerLabelInput')
+      && typeof window.aht.accountRegister === 'undefined'
   `);
-  if (!registration.ok || !registration.result?.ok) {
-    throw new Error(`Player registration failed: ${JSON.stringify(registration)}`);
+  if (!usernameSurfaceAbsent) {
+    throw new Error('The player update/play flow exposed a manual username control or API.');
   }
   const blocked = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '7.7.7' ? status : false)
@@ -480,12 +491,18 @@ try {
 
   await evaluate(client, `refresh().then(() => true)`);
   await waitFor(client, `(() => {
-    const button = document.querySelector('#updateButton');
-    return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
-  })()`, 'fresh player Update button');
+    const button = document.querySelector('#playButton');
+    return button
+      && button.dataset.actionMode === 'install'
+      && button.textContent.trim() === 'Install'
+      && button.classList.contains('is-install-action')
+      && !button.classList.contains('is-update-action')
+      && !button.disabled
+      && button.getAttribute('aria-disabled') !== 'true';
+  })()`, 'fresh player primary Install action');
   const firstInstallPromptProof = await evaluate(client, `(() => {
     const overlay = document.querySelector('#updateOptionsOverlay');
-    const button = document.querySelector('#updateButton');
+    const button = document.querySelector('#playButton');
     const beforeHidden = overlay?.hidden === true;
     button?.click();
     return {
@@ -505,7 +522,7 @@ try {
   if (!updateResult.ok || updateResult.result?.installed?.version !== '7.7.7') {
     throw new Error(`Fresh player update failed: ${JSON.stringify(updateResult)}`);
   }
-  if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 2 || proofRequests.length < 2) {
+  if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 1 || proofRequests.length < 2) {
     throw new Error(`Update did not refresh stale launcher proof registration after Worker rejection: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
   }
   const installedFiles = [
@@ -678,6 +695,19 @@ try {
   }
 
   await fsp.rm(fakeLauncherMarker, { force: true });
+  const closePreference = await evaluate(client, `
+    window.aht.getStatus().then((status) => window.aht.saveSettings({
+      ...status.config,
+      minecraftLauncher: {
+        ...status.config.minecraftLauncher,
+        enabled: false,
+        closeLauncherWhenGameStarts: true
+      }
+    }))
+  `);
+  if (closePreference.config?.minecraftLauncher?.enabled !== true || closePreference.config?.minecraftLauncher?.closeLauncherWhenGameStarts !== true) {
+    throw new Error(`Close-on-game-start preference did not persist with forced profile integration: ${JSON.stringify(closePreference.config?.minecraftLauncher)}`);
+  }
   await evaluate(client, `document.querySelector('#gameTileButton')?.click(); true`);
   await waitFor(client, `window.aht.getStatus('stable').then((status) =>
     document.querySelector('#gameTileButton')?.classList.contains('active')
@@ -725,6 +755,28 @@ try {
     throw new Error(`Stable/PTB report isolation changed after switching back to stable: ${JSON.stringify({ stable: finalStableReports, ptb: launchReportsFor(ptbInstanceDir) })}`);
   }
 
+  await fsp.appendFile(
+    path.join(mcRoot, 'launcher_log.txt'),
+    `[${new Date().toISOString()}] Starting game in folder ${path.join(root, 'Some Other Minecraft Profile')}\n`,
+    'utf8'
+  );
+  await sleep(500);
+  if (child.exitCode !== null) {
+    throw new Error('A different Minecraft profile start incorrectly closed AHT Launcher.');
+  }
+  await fsp.appendFile(
+    path.join(mcRoot, 'launcher_log.txt'),
+    `[${new Date().toISOString()}] Starting game in folder ${instanceDir}\n`,
+    'utf8'
+  );
+  const closeResult = await Promise.race([
+    childExitPromise,
+    sleep(5000).then(() => null)
+  ]);
+  if (!closeResult) {
+    throw new Error('A fresh modpack game-start signal did not close AHT Launcher when the saved preference was enabled.');
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -737,6 +789,8 @@ try {
       syncedRoot: syncedMcRoot
     },
     cleanScanUi,
+    usernameSurfaceAbsent,
+    closeWhenGameStarts: { enabled: true, exit: closeResult },
     launchCommand: playResult.result.command,
     profileSwitch: {
       stable: 'a-hard-time-dregora',

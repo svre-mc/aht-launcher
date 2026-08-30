@@ -24,6 +24,7 @@
   },
   "minecraftLauncher": {
     "enabled": true,
+    "closeLauncherWhenGameStarts": false,
     "profileId": "a-hard-time-dregora",
     "profileName": "A Hard Time",
     "memoryMb": 4096,

@@ -50,6 +50,7 @@ if (!window.aht) {
       },
       minecraftLauncher: {
         enabled: true,
+        closeLauncherWhenGameStarts: false,
         rootDir: "C:\\Users\\Player\\AppData\\Roaming\\.minecraft",
         profileId: "a-hard-time-dregora",
         profileName: "A Hard Time",
@@ -150,6 +151,7 @@ if (!window.aht) {
     mockStatus.config.sync = { enabled: true, sendLocalChanges: false, baseUrl: "", playerLabel: "" };
     mockStatus.config.minecraftLauncher = {
       enabled: true,
+      closeLauncherWhenGameStarts: false,
       rootDir: "",
       profileId: "a-hard-time",
       profileName: "A Hard Time",
@@ -185,7 +187,8 @@ if (!window.aht) {
         ...settings,
         minecraftLauncher: {
           ...mockStatus.config.minecraftLauncher,
-          ...settings.minecraftLauncher
+          ...settings.minecraftLauncher,
+          enabled: true
         }
       };
       const override = typeof mockStatus.config.minecraftLauncher.java8InstallOverride === "boolean"
@@ -226,10 +229,6 @@ if (!window.aht) {
       error: null,
       progress: { phase: "Ready", completed: 0, total: 0, percent: 0 }
     }),
-    accountRegister: async (username) => {
-      mockStatus.identity.minecraftUsername = username;
-      return { ok: true, username };
-    },
     legalStatus: async () => ({
       required: false,
       accepted: true,
@@ -241,6 +240,16 @@ if (!window.aht) {
     }),
     legalAccept: async () => ({ ok: true, acceptedAt: new Date().toISOString() }),
     appExit: async () => ({ ok: true }),
+    windowMinimize: async () => ({ ok: true }),
+    windowClose: async () => ({ ok: true }),
+    likeUpdateLog: async (logId) => {
+      const log = mockUpdateLogs.find((item) => item.id === logId);
+      if (log) {
+        log.liked = true;
+        log.likes = Math.max(0, Number(log.likes) || 0) + 1;
+      }
+      return { ok: true, logId, liked: true, likes: Math.max(0, Number(log?.likes) || 1) };
+    },
     openExternal: async (destination) => ({ ok: destination === "store", opened: destination === "store", destination, target: destination === "store" ? "https://ahardtime.net/shop" : "" }),
     socialList: async () => ({
       available: true,
@@ -535,12 +544,18 @@ if (!window.aht) {
 }
 
 const els = {
+  appFrame: document.querySelector(".app-frame"),
+  workspace: document.querySelector(".workspace"),
+  startupLoader: $("#startupLoader"),
+  sidebarSwitchLoader: $("#sidebarSwitchLoader"),
   tabs: [...document.querySelectorAll(".tab")],
   gameTiles: [...document.querySelectorAll(".game-tile[data-tab]")],
   views: [...document.querySelectorAll(".view")],
   developerTab: $("#developerTab"),
   developerTileButton: $("#developerTileButton"),
   downloadsButton: $("#downloadsButton"),
+  windowMinimizeButton: $("#windowMinimizeButton"),
+  windowCloseButton: $("#windowCloseButton"),
   launcherVersionLabel: $("#launcherVersionLabel"),
   sidebarProgress: $("#sidebarProgress"),
   sidebarProgressLabel: $("#sidebarProgressLabel"),
@@ -567,20 +582,18 @@ const els = {
   newsView: $("#news"),
   newsFeedGrid: $("#newsFeedGrid"),
   newsEmptyState: $("#newsEmptyState"),
-  newsLatestLabel: $("#newsLatestLabel"),
   externalLinks: [...document.querySelectorAll("[data-external-destination]")],
   statusBadge: $("#statusBadge"),
-  versionLine: $("#versionLine"),
   syncStatus: $("#syncStatus"),
   setupNotice: $("#setupNotice"),
   setupAutoButton: $("#setupAutoButton"),
   setupSettingsButton: $("#setupSettingsButton"),
   installedVersion: $("#installedVersion"),
   latestVersion: $("#latestVersion"),
+  launchGameVersion: $("#launchGameVersion"),
   sideInstalledVersion: $("#sideInstalledVersion"),
   ptbSideInstalledVersion: $("#ptbSideInstalledVersion"),
   sidePackTitle: $("#sidePackTitle"),
-  playerPackTitle: $("#playerPackTitle"),
   developerTileTitle: $("#developerTileTitle"),
   instanceDir: $("#instanceDir"),
   minecraftProfile: $("#minecraftProfile"),
@@ -609,11 +622,6 @@ const els = {
   friendsList: $("#friendsList"),
   friendsRequestsList: $("#friendsRequestsList"),
   friendsRequestsBadge: $("#friendsRequestsBadge"),
-  accountOverlay: $("#accountOverlay"),
-  accountForm: $("#accountForm"),
-  minecraftUsernameInput: $("#minecraftUsernameInput"),
-  accountError: $("#accountError"),
-  accountCreateButton: $("#accountCreateButton"),
   diffSummary: $("#diffSummary"),
   activityState: $("#activityState"),
   progressWrap: $("#progressWrap"),
@@ -621,7 +629,6 @@ const els = {
   progressCount: $("#progressCount"),
   progressBar: $("#progressBar"),
   log: $("#log"),
-  updateButton: $("#updateButton"),
   playButton: $("#playButton"),
   copyLatestLaunchReportButton: $("#copyLatestLaunchReportButton"),
   scanButton: $("#scanButton"),
@@ -640,7 +647,6 @@ const els = {
   pickLatestButton: $("#pickLatestButton"),
   proxyUrlInput: $("#proxyUrlInput"),
   syncUrlInput: $("#syncUrlInput"),
-  playerLabelInput: $("#playerLabelInput"),
   instanceInput: $("#instanceInput"),
   minecraftRootInput: $("#minecraftRootInput"),
   openInstancePathButton: $("#openInstancePathButton"),
@@ -650,7 +656,7 @@ const els = {
   minecraftMemoryOutput: $("#minecraftMemoryOutput"),
   playCommandInput: $("#playCommandInput"),
   playArgsInput: $("#playArgsInput"),
-  minecraftProfileEnabledInput: $("#minecraftProfileEnabledInput"),
+  closeLauncherWhenGameStartsInput: $("#closeLauncherWhenGameStartsInput"),
   syncEnabledInput: $("#syncEnabledInput"),
   sendChangesInput: $("#sendChangesInput"),
   pickInstanceButton: $("#pickInstanceButton"),
@@ -768,12 +774,17 @@ const els = {
   developerUpdateLogsList: $("#developerUpdateLogsList"),
   updateLogOverlay: $("#updateLogOverlay"),
   updateLogHero: $("#updateLogHero"),
+  updateLogHeroPlay: $("#updateLogHeroPlay"),
+  updateLogInlineMedia: $("#updateLogInlineMedia"),
   updateLogModalMeta: $("#updateLogModalMeta"),
   updateLogModalTitle: $("#updateLogModalTitle"),
   updateLogModalSubtitle: $("#updateLogModalSubtitle"),
+  updateLogLikeButton: $("#updateLogLikeButton"),
+  updateLogLikeCount: $("#updateLogLikeCount"),
   updateLogArticleBody: $("#updateLogArticleBody"),
   updateLogCloseButton: $("#updateLogCloseButton"),
-  updateLogWatchButton: $("#updateLogWatchButton"),
+  updateLogBottomBackButton: $("#updateLogBottomBackButton"),
+  updateLogBottomLikeButton: $("#updateLogBottomLikeButton"),
   updateLogVideoOverlay: $("#updateLogVideoOverlay"),
   updateLogVideoStage: $("#updateLogVideoStage"),
   updateLogVideoCloseButton: $("#updateLogVideoCloseButton"),
@@ -817,6 +828,8 @@ let scanProgressHideTimer = null;
 let activeUpdateKind = "";
 let activeTabName = "player";
 let activeSidebarPack = "aht";
+let sidebarSwitching = false;
+let queuedSidebarTile = null;
 let playBusy = false;
 const packStatusCache = new Map();
 const releaseValidationByTarget = new Map();
@@ -846,6 +859,21 @@ let friendsSocialState = null;
 const friendsActionRefreshTimers = new Set();
 let currentLegalState = null;
 let activeUpdateLog = null;
+let updateLogReturnContext = null;
+let activeNewsCarouselState = null;
+let newsSurfaceTransitionId = 0;
+const newsSurfaceTransitionTimers = new Set();
+const NEWS_SURFACE_EXIT_MS = 150;
+const NEWS_SURFACE_ENTER_MS = 230;
+const NEWS_CAROUSEL_CROSSFADE_MS = 320;
+const SIDEBAR_SWITCH_EXIT_DELAY_MS = 50;
+const SIDEBAR_SWITCH_EXIT_MS = 180;
+const SIDEBAR_SWITCH_LOAD_HOLD_MS = 180;
+const SIDEBAR_SWITCH_ENTER_MS = 330;
+const STARTUP_MIN_VISIBLE_MS = 700;
+const STARTUP_ESSENTIAL_TIMEOUT_MS = 12_000;
+const STARTUP_ASSET_TIMEOUT_MS = 2_500;
+const STARTUP_FADE_MS = 320;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
 const TOAST_MAX_LIFETIME_MS = 4000;
@@ -859,6 +887,11 @@ function setBadge(text, state = "") {
   els.statusBadge.className = `status-pill ${state}`.trim();
 }
 
+function isEditableSelectionTarget(target) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return Boolean(element?.closest('input, textarea, select, [contenteditable="true"], .allow-selecting'));
+}
+
 function setSyncLine(text) {
   els.syncStatus.textContent = "";
   const dot = document.createElement("span");
@@ -867,63 +900,6 @@ function setSyncLine(text) {
   chevron.className = "profile-chevron";
   chevron.setAttribute("aria-hidden", "true");
   els.syncStatus.append(dot, document.createTextNode(text), chevron);
-}
-
-const POINTER_LIGHT_SELECTOR = [
-  ".brand",
-  ".nav",
-  ".nav-item",
-  ".game-tile:not(.coming-soon)",
-  ".profile-card",
-  ".sidebar-download",
-  ".ghost-button",
-  ".button:not(.modal-icon-button)",
-  ".facts > div",
-  ".feature-card",
-  ".feature-copy-button"
-].join(", ");
-
-function installPointerLighting() {
-  let active = new Set();
-  const staticTargets = document.querySelectorAll(POINTER_LIGHT_SELECTOR);
-  staticTargets.forEach((element) => element.classList.add("pointer-light-surface"));
-
-  const clear = () => {
-    for (const element of active) element.classList.remove("is-pointer-lit");
-    active = new Set();
-  };
-
-  document.addEventListener("pointermove", (event) => {
-    const next = new Set();
-    let element = event.target instanceof Element ? event.target : null;
-    while (element && element !== document.documentElement) {
-      if (element.matches(POINTER_LIGHT_SELECTOR)) {
-        element.classList.add("pointer-light-surface", "is-pointer-lit");
-        const rect = element.getBoundingClientRect();
-        element.style.setProperty("--pointer-x", `${event.clientX - rect.left}px`);
-        element.style.setProperty("--pointer-y", `${event.clientY - rect.top}px`);
-        next.add(element);
-      }
-      element = element.parentElement;
-    }
-    for (const previous of active) {
-      if (!next.has(previous)) previous.classList.remove("is-pointer-lit");
-    }
-    active = next;
-  }, { passive: true });
-  document.addEventListener("pointerleave", clear);
-  window.addEventListener("blur", clear);
-  document.addEventListener("focusin", (event) => {
-    const element = event.target instanceof Element ? event.target.closest(POINTER_LIGHT_SELECTOR) : null;
-    if (!element) return;
-    element.classList.add("pointer-light-surface", "is-pointer-lit");
-    element.style.setProperty("--pointer-x", "50%");
-    element.style.setProperty("--pointer-y", "50%");
-  });
-  document.addEventListener("focusout", (event) => {
-    const element = event.target instanceof Element ? event.target.closest(POINTER_LIGHT_SELECTOR) : null;
-    element?.classList.remove("is-pointer-lit");
-  });
 }
 
 function syncSetupNotice() {
@@ -1075,27 +1051,231 @@ function updateLogMeta(log) {
   return log?.publishedAt ? shortDateTime(log.publishedAt) : "Update Log";
 }
 
-function updateLogDetailMeta(log) {
-  const parts = [updateLogMeta(log)];
-  if (log?.version && log?.publishedAt) parts.push(shortDateTime(log.publishedAt));
-  return parts.filter(Boolean).join("  /  ");
+function updateLogDate(log) {
+  const date = new Date(log?.publishedAt || "");
+  if (Number.isNaN(date.valueOf())) return "Date unavailable";
+  return date.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric"
+  });
 }
 
-function closeUpdateLog() {
-  if (!els.updateLogOverlay) return;
+function updateLogRelativeDate(log) {
+  const published = Date.parse(String(log?.publishedAt || ""));
+  if (!Number.isFinite(published)) return "";
+  const elapsed = Math.max(0, Date.now() - published);
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 31) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} month${months === 1 ? "" : "s"} ago`;
+  const years = Math.floor(days / 365);
+  return `${years} year${years === 1 ? "" : "s"} ago`;
+}
+
+function renderUpdateLogDetailMeta(parent, log) {
+  if (!parent) return;
+  const date = document.createElement("span");
+  date.className = "update-log-modal-date";
+  date.textContent = updateLogDate(log);
+  const relative = document.createElement("span");
+  relative.className = "update-log-modal-relative";
+  relative.textContent = updateLogRelativeDate(log);
+  parent.replaceChildren(...[date, relative].filter((node) => node.textContent));
+}
+
+function updateLogLikeCount(log) {
+  return Math.max(0, Number(log?.likes) || 0);
+}
+
+function updateLogCanLike(log) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(log?.id || ""));
+}
+
+function updateLikeButton(button, log) {
+  if (!button) return;
+  const count = button.querySelector("[data-like-count]") || (button === els.updateLogLikeButton ? els.updateLogLikeCount : null);
+  if (count) count.textContent = String(updateLogLikeCount(log));
+  button.classList.toggle("is-liked", log?.liked === true);
+  const unavailable = !updateLogCanLike(log) || log?.liked === true || !window.aht?.likeUpdateLog;
+  button.disabled = unavailable;
+  button.setAttribute("aria-disabled", String(unavailable));
+  button.setAttribute("aria-label", log?.liked === true ? "You liked this news article" : "Like this news article");
+}
+
+function syncUpdateLogLikeViews(log) {
+  const id = String(log?.id || "");
+  for (const button of document.querySelectorAll(".news-like-button")) {
+    if (button === els.updateLogLikeButton || button.dataset.logId === id) updateLikeButton(button, log);
+  }
+}
+
+async function likeUpdateLogFromButton(log, button) {
+  if (!log || !button || button.disabled || !window.aht?.likeUpdateLog) return;
+  button.classList.add("is-busy");
+  button.disabled = true;
+  try {
+    const result = await window.aht.likeUpdateLog(log.id);
+    log.liked = result?.liked === true;
+    log.likes = Math.max(updateLogLikeCount(log), Number(result?.likes) || 0);
+    syncUpdateLogLikeViews(log);
+  } catch (error) {
+    showToast("Like was not saved", cleanErrorMessage(error), "warn");
+    updateLikeButton(button, log);
+  } finally {
+    button.classList.remove("is-busy");
+  }
+}
+
+function trackNewsSurfaceTimer(callback, delay) {
+  const timer = window.setTimeout(() => {
+    newsSurfaceTransitionTimers.delete(timer);
+    callback();
+  }, delay);
+  newsSurfaceTransitionTimers.add(timer);
+  return timer;
+}
+
+function resetNewsSurfaceTransitionClasses() {
+  els.newsView?.classList.remove("is-transitioning", "is-transition-entering");
+  const surfaces = new Set([
+    els.newsView?.querySelector(".news-view-shell"),
+    els.updateLogOverlay,
+    ...document.querySelectorAll(".news-surface-leaving, .news-surface-entering, .news-surface-entering-active")
+  ]);
+  for (const surface of surfaces) {
+    surface?.classList.remove("news-surface-leaving", "news-surface-entering", "news-surface-entering-active");
+  }
+}
+
+function cancelNewsSurfaceTransition() {
+  newsSurfaceTransitionId += 1;
+  for (const timer of newsSurfaceTransitionTimers) window.clearTimeout(timer);
+  newsSurfaceTransitionTimers.clear();
+  resetNewsSurfaceTransitionClasses();
+}
+
+function transitionNewsSurface(source, incoming, commit, focusTarget = null) {
+  cancelNewsSurfaceTransition();
+  const transitionId = newsSurfaceTransitionId;
+  if (!source || !incoming) {
+    commit();
+    focusTarget?.focus({ preventScroll: true });
+    return;
+  }
+  els.newsView?.classList.add("is-transitioning");
+  source.classList.add("news-surface-leaving");
+  trackNewsSurfaceTimer(() => {
+    if (transitionId !== newsSurfaceTransitionId) return;
+    incoming.classList.add("news-surface-entering");
+    commit();
+    source.classList.remove("news-surface-leaving");
+    void incoming.offsetWidth;
+    els.newsView?.classList.add("is-transition-entering");
+    window.requestAnimationFrame(() => {
+      if (transitionId !== newsSurfaceTransitionId) return;
+      incoming.classList.add("news-surface-entering-active");
+    });
+    trackNewsSurfaceTimer(() => {
+      if (transitionId !== newsSurfaceTransitionId) return;
+      incoming.classList.remove("news-surface-entering", "news-surface-entering-active");
+      els.newsView?.classList.remove("is-transitioning", "is-transition-entering");
+      focusTarget?.focus({ preventScroll: true });
+    }, NEWS_SURFACE_ENTER_MS);
+  }, NEWS_SURFACE_EXIT_MS);
+}
+
+function resetUpdateLogArticle() {
   els.updateLogOverlay.hidden = true;
   els.newsView?.classList.remove("article-open");
   els.updateLogHero.style.backgroundImage = "";
+  els.updateLogHero.disabled = true;
+  els.updateLogHero.classList.remove("is-playable");
+  els.updateLogHero.setAttribute("aria-label", "Update artwork");
+  if (els.updateLogHeroPlay) els.updateLogHeroPlay.hidden = true;
   els.updateLogArticleBody.innerHTML = "";
-  if (els.updateLogWatchButton) els.updateLogWatchButton.hidden = true;
+  if (els.updateLogBottomLikeButton) els.updateLogBottomLikeButton.dataset.logId = "";
   activeUpdateLog = null;
+  updateLogReturnContext = null;
+  els.updateLogCloseButton?.setAttribute("aria-label", "Back to News");
+  els.updateLogBottomBackButton?.setAttribute("aria-label", "Back to News");
   document.body.classList.remove("update-log-open");
 }
 
+function closeUpdateLog(immediate = false) {
+  if (!els.updateLogOverlay) return;
+  const returnContext = updateLogReturnContext || {
+    tab: "news",
+    packKey: activeSidebarPack,
+    focusTarget: null
+  };
+  const focusTarget = returnContext.focusTarget?.isConnected ? returnContext.focusTarget : null;
+  closeUpdateLogVideo();
+  if (immediate || els.updateLogOverlay.hidden) {
+    cancelNewsSurfaceTransition();
+    resetUpdateLogArticle();
+    return;
+  }
+  if (returnContext.tab === "player") {
+    const playerView = document.getElementById("player");
+    transitionNewsSurface(els.updateLogOverlay, playerView, () => {
+      resetUpdateLogArticle();
+      activateTab("player", { preserveNewsArticleTransition: true });
+    }, focusTarget);
+    return;
+  }
+  const feed = els.newsView?.querySelector(".news-view-shell");
+  transitionNewsSurface(els.updateLogOverlay, feed, resetUpdateLogArticle, focusTarget);
+}
+
 function closeUpdateLogVideo() {
-  if (!els.updateLogVideoOverlay) return;
-  els.updateLogVideoOverlay.hidden = true;
-  els.updateLogVideoStage.innerHTML = "";
+  if (els.updateLogVideoOverlay) {
+    els.updateLogVideoOverlay.hidden = true;
+    els.updateLogVideoStage.innerHTML = "";
+  }
+  if (els.updateLogInlineMedia) {
+    els.updateLogInlineMedia.hidden = true;
+    els.updateLogInlineMedia.replaceChildren();
+    els.updateLogInlineMedia.parentElement?.classList.remove("is-media-active");
+  }
+}
+
+function createUpdateLogMediaElement(playable, autoplay = true) {
+  if (!playable) return null;
+  if (playable.type === "youtube") {
+    const iframe = document.createElement("iframe");
+    const url = new URL(playable.url);
+    if (autoplay) url.searchParams.set("autoplay", "1");
+    iframe.src = url.toString();
+    iframe.title = playable.title;
+    iframe.referrerPolicy = "strict-origin-when-cross-origin";
+    iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
+    iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+    iframe.allowFullscreen = true;
+    return iframe;
+  }
+  const video = document.createElement("video");
+  video.src = playable.url;
+  video.controls = true;
+  video.autoplay = autoplay;
+  video.playsInline = true;
+  return video;
+}
+
+function openUpdateLogInlineMedia(log) {
+  const playable = updateLogPlayable(log);
+  if (!playable || !els.updateLogInlineMedia) return;
+  closeUpdateLogVideo();
+  const media = createUpdateLogMediaElement(playable, true);
+  if (!media) return;
+  els.updateLogInlineMedia.replaceChildren(media);
+  els.updateLogInlineMedia.hidden = false;
+  els.updateLogInlineMedia.parentElement?.classList.add("is-media-active");
 }
 
 function appendUpdateLogParagraph(parent, text) {
@@ -1162,64 +1342,255 @@ function renderUpdateLogArticleText(parent, text) {
 
 function openUpdateLog(log) {
   if (!els.updateLogOverlay) return;
+  const articleAlreadyOpen = !els.updateLogOverlay.hidden;
+  if (!articleAlreadyOpen) {
+    updateLogReturnContext = {
+      tab: activeTabName === "news" ? "news" : "player",
+      packKey: activeSidebarPack,
+      focusTarget: document.activeElement instanceof HTMLElement ? document.activeElement : null
+    };
+  }
+  const backDestination = updateLogReturnContext?.tab === "player" ? "Game" : "News";
+  els.updateLogCloseButton?.setAttribute("aria-label", `Back to ${backDestination}`);
+  els.updateLogBottomBackButton?.setAttribute("aria-label", `Back to ${backDestination}`);
+  stopActiveNewsCarouselMedia();
   closeUpdateLogVideo();
   activateTab("news");
   activeUpdateLog = log;
   const imageUrl = updateLogImageUrl(log);
-  els.updateLogModalMeta.textContent = updateLogDetailMeta(log);
+  const playable = updateLogPlayable(log);
+  renderUpdateLogDetailMeta(els.updateLogModalMeta, log);
   els.updateLogModalTitle.textContent = log?.title || "AHT Update Feed";
   els.updateLogModalSubtitle.textContent = String(log?.subtitle || "").trim();
   els.updateLogModalSubtitle.hidden = !els.updateLogModalSubtitle.textContent;
+  if (els.updateLogLikeButton) {
+    els.updateLogLikeButton.dataset.logId = String(log?.id || "");
+    updateLikeButton(els.updateLogLikeButton, log);
+  }
+  if (els.updateLogBottomLikeButton) {
+    els.updateLogBottomLikeButton.dataset.logId = String(log?.id || "");
+    updateLikeButton(els.updateLogBottomLikeButton, log);
+  }
   els.updateLogHero.classList.toggle("has-image", Boolean(imageUrl));
+  els.updateLogHero.classList.toggle("is-playable", Boolean(playable));
+  els.updateLogHero.disabled = !playable;
+  els.updateLogHero.setAttribute("aria-label", playable ? `Play media for ${log?.title || "this update"}` : "Update artwork");
+  if (els.updateLogHeroPlay) els.updateLogHeroPlay.hidden = !playable;
   els.updateLogHero.style.backgroundImage = imageUrl ? `linear-gradient(180deg, rgba(5, 8, 9, 0.04), rgba(5, 8, 9, 0.22)), url("${imageUrl.replace(/"/g, "%22")}"), url("assets/aht-cover.png")` : "";
   renderUpdateLogArticleText(els.updateLogArticleBody, updateLogText(log));
-  if (els.updateLogWatchButton) els.updateLogWatchButton.hidden = !updateLogPlayable(log);
-  els.updateLogOverlay.hidden = false;
-  els.newsView?.classList.add("article-open");
-  els.updateLogOverlay.scrollTop = 0;
-  document.body.classList.add("update-log-open");
-  window.setTimeout(() => els.updateLogCloseButton?.focus(), 0);
+  const commit = () => {
+    els.updateLogOverlay.hidden = false;
+    els.newsView?.classList.add("article-open");
+    els.updateLogOverlay.scrollTop = 0;
+    document.body.classList.add("update-log-open");
+  };
+  if (articleAlreadyOpen) {
+    cancelNewsSurfaceTransition();
+    commit();
+    return;
+  }
+  transitionNewsSurface(els.newsView?.querySelector(".news-view-shell"), els.updateLogOverlay, commit, els.updateLogCloseButton);
 }
 
 function openUpdateLogVideo(log) {
   const playable = updateLogPlayable(log);
   if (!playable || !els.updateLogVideoOverlay) return;
   els.updateLogVideoStage.innerHTML = "";
-  if (playable.type === "youtube") {
-    const iframe = document.createElement("iframe");
-    iframe.src = playable.url;
-    iframe.title = playable.title;
-    iframe.referrerPolicy = "strict-origin-when-cross-origin";
-    iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
-    iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
-    iframe.allowFullscreen = true;
-    els.updateLogVideoStage.appendChild(iframe);
-  } else {
-    const video = document.createElement("video");
-    video.src = playable.url;
-    video.controls = true;
-    video.autoplay = true;
-    video.playsInline = true;
-    els.updateLogVideoStage.appendChild(video);
-  }
+  const media = createUpdateLogMediaElement(playable, true);
+  if (media) els.updateLogVideoStage.appendChild(media);
   els.updateLogVideoOverlay.hidden = false;
+}
+
+function createNewsPlayGlyph() {
+  const glyph = document.createElement("span");
+  glyph.className = "play-glyph";
+  const icon = document.createElement("span");
+  icon.className = "button-icon icon-play";
+  icon.setAttribute("aria-hidden", "true");
+  glyph.appendChild(icon);
+  return glyph;
+}
+
+function createNewsCarouselSlide(log, index) {
+  const imageUrl = updateLogImageUrl(log);
+  const artClasses = ["aht-art", "patch-art", "sync-art"];
+  const slide = document.createElement("span");
+  slide.className = `news-carousel-slide feature-art ${imageUrl ? "has-image" : (artClasses[index % artClasses.length] || "patch-art")}`;
+  slide.setAttribute("aria-hidden", "true");
+  if (imageUrl) {
+    slide.style.backgroundImage = `linear-gradient(180deg, rgba(10, 12, 12, 0.04), rgba(10, 12, 12, 0.28)), url("${imageUrl.replace(/"/g, "%22")}"), url("assets/aht-cover.png")`;
+  }
+  if (updateLogPlayable(log)) slide.appendChild(createNewsPlayGlyph());
+  return slide;
+}
+
+function updateNewsCarouselControls(state) {
+  const log = state.slides[state.activeIndex];
+  const title = String(log?.title || "AHT Update Feed").replace(/\s*(?:\u00BB|\u203A|>>?)\s*$/u, "").trim();
+  state.captionTitle.textContent = title || "AHT Update Feed";
+  state.mediaButton.setAttribute("aria-label", updateLogPlayable(log)
+    ? `Play media for ${title || "this update"}`
+    : `Read ${title || "this update"}`);
+  state.card.setAttribute("aria-label", `Featured news: ${title || "AHT Update Feed"}`);
+  state.card.dataset.activeIndex = String(state.activeIndex);
+  for (const [index, button] of state.pagerButtons.entries()) {
+    const active = index === state.activeIndex;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-current", active ? "true" : "false");
+  }
+}
+
+function stopNewsCarouselMedia(state) {
+  if (!state) return;
+  state.mediaStage.hidden = true;
+  state.mediaStage.replaceChildren();
+  state.card.classList.remove("is-media-active");
+  state.mediaButton.setAttribute("aria-expanded", "false");
+  if (activeNewsCarouselState === state) activeNewsCarouselState = null;
+}
+
+function stopActiveNewsCarouselMedia() {
+  if (activeNewsCarouselState) stopNewsCarouselMedia(activeNewsCarouselState);
+}
+
+function playNewsCarouselMedia(state) {
+  const log = state?.slides?.[state.activeIndex];
+  const playable = updateLogPlayable(log);
+  if (!playable) {
+    if (log) openUpdateLog(log);
+    return;
+  }
+  stopActiveNewsCarouselMedia();
+  const media = createUpdateLogMediaElement(playable, true);
+  if (!media) return;
+  state.mediaStage.replaceChildren(media);
+  state.mediaStage.hidden = false;
+  state.card.classList.add("is-media-active");
+  state.mediaButton.setAttribute("aria-expanded", "true");
+  activeNewsCarouselState = state;
+}
+
+function selectNewsCarouselSlide(state, requestedIndex) {
+  if (!state || state.slides.length < 2) return;
+  const nextIndex = (requestedIndex + state.slides.length) % state.slides.length;
+  if (nextIndex === state.activeIndex && !state.card.classList.contains("is-media-active")) return;
+  stopNewsCarouselMedia(state);
+  if (state.switchTimer) window.clearTimeout(state.switchTimer);
+  for (const stale of state.mediaButton.querySelectorAll(".news-carousel-slide.is-exiting")) stale.remove();
+  const previousLayer = state.layer;
+  const nextLayer = createNewsCarouselSlide(state.slides[nextIndex], nextIndex);
+  state.mediaButton.appendChild(nextLayer);
+  void nextLayer.offsetWidth;
+  previousLayer.classList.remove("is-active");
+  previousLayer.classList.add("is-exiting");
+  nextLayer.classList.add("is-active");
+  state.layer = nextLayer;
+  state.activeIndex = nextIndex;
+  state.card.classList.add("is-switching");
+  state.caption.classList.add("is-switching");
+  updateNewsCarouselControls(state);
+  state.switchTimer = window.setTimeout(() => {
+    previousLayer.remove();
+    state.card.classList.remove("is-switching");
+    state.caption.classList.remove("is-switching");
+    state.switchTimer = null;
+  }, NEWS_CAROUSEL_CROSSFADE_MS);
+}
+
+function buildNewsFeatureCarousel(logs) {
+  const slides = Array.isArray(logs) ? logs.filter(Boolean).slice(0, 10) : [];
+  if (!slides.length) return null;
+  const card = document.createElement("article");
+  card.className = "feature-card large news-feed-card news-feature-carousel";
+  card.dataset.slideCount = String(slides.length);
+
+  const stage = document.createElement("div");
+  stage.className = "news-carousel-stage";
+  const mediaButton = document.createElement("button");
+  mediaButton.type = "button";
+  mediaButton.className = "news-carousel-media";
+  mediaButton.setAttribute("aria-expanded", "false");
+  const layer = createNewsCarouselSlide(slides[0], 0);
+  layer.classList.add("is-active");
+  mediaButton.appendChild(layer);
+
+  const caption = document.createElement("div");
+  caption.className = "news-carousel-caption";
+  const captionTitle = document.createElement("strong");
+  captionTitle.className = "news-carousel-caption-title";
+  caption.appendChild(captionTitle);
+
+  const previous = document.createElement("button");
+  previous.type = "button";
+  previous.className = "news-carousel-arrow news-carousel-previous";
+  previous.setAttribute("aria-label", "Previous featured news");
+  previous.textContent = "\u2039";
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "news-carousel-arrow news-carousel-next";
+  next.setAttribute("aria-label", "Next featured news");
+  next.textContent = "\u203A";
+  previous.hidden = slides.length < 2;
+  next.hidden = slides.length < 2;
+
+  const pager = document.createElement("div");
+  pager.className = "news-carousel-pager";
+  pager.setAttribute("aria-label", "Featured news slides");
+  const pagerButtons = slides.map((log, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", `Show featured news ${index + 1}: ${log?.title || "Update"}`);
+    pager.appendChild(button);
+    return button;
+  });
+
+  const mediaStage = document.createElement("div");
+  mediaStage.className = "news-carousel-inline-media";
+  mediaStage.hidden = true;
+  stage.append(mediaButton, caption, previous, next, pager, mediaStage);
+  card.appendChild(stage);
+  const state = {
+    card,
+    stage,
+    slides,
+    activeIndex: 0,
+    layer,
+    mediaButton,
+    mediaStage,
+    caption,
+    captionTitle,
+    pagerButtons,
+    switchTimer: null
+  };
+  mediaButton.addEventListener("click", () => playNewsCarouselMedia(state));
+  previous.addEventListener("click", () => selectNewsCarouselSlide(state, state.activeIndex - 1));
+  next.addEventListener("click", () => selectNewsCarouselSlide(state, state.activeIndex + 1));
+  pagerButtons.forEach((button, index) => button.addEventListener("click", () => selectNewsCarouselSlide(state, index)));
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    selectNewsCarouselSlide(state, state.activeIndex + (event.key === "ArrowLeft" ? -1 : 1));
+  });
+  updateNewsCarouselControls(state);
+  return card;
 }
 
 function buildUpdateLogCard(log, index, surface = "home") {
   const artClasses = ["aht-art", "patch-art", "sync-art"];
   const playable = updateLogPlayable(log);
   const imageUrl = updateLogImageUrl(log);
-  const card = document.createElement("article");
+  const card = document.createElement(surface === "news" ? "article" : "button");
+  if (surface !== "news") card.type = "button";
   card.className = `feature-card ${index === 0 ? "large" : ""} ${playable ? "is-playable" : ""} ${surface === "news" ? "news-feed-card" : "home-news-card"}`.trim();
+  card.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
+  if (surface !== "news") card.addEventListener("click", () => openUpdateLog(log));
 
-  const art = document.createElement("button");
-  art.type = "button";
-  art.className = `feature-art feature-art-button ${imageUrl ? "has-image" : (artClasses[index % artClasses.length] || "patch-art")}`;
-  art.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
-  if (imageUrl) art.style.backgroundImage = `linear-gradient(180deg, rgba(10, 12, 12, 0.04), rgba(10, 12, 12, 0.36)), url("${imageUrl.replace(/"/g, "%22")}")`;
-  art.addEventListener("click", () => openUpdateLog(log));
+  const art = document.createElement("span");
+  art.className = `feature-art ${imageUrl ? "has-image" : (artClasses[index % artClasses.length] || "patch-art")}`;
+  art.setAttribute("aria-hidden", "true");
+  if (imageUrl) art.style.backgroundImage = `linear-gradient(180deg, rgba(10, 12, 12, 0.04), rgba(10, 12, 12, 0.36)), url("${imageUrl.replace(/"/g, "%22")}"), url("assets/aht-cover.png")`;
   if (playable) {
-    const glyph = document.createElement("div");
+    const glyph = document.createElement("span");
     glyph.className = "play-glyph";
     const icon = document.createElement("span");
     icon.className = "button-icon icon-play";
@@ -1228,24 +1599,61 @@ function buildUpdateLogCard(log, index, surface = "home") {
     art.appendChild(glyph);
   }
 
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.className = "feature-copy feature-copy-button";
-  copy.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
-  copy.addEventListener("click", () => openUpdateLog(log));
+  const copy = document.createElement("span");
+  copy.className = "feature-copy";
   const meta = document.createElement("span");
   meta.className = "feature-meta";
+  const date = document.createElement("span");
+  date.className = "feature-date";
+  date.textContent = updateLogDate(log);
+  const relative = document.createElement("span");
+  relative.className = "feature-relative-date";
+  relative.textContent = updateLogRelativeDate(log);
   const title = document.createElement("strong");
-  const body = document.createElement("p");
+  const arrow = document.createElement("span");
+  arrow.className = "news-card-arrow";
+  arrow.textContent = "\u00BB";
+  arrow.setAttribute("aria-hidden", "true");
+  const headline = document.createElement("span");
+  headline.className = "news-card-headline";
+  const body = document.createElement("span");
   body.className = "feature-summary";
-  const cta = document.createElement("span");
-  cta.className = "feature-cta";
-  meta.textContent = updateLogDetailMeta(log);
-  title.textContent = log?.title || "AHT Update Feed";
+  if (surface === "news") meta.append(date, relative);
+  else meta.textContent = updateLogMeta(log);
+  const rawTitle = String(log?.title || "AHT Update Feed").trim();
+  title.textContent = surface === "news"
+    ? (rawTitle.replace(/\s*(?:\u00BB|\u203A|>>?)\s*$/u, "").trim() || rawTitle)
+    : rawTitle;
+  headline.append(title, arrow);
   body.textContent = updateLogSummary(log?.text || log?.body || "", surface === "news" ? 220 : 120);
-  cta.textContent = "Read article  ›";
-  copy.append(meta, title, body, cta);
-  card.append(art, copy);
+  if (surface === "news") copy.append(meta, headline, body);
+  else copy.append(meta, title, body);
+  if (surface === "news") {
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "news-card-open";
+    openButton.setAttribute("aria-label", `Read ${log?.title || "update log"}`);
+    openButton.addEventListener("click", () => openUpdateLog(log));
+    openButton.append(art, copy);
+    card.appendChild(openButton);
+    if (index !== 0) {
+      const likeButton = document.createElement("button");
+      likeButton.type = "button";
+      likeButton.className = "news-like-button news-card-like";
+      likeButton.dataset.logId = String(log?.id || "");
+      const icon = document.createElement("span");
+      icon.className = "news-like-icon";
+      icon.setAttribute("aria-hidden", "true");
+      const count = document.createElement("span");
+      count.dataset.likeCount = "true";
+      likeButton.append(icon, count);
+      updateLikeButton(likeButton, log);
+      likeButton.addEventListener("click", () => likeUpdateLogFromButton(log, likeButton));
+      card.appendChild(likeButton);
+    }
+  } else {
+    card.append(art, copy);
+  }
   return card;
 }
 
@@ -1259,16 +1667,22 @@ function renderUpdateLogs(logs = []) {
   }
 
   if (els.newsFeedGrid) {
+    stopActiveNewsCarouselMedia();
     els.newsFeedGrid.innerHTML = "";
     els.newsFeedGrid.hidden = allItems.length === 0;
-    for (const [index, log] of allItems.entries()) {
-      els.newsFeedGrid.appendChild(buildUpdateLogCard(log, index, "news"));
+    if (allItems.length) {
+      const featureSlides = [
+        allItems[0],
+        ...allItems.slice(1).filter((log) => updateLogImageUrl(log) || updateLogPlayable(log))
+      ];
+      const carousel = buildNewsFeatureCarousel(featureSlides);
+      if (carousel) els.newsFeedGrid.appendChild(carousel);
+      for (const [offset, log] of allItems.slice(1).entries()) {
+        els.newsFeedGrid.appendChild(buildUpdateLogCard(log, offset + 1, "news"));
+      }
     }
   }
   if (els.newsEmptyState) els.newsEmptyState.hidden = allItems.length > 0;
-  if (els.newsLatestLabel) {
-    els.newsLatestLabel.textContent = allItems.length ? updateLogMeta(allItems[0]) : "No published updates";
-  }
 }
 
 function minecraftUsernameError(username) {
@@ -1280,43 +1694,7 @@ function minecraftUsernameError(username) {
 }
 
 function accountUsername(status = currentStatus) {
-  return status?.identity?.minecraftUsername || status?.config?.sync?.playerLabel || "";
-}
-
-function renderAccountGate(status) {
-  if (!els.accountOverlay) return;
-  const shouldGate = !status.developerMode && !status.identity?.minecraftUsername;
-  els.accountOverlay.hidden = !shouldGate;
-  if (shouldGate) {
-    window.setTimeout(() => els.minecraftUsernameInput.focus(), 0);
-  } else {
-    els.accountError.textContent = "";
-  }
-}
-
-async function submitAccount() {
-  const username = els.minecraftUsernameInput.value.trim();
-  const validation = minecraftUsernameError(username);
-  if (validation) {
-    els.accountError.textContent = validation;
-    return;
-  }
-  setUnavailable(els.accountCreateButton, true);
-  els.accountError.textContent = "";
-  try {
-    const result = await window.aht.accountRegister(username);
-    els.accountOverlay.hidden = true;
-    els.playerLabelView.textContent = result.username || username;
-    showToast("Account created", "Launcher access is ready.", "success");
-    await refresh();
-  } catch (error) {
-    const message = cleanErrorMessage(error);
-    els.accountError.textContent = /not available/i.test(message)
-      ? "That username is not available."
-      : message;
-  } finally {
-    setUnavailable(els.accountCreateButton, false);
-  }
+  return status?.identity?.minecraftUsername || "";
 }
 
 function showLegalDocument(kind = "terms") {
@@ -2731,15 +3109,43 @@ function shortDateTime(value) {
   });
 }
 
+function renderPrimaryAction(status = currentStatus) {
+  if (!els.playButton) return;
+  const installMode = !status?.installed?.version;
+  const updateMode = !installMode && Boolean(status?.updateRequired);
+  const packageActionMode = installMode || updateMode;
+  const updateRunning = Boolean(lastUpdateState?.running);
+  const launcherUpdateRequired = Boolean(status?.launcherUpdate?.updateRequired);
+  const actionBusy = playBusy || updateRunning;
+  const actionMode = installMode ? "install" : (updateMode ? "update" : "play");
+  const label = installMode
+    ? (updateRunning ? "Installing..." : "Install")
+    : (updateMode
+      ? (updateRunning ? "Updating..." : "Update")
+      : (playBusy ? "Preparing..." : "Play"));
+  const iconClass = packageActionMode ? "icon-download" : "icon-play";
+  els.playButton.dataset.actionMode = actionMode;
+  els.playButton.classList.toggle("is-install-action", installMode);
+  els.playButton.classList.toggle("is-update-action", updateMode);
+  els.playButton.classList.toggle("is-play-action", !packageActionMode);
+  els.playButton.setAttribute("aria-busy", actionBusy ? "true" : "false");
+  els.playButton.innerHTML = `<span class="button-icon ${iconClass}" aria-hidden="true"></span><span class="primary-action-label">${label}</span>`;
+  const unavailable = packageActionMode
+    ? (launcherUpdateRequired || Boolean(status?.updateBlockedReason) || !status?.latest || actionBusy)
+    : actionBusy;
+  setUnavailable(els.playButton, unavailable);
+  els.playButton.title = installMode
+    ? (status?.updateBlockedReason || (updateRunning ? "Installing the selected AHT pack" : "Install the selected AHT pack"))
+    : (updateMode
+      ? (status?.updateBlockedReason || (updateRunning ? "Installing the selected AHT update" : "Update the selected AHT installation"))
+      : (playBusy
+        ? "Preparing the exact Minecraft Launcher profile"
+        : (status?.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing."))));
+}
+
 function setPlayBusy(busy) {
   playBusy = Boolean(busy);
-  if (!els.playButton) return;
-  els.playButton.setAttribute("aria-busy", playBusy ? "true" : "false");
-  els.playButton.innerHTML = `<span class="button-icon icon-play" aria-hidden="true"></span>${playBusy ? "Preparing..." : "Play"}`;
-  if (playBusy) {
-    setUnavailable(els.playButton, true);
-    els.playButton.title = "Preparing the exact Minecraft Launcher profile";
-  }
+  renderPrimaryAction(currentStatus);
 }
 
 function normalizePlayerPlatform(value = "") {
@@ -3440,7 +3846,7 @@ function serializeSettings() {
   const existingDeveloper = currentStatus?.config?.developer || {};
   const existingSync = currentStatus?.config?.sync || {};
   const existingCurseForge = currentStatus?.config?.curseforge || {};
-  const username = currentStatus?.identity?.minecraftUsername || els.playerLabelInput.value.trim();
+  const username = currentStatus?.identity?.minecraftUsername || "";
   const feedUrl = playerFeedUrl();
   const workerBase = workerBaseFromFeedUrl(feedUrl);
   const proxyBase = workerUrlFromFeedUrl(feedUrl, "cf/");
@@ -3467,7 +3873,8 @@ function serializeSettings() {
       keyId: "aht-launcher-proof-v1"
     },
     minecraftLauncher: {
-      enabled: els.minecraftProfileEnabledInput.checked,
+      enabled: true,
+      closeLauncherWhenGameStarts: els.closeLauncherWhenGameStartsInput.checked,
       rootDir: els.minecraftRootInput.value.trim(),
       profileName: els.minecraftProfileNameInput.value.trim(),
       memoryMb: Number(els.minecraftMemoryInput.value || DEFAULT_MEMORY_MB)
@@ -3507,19 +3914,17 @@ function serializeSettings() {
 }
 function fillSettings(status) {
   const config = status.config;
-  const username = status.identity?.minecraftUsername || config.sync?.playerLabel || "";
   setInputValue(els.latestUrlInput, config.latestUrl || "");
   setInputValue(els.playerFeedUrlInput, config.latestUrl || "");
   setInputValue(els.proxyUrlInput, config.curseforge?.proxyBaseUrl || "");
   setInputValue(els.syncUrlInput, config.sync?.baseUrl || "");
-  setInputValue(els.playerLabelInput, username);
   setInputValue(els.instanceInput, config.instanceDir || "");
   setInputValue(els.minecraftRootInput, config.minecraftLauncher?.rootDir || status.minecraftProfile?.rootDir || "");
   setInputValue(els.minecraftProfileNameInput, config.minecraftLauncher?.profileName || status.minecraftProfile?.profileName || "");
   setMemoryValue(config.minecraftLauncher?.memoryMb || DEFAULT_MEMORY_MB);
   setInputValue(els.playCommandInput, config.playCommand?.command || "");
   setInputValue(els.playArgsInput, Array.isArray(config.playCommand?.args) ? config.playCommand.args.join(" ") : "");
-  els.minecraftProfileEnabledInput.checked = config.minecraftLauncher?.enabled !== false;
+  els.closeLauncherWhenGameStartsInput.checked = config.minecraftLauncher?.closeLauncherWhenGameStarts === true;
   els.syncEnabledInput.checked = config.sync?.enabled !== false;
   els.sendChangesInput.checked = config.sync?.sendLocalChanges !== false;
   setInputValue(els.adminUrlInput, config.developer?.adminBaseUrl || config.sync?.baseUrl || "");
@@ -3608,16 +4013,15 @@ function renderStatus(status) {
   const installedVersion = status.installed?.version || null;
   const configured = Boolean(status.config.latestUrl);
   const installedLabel = installedVersion ? `v.${installedVersion}` : "Not Installed";
-  els.versionLine.textContent = installedLabel;
   if (els.launcherVersionLabel) els.launcherVersionLabel.textContent = launcherVersion;
   els.installedVersion.textContent = installedVersion || "Not Installed";
   els.latestVersion.textContent = latestVersion;
+  if (els.launchGameVersion) els.launchGameVersion.textContent = installedVersion || "Not installed";
   if (statusPack === "ptb") {
     if (els.ptbSideInstalledVersion) els.ptbSideInstalledVersion.textContent = installedLabel;
   } else {
     els.sideInstalledVersion.textContent = installedLabel;
   }
-  if (els.playerPackTitle) els.playerPackTitle.textContent = status.releaseName || (statusPack === "ptb" ? "A Hard Time PTB" : "A Hard Time");
   if (els.instanceDir) els.instanceDir.textContent = status.config.instanceDir || "-";
   if (status.minecraftProfile?.versionId) {
     const profileState = status.minecraftProfile.loaderInstalled ? "ready" : "loader missing";
@@ -3703,26 +4107,23 @@ function renderStatus(status) {
 
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
-  setUnavailable(els.updateButton, launcherUpdateRequired || Boolean(status.updateBlockedReason) || !status.latest || !status.updateRequired || updateRunning);
-  setUnavailable(els.playButton, playBusy || updateRunning);
   setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
-  els.updateButton.title = status.updateBlockedReason || (status.updateRequired ? "Update pack" : "No update available.");
-  els.playButton.title = playBusy
-    ? "Preparing the exact Minecraft Launcher profile"
-    : (status.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing."));
+  renderPrimaryAction(status);
   if (shouldShowUpdateProgress(lastUpdateState)) {
     setProgress(true, estimateProgress(lastUpdateState), updateProgressLabel(lastUpdateState));
   } else {
     setProgress(false);
   }
   fillSettings(status);
-  renderAccountGate(status);
   renderDownloads();
 }
 
-async function refresh(packKey = activeSidebarPack) {
-  renderStatus(await window.aht.getStatus(packKey));
+async function refresh(packKey = activeSidebarPack, options = {}) {
+  const status = await window.aht.getStatus(packKey);
+  if (options.renderGate) await options.renderGate;
+  renderStatus(status);
   lastStatusRefreshAt = Date.now();
+  return status;
 }
 
 async function refreshQuietly() {
@@ -3734,18 +4135,188 @@ async function refreshQuietly() {
   }
 }
 
-function activateTab(name) {
-  activeTabName = name;
+function syncNavigationSelection(name = activeTabName, packKey = activeSidebarPack) {
   els.tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === name));
   els.gameTiles.forEach((tile) => {
     const sameTab = tile.dataset.tab === "player"
       ? ["player", "news", "settings"].includes(name)
       : tile.dataset.tab === name;
-    const samePack = !tile.dataset.pack || tile.dataset.pack === activeSidebarPack;
+    const samePack = !tile.dataset.pack || tile.dataset.pack === packKey;
     tile.classList.toggle("active", sameTab && samePack);
   });
+}
+
+function activateTab(name, options = {}) {
+  if (name !== "news" && activeTabName === "news" && options.preserveNewsArticleTransition !== true) {
+    stopActiveNewsCarouselMedia();
+    if (!els.updateLogOverlay.hidden || els.newsView?.classList.contains("is-transitioning")) closeUpdateLog(true);
+  }
+  activeTabName = name;
+  syncNavigationSelection(name, activeSidebarPack);
   els.views.forEach((view) => view.classList.toggle("active", view.id === name));
   syncSetupNotice();
+}
+
+function waitForUiDelay(delayMs) {
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+}
+
+function waitForNextPaint() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(fallback);
+      resolve();
+    };
+    const fallback = window.setTimeout(finish, 80);
+    window.requestAnimationFrame(finish);
+  });
+}
+
+async function transitionSidebarSelection(tile) {
+  if (!tile || tile.disabled) return;
+  if (sidebarSwitching) {
+    queuedSidebarTile = tile;
+    return;
+  }
+  const previousPack = activeSidebarPack;
+  const previousTab = activeTabName;
+  const nextPack = tile.dataset.pack || previousPack;
+  const nextTab = tile.dataset.tab || previousTab;
+  if (nextPack === previousPack && nextTab === previousTab) return;
+  if (nextPack !== previousPack && (updatePoll || lastUpdateState?.running)) {
+    showToast("Update in progress", "Finish the current pack operation before switching packs.", "info");
+    return;
+  }
+
+  const sourceView = els.views.find((view) => view.classList.contains("active")) || null;
+  sidebarSwitching = true;
+  activeSidebarPack = nextPack;
+  syncNavigationSelection(nextTab, nextPack);
+  els.workspace?.classList.add("is-sidebar-switching");
+  els.workspace?.setAttribute("aria-busy", "true");
+
+  const exitGate = (async () => {
+    await waitForUiDelay(SIDEBAR_SWITCH_EXIT_DELAY_MS);
+    sourceView?.classList.add("sidebar-view-leaving");
+    setBadge("Checking", "warn");
+    await waitForUiDelay(SIDEBAR_SWITCH_EXIT_MS);
+  })();
+  const minimumEnterGate = (async () => {
+    await exitGate;
+    await waitForUiDelay(SIDEBAR_SWITCH_LOAD_HOLD_MS);
+  })();
+  const statusResultPromise = refresh(nextPack, { renderGate: exitGate }).then(
+    (status) => ({ status, error: null }),
+    (error) => ({ status: null, error })
+  );
+
+  try {
+    const [statusResult] = await Promise.all([statusResultPromise, minimumEnterGate]);
+    let incomingView = document.getElementById(nextTab) || sourceView;
+    if (statusResult.error) {
+      activeSidebarPack = previousPack;
+      syncNavigationSelection(previousTab, previousPack);
+      incomingView = sourceView;
+      showToast("Pack status failed", cleanErrorMessage(statusResult.error), "error");
+    } else {
+      incomingView?.classList.add("sidebar-view-entering");
+      activateTab(nextTab);
+    }
+
+    if (statusResult.error) incomingView?.classList.add("sidebar-view-entering");
+    sourceView?.classList.remove("sidebar-view-leaving");
+    void incomingView?.offsetWidth;
+    await waitForNextPaint();
+    await waitForNextPaint();
+    els.workspace?.classList.add("is-sidebar-switch-entering");
+    incomingView?.classList.add("sidebar-view-entering-active");
+    await waitForUiDelay(SIDEBAR_SWITCH_ENTER_MS);
+  } finally {
+    for (const view of els.views) {
+      view.classList.remove("sidebar-view-leaving", "sidebar-view-entering", "sidebar-view-entering-active");
+    }
+    els.workspace?.classList.remove("is-sidebar-switching", "is-sidebar-switch-entering");
+    els.workspace?.removeAttribute("aria-busy");
+    sidebarSwitching = false;
+    const queuedTile = queuedSidebarTile;
+    queuedSidebarTile = null;
+    if (queuedTile && !queuedTile.disabled) {
+      window.setTimeout(() => {
+        void transitionSidebarSelection(queuedTile);
+      }, 0);
+    }
+  }
+}
+
+function waitForWindowLoad() {
+  if (document.readyState === "complete") return Promise.resolve();
+  return new Promise((resolve) => window.addEventListener("load", resolve, { once: true }));
+}
+
+async function waitForCriticalImages() {
+  const imageSettles = [...document.images].map((image) => {
+    if (image.complete) return typeof image.decode === "function" ? image.decode().catch(() => {}) : Promise.resolve();
+    return new Promise((resolve) => {
+      image.addEventListener("load", resolve, { once: true });
+      image.addEventListener("error", resolve, { once: true });
+    });
+  });
+  await Promise.allSettled(imageSettles);
+}
+
+function renderInitialStatusError(error) {
+  const message = cleanErrorMessage(error);
+  setBadge("Error", "bad");
+  setLog(message);
+  setUnavailable(els.playButton, false);
+  els.playButton.title = "Run the launch checks and create a support report if anything fails.";
+  showToast("Launcher error", message, "error", {
+    context: "play:start",
+    packKey: activeSidebarPack,
+    copyLabel: "Click here to copy"
+  });
+}
+
+function revealLauncher() {
+  if (!document.body.classList.contains("is-booting")) return;
+  els.appFrame?.removeAttribute("inert");
+  els.appFrame?.removeAttribute("aria-hidden");
+  els.startupLoader?.setAttribute("aria-hidden", "true");
+  document.body.classList.add("is-launcher-ready");
+  document.body.classList.remove("is-booting");
+  window.setTimeout(() => {
+    if (els.startupLoader) els.startupLoader.hidden = true;
+  }, STARTUP_FADE_MS);
+}
+
+async function bootstrapLauncher() {
+  const startedAt = performance.now();
+  let essentialsSettled = false;
+  const fontsReady = document.fonts?.ready || Promise.resolve();
+  const initialStatusReady = refresh().catch((error) => {
+    renderInitialStatusError(error);
+  });
+  const essentials = Promise.allSettled([
+    loadLegalGate(),
+    initialStatusReady,
+    waitForWindowLoad(),
+    fontsReady
+  ]).then(() => {
+    essentialsSettled = true;
+  });
+  await Promise.race([essentials, waitForUiDelay(STARTUP_ESSENTIAL_TIMEOUT_MS)]);
+  if (!essentialsSettled && !currentStatus) {
+    renderInitialStatusError(new Error("Launcher startup timed out while loading status."));
+  }
+  await Promise.race([waitForCriticalImages(), waitForUiDelay(STARTUP_ASSET_TIMEOUT_MS)]);
+  const remaining = Math.max(0, STARTUP_MIN_VISIBLE_MS - (performance.now() - startedAt));
+  if (remaining) await waitForUiDelay(remaining);
+  await waitForNextPaint();
+  await waitForNextPaint();
+  revealLauncher();
 }
 
 async function openExternalDestination(button) {
@@ -3793,6 +4364,7 @@ async function pollUpdate() {
     return;
   }
   lastUpdateState = state;
+  renderPrimaryAction(currentStatus);
   const lines = [...state.lines];
   if (els.activityState) els.activityState.textContent = state.running ? "Running" : "Idle";
   setProgress(shouldShowUpdateProgress(state), estimateProgress(state), updateProgressLabel(state));
@@ -3851,9 +4423,8 @@ async function startUpdate(forceRepair, options = {}) {
   setBadge(forceRepair ? "Repairing" : "Updating", "warn");
   if (els.activityState) els.activityState.textContent = forceRepair ? "Repairing" : "Updating";
   setProgress(true, 3, forceRepair ? "Preparing repair" : "Preparing update");
-  setUnavailable(els.updateButton, true);
-  setUnavailable(els.playButton, true);
   setUnavailable(els.scanButton, true);
+  renderPrimaryAction(currentStatus);
   setLog("");
   renderDownloads(lastUpdateState);
   showToast(forceRepair ? "Repair started" : "Update started", "Progress is shown in the sidebar.", "info");
@@ -3975,7 +4546,6 @@ async function scanFilesForRepair() {
   }
   window.clearTimeout(scanProgressHideTimer);
   setUnavailable(els.scanButton, true);
-  setUnavailable(els.updateButton, true);
   setUnavailable(els.playButton, true);
   setBadge("Scanning", "warn");
   setProgress(true, 8, "Scanning files");
@@ -4016,9 +4586,7 @@ async function scanFilesForRepair() {
   } finally {
     setUnavailable(els.scanButton, false);
     if (currentStatus) {
-      const updateRunning = Boolean(lastUpdateState?.running);
-      setUnavailable(els.updateButton, Boolean(currentStatus.updateBlockedReason) || !currentStatus.latest || !currentStatus.updateRequired || updateRunning);
-      setUnavailable(els.playButton, playBusy || updateRunning);
+      renderPrimaryAction(currentStatus);
     }
     if (scanCompleted) {
       const scanLog = currentLogText();
@@ -4070,28 +4638,20 @@ async function applyRecommendedSetup() {
   }
 }
 
-els.tabs.forEach((tab) => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
+els.tabs.forEach((tab) => tab.addEventListener("click", () => {
+  if (!sidebarSwitching) activateTab(tab.dataset.tab);
+}));
 els.externalLinks.forEach((button) => button.addEventListener("click", () => openExternalDestination(button)));
-els.gameTiles.forEach((tile) => tile.addEventListener("click", async () => {
-  const nextPack = tile.dataset.pack || activeSidebarPack;
-  if (nextPack !== activeSidebarPack && (updatePoll || lastUpdateState?.running)) {
-    showToast("Update in progress", "Finish the current pack operation before switching packs.", "info");
-    return;
-  }
-  activeSidebarPack = nextPack;
-  activateTab(tile.dataset.tab);
-  setBadge("Checking", "warn");
-  try {
-    await refresh(nextPack);
-  } catch (error) {
-    showToast("Pack status failed", cleanErrorMessage(error), "error");
-  }
+els.gameTiles.forEach((tile) => tile.addEventListener("click", () => {
+  void transitionSidebarSelection(tile);
 }));
 els.setupSettingsButton.addEventListener("click", () => activateTab("settings"));
 els.setupAutoButton.addEventListener("click", applyRecommendedSetup);
 els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
 els.downloadsButton.addEventListener("click", openDownloads);
 els.downloadsCloseButton.addEventListener("click", closeDownloads);
+if (els.windowMinimizeButton) els.windowMinimizeButton.addEventListener("click", () => window.aht.windowMinimize());
+if (els.windowCloseButton) els.windowCloseButton.addEventListener("click", () => window.aht.windowClose());
 if (els.profileFriendsButton) els.profileFriendsButton.addEventListener("click", openFriendsPanel);
 for (const tab of [els.legalTermsTab, els.legalPrivacyTab]) {
   if (tab) tab.addEventListener("click", () => showLegalDocument(tab.dataset.legalDocument));
@@ -4124,14 +4684,20 @@ if (els.launcherUpdateNowButton) {
 els.downloadsOverlay.addEventListener("click", (event) => {
   if (event.target === els.downloadsOverlay) closeDownloads();
 });
+document.addEventListener("selectstart", (event) => {
+  if (!isEditableSelectionTarget(event.target)) event.preventDefault();
+});
+document.addEventListener("dragstart", (event) => {
+  if (!isEditableSelectionTarget(event.target)) event.preventDefault();
+});
 window.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === "a" && !isEditableSelectionTarget(event.target)) {
+    event.preventDefault();
+  }
   if (event.key === "Escape" && !els.downloadsOverlay.hidden) closeDownloads();
   if (event.key === "Escape" && els.friendsOverlay && !els.friendsOverlay.hidden) closeFriendsPanel();
   if (event.key === "Escape" && els.repairPromptOverlay && !els.repairPromptOverlay.hidden) closeRepairPrompt();
   if (event.key === "Escape" && els.updateOptionsOverlay && !els.updateOptionsOverlay.hidden) closeUpdateOptions();
-});
-els.updateButton.addEventListener("click", () => {
-  if (!isUnavailable(els.updateButton)) openUpdateOptions();
 });
 if (els.downloadsUpdateIconButton) {
   els.downloadsUpdateIconButton.addEventListener("click", () => {
@@ -4140,6 +4706,10 @@ if (els.downloadsUpdateIconButton) {
 }
 els.playButton.addEventListener("click", async () => {
   if (playBusy || isUnavailable(els.playButton)) return;
+  if (els.playButton.dataset.actionMode === "install" || currentStatus?.updateRequired) {
+    openUpdateOptions();
+    return;
+  }
   const requestedPackKey = activeSidebarPack;
   const requestedPackName = requestedPackKey === "ptb" ? "A Hard Time PTB" : "A Hard Time";
   if (els.copyLatestLaunchReportButton) els.copyLatestLaunchReportButton.hidden = true;
@@ -4202,15 +4772,6 @@ if (els.copyLatestLaunchReportButton) {
 if (els.openInstanceFromPlayerButton) {
   els.openInstanceFromPlayerButton.addEventListener("click", () => openCurrentInstance());
 }
-els.accountForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  submitAccount();
-});
-els.minecraftUsernameInput.addEventListener("input", () => {
-  if (els.accountError.textContent) {
-    els.accountError.textContent = "";
-  }
-});
 els.scanButton.addEventListener("click", scanFilesForRepair);
 if (els.repairPromptCancelButton) {
   els.repairPromptCancelButton.addEventListener("click", closeRepairPrompt);
@@ -4399,16 +4960,22 @@ els.pickUpdateLogVideoButton.addEventListener("click", async () => {
   if (file) els.updateLogVideoInput.value = file;
 });
 els.updateLogCloseButton.addEventListener("click", () => closeUpdateLog());
-if (els.updateLogWatchButton) {
-  els.updateLogWatchButton.addEventListener("click", () => openUpdateLogVideo(activeUpdateLog));
+if (els.updateLogBottomBackButton) els.updateLogBottomBackButton.addEventListener("click", () => closeUpdateLog());
+if (els.updateLogLikeButton) {
+  els.updateLogLikeButton.addEventListener("click", () => likeUpdateLogFromButton(activeUpdateLog, els.updateLogLikeButton));
 }
+if (els.updateLogBottomLikeButton) {
+  els.updateLogBottomLikeButton.addEventListener("click", () => likeUpdateLogFromButton(activeUpdateLog, els.updateLogBottomLikeButton));
+}
+els.updateLogHero.addEventListener("click", () => openUpdateLogInlineMedia(activeUpdateLog));
 els.updateLogVideoCloseButton.addEventListener("click", () => closeUpdateLogVideo());
 els.updateLogVideoOverlay.addEventListener("click", (event) => {
   if (event.target === els.updateLogVideoOverlay) closeUpdateLogVideo();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    if (!els.updateLogVideoOverlay.hidden) closeUpdateLogVideo();
+    if (activeNewsCarouselState) stopActiveNewsCarouselMedia();
+    else if (!els.updateLogVideoOverlay.hidden || !els.updateLogInlineMedia?.hidden) closeUpdateLogVideo();
     else if (!els.updateLogOverlay.hidden) closeUpdateLog();
   }
 });
@@ -4896,19 +5463,10 @@ els.bucketInput.addEventListener("input", () => {
   updateReleaseUploadState();
 });
 
-installPointerLighting();
-void loadLegalGate();
-refresh().catch((error) => {
-  const message = cleanErrorMessage(error);
-  setBadge("Error", "bad");
-  setLog(message);
-  setUnavailable(els.playButton, false);
-  els.playButton.title = "Run the launch checks and create a support report if anything fails.";
-  showToast("Launcher error", message, "error", {
-    context: "play:start",
-    packKey: activeSidebarPack,
-    copyLabel: "Click here to copy"
-  });
+void bootstrapLauncher().catch((error) => {
+  console.warn("Launcher startup gate failed", error);
+  if (!currentStatus) renderInitialStatusError(error);
+  revealLauncher();
 });
 
 window.addEventListener("focus", () => {

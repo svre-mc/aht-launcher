@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
-import worker from '../cloudflare/curseforge-proxy-worker.js';
+import worker, { LauncherStateHub } from '../cloudflare/curseforge-proxy-worker.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import {
   TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
   TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI
 } from './helpers/launcher-proof-fixture.mjs';
+import { createDeviceAssertion, createDeviceCredential } from '../src/deviceIdentity.js';
+import { launcherProofDeviceBinding } from '../src/launcherProof.js';
 
 const originalFetch = globalThis.fetch;
 let sentLauncherPayload = null;
@@ -32,6 +34,8 @@ if (
 }
 
 const objects = new Map();
+const durableObjectStorage = new Map();
+const durableObjectInstances = new Map();
 const env = {
   ADMIN_USERNAME: 'admin',
   ADMIN_PASSWORD: 'secret',
@@ -41,6 +45,37 @@ const env = {
   LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI: TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI,
   LAUNCHER_ATTESTATION_KEY_ID: 'aht-launcher-attestation-v2',
   AHT_REQUIRED_LAUNCHER_VERSION: '0.1.0',
+  AHT_LAUNCHER_STATE: {
+    idFromName(name) {
+      return name;
+    },
+    get(id) {
+      if (!durableObjectInstances.has(id)) {
+        const values = new Map();
+        durableObjectStorage.set(id, values);
+        const instance = new LauncherStateHub({
+          storage: {
+            async get(key) {
+              return values.get(key);
+            },
+            async put(key, value) {
+              values.set(key, structuredClone(value));
+            }
+          },
+          getWebSockets() {
+            return [];
+          },
+          acceptWebSocket() {}
+        }, env);
+        durableObjectInstances.set(id, {
+          async fetch(input, init) {
+            return instance.fetch(input instanceof Request ? input : new Request(input, init));
+          }
+        });
+      }
+      return durableObjectInstances.get(id);
+    }
+  },
   AHT_DATA: {
     async put(key, value) {
       objects.set(key, value);
@@ -189,6 +224,40 @@ await jsonRequest('/api/events', {
   })
 });
 
+const testRigCredential = createDeviceCredential();
+function withTestRigProofDevice(payload) {
+  const decorated = {
+    ...payload,
+    protocol: payload.protocol || 'aht-launcher-proof-v1',
+    deviceId: testRigCredential.deviceId,
+    devicePublicKey: testRigCredential.publicKey
+  };
+  decorated.deviceAssertion = createDeviceAssertion(testRigCredential, {
+    purpose: 'launcher-proof',
+    binding: launcherProofDeviceBinding(decorated)
+  });
+  return decorated;
+}
+const testRigRegistrationPayload = {
+  username: 'TestRig',
+  minecraftUuid: '0123456789abcdef0123456789abcdef',
+  installId: 'install-b',
+  deviceId: testRigCredential.deviceId,
+  devicePublicKey: testRigCredential.publicKey,
+  appVersion: '0.1.81',
+  platform: 'darwin',
+  arch: 'x64',
+  packId: 'a-hard-time-dregora'
+};
+testRigRegistrationPayload.deviceAssertion = createDeviceAssertion(testRigCredential, {
+  purpose: 'account-registration',
+  binding: {
+    username: 'testrig',
+    minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
+    installId: 'install-b',
+    deviceId: testRigCredential.deviceId
+  }
+});
 const registration = await jsonRequest('/api/users/register', {
   method: 'POST',
   headers: {
@@ -197,24 +266,26 @@ const registration = await jsonRequest('/api/users/register', {
     'User-Agent': 'AHT test',
     'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345'
   },
-  body: JSON.stringify({
-    username: 'TestRig',
-    minecraftUuid: '0123456789abcdef0123456789abcdef',
-    installId: 'install-b',
-    appVersion: '0.1.81',
-    platform: 'darwin',
-    arch: 'x64',
-    packId: 'a-hard-time-dregora'
-  })
+  body: JSON.stringify(testRigRegistrationPayload)
 });
 
+const repeatRegistrationPayload = {
+  ...testRigRegistrationPayload,
+  username: 'testrig'
+};
+repeatRegistrationPayload.deviceAssertion = createDeviceAssertion(testRigCredential, {
+  purpose: 'account-registration',
+  binding: {
+    username: 'testrig',
+    minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
+    installId: 'install-b',
+    deviceId: testRigCredential.deviceId
+  }
+});
 const repeatRegistration = await jsonRequest('/api/users/register', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    username: 'testrig',
-    installId: 'install-b'
-  })
+  body: JSON.stringify(repeatRegistrationPayload)
 });
 
 const duplicateResponse = await worker.fetch(new Request('https://worker.test/api/users/register', {
@@ -387,27 +458,35 @@ if (oldRecoveredProofResponse.status !== 403) {
   throw new Error(`Recovered username should reject the old install proof, got ${oldRecoveredProofResponse.status}`);
 }
 
+const launcherProofRequest = {
+  protocol: 'aht-launcher-attestation-v2',
+  launchId: 'launch-proof-test',
+  username: 'TestRig',
+  minecraftUsername: 'TestRig',
+  minecraftUuid: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+  installId: 'install-b',
+  packId: 'client-controlled-pack-id',
+  packVersion: '2.8.2',
+  installedVersion: '2.8.2',
+  launcherVersion: '0.1.0',
+  appVersion: '0.1.0',
+  platform: 'win32',
+  arch: 'x64',
+  instanceDirHash: 'abc123',
+  deviceId: testRigCredential.deviceId,
+  devicePublicKey: testRigCredential.publicKey
+};
+launcherProofRequest.deviceAssertion = createDeviceAssertion(testRigCredential, {
+  purpose: 'launcher-proof',
+  binding: launcherProofDeviceBinding(launcherProofRequest)
+});
 const launcherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
     'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345'
   },
-  body: JSON.stringify({
-    protocol: 'aht-launcher-attestation-v2',
-    launchId: 'launch-proof-test',
-    username: 'TestRig',
-    minecraftUsername: 'TestRig',
-    minecraftUuid: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
-    installId: 'install-b',
-    packId: 'client-controlled-pack-id',
-    packVersion: '2.8.2',
-    installedVersion: '2.8.2',
-    appVersion: '0.1.0',
-    platform: 'win32',
-    arch: 'x64',
-    instanceDirHash: 'abc123'
-  })
+  body: JSON.stringify(launcherProofRequest)
 });
 if (
   !launcherProof.trusted
@@ -437,6 +516,7 @@ const missingRecoveryProofResponse = await worker.fetch(new Request('https://wor
     protocol: 'aht-launcher-attestation-v2',
     minecraftUsername: 'TestRig',
     installId: 'install-b',
+    launcherVersion: '0.1.0',
     appVersion: '0.1.0'
   })
 }), env, {});
@@ -447,11 +527,11 @@ if (missingRecoveryProofResponse.status !== 403) {
 const fallbackProofResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
+  body: JSON.stringify(withTestRigProofDevice({
     minecraftUsername: 'TestRig',
     installId: 'install-b',
     appVersion: '0.1.0'
-  })
+  }))
 }), {
   ...env,
   LAUNCHER_PROOF_SECRET: '',
@@ -465,11 +545,11 @@ if (!fallbackProofResponse.ok || !fallbackProof.trusted || fallbackProof.source 
 const curseForgeOnlyProofResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
+  body: JSON.stringify(withTestRigProofDevice({
     minecraftUsername: 'TestRig',
     installId: 'install-b',
     appVersion: '0.1.0'
-  })
+  }))
 }), {
   AHT_DATA: env.AHT_DATA,
   AHT_REQUIRED_LAUNCHER_VERSION: '0.1.0',
@@ -857,7 +937,7 @@ if (
 const developerLauncherProof = await jsonRequest('/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...auth },
-  body: JSON.stringify({
+  body: JSON.stringify(withTestRigProofDevice({
     protocol: 'aht-launcher-attestation-v2',
     minecraftUsername: 'TestRig',
     minecraftUuid: '01234567-89ab-cdef-0123-456789abcdef',
@@ -867,9 +947,10 @@ const developerLauncherProof = await jsonRequest('/api/launcher-proof', {
     developerClientBypass: true,
     modIntegrityBypass: true,
     packId: 'a-hard-time-dregora',
+    launcherVersion: '0.1.0',
     appVersion: '0.1.0',
     installedVersion: '2.8.2'
-  })
+  }))
 });
 if (
   developerLauncherProof.payload.launcherChannel !== 'developer'
@@ -898,7 +979,7 @@ if (wrongKidSocialResponse.status !== 401) {
 const wrongConfiguredKidResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'test_rig_recovery_secret_123456789012345' },
-  body: JSON.stringify({ protocol: 'aht-launcher-attestation-v2', minecraftUsername: 'TestRig', installId: 'install-b', appVersion: '0.1.0' })
+  body: JSON.stringify(withTestRigProofDevice({ protocol: 'aht-launcher-attestation-v2', minecraftUsername: 'TestRig', installId: 'install-b', launcherVersion: '0.1.0', appVersion: '0.1.0' }))
 }), { ...env, LAUNCHER_ATTESTATION_KEY_ID: 'wrong-key-id' }, {});
 const wrongConfiguredKid = await wrongConfiguredKidResponse.json();
 if (wrongConfiguredKidResponse.status !== 500
@@ -936,6 +1017,80 @@ if (
 ) {
   throw new Error(`Update log publish/list failed: ${JSON.stringify({ publishedLog, publicLogs, adminLogs })}`);
 }
+const likeCredential = createDeviceCredential();
+const likeUsername = 'NewsLiker';
+const likeRegistrationBinding = {
+  username: likeUsername.toLowerCase(),
+  minecraftUuid: '11111111-2222-4333-8444-555555555555',
+  installId: 'news-like-install',
+  deviceId: likeCredential.deviceId
+};
+await jsonRequest('/api/users/register', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-AHT-Launcher-Recovery': 'news_liker_recovery_secret_123456789012345'
+  },
+  body: JSON.stringify({
+    username: likeUsername,
+    minecraftUuid: likeRegistrationBinding.minecraftUuid,
+    installId: likeRegistrationBinding.installId,
+    deviceId: likeCredential.deviceId,
+    devicePublicKey: likeCredential.publicKey,
+    deviceAssertion: createDeviceAssertion(likeCredential, {
+      purpose: 'account-registration',
+      binding: likeRegistrationBinding
+    })
+  })
+});
+const likeBinding = {
+  logId: publishedLog.log.id,
+  username: likeUsername.toLowerCase(),
+  deviceId: likeCredential.deviceId
+};
+const likePayload = {
+  ...likeBinding,
+  devicePublicKey: likeCredential.publicKey,
+  deviceAssertion: createDeviceAssertion(likeCredential, {
+    purpose: 'update-log-like',
+    binding: likeBinding
+  })
+};
+const firstLike = await jsonRequest(`/api/update-logs/${publishedLog.log.id}/like`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(likePayload)
+});
+likePayload.deviceAssertion = createDeviceAssertion(likeCredential, {
+  purpose: 'update-log-like',
+  binding: likeBinding
+});
+const repeatedLike = await jsonRequest(`/api/update-logs/${publishedLog.log.id}/like`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(likePayload)
+});
+const likedLogs = await jsonRequest('/api/update-logs?limit=3');
+if (firstLike.likes !== 1 || repeatedLike.likes !== 1 || likedLogs.logs[0]?.likes !== 1) {
+  throw new Error(`Update-log likes were not idempotent: ${JSON.stringify({ firstLike, repeatedLike, likedLogs })}`);
+}
+const rogueCredential = createDeviceCredential();
+const rogueBinding = { ...likeBinding, deviceId: rogueCredential.deviceId };
+const rogueLikeResponse = await worker.fetch(new Request(`https://worker.test/api/update-logs/${publishedLog.log.id}/like`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    ...rogueBinding,
+    devicePublicKey: rogueCredential.publicKey,
+    deviceAssertion: createDeviceAssertion(rogueCredential, {
+      purpose: 'update-log-like',
+      binding: rogueBinding
+    })
+  })
+}), env, {});
+if (rogueLikeResponse.status !== 403) {
+  throw new Error(`Unregistered launcher device liked news: ${rogueLikeResponse.status}`);
+}
 const summary = await jsonRequest('/admin/summary', { headers: auth });
 const events = await jsonRequest('/admin/events?limit=10', { headers: auth });
 
@@ -967,4 +1122,136 @@ if (recoveredInstallResponse.status !== 403
   throw new Error(`Public UUID telemetry rotated a registered install identity: ${recoveredInstallResponse.status} ${JSON.stringify(recoveredInstallUpdate)}`);
 }
 
-console.log(JSON.stringify({ registration, launcherDownloads: allDownloadRecords, launcherUpdates: allLauncherUpdates, players: allPlayers, playerIpv4Groups, launcherProof: { source: launcherProof.source, trusted: launcherProof.trusted, tokenParts: launcherProof.token.split('.').length }, developerLauncherProof: { bypass: developerLauncherProof.payload.modIntegrityBypass, channel: developerLauncherProof.payload.launcherChannel, downstreamVerified: developerSocialResponse.status === 200 }, publishedLog, publicLogs, summary, events }, null, 2));
+const installerRecordCount = () => [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
+const limitUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const limitIdentityDigest = crypto.createHash('sha256')
+  .update(`minecraft-uuid\0${limitUuid}`)
+  .digest('hex');
+const limitObjectId = `launcher-installer-download:${limitIdentityDigest}`;
+const limitPath = `/launcher/download/windows-x64?aht_uuid=${limitUuid}`;
+const limitHeaders = {
+  'CF-Connecting-IP': '198.51.100.70',
+  'User-Agent': 'AHT installer limit test'
+};
+const headDownload = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
+  method: 'HEAD',
+  headers: limitHeaders
+}), env, {});
+if (headDownload.status !== 302 || durableObjectStorage.has(limitObjectId)) {
+  throw new Error('HEAD installer checks must neither fail nor consume a download slot.');
+}
+
+const downloadsBeforeLimitProof = installerRecordCount();
+const acceptedResetHeaders = new Set();
+for (let attempt = 1; attempt <= 7; attempt += 1) {
+  const response = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
+    headers: limitHeaders
+  }), env, {});
+  const expectedRemaining = String(7 - attempt);
+  if (response.status !== 302
+      || response.headers.get('X-AHT-Download-Limit') !== '7'
+      || response.headers.get('X-AHT-Download-Remaining') !== expectedRemaining) {
+    throw new Error(`Installer download ${attempt} was not accepted with the correct quota: ${response.status} ${JSON.stringify([...response.headers])}`);
+  }
+  acceptedResetHeaders.add(response.headers.get('X-AHT-Download-Reset'));
+}
+if (acceptedResetHeaders.size !== 1 || installerRecordCount() !== downloadsBeforeLimitProof + 7) {
+  throw new Error('The seven accepted downloads did not retain one anchored window or exactly seven telemetry records.');
+}
+const storedLimitWindow = durableObjectStorage.get(limitObjectId)?.get('launcherInstallerDownloadWindow');
+if (Object.keys(storedLimitWindow || {}).sort().join(',') !== 'count,firstDownloadAt,schemaVersion'
+    || storedLimitWindow.count !== 7
+    || JSON.stringify(storedLimitWindow).includes(limitUuid)
+    || JSON.stringify(storedLimitWindow).includes(limitHeaders['CF-Connecting-IP'])) {
+  throw new Error(`Installer quota storage retained more than the anonymous window counter: ${JSON.stringify(storedLimitWindow)}`);
+}
+const eighthDownload = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
+  headers: limitHeaders
+}), env, {});
+const eighthDownloadBody = await eighthDownload.json();
+const eighthRetryAfter = Number(eighthDownload.headers.get('Retry-After'));
+if (eighthDownload.status !== 429
+    || eighthDownloadBody.code !== 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT'
+    || eighthDownloadBody.limit !== 7
+    || !Number.isInteger(eighthRetryAfter)
+    || eighthRetryAfter < 1
+    || eighthRetryAfter > 86_400
+    || installerRecordCount() !== downloadsBeforeLimitProof + 7) {
+  throw new Error(`The eighth installer download was not rejected cleanly: ${eighthDownload.status} ${JSON.stringify(eighthDownloadBody)}`);
+}
+
+const expiredState = durableObjectStorage.get(limitObjectId);
+expiredState.set('launcherInstallerDownloadWindow', {
+  schemaVersion: 1,
+  firstDownloadAt: Date.now() - (24 * 60 * 60 * 1000) - 1,
+  count: 7
+});
+const firstDownloadAfterExpiry = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
+  headers: limitHeaders
+}), env, {});
+if (firstDownloadAfterExpiry.status !== 302
+    || firstDownloadAfterExpiry.headers.get('X-AHT-Download-Remaining') !== '6'
+    || installerRecordCount() !== downloadsBeforeLimitProof + 8) {
+  throw new Error('The first download after the anchored 24-hour expiry did not start a fresh window.');
+}
+
+const beforeUpdaterExemption = installerRecordCount();
+for (let attempt = 0; attempt < 9; attempt += 1) {
+  const updateResponse = await worker.fetch(new Request(
+    `https://worker.test/launcher/files/win32-x64/AHT-Windows.exe?aht_uuid=${limitUuid}`,
+    { headers: limitHeaders }
+  ), env, {});
+  if (updateResponse.status !== 200) {
+    throw new Error(`Untagged launcher self-update ${attempt + 1} was incorrectly limited: ${updateResponse.status}`);
+  }
+}
+const updaterExempt = installerRecordCount() === beforeUpdaterExemption;
+if (!updaterExempt) {
+  throw new Error('Untagged launcher self-updates must stay unlimited and uncounted.');
+}
+if (durableObjectStorage.get(limitObjectId)?.get('launcherInstallerDownloadWindow')?.count !== 1) {
+  throw new Error('Untagged launcher self-updates changed the installer quota counter.');
+}
+
+const concurrentUuid = '11111111-aaaa-4bbb-8ccc-222222222222';
+const concurrentPath = `/launcher/download/windows-x64?aht_uuid=${concurrentUuid}`;
+const beforeConcurrentProof = installerRecordCount();
+const concurrentResponses = await Promise.all(Array.from({ length: 12 }, () => worker.fetch(new Request(
+  `https://worker.test${concurrentPath}`,
+  { headers: { 'CF-Connecting-IP': '198.51.100.71' } }
+), env, {})));
+const concurrentAccepted = concurrentResponses.filter((response) => response.status === 302).length;
+const concurrentDenied = concurrentResponses.filter((response) => response.status === 429).length;
+if (concurrentAccepted !== 7 || concurrentDenied !== 5 || installerRecordCount() !== beforeConcurrentProof + 7) {
+  throw new Error(`Concurrent installer limit was not atomic: ${JSON.stringify({ concurrentAccepted, concurrentDenied })}`);
+}
+
+const taggedLimitUuid = '33333333-aaaa-4bbb-8ccc-444444444444';
+const taggedLimitPath = `/launcher/files/win32-x64/AHT-Windows.exe?aht_download=windows-x64&aht_uuid=${taggedLimitUuid}`;
+for (let attempt = 1; attempt <= 7; attempt += 1) {
+  const response = await worker.fetch(new Request(`https://worker.test${taggedLimitPath}`, {
+    headers: { 'CF-Connecting-IP': '198.51.100.72' }
+  }), env, {});
+  if (response.status !== 200 || response.headers.get('X-AHT-Download-Remaining') !== String(7 - attempt)) {
+    throw new Error(`Tagged direct installer ${attempt} was not authorized correctly: ${response.status}`);
+  }
+}
+const taggedEighth = await worker.fetch(new Request(`https://worker.test${taggedLimitPath}`, {
+  headers: { 'CF-Connecting-IP': '198.51.100.72' }
+}), env, {});
+if (taggedEighth.status !== 429) {
+  throw new Error(`Tagged direct installer bypassed the seven-download limit: ${taggedEighth.status}`);
+}
+
+const downloadLimitProof = {
+  limit: 7,
+  windowHours: 24,
+  anchoredReset: acceptedResetHeaders.size === 1,
+  eighthStatus: eighthDownload.status,
+  retryAfterSeconds: eighthRetryAfter,
+  concurrentAccepted,
+  concurrentDenied,
+  updaterExempt
+};
+
+console.log(JSON.stringify({ registration, launcherDownloads: allDownloadRecords, launcherUpdates: allLauncherUpdates, players: allPlayers, playerIpv4Groups, launcherProof: { source: launcherProof.source, trusted: launcherProof.trusted, tokenParts: launcherProof.token.split('.').length }, developerLauncherProof: { bypass: developerLauncherProof.payload.modIntegrityBypass, channel: developerLauncherProof.payload.launcherChannel, downstreamVerified: developerSocialResponse.status === 200 }, publishedLog, publicLogs, summary, events, downloadLimitProof }, null, 2));

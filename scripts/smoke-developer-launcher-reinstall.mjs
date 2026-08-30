@@ -655,7 +655,14 @@ try {
     instanceDir: path.join(root, 'instance'),
     latestUrl: '',
     sync: { enabled: false, sendLocalChanges: false, baseUrl: '', playerLabel: 'LocalReinstallSmoke' },
-    minecraftLauncher: { enabled: false, rootDir: path.join(root, 'minecraft'), profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 4096 },
+    minecraftLauncher: {
+      enabled: true,
+      closeLauncherWhenGameStarts: false,
+      rootDir: path.join(root, 'minecraft'),
+      profileId: 'a-hard-time-dregora',
+      profileName: 'A Hard Time',
+      memoryMb: 4096
+    },
     playCommand: { command: '', args: [], cwd: path.join(root, 'instance') }
   };
   const developerConfig = {
