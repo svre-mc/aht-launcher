@@ -1,7 +1,5 @@
 # A Hard Time Launcher
 
-Security and access-control operations are documented in [docs/access-control-and-data-security.md](docs/access-control-and-data-security.md).
-
 A Hard Time Launcher installs and updates the A Hard Time Minecraft modpack with a CurseForge-style pack import flow. The launcher creates its own managed Minecraft instance, downloads required files from the hosted update feed, and opens the CurseForge Minecraft Launcher when available, with the official Minecraft Launcher as a fallback.
 
 ## Downloads
@@ -24,20 +22,7 @@ The app also writes a Minecraft Launcher profile that points at that managed fol
 
 ## Player Flow
 
-The player app:
-
-- Checks the hosted `latest.json` update feed.
-- Blocks Play when a required modpack update is available.
-- Downloads the CurseForge export ZIP for the current release.
-- Reads `manifest.json` from the pack ZIP.
-- Downloads public mods through the configured CurseForge-compatible proxy.
-- Uses the private fallback cache for files that cannot be downloaded automatically.
-- Extracts overrides into their matching Minecraft folders, including `mods/`, `config/`, `resourcepacks/`, `scripts/`, and other pack folders.
-- Places resourcepack ZIPs in `resourcepacks/`, even if a bad export or cache source accidentally lists them with mod files.
-- Records managed file hashes for install, scan, and repair.
-- Ignores player edits under `config/` for local-change checks.
-- Checks managed `mods/` before Play and blocks launch when a required mod is missing or corrupted.
-- Opens the CurseForge Minecraft Launcher first with the exact A Hard Time profile selected, then falls back to the official Minecraft Launcher only when CurseForge is unavailable.
+The launcher handles installation, updates, repair, and game startup through its desktop interface.
 
 ## Launcher Updates
 

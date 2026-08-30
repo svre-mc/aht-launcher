@@ -6,6 +6,7 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 const readText = (resource) => fs.readFileSync(resource, 'utf8').replace(/\r\n?/g, '\n');
 const packageJson = JSON.parse(readText(new URL('../package.json', import.meta.url)));
+const publicReadme = readText(new URL('../README.md', import.meta.url));
 const commonBuilder = require('../build/electron-builder.common.cjs');
 const windowsInstallerInclude = readText(new URL('../build/windows-installer.nsh', import.meta.url));
 const rendererApp = readText(new URL('../desktop/renderer/app.js', import.meta.url));
@@ -161,8 +162,21 @@ function icoLayers(relativePath) {
 const sensitiveExtensions = new Set(['.cjs', '.html', '.js', '.json', '.md', '.mjs', '.toml', '.yml']);
 const sensitiveRoots = ['desktop', 'src', 'config', 'docs', 'scripts', 'cloudflare', '.github'];
 const sensitiveFiles = ['README.md', 'package.json'];
+const forbiddenPublicSecurityDocs = [
+  'docs/access-control-and-data-security.md',
+  'docs/launcher-proof-contract.md',
+  'docs/launcher-update-automation.md',
+  'docs/macos-signing-and-download-paths.md'
+];
 
 assert(configs.windows.productName === 'A Hard Time Launcher Windows', 'Windows product name is not tailored.');
+assert(
+  forbiddenPublicSecurityDocs.every((relativePath) => !fs.existsSync(new URL(`../${relativePath}`, import.meta.url)))
+    && !publicReadme.includes('Security and access-control operations are documented')
+    && !publicReadme.includes('Ignores player edits under')
+    && !publicReadme.includes('private fallback cache'),
+  'Public repository documentation must not disclose security, attestation, operator, fallback-cache, or integrity-bypass internals.'
+);
 assert(configs.windows.directories?.output === 'release-builds/windows', 'Windows output folder is wrong.');
 assert(configs.windows.win?.artifactName?.includes('Windows-10-11'), 'Windows artifact name should target Windows 10/11.');
 assert(configs.windows.win?.target?.[0]?.target === 'nsis', 'Windows regular launcher must build NSIS.');
