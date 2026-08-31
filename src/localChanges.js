@@ -3,8 +3,24 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { hashFile, normalizeRelPath, pathExists, readJsonFile, safeJoin } from './utils.js';
 
-const MONITORED_ROOTS = ['mods'];
+const MODS_ONLY_MONITORED_ROOTS = Object.freeze(['mods']);
+const LAUNCH_CRITICAL_MONITORED_ROOTS = Object.freeze([
+  'fancymenu_data',
+  'mods',
+  'resourcepacks',
+  'resources',
+  'scripts',
+  'structures'
+]);
 const ALLOWED_UNMANAGED_MOD_DIRECTORIES = new Set(['openterraingenerator']);
+const PLAYER_MUTABLE_MANAGED_ROOTS = new Set(['config']);
+const PLAYER_MUTABLE_MANAGED_FILES = new Set([
+  'options.txt',
+  'optionsof.txt',
+  'optionsshaders.txt',
+  'servers.dat',
+  'servers.dat_old'
+]);
 
 function yieldToEventLoop() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -51,6 +67,17 @@ function managedFiles(managed = [], requiredManaged = []) {
     byPath.set(item.relativePath, item);
   }
   return [...byPath.values()];
+}
+
+export function isLaunchCriticalManagedPath(relativePath = '') {
+  const normalized = normalizeRelPath(String(relativePath || '')).toLowerCase();
+  if (!normalized || PLAYER_MUTABLE_MANAGED_FILES.has(normalized)) return false;
+  const [root] = normalized.split('/');
+  return !PLAYER_MUTABLE_MANAGED_ROOTS.has(root);
+}
+
+export function launchCriticalManagedFiles(managed = []) {
+  return managedFiles(managed, []).filter((item) => isLaunchCriticalManagedPath(item.relativePath));
 }
 
 function managedModFiles(managed = [], requiredManaged = []) {
@@ -160,7 +187,10 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
     });
   };
 
-  for (const root of MONITORED_ROOTS) {
+  const monitoredRoots = Array.isArray(options.monitoredRoots) && options.monitoredRoots.length
+    ? options.monitoredRoots
+    : MODS_ONLY_MONITORED_ROOTS;
+  for (const root of monitoredRoots) {
     const rootPath = safeJoin(instanceDir, root);
     const entries = await fs.readdir(rootPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -264,7 +294,10 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
     }
   }
 
-  for (const root of MONITORED_ROOTS) {
+  const monitoredRoots = Array.isArray(options.monitoredRoots) && options.monitoredRoots.length
+    ? options.monitoredRoots
+    : MODS_ONLY_MONITORED_ROOTS;
+  for (const root of monitoredRoots) {
     const rootPath = safeJoin(instanceDir, root);
     const entries = await fs.readdir(rootPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -339,7 +372,179 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
 
 export async function captureManagedModFingerprint(instanceDir, options = {}) {
   const managed = managedModFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
-  return captureFingerprintFromManaged(instanceDir, managed, options);
+  return captureFingerprintFromManaged(instanceDir, managed, {
+    ...options,
+    monitoredRoots: MODS_ONLY_MONITORED_ROOTS
+  });
+}
+
+async function mapWithConcurrency(items = [], concurrency = 32, mapper = async (value) => value) {
+  const values = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(items.length || 1, Number(concurrency) || 1));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      values[index] = await mapper(items[index], index);
+    }
+  }));
+  return values;
+}
+
+async function captureIntegrityFingerprintFromManaged(instanceDir, managed = [], options = {}) {
+  const normalizedManaged = managedFiles(managed, []);
+  const launchCritical = launchCriticalManagedFiles(normalizedManaged);
+  const pathSetFingerprint = await captureFingerprintFromManaged(
+    instanceDir,
+    launchCritical,
+    { ...options, monitoredRoots: LAUNCH_CRITICAL_MONITORED_ROOTS }
+  );
+  let latestChangeMs = Number(pathSetFingerprint.latestChangeMs) || 0;
+  const actual = await mapWithConcurrency(
+    normalizedManaged,
+    options.fingerprintConcurrency || 48,
+    async (item) => {
+      const relativePath = item.relativePath;
+      const target = safeJoin(instanceDir, relativePath);
+      try {
+        const stat = await fs.lstat(target, { bigint: true });
+        const mtimeNs = statNanoseconds(stat, 'mtime');
+        const ctimeNs = statNanoseconds(stat, 'ctime');
+        latestChangeMs = Math.max(
+          latestChangeMs,
+          Number(mtimeNs / 1_000_000n),
+          Number(ctimeNs / 1_000_000n)
+        );
+        return {
+          path: relativePath,
+          type: stat.isFile() ? 'file' : (stat.isDirectory() ? 'directory' : 'other'),
+          size: stat.size.toString(),
+          mtimeNs: mtimeNs.toString(),
+          ctimeNs: ctimeNs.toString(),
+          ino: stat.ino.toString()
+        };
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          return { path: relativePath, type: 'missing', size: '0', mtimeNs: '0', ctimeNs: '0', ino: '0' };
+        }
+        throw error;
+      }
+    }
+  );
+  const expected = [...normalizedManaged]
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath))
+    .map((item) => `${item.relativePath}|${item.sha256 || ''}|${item.sha1 || ''}`);
+  const actualRows = [...actual]
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map((item) => `${item.path}|${item.type}|${item.size}|${item.mtimeNs}|${item.ctimeNs}|${item.ino}`);
+  const digest = createHash('sha256')
+    .update(`managed\n${expected.join('\n')}\nactual\n${actualRows.join('\n')}\npath-set\n${pathSetFingerprint.digest}\n`)
+    .digest('hex');
+
+  const fingerprint = {
+    schemaVersion: 2,
+    capturedAt: new Date().toISOString(),
+    digest,
+    managedCount: normalizedManaged.length,
+    entryCount: actual.length + Number(pathSetFingerprint.entryCount || 0),
+    pathsValid: pathSetFingerprint.pathsValid && actual.every((item) => item.type === 'file'),
+    latestChangeMs,
+    pathSetDigest: pathSetFingerprint.digest,
+    // Retained for schema-v2 cache compatibility; it now covers every
+    // launch-critical content root, not only mods.
+    modsDigest: pathSetFingerprint.digest
+  };
+  if (options.includeFileStates === true) {
+    fingerprint.fileStates = [...actual]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((item) => ({ ...item }));
+  }
+  return fingerprint;
+}
+
+export async function captureManagedIntegrityFingerprint(instanceDir, options = {}) {
+  const managed = managedFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
+  return captureIntegrityFingerprintFromManaged(instanceDir, managed, options);
+}
+
+function fingerprintFileStateChanged(current = null, previous = null) {
+  if (!current || !previous) return true;
+  return ['type', 'size', 'mtimeNs', 'ctimeNs', 'ino']
+    .some((field) => String(current[field] ?? '') !== String(previous[field] ?? ''));
+}
+
+function fingerprintStateChangedAfter(state = null, sinceMs = Number.NaN) {
+  if (!state || !Number.isFinite(sinceMs)) return true;
+  const cutoffNs = BigInt(Math.max(0, Math.floor(sinceMs))) * 1_000_000n;
+  return BigInt(state.mtimeNs || '0') > cutoffNs || BigInt(state.ctimeNs || '0') > cutoffNs;
+}
+
+export async function verifyManagedIntegritySnapshot(instanceDir, options = {}) {
+  const managed = launchCriticalManagedFiles(await loadManaged(instanceDir, options));
+  const fingerprintWithStates = await captureIntegrityFingerprintFromManaged(instanceDir, managed, {
+    ...options,
+    includeFileStates: true
+  });
+  const fileStates = Array.isArray(fingerprintWithStates.fileStates)
+    ? fingerprintWithStates.fileStates
+    : [];
+  const fingerprint = { ...fingerprintWithStates };
+  delete fingerprint.fileStates;
+
+  const previousStates = Array.isArray(options.previousFileStates) ? options.previousFileStates : [];
+  const previousByPath = new Map(previousStates.map((item) => [normalizeRelPath(String(item?.path || '')), item]));
+  const currentByPath = new Map(fileStates.map((item) => [normalizeRelPath(String(item?.path || '')), item]));
+  const legacySinceMs = Date.parse(String(options.legacySince || ''));
+  const hasPreviousStates = previousByPath.size > 0;
+  const forcedPaths = new Set((Array.isArray(options.forcePaths) ? options.forcePaths : [])
+    .map((item) => normalizeRelPath(String(item || '')))
+    .filter(Boolean));
+  const forceAll = options.forceAll === true;
+  const onlyForced = options.onlyForced === true && (forceAll || forcedPaths.size > 0);
+  const candidates = managed.filter((item) => {
+    const current = currentByPath.get(item.relativePath);
+    const forced = forceAll || [...forcedPaths]
+      .some((forcedPath) => item.relativePath === forcedPath || item.relativePath.startsWith(`${forcedPath}/`));
+    if (forced) return true;
+    if (onlyForced) return false;
+    if (!current || current.type !== 'file') return true;
+    if (hasPreviousStates) {
+      return fingerprintFileStateChanged(current, previousByPath.get(item.relativePath));
+    }
+    return fingerprintStateChangedAfter(current, legacySinceMs);
+  });
+  const issues = [];
+  await mapWithConcurrency(candidates, options.hashConcurrency || 8, async (item) => {
+    const state = currentByPath.get(item.relativePath);
+    if (!state || state.type !== 'file') {
+      issues.push({ path: item.relativePath, reason: state?.type || 'missing' });
+      return;
+    }
+    const algorithm = item.sha256 ? 'sha256' : (item.sha1 ? 'sha1' : '');
+    const expected = String(item[algorithm] || '').toLowerCase();
+    if (!algorithm || !expected) {
+      issues.push({ path: item.relativePath, reason: 'missing-trusted-hash' });
+      return;
+    }
+    const actual = String(await hashFile(safeJoin(instanceDir, item.relativePath), algorithm)).toLowerCase();
+    if (actual !== expected) {
+      issues.push({ path: item.relativePath, reason: 'content-changed' });
+    }
+  });
+  if (!fingerprint.pathsValid && !issues.length) {
+    issues.push({ path: 'launch-critical-roots', reason: 'managed-path-set-changed' });
+  }
+  issues.sort((left, right) => left.path.localeCompare(right.path));
+  return {
+    valid: fingerprint.pathsValid === true && issues.length === 0,
+    fingerprint,
+    fileStates,
+    managedFiles: managed,
+    metadataChanges: candidates.length,
+    hashedFiles: candidates.length,
+    issues
+  };
 }
 
 export async function scanLocalChanges(instanceDir, options = {}) {
@@ -390,7 +595,10 @@ export async function scanLocalChanges(instanceDir, options = {}) {
   }
 
   reportProgress('Scanning extra mods', managedToCheck.length, managedToCheck.length);
-  added.push(...await scanAddedModFiles(instanceDir, managedSet, limit, { yieldEvery: 25 }));
+  added.push(...await scanAddedModFiles(instanceDir, managedSet, limit, {
+    yieldEvery: 25,
+    monitoredRoots: MODS_ONLY_MONITORED_ROOTS
+  }));
   reportProgress('Scan complete', managedToCheck.length, managedToCheck.length);
 
   return {
@@ -460,10 +668,13 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
   }
 
   reportProgress('Scanning extra mods', managedToCheck.length, managedToCheck.length);
-  const added = await scanAddedModFiles(instanceDir, managedModSet, limit, { yieldEvery: 25 });
+  const added = await scanAddedModFiles(instanceDir, managedModSet, limit, {
+    yieldEvery: 25,
+    monitoredRoots: MODS_ONLY_MONITORED_ROOTS
+  });
   reportProgress('Integrity scan complete', managedToCheck.length, managedToCheck.length);
   const corruptCount = changed.length + missing.length + added.length;
-  const fingerprint = await captureFingerprintFromManaged(instanceDir, managedMods, options);
+  const fingerprint = await captureIntegrityFingerprintFromManaged(instanceDir, managed, options);
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,

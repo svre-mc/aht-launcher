@@ -117,9 +117,19 @@ export async function loadVerifiedManagedManifest({
   if (!manifestRef) throw new Error('The selected release does not contain a client-manifest location.');
   const source = resolveSource(latestSource, manifestRef);
   const cacheKey = `${source}\0${expectedSha256}`;
-  if (verifiedManifestCache.has(cacheKey)) return verifiedManifestCache.get(cacheKey);
+  const effectiveMaxBytes = Math.max(1024, Number(maxBytes) || DEFAULT_MAX_MANIFEST_BYTES);
+  if (verifiedManifestCache.has(cacheKey)) {
+    const cached = verifiedManifestCache.get(cacheKey);
+    if (expectedSize > 0 && Number(cached?.size) !== expectedSize) {
+      throw new Error(`Client manifest size mismatch: expected ${expectedSize}, got ${Number(cached?.size) || 0}.`);
+    }
+    if (Number(cached?.size) > effectiveMaxBytes) {
+      throw new Error(`Client manifest exceeds the ${effectiveMaxBytes}-byte limit.`);
+    }
+    return cached;
+  }
 
-  const bytes = await readSourceBytes(source, Math.max(1024, Number(maxBytes) || DEFAULT_MAX_MANIFEST_BYTES));
+  const bytes = await readSourceBytes(source, effectiveMaxBytes);
   if (expectedSize > 0 && bytes.length !== expectedSize) {
     throw new Error(`Client manifest size mismatch: expected ${expectedSize}, got ${bytes.length}.`);
   }

@@ -484,6 +484,7 @@ try {
       const editableField = document.querySelector('input');
       const repairIcon = scanButton?.querySelector('.button-icon');
       if (!(frame && workspace && heroPanel && heroArt && actions && scanButton && settingsButton && launchStrip && launchInfo && launchActions && playButton && footerLogo && footerLogoImage?.complete && oldFacts && statusBadge && editableField && repairIcon)) return false;
+      if (playButton.classList.contains('is-disabled') || playButton.getAttribute('aria-disabled') === 'true') return false;
       const workspaceRect = workspace.getBoundingClientRect();
       const stripRect = launchStrip.getBoundingClientRect();
       const actionRect = launchActions.getBoundingClientRect();

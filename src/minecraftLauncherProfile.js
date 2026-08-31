@@ -505,7 +505,7 @@ function minecraftLibraryRuleMatches(rule = {}, { platform = process.platform, a
   return true;
 }
 
-function minecraftLibraryAllowed(library = {}, options = {}) {
+export function minecraftLibraryAllowed(library = {}, options = {}) {
   const rules = Array.isArray(library?.rules) ? library.rules : [];
   if (!rules.length) return true;
   let allowed = false;
@@ -1180,5 +1180,28 @@ export async function ensureMinecraftLauncherProfile({ config, latest = null, in
     ...primaryProfile,
     syncedProfiles,
     syncedProfileCount: syncedProfiles.length
+  };
+}
+
+export async function selectPreparedMinecraftLauncherProfile(profile = null) {
+  const candidates = Array.isArray(profile?.syncedProfiles) && profile.syncedProfiles.length
+    ? profile.syncedProfiles
+    : (profile ? [profile] : []);
+  if (!candidates.length) {
+    throw new Error('The prepared Minecraft Launcher profile is missing. Restart A Hard Time Launcher.');
+  }
+  const selected = [];
+  for (const candidate of candidates) {
+    if (!candidate?.rootDir || !candidate?.profilesPath || !candidate?.profileId || !candidate?.versionId) {
+      throw new Error('The prepared Minecraft Launcher profile is incomplete. Restart A Hard Time Launcher.');
+    }
+    selected.push(await writeMinecraftLauncherProfile(candidate, { selectForPlay: true }));
+  }
+  const primaryRoot = launcherRootKey(profile?.rootDir || '');
+  const primary = selected.find((candidate) => launcherRootKey(candidate.rootDir) === primaryRoot) || selected[0];
+  return {
+    ...primary,
+    syncedProfiles: selected,
+    syncedProfileCount: selected.length
   };
 }

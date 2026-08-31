@@ -192,6 +192,7 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await waitFor(client, "!document.body.classList.contains('is-booting')", 'startup preparation gate');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.config?.latestUrl === ${JSON.stringify(latestPath)} ? status : false)
   `, 'local default config');

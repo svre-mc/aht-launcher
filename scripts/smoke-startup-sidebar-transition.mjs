@@ -23,9 +23,9 @@ const defaultsPath = path.join(root, 'app.defaults.json');
 const screenshotDir = process.env.AHT_SMOKE_OUTPUT_DIR
   ? path.resolve(process.env.AHT_SMOKE_OUTPUT_DIR)
   : path.join(root, 'screenshots');
-const electronArgs = smokeExe
-  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+const electronArgsFor = (debugPort) => smokeExe
+  ? [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`]
+  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -34,11 +34,11 @@ async function writeJson(file, value) {
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-async function waitForTarget() {
+async function waitForTarget(debugEndpoint = endpoint) {
   let lastError;
   for (let attempt = 0; attempt < 240; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${debugEndpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
         const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -49,7 +49,7 @@ async function waitForTarget() {
     }
     await sleep(50);
   }
-  throw new Error(`Timed out waiting for Electron debugger target: ${lastError?.message || 'no target'}`);
+  throw new Error(`Timed out waiting for Electron debugger target at ${debugEndpoint}: ${lastError?.message || 'no target'}`);
 }
 
 function connect(wsUrl) {
@@ -210,19 +210,32 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
-const child = spawn(electronBin, electronArgs, {
-  cwd: electronCwd,
-  env: {
-    ...process.env,
-    AHT_APP_DEFAULTS: defaultsPath,
-    AHT_TEST_HOOKS: '1',
-    AHT_TEST_REMOTE_DEBUG_PORT: String(port),
-    AHT_TEST_USER_DATA: userData,
-    ELECTRON_ENABLE_LOGGING: '0'
-  },
-  stdio: 'ignore',
-  windowsHide: true
-});
+function spawnLauncher(debugPort) {
+  return spawn(electronBin, electronArgsFor(debugPort), {
+    cwd: electronCwd,
+    env: {
+      ...process.env,
+      AHT_APP_DEFAULTS: defaultsPath,
+      AHT_TEST_HOOKS: '1',
+      AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort),
+      AHT_TEST_USER_DATA: userData,
+      ELECTRON_ENABLE_LOGGING: '0'
+    },
+    stdio: 'ignore',
+    windowsHide: true
+  });
+}
+
+async function waitForChildExit(child, timeoutMs = 5_000) {
+  if (!child || child.exitCode !== null) return true;
+  return Promise.race([
+    new Promise((resolve) => child.once('exit', () => resolve(true))),
+    sleep(timeoutMs).then(() => false)
+  ]);
+}
+
+let child = spawnLauncher(port);
+let quickChild = null;
 
 let client;
 const screenshots = [];
@@ -234,11 +247,13 @@ try {
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.querySelector('#startupLoader') && document.querySelector('.app-frame')", 'startup DOM');
+  await waitFor(client, "document.querySelector('#startupLoaderLabel')?.textContent === 'Initializing'", 'first-ever initialization label');
 
   const startupProof = await evaluate(client, `(() => {
     const loader = document.querySelector('#startupLoader');
     const frame = document.querySelector('.app-frame');
     const moneySystem = loader.querySelector('.money-loader-system');
+    const progressRule = document.querySelector('#startupLoaderRule');
     const moneyRect = moneySystem.getBoundingClientRect();
     return {
       booting: document.body.classList.contains('is-booting'),
@@ -248,6 +263,9 @@ try {
       frameVisibility: getComputedStyle(frame).visibility,
       frameInert: frame.hasAttribute('inert'),
       statusStillPending: document.querySelector('#launcherVersionLabel')?.textContent === 'Launcher v-',
+      label: document.querySelector('#startupLoaderLabel')?.textContent || '',
+      progressHidden: progressRule?.hidden,
+      progressWidth: document.querySelector('#startupLoaderProgress')?.style.width || '',
       moneyLogoSrc: moneySystem.querySelector('.startup-money-logo')?.getAttribute('src') || '',
       moneyStarCount: moneySystem.querySelectorAll('.startup-orbit-star').length,
       legacyGlobePresent: Boolean(moneySystem.querySelector('.news-loader-globe')),
@@ -256,6 +274,7 @@ try {
   })()`);
   assert(startupProof.booting && startupProof.loaderOpacity === 1 && startupProof.loaderVisibility === 'visible', 'Startup screen was not opaque while status was pending', startupProof);
   assert(startupProof.frameOpacity === 0 && startupProof.frameVisibility === 'hidden' && startupProof.frameInert, 'Partially loaded launcher shell was exposed', startupProof);
+  assert(startupProof.label === 'Initializing' && startupProof.progressHidden === false, 'First-ever startup did not show Initializing with its progress rule beneath the AHT logo', startupProof);
   assert(startupProof.moneyLogoSrc === 'assets/aht-bill-transparent.png' && startupProof.moneyStarCount === 8 && !startupProof.legacyGlobePresent, 'Startup did not expose the required money-and-stars loader component', startupProof);
   screenshots.push(await captureScreenshot(client, 'startup-loading-screen'));
 
@@ -296,6 +315,7 @@ try {
     const topbar = document.querySelector('.topbar').getBoundingClientRect();
     return { sidebar: [sidebar.x, sidebar.y, sidebar.width, sidebar.height], topbar: [topbar.x, topbar.y, topbar.width, topbar.height] };
   })()`);
+  const switchStartedAt = Date.now();
   await pointerClick(client, '#ptbTileButton');
   const immediateProof = await evaluate(client, `(() => ({
     ptbSelected: document.querySelector('#ptbTileButton').classList.contains('active'),
@@ -315,45 +335,29 @@ try {
   assert(exitProof.leaving && exitProof.opacity > 0.05 && exitProof.opacity < 0.98 && exitProof.transform === 'none', 'Outgoing view did not use the measured opacity-only fade', exitProof);
 
   await sleep(190);
-  const holdProof = await evaluate(client, `(() => {
+  const midProof = await evaluate(client, `(() => {
     const view = document.querySelector('.view.active');
     const workspace = document.querySelector('.workspace');
-    const loader = document.querySelector('#sidebarSwitchLoader');
     const sidebar = document.querySelector('.sidebar');
     const topbar = document.querySelector('.topbar');
     const sidebarRect = sidebar.getBoundingClientRect();
     const topbarRect = topbar.getBoundingClientRect();
-    const loaderRect = loader.getBoundingClientRect();
     return {
       viewOpacity: Number(getComputedStyle(view).opacity),
-      loaderOpacity: Number(getComputedStyle(loader).opacity),
       workspaceBusy: workspace.getAttribute('aria-busy'),
       sidebarOpacity: Number(getComputedStyle(sidebar).opacity),
       topbarOpacity: Number(getComputedStyle(topbar).opacity),
-      moneyLogoSrc: loader.querySelector('.startup-money-logo')?.getAttribute('src') || '',
-      moneyStarCount: loader.querySelectorAll('.startup-orbit-star').length,
-      legacyGlobePresent: Boolean(loader.querySelector('.news-loader-globe')),
-      moneyGeometry: [loaderRect.width, loaderRect.height, loaderRect.right, loaderRect.bottom],
+      entering: view.classList.contains('sidebar-view-entering-active'),
+      transform: getComputedStyle(view).transform,
+      sidebarLoaderPresent: Boolean(document.querySelector('#sidebarSwitchLoader')),
       shell: { sidebar: [sidebarRect.x, sidebarRect.y, sidebarRect.width, sidebarRect.height], topbar: [topbarRect.x, topbarRect.y, topbarRect.width, topbarRect.height] }
     };
   })()`);
-  assert(holdProof.viewOpacity < 0.02 && holdProof.loaderOpacity > 0.85 && holdProof.workspaceBusy === 'true', 'Blank loading hold did not match BSG', holdProof);
-  assert(holdProof.moneyLogoSrc === startupProof.moneyLogoSrc && holdProof.moneyStarCount === startupProof.moneyStarCount && !holdProof.legacyGlobePresent && JSON.stringify(holdProof.moneyGeometry) === JSON.stringify(startupProof.moneyGeometry), 'Game-mode switching did not reuse the exact startup money-and-stars loader', { startup: startupProof, hold: holdProof });
-  assert(holdProof.sidebarOpacity === 1 && holdProof.topbarOpacity === 1 && JSON.stringify(holdProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, hold: holdProof });
-  screenshots.push(await captureScreenshot(client, 'sidebar-switch-loading-hold'));
-
-  await waitFor(client, "document.querySelector('.workspace')?.classList.contains('is-sidebar-switch-entering') && document.querySelector('.view.active')?.classList.contains('sidebar-view-entering-active')", 'sidebar enter phase');
-  await sleep(105);
-  const enterProof = await evaluate(client, `(() => {
-    const view = document.querySelector('.view.active');
-    return {
-      opacity: Number(getComputedStyle(view).opacity),
-      entering: view.classList.contains('sidebar-view-entering-active'),
-      transform: getComputedStyle(view).transform,
-      loaderOpacity: Number(getComputedStyle(document.querySelector('#sidebarSwitchLoader')).opacity)
-    };
-  })()`);
-  assert(enterProof.entering && enterProof.opacity > 0.05 && enterProof.opacity < 0.98 && enterProof.transform === 'none', 'Incoming view did not use the measured opacity-only fade', enterProof);
+  assert(!midProof.sidebarLoaderPresent && midProof.workspaceBusy === 'true', 'Sidebar switch restored a loading icon or failed to keep its short transition busy state', midProof);
+  assert(midProof.sidebarOpacity === 1 && midProof.topbarOpacity === 1 && JSON.stringify(midProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, mid: midProof });
+  const enterProof = { ...midProof, opacity: midProof.viewOpacity };
+  assert(enterProof.entering && enterProof.opacity > 0.05 && enterProof.opacity < 0.98 && enterProof.transform === 'none' && !enterProof.sidebarLoaderPresent, 'Incoming view did not use the measured opacity-only fade without a loading icon', enterProof);
+  screenshots.push(await captureScreenshot(client, 'sidebar-switch-direct-transition'));
   screenshots.push(await captureScreenshot(client, 'sidebar-switch-entering'));
 
   const finalProof = await waitFor(client, `(() => {
@@ -365,23 +369,59 @@ try {
       activePack: document.querySelector('.game-tile.active')?.dataset.pack || '',
       activeView: activeView?.id || '',
       viewOpacity: Number(getComputedStyle(activeView).opacity),
-      loaderOpacity: Number(getComputedStyle(document.querySelector('#sidebarSwitchLoader')).opacity),
+      sidebarLoaderPresent: Boolean(document.querySelector('#sidebarSwitchLoader')),
       label: button.textContent.trim(),
       background: getComputedStyle(button).backgroundImage,
       workspaceBusy: workspace.hasAttribute('aria-busy')
     };
   })()`, 'completed PTB transition');
-  assert(finalProof.activePack === 'ptb' && finalProof.activeView === 'player' && finalProof.viewOpacity === 1 && finalProof.loaderOpacity === 0 && !finalProof.workspaceBusy, 'Sidebar transition did not cleanly finish', finalProof);
+  finalProof.elapsedMs = Date.now() - switchStartedAt;
+  assert(finalProof.activePack === 'ptb' && finalProof.activeView === 'player' && finalProof.viewOpacity === 1 && !finalProof.sidebarLoaderPresent && !finalProof.workspaceBusy, 'Sidebar transition did not cleanly finish', finalProof);
+  assert(finalProof.elapsedMs < 1_500, 'Sidebar transition performed long preparation work instead of using the startup-prepared path', finalProof);
   assert(finalProof.label === 'Install' && finalProof.background !== readyProof.background, 'Install and Update palettes were not distinct', { update: readyProof, install: finalProof });
   assert(!/116,\s*164,\s*88|147,\s*201,\s*112/.test(finalProof.background), 'Install action retained the saturated green palette', finalProof.background);
   screenshots.push(await captureScreenshot(client, 'sidebar-switch-complete-install-palette'));
+
+  const initializationMarker = JSON.parse(await fsp.readFile(path.join(userData, 'startup-initialization.json'), 'utf8'));
+  assert(initializationMarker.completedAt && Array.isArray(initializationMarker.blockedPacks), 'First-ever startup did not persist its cross-version initialization marker', initializationMarker);
+
+  await evaluate(client, "window.aht?.windowClose?.(); true").catch(() => {});
+  client.close();
+  client = null;
+  if (!(await waitForChildExit(child))) child.kill();
+
+  const quickPort = port + 2;
+  const quickEndpoint = `http://127.0.0.1:${quickPort}`;
+  quickChild = spawnLauncher(quickPort);
+  const quickTarget = await waitForTarget(quickEndpoint);
+  client = await connect(quickTarget.webSocketDebuggerUrl);
+  await client.call('Runtime.enable');
+  await client.call('Page.enable');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await waitFor(client, "document.querySelector('#startupLoader') && document.querySelector('.app-frame')", 'quick-relaunch startup DOM');
+  const quickVisibleAt = Date.now();
+  const quickStartupState = await evaluate(client, 'window.aht.getStartupPreparationState()');
+  const quickLoadingProof = await evaluate(client, `(() => ({
+    booting: document.body.classList.contains('is-booting'),
+    label: document.querySelector('#startupLoaderLabel')?.textContent || '',
+    progressHidden: document.querySelector('#startupLoaderRule')?.hidden,
+    frameHidden: document.querySelector('.app-frame')?.getAttribute('aria-hidden') === 'true'
+  }))()`);
+  assert(quickStartupState.firstInitialization === false && quickStartupState.initialized === true, 'The persisted initialization marker was not reused on relaunch', quickStartupState);
+  assert(quickLoadingProof.label === 'Loading launcher' && quickLoadingProof.progressHidden === true, 'A normal relaunch incorrectly restored the one-time Initializing progress UI', quickLoadingProof);
+  await waitFor(client, "!document.body.classList.contains('is-booting')", 'quick relaunch reveal', 120, 40);
+  const quickStartupElapsedMs = Date.now() - quickVisibleAt;
+  const quickFinalState = await evaluate(client, 'window.aht.getStartupPreparationState()');
+  assert(quickStartupElapsedMs < 5_000, 'Normal cached startup exceeded the five-second maximum', { quickStartupElapsedMs, quickStartupState, quickFinalState, quickLoadingProof });
 
   console.log(JSON.stringify({
     ok: true,
     mode: smokeExe ? 'installed' : 'source',
     startup: startupProof,
+    quickRelaunch: { elapsedMs: quickStartupElapsedMs, state: quickStartupState, finalState: quickFinalState, loading: quickLoadingProof },
     ready: readyProof,
-    transition: { immediate: immediateProof, exit: exitProof, hold: holdProof, enter: enterProof, final: finalProof },
+    transition: { immediate: immediateProof, exit: exitProof, mid: midProof, enter: enterProof, final: finalProof },
     screenshots
   }, null, 2));
 } finally {
@@ -390,6 +430,7 @@ try {
     client.close();
   }
   if (!child.killed) child.kill();
+  if (quickChild && !quickChild.killed) quickChild.kill();
   const closePromise = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections?.();
   await closePromise;

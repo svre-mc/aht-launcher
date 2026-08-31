@@ -20,8 +20,11 @@ import {
 } from '../src/clientPackFormat.js';
 import { installPack } from '../src/installer.js';
 import {
+  captureManagedIntegrityFingerprint,
+  launchCriticalManagedFiles,
   scanLocalChanges,
-  scanManagedIntegrity
+  scanManagedIntegrity,
+  verifyManagedIntegritySnapshot
 } from '../src/localChanges.js';
 import {
   defaultMinecraftRoot,
@@ -29,7 +32,9 @@ import {
   ensureMinecraftLauncherProfile,
   inspectMinecraftLauncherAuth,
   inspectMinecraftLauncherProfile,
+  minecraftLibraryAllowed,
   minecraftRootCandidates,
+  selectPreparedMinecraftLauncherProfile,
   setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
 import {
@@ -51,11 +56,16 @@ import {
   createLaunchAttempt,
   finishLaunchStep,
   formatLaunchReport,
+  latestLaunchReportPath,
   runLaunchStep,
   sanitizeDiagnosticText,
   setLaunchRequirement,
   writeLaunchReport
 } from '../src/launchDiagnostics.js';
+import {
+  preparedRuntimeSnapshotCoversFiles,
+  verifyPreparedRuntimeSnapshot
+} from '../src/preparedRuntimeIntegrity.js';
 import {
   assertLauncherReleaseAdvance,
   selectLauncherArtifact,
@@ -81,10 +91,8 @@ import {
   isKnownWindowsMinecraftLauncher,
   normalizeWindowsLauncherRecord,
   windowsLauncherRecordHasUsableWindow,
-  windowsLauncherRecordIdentity,
-  windowsLauncherRecordMatchesAllowedPath,
+  windowsLauncherRecordLooksLikeLauncherUi,
   windowsLauncherRecordMatchesTarget,
-  windowsLauncherTaskkillArgs,
   windowsLauncherWindowIdentity
 } from '../src/windowsMinecraftLauncher.js';
 
@@ -98,6 +106,7 @@ import {
   pathExists,
   readJsonFile,
   readJsonFromSource,
+  removeFileIfExists,
   resolveSource,
   safeJoin,
   writeJsonFile
@@ -271,9 +280,34 @@ const adminLoginPromises = new Map();
 let developerSession = null;
 const latestReleaseCache = new Map();
 const launcherProofRefreshes = new Map();
+const launchPreparationCache = new Map();
+const launchPreparationInFlight = new Map();
+const launchPreparationProofTimers = new Map();
+const launchPreparationWatchers = new Map();
+let startupPreparationInFlight = null;
+let startupSnapshotWriteQueue = Promise.resolve();
+let startupPreparationState = {
+  running: false,
+  firstInitialization: false,
+  phase: 'Waiting',
+  percent: 0,
+  startedAt: '',
+  completedAt: '',
+  error: ''
+};
 const launcherVersionTelemetryInFlight = new Map();
 const remoteRegistrationRefreshes = new Map();
+const remoteRegistrationsCompletedThisSession = new Map();
 const LATEST_RELEASE_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
+const LAUNCH_PREPARATION_PROOF_MIN_VALIDITY_MS = 2 * 60 * 1000;
+const LAUNCH_PREPARATION_PROOF_REFRESH_LEAD_MS = 3 * 60 * 1000;
+const STARTUP_INITIALIZATION_SCHEMA = 'aht-launcher-startup-initialization/v1';
+const STARTUP_PREPARATION_CACHE_SCHEMA = 'aht-launcher-startup-preparation-cache/v1';
+const STARTUP_PREPARATION_ENVELOPE_SCHEMA = 'aht-launcher-startup-preparation-envelope/v1';
+const STARTUP_PREPARATION_KEY_SCHEMA = 'aht-launcher-startup-preparation-key/v1';
+const LAUNCH_PREPARATION_MANAGED_POLICY = 'launch-critical-managed-files/v1';
+const LAUNCH_PREPARATION_RUNTIME_POLICY = 'minecraft-forge-runtime-content/v2';
+const STARTUP_PREPARATION_PACKS = Object.freeze(['stable', 'ptb']);
 const LAUNCHER_UPDATE_INSTALLING_STALE_MS = 10 * 60 * 1000;
 
 const DEFAULT_DEVELOPER_USERNAME = 'admin';
@@ -531,7 +565,7 @@ async function persistLaunchAttempt(attempt, config = {}) {
     attempt.reportWriteError = `Could not save the report file: ${writeError}`;
   }
   const text = saved?.text || formatLaunchReport(attempt);
-  lastLaunchDiagnostic = {
+  const diagnostic = {
     attemptId: attempt.attemptId,
     result: attempt.result,
     path: saved?.path || '',
@@ -541,7 +575,26 @@ async function persistLaunchAttempt(attempt, config = {}) {
     attempt,
     config: effectiveConfig
   };
-  return lastLaunchDiagnostic;
+  const currentStartedAt = Date.parse(lastLaunchDiagnostic?.attempt?.startedAt || '');
+  const nextStartedAt = Date.parse(attempt.startedAt || '');
+  if (!lastLaunchDiagnostic?.attempt || !Number.isFinite(currentStartedAt) || !Number.isFinite(nextStartedAt) || nextStartedAt >= currentStartedAt) {
+    lastLaunchDiagnostic = diagnostic;
+  }
+  return diagnostic;
+}
+
+function stageLaunchAttempt(attempt, config = {}) {
+  const effectiveConfig = config?.instanceDir ? config : configForPack(defaultConfig(), attempt?.pack?.channel || 'stable');
+  lastLaunchDiagnostic = {
+    attemptId: attempt.attemptId,
+    result: attempt.result,
+    path: '',
+    directory: '',
+    text: formatLaunchReport(attempt),
+    writeError: '',
+    attempt,
+    config: effectiveConfig
+  };
 }
 
 function markFailedLaunchRequirement(attempt) {
@@ -569,11 +622,9 @@ function markFailedLaunchRequirement(attempt) {
   if (requirement) setLaunchRequirement(attempt, requirement, 'FAIL', failed.detail || 'This requirement failed during Play.');
 }
 
-function launchDiagnosticIpc(handler) {
-  return async (event, payload = {}) => {
-    const target = releaseTarget(payload?.packKey || payload || 'stable');
-    const fallbackConfig = configForPack(defaultConfig(), target.id);
-    const attempt = createLaunchAttempt({
+function createLaunchDiagnosticAttempt(target = releaseTarget('stable')) {
+  const fallbackConfig = configForPack(defaultConfig(), target.id);
+  return createLaunchAttempt({
       appName: app.getName(),
       appVersion: app.getVersion(),
       mode: isDeveloperMode() ? 'developer' : 'player',
@@ -583,24 +634,42 @@ function launchDiagnosticIpc(handler) {
       channel: target.id,
       instanceDir: fallbackConfig.instanceDir,
       minecraftRoot: fallbackConfig.minecraftLauncher?.rootDir || ''
-    });
+  });
+}
+
+function launchDiagnosticIpc(handler) {
+  return async (event, payload = {}) => {
+    const target = releaseTarget(payload?.packKey || payload || 'stable');
+    const fallbackConfig = configForPack(defaultConfig(), target.id);
+    const attempt = createLaunchDiagnosticAttempt(target);
     try {
       const result = await handler(event, payload, attempt);
       completeLaunchAttempt(attempt, 'HANDOFF CONFIRMED');
-      await persistLaunchAttempt(attempt, attempt.runtimeConfig || fallbackConfig).catch(() => null);
+      stageLaunchAttempt(attempt, attempt.runtimeConfig || fallbackConfig);
       armCloseLauncherWhenGameStarts(attempt.runtimeConfig || fallbackConfig, attempt);
+      void persistLaunchAttempt(attempt, attempt.runtimeConfig || fallbackConfig).catch(() => null);
       return result;
     } catch (error) {
       markFailedLaunchRequirement(attempt);
       completeLaunchAttempt(attempt, 'FAILED', error);
-      const diagnostic = await persistLaunchAttempt(attempt, attempt.runtimeConfig || fallbackConfig).catch((reportError) => ({
-        path: '',
-        writeError: reportError?.message || String(reportError || 'Launch report could not be written.')
-      }));
+      stageLaunchAttempt(attempt, attempt.runtimeConfig || fallbackConfig);
       recordErrorDiagnostic('play:start', error, {
         attemptId: attempt.attemptId,
-        reportPath: diagnostic.path,
-        reportWriteError: diagnostic.writeError
+        reportPath: '',
+        reportWriteError: ''
+      });
+      void persistLaunchAttempt(attempt, attempt.runtimeConfig || fallbackConfig).then((diagnostic) => {
+        recordErrorDiagnostic('play:start', error, {
+          attemptId: attempt.attemptId,
+          reportPath: diagnostic.path,
+          reportWriteError: diagnostic.writeError
+        });
+      }).catch((reportError) => {
+        recordErrorDiagnostic('play:start', error, {
+          attemptId: attempt.attemptId,
+          reportPath: '',
+          reportWriteError: reportError?.message || String(reportError || 'Launch report could not be written.')
+        });
       });
       throw error;
     }
@@ -967,17 +1036,68 @@ async function buildErrorDiagnosticReport(payload = {}) {
     '================================================================',
     ''
   ];
-  return { text: lines.join('\r\n'), path: '' };
+  const text = lines.join('\r\n');
+  const instanceDir = config?.instanceDir || configForPack(defaultConfig(), target.id).instanceDir;
+  const reportPath = latestLaunchReportPath(instanceDir);
+  try {
+    await fs.mkdir(path.dirname(reportPath), { recursive: true });
+    await fs.writeFile(reportPath, text, 'utf8');
+    return { text, path: reportPath };
+  } catch {
+    return { text, path: '' };
+  }
+}
+
+async function setWindowsClipboardFile(file) {
+  const reportPath = path.resolve(String(file || ''));
+  const stat = await fs.stat(reportPath);
+  if (!stat.isFile()) throw new Error('The launch report file is unavailable.');
+  await new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-STA',
+      '-Command',
+      'Set-Clipboard -LiteralPath $env:AHT_CLIPBOARD_REPORT'
+    ], {
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, AHT_CLIPBOARD_REPORT: reportPath }
+    });
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error('Copying the launch report file timed out.'));
+    }, 5_000);
+    child.stderr?.on('data', (chunk) => {
+      if (stderr.length < 2000) stderr += chunk.toString('utf8');
+    });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || `Windows file clipboard exited with code ${code}.`));
+    });
+  });
 }
 
 async function copyErrorDiagnosticReport(payload = {}) {
   const report = await buildErrorDiagnosticReport(payload);
-  clipboard.writeText(report.text);
+  if (!report.path || path.basename(report.path).toLowerCase() !== 'ahtlatest.log') {
+    throw new Error('The latest launch report file is unavailable.');
+  }
+  if (process.platform === 'win32') await setWindowsClipboardFile(report.path);
+  else clipboard.writeText(report.text);
   return {
     ok: true,
     copied: true,
     chars: report.text.length,
-    fileName: report.path ? path.basename(report.path) : ''
+    copyKind: process.platform === 'win32' ? 'file' : 'text',
+    fileName: path.basename(report.path),
+    filePath: report.path
   };
 }
 
@@ -1266,6 +1386,18 @@ function deviceIdentityPath() {
 
 function installerJava8SelectionPath() {
   return path.join(app.getPath('userData'), 'installer-java8-selection.json');
+}
+
+function startupInitializationStatePath() {
+  return path.join(app.getPath('userData'), 'startup-initialization.json');
+}
+
+function startupPreparationCachePath() {
+  return path.join(app.getPath('userData'), 'startup-preparation-cache.json');
+}
+
+function startupPreparationKeyPath() {
+  return path.join(app.getPath('userData'), 'startup-preparation-key.json');
 }
 
 async function readPendingInstallerJava8Selection() {
@@ -2642,11 +2774,12 @@ async function refreshMinecraftLauncherProfile(config) {
 
 async function saveSettings(configPatch, packValue = 'stable') {
   const target = releaseTarget(packValue);
+  const previousBaseConfig = await loadConfig();
   let baseConfig = null;
   if (target.id === 'stable') {
     baseConfig = await saveConfig(configPatch);
   } else {
-    const current = await loadConfig();
+    const current = previousBaseConfig;
     const {
       packId: _packId,
       instanceDir,
@@ -2677,6 +2810,27 @@ async function saveSettings(configPatch, packValue = 'stable') {
       packs: { ...current.packs, [target.id]: nextPack }
     });
     await ensureDir(nextPack.instanceDir || defaultPtbInstanceDir());
+  }
+  for (const packKey of ['stable', 'ptb']) {
+    const previousPackConfig = configForPack(previousBaseConfig, packKey);
+    const nextPackConfig = configForPack(baseConfig, packKey);
+    if (launchPreparationConfigSignature(previousPackConfig)
+        !== launchPreparationConfigSignature(nextPackConfig)) {
+      invalidateLaunchPreparation(packKey);
+      continue;
+    }
+    const prepared = launchPreparationCache.get(packKey);
+    if (prepared?.state === 'ready' && prepared.launcherConfig) {
+      prepared.config = nextPackConfig;
+      prepared.launcherConfig = {
+        ...prepared.launcherConfig,
+        minecraftLauncher: {
+          ...prepared.launcherConfig.minecraftLauncher,
+          closeLauncherWhenGameStarts: nextPackConfig.minecraftLauncher?.closeLauncherWhenGameStarts === true
+        }
+      };
+      if (prepared.attempt) prepared.attempt.runtimeConfig = prepared.launcherConfig;
+    }
   }
   const config = configForPack(baseConfig, target.id);
   const safeConfig = rendererStatusConfig(config);
@@ -2732,6 +2886,7 @@ async function setupRecommendations(config = null) {
 }
 
 async function applyRecommendedSetup() {
+  invalidateAllLaunchPreparations();
   const current = await loadConfig();
   const setup = await setupRecommendations(current);
   const instanceDir = defaultInstanceDir();
@@ -2844,6 +2999,9 @@ function isLauncherProofAuthenticationError(error) {
 }
 
 async function writeLauncherProofWithDeveloperAuth({ config = {}, ...options } = {}) {
+  if (config.launcherProof?.enabled === false) {
+    return writeLauncherProof({ config, ...options });
+  }
   const developerAuthRequired = developerAdminSessionAllowed();
   const writeWithCurrentToken = async () => writeLauncherProof({
     config,
@@ -2930,11 +3088,18 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
     if (!username) {
       throw error;
     }
+    const proofWorkerBase = workerServiceBaseUrl(
+      config.launcherProof?.baseUrl || config.sync?.baseUrl || config.developer?.adminBaseUrl
+    );
+    const registrationWorkerBase = remoteRegistrationBaseUrl(config);
+    const registrationCanRepairProof = Boolean(proofWorkerBase && proofWorkerBase === registrationWorkerBase);
     try {
-      await registerMinecraftUsername(username, {
+      await registerMinecraftUsernameInFlight(config, identity, username, {
         mode: identity.usernameRegistrationMode || 'proof-refresh',
         minecraftUuid: identity.minecraftUuid || identity.minecraftUUID || '',
-        skipLauncherAuthSync: true
+        skipLauncherAuthSync: true,
+        forceRemoteRegistration: registrationCanRepairProof,
+        reuseCompletedRegistration: !registrationCanRepairProof
       });
     } catch (refreshError) {
       if (isUsernameUnavailableError(refreshError)) {
@@ -3150,11 +3315,49 @@ function remoteRegistrationKey(config = {}, identity = {}, username = '') {
   return `${identity.installId || ''}\0${normalizeMinecraftUsername(username).toLowerCase()}\0${remoteRegistrationBaseUrl(config)}`;
 }
 
+function remoteRegistrationSatisfiesRequest(config = {}, identity = {}, username = '', minecraftUuid = '') {
+  const normalizedUsername = normalizeMinecraftUsername(username).toLowerCase();
+  const requestedUuid = normalizeMinecraftUuid(minecraftUuid);
+  const savedUuid = normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID);
+  const confirmedAt = Date.parse(identity.remoteRegistrationConfirmedAt || '');
+  const confirmedBase = remoteRegistrationBaseUrl({ sync: { baseUrl: identity.remoteRegistrationWorkerBaseUrl || '' } });
+  return Boolean(
+    normalizedUsername
+    && normalizeMinecraftUsername(identity.minecraftUsername).toLowerCase() === normalizedUsername
+    && (!requestedUuid || savedUuid === requestedUuid)
+    && Number.isFinite(confirmedAt)
+    && confirmedBase === remoteRegistrationBaseUrl(config)
+  );
+}
+
 async function registerMinecraftUsernameInFlight(config = {}, identity = {}, username = '', options = {}) {
   const key = remoteRegistrationKey(config, identity, username);
   const running = remoteRegistrationRefreshes.get(key);
   if (running) return running;
-  const registration = registerMinecraftUsername(username, options).finally(() => {
+  const registration = (async () => {
+    // Startup, renderer status, and background telemetry can arrive one after
+    // another instead of overlapping perfectly. Re-read the durable identity
+    // inside the serialized operation so a caller holding the pre-import
+    // identity cannot register the same Minecraft account again after the
+    // first request has already completed.
+    const current = await loadIdentity();
+    const durableRegistrationMatches = remoteRegistrationSatisfiesRequest(config, current, username, options.minecraftUuid);
+    const completed = remoteRegistrationsCompletedThisSession.get(key);
+    if (completed && (options.reuseCompletedRegistration || (!options.forceRemoteRegistration && durableRegistrationMatches))) {
+      return completed;
+    }
+    if (!options.forceRemoteRegistration && durableRegistrationMatches) {
+      return {
+        ok: true,
+        username: current.minecraftUsername,
+        minecraftUuid: normalizeMinecraftUuid(current.minecraftUuid || current.minecraftUUID),
+        remote: { skipped: true, reason: 'registration already confirmed' }
+      };
+    }
+    const result = await registerMinecraftUsername(username, options);
+    if (!result?.remote?.skipped) remoteRegistrationsCompletedThisSession.set(key, result);
+    return result;
+  })().finally(() => {
     if (remoteRegistrationRefreshes.get(key) === registration) {
       remoteRegistrationRefreshes.delete(key);
     }
@@ -3644,7 +3847,7 @@ async function managedIntegrityOptions(config, latest = null) {
       latest: release
     });
     return {
-      managedFiles: verified.managedFiles,
+      managedFiles: launchCriticalManagedFiles(verified.managedFiles),
       ignoreLocalManaged: true
     };
   }
@@ -3735,6 +3938,21 @@ async function likeUpdateLog(logId) {
   };
 }
 
+function launchPreparationConfigSignature(config = {}) {
+  const minecraft = config.minecraftLauncher || {};
+  return JSON.stringify({
+    packId: config.packId || '',
+    instanceDir: path.resolve(config.instanceDir || defaultInstanceDir()),
+    latestUrl: config.latestUrl || '',
+    rootDir: minecraft.rootDir || '',
+    profileId: minecraft.profileId || '',
+    profileName: minecraft.profileName || '',
+    memoryMb: Number(minecraft.memoryMb) || 0,
+    javaPath: minecraft.javaPath || '',
+    java8InstallOverride: typeof minecraft.java8InstallOverride === 'boolean' ? minecraft.java8InstallOverride : null
+  });
+}
+
 function integrityStatePath(config) {
   return path.join(instanceSecurityStateDir(config), 'integrity.json');
 }
@@ -3761,7 +3979,7 @@ async function writeIntegrityState(config, integrity, source = 'scan') {
   return state;
 }
 
-async function scanPlayIntegrity(config, latest = null) {
+async function scanPlayIntegrity(config, latest = null, options = {}) {
   await migrateInstanceSecurityState(config);
   const managedOptions = await managedIntegrityOptions(config, latest);
   if (!Array.isArray(managedOptions.managedFiles)) {
@@ -3770,11 +3988,20 @@ async function scanPlayIntegrity(config, latest = null) {
   // Local integrity JSON and metadata fingerprints are user-editable caches.
   // A Play authorization therefore always hashes the authoritative managed set
   // derived from the verified release manifest instead of trusting cached state.
-  const integrity = await scanManagedIntegrity(config.instanceDir, managedOptions);
-  return writeIntegrityState(config, {
+  const integrity = await scanManagedIntegrity(config.instanceDir, {
+    ...managedOptions,
+    onProgress: typeof options.onProgress === 'function' ? options.onProgress : null
+  });
+  const state = await writeIntegrityState(config, {
     ...integrity,
     checkMode: 'full-hash'
   }, 'play-check');
+  Object.defineProperty(state, 'managedFiles', {
+    value: managedOptions.managedFiles,
+    configurable: true,
+    enumerable: false
+  });
+  return state;
 }
 
 function developerBypassIntegrityState(config, source = 'developer-bypass') {
@@ -4382,6 +4609,21 @@ function minecraftProfileForRenderer(profile = null) {
   };
 }
 
+function uninstalledMinecraftProfileForStatus(config = {}) {
+  const minecraft = config.minecraftLauncher || {};
+  return {
+    enabled: minecraft.enabled !== false,
+    profileId: minecraft.profileId || '',
+    profileName: minecraft.profileName || '',
+    profileExists: false,
+    versionId: '',
+    loaderInstalled: false,
+    minecraftVersion: '',
+    loaderId: '',
+    accountReuseAvailable: false
+  };
+}
+
 function minecraftProfileResultForRenderer(result = {}) {
   if (isDeveloperMode() || !result?.minecraftProfile) {
     return result;
@@ -4422,11 +4664,12 @@ function minecraftLauncherHandoffForRenderer(handoff = {}) {
   };
 }
 
-async function getStatus(configOverride = null, packValue = 'stable') {
+async function getStatus(configOverride = null, packValue = 'stable', options = {}) {
   const target = releaseTarget(packValue);
   const baseConfig = configOverride || await loadConfig();
   const config = configForPack(baseConfig, target.id);
   const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+  const prepared = launchPreparationCache.get(target.id);
   const identity = await identityPayload(launcherConfig);
   queueCurrentLauncherVersionReport(config, identity);
   let latest = null;
@@ -4434,14 +4677,18 @@ async function getStatus(configOverride = null, packValue = 'stable') {
   let updateLogs = [];
   let updateLogsError = null;
   try {
-    latest = await readLatest(config);
+    latest = options.preferCache
+      ? (cachedLatestRelease(config, Number.MAX_SAFE_INTEGER) || prepared?.latest || null)
+      : await readLatest(config);
   } catch (error) {
     latestError = error.message;
   }
-  try {
-    updateLogs = await readUpdateLogs(config, 12);
-  } catch (error) {
-    updateLogsError = error.message;
+  if (!options.preferCache) {
+    try {
+      updateLogs = await readUpdateLogs(config, 12);
+    } catch (error) {
+      updateLogsError = error.message;
+    }
   }
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   let installed = null;
@@ -4459,22 +4706,65 @@ async function getStatus(configOverride = null, packValue = 'stable') {
   }
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
   const launchLatestError = developerClientBypass && installed ? null : latestError;
-  const [minecraftProfile, java8Runtime] = await Promise.all([
-    inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
-    java8RuntimeStatus(launcherConfig)
-  ]);
+  const [minecraftProfile, java8Runtime] = prepared?.state === 'ready'
+    ? [prepared.minecraftProfile || null, prepared.java8Runtime || null]
+    : (options.preferCache
+        ? [prepared?.minecraftProfile || null, prepared?.java8Runtime || null]
+        : (!installed
+          ? [uninstalledMinecraftProfileForStatus(launcherConfig), isDeveloperMode() ? null : await java8RuntimeStatus(launcherConfig)]
+          : await Promise.all([
+            inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
+            java8RuntimeStatus(launcherConfig)
+          ])));
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
   const updateRequired = !updateBlockedReason && latest && latest.required !== false
     ? installed?.version !== latest.version
     : false;
-  const launchState = evaluateLaunchState(launcherConfig, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
+  let effectiveMinecraftProfile = minecraftProfile;
+  let effectiveJava8Runtime = java8Runtime;
+  let effectiveIntegrity = integrity;
+  let launchState = evaluateLaunchState(launcherConfig, launchLatest, launchLatestError, installed, minecraftProfile, launchIntegrity, {
     skipLoaderCheck: true,
     allowLegacyRelease: developerClientBypass,
     java8Runtime
   });
+  let launchPreparationState = 'missing';
+  let launchPreparedAt = '';
+  if (prepared?.state === 'ready') {
+    const sameInstalledVersion = String(prepared.installed?.version || '') === String(installed?.version || '');
+    const sameLatestVersion = String(prepared.latest?.version || '') === String(launchLatest?.version || '');
+    if (!sameInstalledVersion || !sameLatestVersion) {
+      invalidateLaunchPreparation(target.id);
+    } else {
+      effectiveMinecraftProfile = prepared.minecraftProfile || minecraftProfile;
+      effectiveJava8Runtime = prepared.java8Runtime || java8Runtime;
+      effectiveIntegrity = prepared.integrity || integrity;
+      launchState = { playConfigured: true, launchReady: true, launchMode: 'minecraftLauncher', launchBlockedReason: '' };
+      launchPreparationState = 'ready';
+      launchPreparedAt = prepared.completedAt || '';
+    }
+  } else if (prepared?.state === 'blocked') {
+    effectiveMinecraftProfile = prepared.minecraftProfile || minecraftProfile;
+    effectiveJava8Runtime = prepared.java8Runtime || java8Runtime;
+    effectiveIntegrity = prepared.integrity || integrity;
+    launchState = {
+      ...launchState,
+      launchReady: false,
+      launchBlockedReason: String(prepared.error?.message || launchState.launchBlockedReason || 'Launcher preparation failed.')
+    };
+    launchPreparationState = 'blocked';
+    launchPreparedAt = prepared.completedAt || '';
+  } else if (prepared?.state === 'preparing') {
+    launchState = {
+      ...launchState,
+      launchReady: false,
+      launchBlockedReason: 'Launcher preparation is still running.'
+    };
+    launchPreparationState = 'preparing';
+  }
   const pendingLauncherUpdate = await hydratePendingLauncherUpdateState();
-  let launcherUpdate = await readLauncherUpdate(config);
+  let launcherUpdate = options.preferCache ? null : await readLauncherUpdate(config);
   if (pendingLauncherUpdate?.version && (
     compareVersions(pendingLauncherUpdate.version, app.getVersion()) > 0
     || (pendingLauncherUpdate.purpose === 'developer-reinstall' && isDeveloperMode() && isDeveloperAuthenticated())
@@ -4528,17 +4818,20 @@ async function getStatus(configOverride = null, packValue = 'stable') {
       }))
       : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', socialServerSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
     setup: setupForRenderer(await setupRecommendations(config)),
-    minecraftProfile: minecraftProfileForRenderer(minecraftProfile),
-    java8Runtime,
+    minecraftProfile: minecraftProfileForRenderer(effectiveMinecraftProfile),
+    java8Runtime: effectiveJava8Runtime,
     latest,
     latestError,
     updateLogs,
     updateLogsError,
     launcherUpdate: launcherUpdateForRenderer(launcherUpdate),
     installed,
-    integrity,
+    integrity: effectiveIntegrity,
     updateBlockedReason,
     updateRequired,
+    launchPreparationComplete: ['ready', 'blocked'].includes(launchPreparationState),
+    launchPreparationState,
+    launchPreparedAt,
     ...launchState
   };
 }
@@ -4549,6 +4842,7 @@ async function runUpdate(forceRepair = false, options = {}) {
     return updateState;
   }
   const target = releaseTarget(options.packKey || 'stable');
+  invalidateLaunchPreparation(target.id);
   updateState = {
     ...createOperationState(forceRepair ? 'repair' : 'install', forceRepair ? 'Preparing repair' : 'Preparing update'),
     releaseTarget: target.id,
@@ -4587,6 +4881,9 @@ async function runUpdate(forceRepair = false, options = {}) {
       logger: { log: (line) => appendOperationLine(updateState, line) }
     });
     let latestAfterInstall = null;
+    let preparedLauncherProof = null;
+    let preparedMinecraftProfile = null;
+    let preparedMinecraftAssets = null;
     try {
       latestAfterInstall = await readLatest(config);
       const launcherProof = await writeSerializedRegisteredLauncherProof({
@@ -4600,6 +4897,7 @@ async function runUpdate(forceRepair = false, options = {}) {
         trusted: Boolean(launcherProof.trusted),
         source: launcherProof.source || ''
       };
+      preparedLauncherProof = launcherProof;
       let profile = await ensureMinecraftLauncherProfile({
         config: launcherConfig,
         latest: latestAfterInstall,
@@ -4614,6 +4912,7 @@ async function runUpdate(forceRepair = false, options = {}) {
         profile,
         logger: { log: (line) => assetLines.push(String(line)) }
       });
+      preparedMinecraftAssets = result.minecraftAssets;
       appendOperationLines(updateState, assetLines);
       profile = await installMinecraftProfileLoaders(profile, {
         config: launcherConfig,
@@ -4622,6 +4921,7 @@ async function runUpdate(forceRepair = false, options = {}) {
         operationState: updateState
       });
       result.minecraftProfile = profile;
+      preparedMinecraftProfile = profile;
     } catch (error) {
       throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
     }
@@ -4634,7 +4934,22 @@ async function runUpdate(forceRepair = false, options = {}) {
         };
       }
     });
-    await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');
+    const storedIntegrity = await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');
+    const preparedIntegrity = developerClientBypassAllowed()
+      ? { ...storedIntegrity, source: 'developer-update-bypass', developerClientBypass: true }
+      : storedIntegrity;
+    await publishCompletedUpdatePreparation({
+      target,
+      config,
+      launcherConfig,
+      identity,
+      latest: latestAfterInstall,
+      installed: result.installed,
+      integrity: preparedIntegrity,
+      minecraftProfile: preparedMinecraftProfile,
+      launcherProof: preparedLauncherProof,
+      minecraftAssets: preparedMinecraftAssets
+    });
     await sendLauncherEvent(config, identity, {
       type: forceRepair ? 'repair_completed' : 'install_completed',
       version: result.installed?.version || null,
@@ -9543,9 +9858,10 @@ function spawnDetached(command, args = [], cwd = app.getPath('home'), env = proc
     try {
       captureCount = (Number(JSON.parse(fsSync.readFileSync(capturePath, 'utf8'))?.captureCount) || 0) + 1;
     } catch {}
-    fsSync.writeFileSync(capturePath, `${JSON.stringify({ command, args, cwd, windowsHide, captureCount }, null, 2)}\n`, 'utf8');
-    registerTestWindowsLauncherProcess(command);
-    return Promise.resolve({ ok: true, command, args, captured: true });
+    const capturedAtMs = Date.now();
+    const pid = registerTestWindowsLauncherProcess(command);
+    fsSync.writeFileSync(capturePath, `${JSON.stringify({ command, args, cwd, windowsHide, captureCount, capturedAtMs, pid }, null, 2)}\n`, 'utf8');
+    return Promise.resolve({ ok: true, command, args, captured: true, pid });
   }
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -9606,11 +9922,6 @@ function spawnDetachedGui(command, args = [], cwd = app.getPath('home'), env = p
   return spawnDetached(command, args, cwd, env, { windowsHide: false });
 }
 
-function windowsSystemExecutable(name) {
-  const windowsRoot = process.env.SystemRoot || 'C:\\Windows';
-  return path.join(windowsRoot, 'System32', name);
-}
-
 function windowsPowerShellExecutable() {
   return path.join(
     process.env.SystemRoot || 'C:\\Windows',
@@ -9652,7 +9963,7 @@ function writeTestWindowsProcessState(state) {
 
 function registerTestWindowsLauncherProcess(executablePath) {
   const state = readTestWindowsProcessState();
-  if (!state) return;
+  if (!state) return 0;
   const pid = state.nextPid;
   state.nextPid += 1;
   state.records = state.records.filter((record) => Number(record.pid) !== pid);
@@ -9670,6 +9981,7 @@ function registerTestWindowsLauncherProcess(executablePath) {
     foreground: false
   });
   writeTestWindowsProcessState(state);
+  return pid;
 }
 
 async function windowsMinecraftLauncherProcessSnapshot(options = {}) {
@@ -9709,140 +10021,95 @@ function windowsDesktopMinecraftLauncherCandidates() {
   ].filter(Boolean).map((candidate) => path.resolve(candidate));
 }
 
-function windowsMinecraftLauncherAllowedPaths(config = {}) {
-  const configuredRoot = String(config.minecraftLauncher?.rootDir || '').trim();
-  return [
-    configuredRoot ? path.join(configuredRoot, 'minecraft.exe') : '',
-    ...windowsDesktopMinecraftLauncherCandidates()
-  ].filter(Boolean).map((candidate) => path.resolve(candidate));
+function minecraftNotInstalledError() {
+  const error = new Error('Minecraft not installed. Install Minecraft.');
+  error.code = 'AHT_MINECRAFT_NOT_INSTALLED';
+  return error;
+}
+
+async function resolveMinecraftLauncherRoute(config = {}) {
+  const requestedCwd = String(config.minecraftLauncher?.rootDir || '').trim() || app.getPath('home');
+  const cwd = await existingLaunchCwd(requestedCwd);
+  if (trustedMinecraftOpenCommandAllowed() && config.minecraftLauncher?.openCommand) {
+    return {
+      kind: 'custom',
+      command: config.minecraftLauncher.openCommand,
+      args: Array.isArray(config.minecraftLauncher.openArgs) ? config.minecraftLauncher.openArgs : [],
+      cwd
+    };
+  }
+
+  if (process.platform === 'win32') {
+    const preferredCurseForgeRoot = String(config.minecraftLauncher?.runtimeCurseForgeRoot || '').trim();
+    const usingCurseForgeRoot = Boolean(
+      (preferredCurseForgeRoot && samePath(cwd, preferredCurseForgeRoot))
+      || isCurseForgeMinecraftRoot(cwd)
+    );
+    const rootLauncher = path.join(cwd, 'minecraft.exe');
+    if (await pathExists(rootLauncher)) {
+      const homePage = await setMinecraftLauncherHomePage(cwd);
+      if (!homePage.ok) {
+        console.warn(`Unable to set Minecraft Launcher home page: ${homePage.reason || 'unknown error'}`);
+      }
+      return {
+        kind: usingCurseForgeRoot ? 'curseforge' : 'configured-root',
+        targetKind: 'root',
+        executablePath: rootLauncher,
+        args: ['--workDir', cwd],
+        cwd,
+        rootDir: cwd,
+        homePagePrepared: Boolean(homePage.ok)
+      };
+    }
+    for (const candidate of windowsDesktopMinecraftLauncherCandidates()) {
+      if (await pathExists(candidate)) {
+        return {
+          kind: 'desktop',
+          targetKind: 'desktop',
+          executablePath: candidate,
+          args: ['--workDir', cwd],
+          cwd,
+          rootDir: cwd
+        };
+      }
+    }
+    const snapshot = await windowsMinecraftLauncherProcessSnapshot();
+    if (snapshot.packageRoots.length) {
+      return {
+        kind: 'store',
+        targetKind: 'store',
+        cwd,
+        rootDir: cwd,
+        sessionId: snapshot.currentSessionId,
+        storeRoots: snapshot.packageRoots
+      };
+    }
+    throw minecraftNotInstalledError();
+  }
+
+  if (process.platform === 'darwin') {
+    const home = app.getPath('home');
+    const appPaths = [
+      process.env.AHT_MINECRAFT_MAC_APP || '',
+      '/Applications/Minecraft.app',
+      '/Applications/Minecraft Launcher.app',
+      path.join(home, 'Applications', 'Minecraft.app'),
+      path.join(home, 'Applications', 'Minecraft Launcher.app')
+    ].filter(Boolean);
+    for (const appPath of appPaths) {
+      if (await pathExists(appPath)) {
+        return { kind: 'mac', appPath, cwd, rootDir: cwd };
+      }
+    }
+    throw minecraftNotInstalledError();
+  }
+
+  return { kind: 'linux', command: 'minecraft-launcher', args: [], cwd, rootDir: cwd };
 }
 
 function launcherRecordLabel(record = {}) {
   const normalized = normalizeWindowsLauncherRecord(record);
   return `${normalized.image || 'unknown'} PID ${normalized.pid || '?'}${normalized.path ? ` at ${normalized.path}` : ' with an unreadable path'}`;
-}
-
-async function terminateTestWindowsLauncherRecord(record) {
-  const state = readTestWindowsProcessState();
-  if (!state) return false;
-  const before = state.records.length;
-  state.records = state.records.filter((candidate) => Number(candidate.pid) !== Number(record.pid));
-  writeTestWindowsProcessState(state);
-  return state.records.length !== before;
-}
-
-async function closeWindowsMinecraftLaunchersForProfileReload(config = {}) {
-  const snapshot = await windowsMinecraftLauncherProcessSnapshot();
-  const currentSessionRecords = snapshot.records.filter((record) => record.sessionId === snapshot.currentSessionId);
-  if (!currentSessionRecords.length) {
-    return { detected: false, closed: false, images: [], sessionId: snapshot.currentSessionId };
-  }
-  const allowedPaths = windowsMinecraftLauncherAllowedPaths(config);
-  const trusted = currentSessionRecords.filter((record) => windowsLauncherRecordMatchesAllowedPath(record, {
-    allowedPaths,
-    allowStore: true,
-    storeRoots: snapshot.packageRoots,
-    sessionId: snapshot.currentSessionId
-  }));
-  const untrusted = currentSessionRecords.filter((record) => !trusted.some((candidate) => candidate.pid === record.pid));
-  if (untrusted.length) {
-    throw new Error(`Close Minecraft Launcher and click Play again. A Hard Time will not close an unverified process: ${untrusted.map(launcherRecordLabel).join('; ')}.`);
-  }
-
-  const capturePath = process.env.AHT_TEST_HOOKS === '1'
-    ? String(process.env.AHT_TEST_MINECRAFT_HANDOFF_CAPTURE_PATH || '').trim()
-    : '';
-  const terminatedPids = [];
-  for (const record of trusted) {
-    const current = (await windowsMinecraftLauncherProcessSnapshot()).records.find((candidate) => candidate.pid === record.pid);
-    if (!current) continue;
-    if (windowsLauncherRecordIdentity(current) !== windowsLauncherRecordIdentity(record)) {
-      throw new Error(`Minecraft Launcher changed while preparing Play. Close it manually and try again: ${launcherRecordLabel(current)}.`);
-    }
-    try {
-      if (readTestWindowsProcessState()) {
-        await terminateTestWindowsLauncherRecord(record);
-      } else {
-        // PID targeting avoids killing unrelated launchers; never use /T or /F,
-        // because a running Java game must survive and force-close is unsafe.
-        await spawnLogged(windowsSystemExecutable('taskkill.exe'), windowsLauncherTaskkillArgs(record), { timeoutMs: 10_000 });
-      }
-      terminatedPids.push(record.pid);
-    } catch {
-      // The exact readback below distinguishes a normal self-close from refusal.
-    }
-  }
-
-  const deadline = Date.now() + 10_000;
-  let remaining = [];
-  do {
-    const current = await windowsMinecraftLauncherProcessSnapshot();
-    remaining = current.records.filter((record) => currentSessionRecords.some((before) => before.pid === record.pid));
-    if (!remaining.length) break;
-    await sleep(250);
-  } while (Date.now() < deadline);
-  if (remaining.length) {
-    throw new Error(`Minecraft Launcher did not close cleanly. Close it manually and click Play again: ${remaining.map(launcherRecordLabel).join('; ')}.`);
-  }
-  // Require a quiet interval before the final readback so an updater respawn
-  // cannot slip between the check and the profile write.
-  await sleep(500);
-  const postClose = await windowsMinecraftLauncherProcessSnapshot();
-  const reopened = postClose.records.filter((record) => record.sessionId === snapshot.currentSessionId);
-  if (reopened.length) {
-    throw new Error(`Minecraft Launcher reopened while A Hard Time was preparing the selected profile. Close it and click Play again: ${reopened.map(launcherRecordLabel).join('; ')}.`);
-  }
-  if (capturePath) {
-    fsSync.mkdirSync(path.dirname(capturePath), { recursive: true });
-    fsSync.writeFileSync(capturePath, `${JSON.stringify({
-      detected: trusted,
-      action: 'close-for-profile-reload',
-      terminatedPids,
-      taskkillArgs: trusted.map((record) => windowsLauncherTaskkillArgs(record))
-    }, null, 2)}\n`, 'utf8');
-  }
-  return {
-    detected: true,
-    closed: true,
-    images: trusted.map((record) => record.image),
-    pids: trusted.map((record) => record.pid),
-    sessionId: snapshot.currentSessionId,
-    storeRoots: snapshot.packageRoots
-  };
-}
-
-async function prepareMinecraftLauncherForPlay(config = {}) {
-  if (trustedMinecraftOpenCommandAllowed() && config.minecraftLauncher?.openCommand) {
-    return { detected: false, closed: false, images: [], sessionId: -1 };
-  }
-  if (process.platform === 'win32') {
-    return closeWindowsMinecraftLaunchersForProfileReload(config);
-  }
-  if (process.platform === 'darwin') {
-    try {
-      const output = await spawnLogged('/usr/bin/pgrep', [
-        '-f',
-        'Minecraft( Launcher)?[.]app/Contents/MacOS|com[.]mojang[.]minecraftlauncher'
-      ], { timeoutMs: 5_000 });
-      if (String(output || '').trim()) {
-        throw new Error('Close Minecraft Launcher and click Play again so A Hard Time can reload the exact profile.');
-      }
-    } catch (error) {
-      if (/Close Minecraft Launcher/.test(String(error?.message || ''))) throw error;
-      // pgrep exits 1 when no matching launcher exists.
-    }
-  }
-  return { detected: false, closed: false, images: [], sessionId: -1 };
-}
-
-async function assertMinecraftLauncherStayedClosedForProfileWrite(handoff = {}) {
-  if (process.platform !== 'win32' || Number(handoff.sessionId) < 0) return;
-  await sleep(250);
-  const snapshot = await windowsMinecraftLauncherProcessSnapshot();
-  const reopened = snapshot.records.filter((record) => record.sessionId === Number(handoff.sessionId));
-  if (reopened.length) {
-    throw new Error(`Minecraft Launcher reopened before the selected A Hard Time profile was ready. Close it and click Play again: ${reopened.map(launcherRecordLabel).join('; ')}.`);
-  }
 }
 
 async function focusWindowsMinecraftLauncher(record) {
@@ -9937,7 +10204,11 @@ async function confirmWindowsMinecraftLauncherActivation(result, target = {}, ti
       storeRoots: target.storeRoots?.length ? target.storeRoots : snapshot.packageRoots
     };
     lastSeen = snapshot.records.filter((record) => windowsLauncherRecordMatchesTarget(record, scopedTarget));
-    const candidate = lastSeen.find(windowsLauncherRecordHasUsableWindow);
+    const candidate = lastSeen.find((record) => (
+      Number(target.spawnPid) > 0
+      && record.pid === Number(target.spawnPid)
+      && windowsLauncherRecordHasUsableWindow(record)
+    )) || lastSeen.find(windowsLauncherRecordLooksLikeLauncherUi);
     if (candidate) {
       const identity = windowsLauncherWindowIdentity(candidate);
       if (identity !== stableIdentity) {
@@ -10062,7 +10333,48 @@ async function openWindowsStoreMinecraftLauncher(cwd, env, sessionId = -1, store
     throw new Error(`Minecraft Launcher could not be opened. App activation failed: ${explorerError?.message || 'unknown error'}. Hidden fallback failed: ${startError.message}`);
   }
 }
+
+async function openPreparedMinecraftLauncherRoute(route = {}, env = minecraftLaunchEnv()) {
+  const cwd = route.cwd || app.getPath('home');
+  if (route.kind === 'custom') {
+    return spawnDetachedGui(route.command, route.args || [], cwd, env);
+  }
+  if (process.platform === 'win32') {
+    if (route.targetKind === 'root' || route.targetKind === 'desktop') {
+      const spawned = await spawnDetachedGui(route.executablePath, route.args || ['--workDir', cwd], cwd, env);
+      const result = await confirmWindowsMinecraftLauncherActivation(spawned, {
+        kind: route.targetKind,
+        executablePath: route.executablePath,
+        sessionId: route.sessionId,
+        spawnPid: spawned.pid
+      });
+      return {
+        ...result,
+        kind: route.kind,
+        rootDir: route.rootDir || cwd,
+        homePagePrepared: Boolean(route.homePagePrepared)
+      };
+    }
+    if (route.targetKind === 'store') {
+      return openWindowsStoreMinecraftLauncher(cwd, env, route.sessionId, route.storeRoots || []);
+    }
+    throw minecraftNotInstalledError();
+  }
+  if (process.platform === 'darwin') {
+    if (!route.appPath) throw minecraftNotInstalledError();
+    return {
+      ...(await openMacApplication([route.appPath, '--args', '--workDir', cwd], cwd, env)),
+      kind: 'mac',
+      rootDir: route.rootDir || cwd
+    };
+  }
+  return spawnDetached(route.command || 'minecraft-launcher', route.args || [], cwd, env);
+}
+
 async function openMinecraftLauncher(config, options = {}) {
+  if (options.route) {
+    return openPreparedMinecraftLauncherRoute(options.route);
+  }
   const launcherConfig = await minecraftLauncherRuntimeConfig(config);
   const requestedCwd = launcherConfig.minecraftLauncher?.rootDir || app.getPath('home');
   const cwd = await existingLaunchCwd(requestedCwd);
@@ -10086,10 +10398,8 @@ async function openMinecraftLauncher(config, options = {}) {
       }
       const target = { kind: 'root', executablePath: rootLauncher, sessionId: options.sessionId };
       try {
-        const result = await confirmWindowsMinecraftLauncherActivation(
-          await spawnDetachedGui(rootLauncher, ['--workDir', cwd], cwd, env),
-          target
-        );
+        const spawned = await spawnDetachedGui(rootLauncher, ['--workDir', cwd], cwd, env);
+        const result = await confirmWindowsMinecraftLauncherActivation(spawned, { ...target, spawnPid: spawned.pid });
         return {
           ...result,
           kind: usingCurseForgeRoot ? 'curseforge' : 'configured-root',
@@ -10113,10 +10423,11 @@ async function openMinecraftLauncher(config, options = {}) {
     for (const candidate of candidates) {
       if (await pathExists(candidate)) {
         try {
+          const spawned = await spawnDetachedGui(candidate, desktopArgs, cwd, env);
           return {
             ...(await confirmWindowsMinecraftLauncherActivation(
-              await spawnDetachedGui(candidate, desktopArgs, cwd, env),
-              { kind: 'desktop', executablePath: candidate, sessionId: options.sessionId }
+              spawned,
+              { kind: 'desktop', executablePath: candidate, sessionId: options.sessionId, spawnPid: spawned.pid }
             )),
             kind: 'desktop',
             rootDir: cwd
@@ -10216,7 +10527,9 @@ ipcMain.handle('status:get', async (_event, payload = {}) => {
     testStatusFailuresRemaining -= 1;
     throw new Error('Test-only initial status failure.');
   }
-  return getStatus(null, payload?.packKey || payload || 'stable');
+  return getStatus(null, payload?.packKey || payload || 'stable', {
+    preferCache: Boolean(payload?.preferCache)
+  });
 });
 ipcMain.handle('settings:save', async (_event, payload = {}) => {
   if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'config')) {
@@ -10327,8 +10640,16 @@ ipcMain.handle('changes:sync', async (_event, payload = {}) => {
     changes
   });
 });
-ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, attempt) => {
+async function performLaunchPreparation(payload = {}, attempt, options = {}) {
   const target = releaseTarget(payload?.packKey || payload || 'stable');
+  const reportProgress = (phase, percent, detail = '') => {
+    options.onProgress?.({
+      phase: String(phase || `Initializing ${target.name}`),
+      percent: Math.max(0, Math.min(100, Number(percent) || 0)),
+      detail: String(detail || '')
+    });
+  };
+  reportProgress(`Initializing ${target.name}`, 1);
   await runLaunchStep(
     attempt,
     'legal-consent',
@@ -10365,8 +10686,18 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     async () => minecraftLauncherRuntimeConfig(config),
     (value) => `Minecraft root: ${value.minecraftLauncher?.rootDir || 'not resolved'}.`
   );
+  reportProgress(`Loading ${target.name} settings`, 5);
   attempt.minecraftRoot = launcherConfig.minecraftLauncher?.rootDir || '';
   attempt.runtimeConfig = launcherConfig;
+  const launcherRoute = await runLaunchStep(
+    attempt,
+    'launcher-route',
+    'Resolve an installed Minecraft Launcher',
+    async () => resolveMinecraftLauncherRoute(launcherConfig),
+    (value) => `${value.kind || 'Minecraft Launcher'} is installed and ready for handoff.`
+  );
+  reportProgress('Finding Minecraft Launcher', 10);
+  setLaunchRequirement(attempt, 'minecraftLauncher', 'PASS', `${launcherRoute.kind || 'Minecraft Launcher'} route is ready.`);
   attempt.minecraftSignalBaseline = await runLaunchStep(
     attempt,
     'launcher-log-baseline',
@@ -10408,6 +10739,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   if (!launcherVersionReady) {
     throw new Error(`AHT Launcher ${launcherUpdate.latestVersion || 'update'} must be installed before Play.`);
   }
+  reportProgress('Checking installed version', 15);
 
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   const installed = await runLaunchStep(
@@ -10458,16 +10790,36 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   }
 
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
+  reportProgress('Loading verified release files', 20);
   attempt.pack.latestVersion = String(launchLatest?.version || '');
-  if (installed && launchLatest && installed.packId === target.packId && installed.version !== launchLatest.version) {
+  const managedMutationMonitor = developerClientBypass
+    ? null
+    : await createLaunchPreparationMutationMonitor(config, launchLatest);
+  Object.defineProperty(attempt, 'managedMutationMonitor', {
+    value: managedMutationMonitor,
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  const expectedInstalledPackId = launchLatest?.packId || target.packId;
+  if (installed && launchLatest && installed.packId === expectedInstalledPackId && installed.version === launchLatest.version) {
+    setLaunchRequirement(attempt, 'installed', 'PASS', `Installed version ${installed.version || 'unknown'}.`);
+  } else if (installed && launchLatest && installed.packId === expectedInstalledPackId) {
     setLaunchRequirement(attempt, 'installed', 'FAIL', `Installed version ${installed.version || 'unknown'}; latest version ${launchLatest.version || 'unknown'}. Update is required.`);
+  } else if (installed && launchLatest) {
+    setLaunchRequirement(attempt, 'installed', 'FAIL', `Installed pack ${installed.packId || 'unknown'} does not match ${expectedInstalledPackId}.`);
   }
   const preflightOutcomes = await Promise.allSettled([
     runLaunchStep(
       attempt,
       'integrity',
       'Verify managed modpack files',
-      async () => (developerClientBypass ? null : scanPlayIntegrity(config, launchLatest)),
+      async () => (developerClientBypass ? null : scanPlayIntegrity(config, launchLatest, {
+        onProgress: (progress = {}) => {
+          const scanPercent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+          reportProgress(progress.phase || 'Verifying installed files', 22 + Math.round(scanPercent * 0.4), progress.currentPath || '');
+        }
+      })),
       (value) => developerClientBypass
         ? { status: 'WARN', detail: 'Developer client integrity bypass is active.' }
         : (Boolean(value?.valid) && Number(value?.counts?.corrupted || 0) === 0
@@ -10503,6 +10855,18 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   const rejectedPreflight = preflightOutcomes.find((outcome) => outcome.status === 'rejected');
   if (rejectedPreflight) throw rejectedPreflight.reason;
   const [integrity, minecraftProfile, java8Runtime] = preflightOutcomes.map((outcome) => outcome.value);
+  reportProgress('Preparing Minecraft runtime', 64);
+  attempt.launchPreparation = {
+    target,
+    config,
+    launcherConfig,
+    launcherRoute,
+    latest: launchLatest,
+    installed,
+    integrity: developerClientBypass ? developerBypassIntegrityState(config) : integrity,
+    java8Runtime,
+    minecraftProfile
+  };
   if (developerClientBypass) {
     setLaunchRequirement(attempt, 'integrity', 'WARN', 'Developer client integrity bypass is active.');
   } else {
@@ -10564,6 +10928,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     (value) => `Trusted proof created by ${value?.source || 'the configured signer'}; no token is written to this report.`
   );
   const runtimeRepairPromise = (async () => {
+    reportProgress('Preparing Minecraft profile', 70);
     let repairedProfile = await runLaunchStep(
       attempt,
       'prepare-profile',
@@ -10571,6 +10936,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       async () => ensureMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
       (value) => `${value?.profileName || target.name}; ${value?.versionId || 'version unresolved'}.`
     );
+    reportProgress('Verifying Minecraft assets', 78);
     const repairedAssets = await runLaunchStep(
       attempt,
       'verify-assets',
@@ -10581,6 +10947,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
         return `${count} Minecraft root${count === 1 ? '' : 's'} checked.`;
       }
     );
+    reportProgress('Validating Forge and Java', 88);
     repairedProfile = await runLaunchStep(
       attempt,
       'install-forge',
@@ -10608,6 +10975,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   const launcherProof = launcherProofOutcome.value;
   const runtimeRepair = runtimeRepairOutcome.value;
   const { profile, minecraftAssets } = runtimeRepair;
+  reportProgress('Validating launch readiness', 95);
   await runLaunchStep(
     attempt,
     'final-readiness',
@@ -10621,13 +10989,6 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       return state;
     },
     'The repaired installation passed the final gate.'
-  );
-  const launcherHandoff = await runLaunchStep(
-    attempt,
-    'launcher-handoff',
-    'Prepare Minecraft Launcher for profile selection',
-    async () => prepareMinecraftLauncherForPlay(launcherConfig),
-    (value) => value?.closed ? 'An existing verified Minecraft Launcher was closed for an exact profile reload.' : 'No conflicting Minecraft Launcher window was open.'
   );
   const selectionConfig = profile?.javaPath
     ? {
@@ -10656,21 +11017,1283 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     },
     (value) => `${value?.profileName || target.name}; ${value?.versionId || 'version unresolved'} selected.`
   );
+  await confirmLaunchPreparationMutationMonitor(managedMutationMonitor, integrity?.fingerprint, {
+    changedMessage: 'A managed game file changed during launcher preparation. The installation was not authorized; restart the launcher to verify it again.',
+    monitoringMessage: 'Managed-file monitoring stopped during launcher preparation. Restart A Hard Time Launcher before playing.'
+  });
+  reportProgress(`${target.name} is ready`, 100);
+  attempt.managedMutationMonitor = null;
+  return {
+    target,
+    config,
+    launcherConfig: selectionConfig,
+    launcherRoute,
+    identity,
+    latest: launchLatest,
+    installed,
+    integrity: developerClientBypass ? developerBypassIntegrityState(config) : integrity,
+    java8Runtime: profile.javaRuntime ? { ...java8Runtime, usable: true } : java8Runtime,
+    minecraftProfile: selectedProfile,
+    launcherProof,
+    minecraftAssets,
+    managedMutationMonitor
+  };
+}
+
+async function readStartupInitializationState() {
+  const file = startupInitializationStatePath();
+  if (!(await pathExists(file))) return null;
+  const state = await readJsonFile(file).catch(() => null);
+  return state?.schema === STARTUP_INITIALIZATION_SCHEMA && state.completedAt ? state : null;
+}
+
+async function markStartupInitializationComplete(summary = {}) {
+  const state = {
+    schema: STARTUP_INITIALIZATION_SCHEMA,
+    completedAt: new Date().toISOString(),
+    launcherVersionAtInitialization: app.getVersion(),
+    preparedPacks: Array.isArray(summary.preparedPacks) ? summary.preparedPacks : [],
+    blockedPacks: Array.isArray(summary.blockedPacks) ? summary.blockedPacks : []
+  };
+  await writeJsonFile(startupInitializationStatePath(), state);
+  return state;
+}
+
+function startupPreparationStateForRenderer() {
+  return {
+    running: Boolean(startupPreparationState.running),
+    firstInitialization: Boolean(startupPreparationState.firstInitialization),
+    phase: String(startupPreparationState.phase || ''),
+    percent: Math.max(0, Math.min(100, Number(startupPreparationState.percent) || 0)),
+    startedAt: startupPreparationState.startedAt || '',
+    completedAt: startupPreparationState.completedAt || '',
+    error: startupPreparationState.error || ''
+  };
+}
+
+function emitStartupPreparationProgress(sender, patch = {}) {
+  startupPreparationState = { ...startupPreparationState, ...patch };
+  const payload = startupPreparationStateForRenderer();
+  try {
+    if (sender && !sender.isDestroyed()) sender.send('startup:preparation-progress', payload);
+  } catch {
+    // Renderer progress is advisory; preparation truth stays in the main process.
+  }
+  return payload;
+}
+
+function startupPreparationReleaseSignature(latest = null) {
+  return JSON.stringify({
+    packId: String(latest?.packId || ''),
+    version: String(latest?.version || ''),
+    installMode: String(latest?.installMode || ''),
+    zipFormat: String(latest?.zipFormat || ''),
+    zipSha256: String(latest?.zip?.sha256 || ''),
+    zipSize: Number(latest?.zip?.size) || 0,
+    clientManifestSha256: String(latest?.clientManifest?.sha256 || ''),
+    clientManifestSize: Number(latest?.clientManifest?.size) || 0
+  });
+}
+
+async function startupPreparationSecret(options = {}) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Windows protected storage is unavailable; the quick startup cache cannot be trusted.');
+  }
+  const file = startupPreparationKeyPath();
+  if (await pathExists(file)) {
+    const record = await readJsonFile(file);
+    if (record?.schema !== STARTUP_PREPARATION_KEY_SCHEMA || !record.encryptedKey) {
+      throw new Error('The protected quick startup key is damaged.');
+    }
+    const secret = safeStorage.decryptString(Buffer.from(String(record.encryptedKey), 'base64'));
+    if (!/^[a-f0-9]{64}$/.test(secret)) throw new Error('The protected quick startup key is invalid.');
+    return secret;
+  }
+  if (options.create !== true) return '';
+  const secret = crypto.randomBytes(32).toString('hex');
+  await writeJsonFile(file, {
+    schema: STARTUP_PREPARATION_KEY_SCHEMA,
+    encryptedKey: safeStorage.encryptString(secret).toString('base64'),
+    createdAt: new Date().toISOString()
+  });
+  return secret;
+}
+
+function signStartupPreparationPayload(payloadText = '', secret = '') {
+  return crypto.createHmac('sha256', secret).update(payloadText, 'utf8').digest('hex');
+}
+
+async function readStartupPreparationSnapshot() {
+  const file = startupPreparationCachePath();
+  if (!(await pathExists(file))) return null;
+  const secret = await startupPreparationSecret({ create: false });
+  if (!secret) return null;
+  const envelope = await readJsonFile(file);
+  if (envelope?.schema !== STARTUP_PREPARATION_ENVELOPE_SCHEMA || !envelope.payload || !envelope.signature) {
+    throw new Error('The quick startup cache envelope is invalid.');
+  }
+  const payloadText = Buffer.from(String(envelope.payload), 'base64').toString('utf8');
+  const expected = Buffer.from(signStartupPreparationPayload(payloadText, secret), 'hex');
+  const actual = Buffer.from(String(envelope.signature), 'hex');
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    throw new Error('The quick startup cache signature is invalid.');
+  }
+  const snapshot = JSON.parse(payloadText);
+  if (snapshot?.schema !== STARTUP_PREPARATION_CACHE_SCHEMA || typeof snapshot.packs !== 'object') {
+    throw new Error('The quick startup cache payload is invalid.');
+  }
+  return snapshot;
+}
+
+async function writeStartupPreparationSnapshot(snapshot = {}) {
+  const secret = await startupPreparationSecret({ create: true });
+  const payload = {
+    schema: STARTUP_PREPARATION_CACHE_SCHEMA,
+    updatedAt: new Date().toISOString(),
+    packs: snapshot.packs && typeof snapshot.packs === 'object' ? snapshot.packs : {}
+  };
+  const payloadText = JSON.stringify(payload);
+  await writeJsonFile(startupPreparationCachePath(), {
+    schema: STARTUP_PREPARATION_ENVELOPE_SCHEMA,
+    payload: Buffer.from(payloadText, 'utf8').toString('base64'),
+    signature: signStartupPreparationPayload(payloadText, secret)
+  });
+  return payload;
+}
+
+function queueStartupSnapshotMutation(mutator) {
+  const operation = startupSnapshotWriteQueue.catch(() => {}).then(async () => {
+    let current = null;
+    try {
+      current = await readStartupPreparationSnapshot();
+    } catch {
+      current = null;
+    }
+    const next = await mutator(current || { schema: STARTUP_PREPARATION_CACHE_SCHEMA, packs: {} });
+    return writeStartupPreparationSnapshot(next);
+  });
+  startupSnapshotWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
+function preparedProfileForSnapshot(profile = null) {
+  if (!profile) return null;
+  const safeProfile = (value = {}) => ({
+    enabled: value.enabled !== false,
+    rootDir: String(value.rootDir || ''),
+    profilesPath: String(value.profilesPath || ''),
+    profileId: String(value.profileId || ''),
+    profileName: String(value.profileName || ''),
+    profileExists: Boolean(value.profileExists),
+    versionId: String(value.versionId || ''),
+    versionJson: String(value.versionJson || ''),
+    loaderInstalled: Boolean(value.loaderInstalled),
+    gameDir: String(value.gameDir || ''),
+    javaArgs: String(value.javaArgs || ''),
+    javaPath: String(value.javaPath || ''),
+    minecraftVersion: String(value.minecraftVersion || ''),
+    loaderId: String(value.loaderId || ''),
+    loaderInstallerUrl: String(value.loaderInstallerUrl || '')
+  });
+  const syncedProfiles = (Array.isArray(profile.syncedProfiles) ? profile.syncedProfiles : [profile]).map(safeProfile);
+  const primary = safeProfile(profile);
+  return { ...primary, syncedProfiles, syncedProfileCount: syncedProfiles.length };
+}
+
+function addRuntimeFile(files, file = '') {
+  const value = String(file || '').trim();
+  if (!value || !path.isAbsolute(value)) return;
+  const resolved = path.resolve(value);
+  const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  if (!files.has(key)) files.set(key, { key, path: resolved });
+}
+
+async function addVersionRuntimeFiles(files, rootDir = '', versionJsonPath = '') {
+  if (!rootDir || !versionJsonPath) return;
+  addRuntimeFile(files, versionJsonPath);
+  const versionJson = await readJsonFile(versionJsonPath).catch(() => null);
+  for (const library of Array.isArray(versionJson?.libraries) ? versionJson.libraries : []) {
+    if (!minecraftLibraryAllowed(library)) continue;
+    const relativePath = String(library?.downloads?.artifact?.path || '').trim();
+    if (!relativePath) continue;
+    addRuntimeFile(files, safeJoin(path.join(rootDir, 'libraries'), relativePath.replaceAll('\\', '/')));
+  }
+}
+
+async function preparedRuntimeFiles(entry = {}) {
+  const files = new Map();
+  addRuntimeFile(files, entry.minecraftProfile?.javaPath || entry.java8Runtime?.path || '');
+  const profiles = Array.isArray(entry.minecraftProfile?.syncedProfiles) && entry.minecraftProfile.syncedProfiles.length
+    ? entry.minecraftProfile.syncedProfiles
+    : (entry.minecraftProfile ? [entry.minecraftProfile] : []);
+  for (const profile of profiles) {
+    await addVersionRuntimeFiles(files, profile.rootDir, profile.versionJson);
+  }
+  for (const root of Array.isArray(entry.minecraftAssets?.roots) ? entry.minecraftAssets.roots : []) {
+    addRuntimeFile(files, root.clientJarPath);
+    addRuntimeFile(files, root.assetIndexPath);
+    await addVersionRuntimeFiles(files, root.rootDir, root.versionJsonPath);
+  }
+  return [...files.values()].map((item) => item.path).sort((left, right) => left.localeCompare(right));
+}
+
+function preparedRuntimeVerificationError(target, snapshot = null, options = {}) {
+  const issues = Array.isArray(snapshot?.issues) ? snapshot.issues : [];
+  const missing = issues.filter((issue) => issue.reason === 'missing' || issue.reason === 'not-file');
+  const changed = issues.filter((issue) => issue.reason === 'content-changed');
+  const invalidSnapshot = options.invalidSnapshot === true;
+  const code = invalidSnapshot
+    ? 'AHT_RUNTIME_SNAPSHOT_INVALID'
+    : (missing.length ? 'AHT_RUNTIME_FILE_MISSING' : 'AHT_RUNTIME_CONTENT_CHANGED');
+  const message = invalidSnapshot
+    ? `The trusted Minecraft and Forge runtime snapshot is incomplete. Restart A Hard Time Launcher to rebuild it for ${target.name}.`
+    : (missing.length
+      ? `Required Minecraft or Forge files are missing for ${target.name}. Run Repair before playing.`
+      : `Minecraft or Forge file bytes changed after initialization. Run Repair before playing ${target.name}.`);
+  const error = new Error(message);
+  error.name = 'AhtRuntimeIntegrityError';
+  error.code = code;
+  error.subsystem = 'minecraft-forge-runtime-integrity';
+  error.diagnosticFlags = [
+    {
+      status: 'FAIL',
+      code,
+      detail: invalidSnapshot
+        ? 'The signed runtime snapshot declared content verification but did not contain a complete SHA-256 state set.'
+        : `${issues.length} runtime integrity issue${issues.length === 1 ? '' : 's'} detected.`
+    },
+    {
+      status: snapshot?.fingerprint?.pathsValid === true ? 'PASS' : 'FAIL',
+      code: 'RUNTIME_PATH_SET',
+      detail: `${Number(snapshot?.fingerprint?.fileCount) || 0} required Java, Minecraft, Forge, asset, and library files checked.`
+    },
+    {
+      status: 'INFO',
+      code: 'RUNTIME_CONTENT_HASHING',
+      detail: `${Number(snapshot?.hashedFiles) || 0} files hashed; ${Number(snapshot?.metadataChanges) || 0} metadata changes examined.`
+    },
+    ...issues.slice(0, 24).map((issue) => ({
+      status: 'FAIL',
+      code: issue.reason === 'content-changed' ? 'RUNTIME_FILE_CONTENT_CHANGED' : 'RUNTIME_FILE_MISSING',
+      detail: [
+        issue.path,
+        issue.expectedSha256 ? `expected sha256 ${issue.expectedSha256}` : '',
+        issue.actualSha256 ? `actual sha256 ${issue.actualSha256}` : ''
+      ].filter(Boolean).join('; ')
+    }))
+  ];
+  return error;
+}
+
+async function assertPreparedProfileFiles(profile = null) {
+  const profiles = Array.isArray(profile?.syncedProfiles) && profile.syncedProfiles.length
+    ? profile.syncedProfiles
+    : (profile ? [profile] : []);
+  if (!profiles.length) throw new Error('The cached Minecraft Launcher profile is missing.');
+  for (const item of profiles) {
+    const document = await readJsonFile(item.profilesPath);
+    const stored = document?.profiles?.[item.profileId];
+    if (!stored
+        || path.resolve(String(stored.gameDir || '')) !== path.resolve(String(item.gameDir || ''))
+        || String(stored.lastVersionId || '') !== String(item.versionId || '')) {
+      throw new Error(`Minecraft Launcher profile ${item.profileName || item.profileId} changed after initialization.`);
+    }
+  }
+}
+
+async function persistPreparedLaunchEntry(key, entry = {}, options = {}) {
+  if (entry.state !== 'ready' || !entry.config || !entry.latest || !entry.installed) return null;
+  const developerBypassSnapshot = developerClientBypassAllowed() && entry.integrity?.developerClientBypass === true;
+  const managedOptions = developerBypassSnapshot
+    ? { managedFiles: [], ignoreLocalManaged: true }
+    : (Array.isArray(entry.managedFiles)
+    ? { managedFiles: entry.managedFiles, ignoreLocalManaged: true }
+    : (Array.isArray(entry.integrity?.managedFiles)
+    ? { managedFiles: entry.integrity.managedFiles, ignoreLocalManaged: true }
+    : await managedIntegrityOptions(entry.config, entry.latest)));
+  if (!developerBypassSnapshot) {
+    managedOptions.managedFiles = launchCriticalManagedFiles(managedOptions.managedFiles || []);
+  }
+  if (!developerBypassSnapshot && (!Array.isArray(managedOptions.managedFiles) || !managedOptions.managedFiles.length)) {
+    throw new Error('The verified managed-file list is unavailable for the quick startup cache.');
+  }
+  const managedFiles = (managedOptions.managedFiles || []).map((item) => ({
+    relativePath: normalizeRelPath(String(item?.relativePath || item?.path || '')),
+    source: String(item?.source || 'managed'),
+    sha256: String(item?.sha256 || ''),
+    sha1: String(item?.sha1 || '')
+  })).filter((item) => item.relativePath);
+  let managedFingerprint = { schemaVersion: 2, digest: 'developer-client-bypass', managedCount: 0, entryCount: 0, pathsValid: true, latestChangeMs: 0, modsDigest: '' };
+  let managedFileStates = [];
+  if (!developerBypassSnapshot) {
+    const suppliedSnapshot = options.managedSnapshot || entry.managedMutationMonitor?.verifiedSnapshot;
+    if (suppliedSnapshot?.valid === true
+        && suppliedSnapshot.fingerprint?.schemaVersion === 2
+        && Array.isArray(suppliedSnapshot.fileStates)) {
+      managedFingerprint = suppliedSnapshot.fingerprint;
+      managedFileStates = suppliedSnapshot.fileStates;
+    } else {
+      const captured = await captureManagedIntegrityFingerprint(entry.config.instanceDir, {
+        managedFiles,
+        ignoreLocalManaged: true,
+        includeFileStates: true
+      });
+      managedFileStates = Array.isArray(captured.fileStates) ? captured.fileStates : [];
+      managedFingerprint = { ...captured };
+      delete managedFingerprint.fileStates;
+    }
+  }
+  const runtimeCandidates = await preparedRuntimeFiles(entry);
+  const runtimeFiles = developerBypassSnapshot
+    ? (await Promise.all(runtimeCandidates.map(async (file) => {
+        const stat = await fs.lstat(file).catch(() => null);
+        return stat?.isFile() ? file : '';
+      }))).filter(Boolean)
+    : runtimeCandidates;
+  const suppliedRuntimeSnapshot = options.runtimeSnapshot;
+  const runtimeSnapshot = preparedRuntimeSnapshotCoversFiles(suppliedRuntimeSnapshot, runtimeFiles)
+    ? suppliedRuntimeSnapshot
+    : await verifyPreparedRuntimeSnapshot(runtimeFiles);
+  const runtimeFingerprint = runtimeSnapshot.fingerprint;
+  if (!managedFingerprint.pathsValid || runtimeSnapshot.valid !== true || !runtimeFingerprint.pathsValid) {
+    throw new Error('The prepared installation changed before its quick startup cache could be saved.');
+  }
+  const cachedEntry = {
+    cachedAt: new Date().toISOString(),
+    targetId: String(entry.target?.id || key),
+    developerClientBypass: developerBypassSnapshot,
+    configSignature: launchPreparationConfigSignature(entry.config),
+    releaseSignature: startupPreparationReleaseSignature(entry.latest),
+    latest: entry.latest,
+    installed: entry.installed,
+    integrity: { ...(entry.integrity || {}), fingerprint: managedFingerprint },
+    managedFilePolicy: developerBypassSnapshot ? 'developer-client-bypass' : LAUNCH_PREPARATION_MANAGED_POLICY,
+    managedFiles,
+    managedFingerprint,
+    managedFileStates,
+    minecraftProfile: preparedProfileForSnapshot(entry.minecraftProfile),
+    java8Runtime: entry.java8Runtime || null,
+    minecraftAssets: entry.minecraftAssets || null,
+    runtimeFilePolicy: LAUNCH_PREPARATION_RUNTIME_POLICY,
+    runtimeFiles,
+    runtimeFileStates: runtimeSnapshot.fileStates,
+    runtimeFingerprint
+  };
+  entry.runtimeFiles = runtimeFiles;
+  entry.runtimeFileStates = runtimeSnapshot.fileStates;
+  entry.runtimeFingerprint = runtimeFingerprint;
+  await queueStartupSnapshotMutation((snapshot) => ({
+    ...snapshot,
+    packs: { ...(snapshot.packs || {}), [key]: cachedEntry }
+  }));
+  return cachedEntry;
+}
+
+async function publishCompletedUpdatePreparation({
+  target,
+  config,
+  launcherConfig,
+  identity,
+  latest,
+  installed,
+  integrity,
+  minecraftProfile,
+  launcherProof,
+  minecraftAssets
+} = {}) {
+  if (!target || !config || !launcherConfig || !latest || !installed || !minecraftProfile || !launcherProof) return null;
+  const corrupted = Number(integrity?.counts?.corrupted || 0);
+  if (integrity?.valid !== true || corrupted > 0) {
+    throw new Error(`Update verification found ${Math.max(1, corrupted)} managed file issue${corrupted === 1 ? '' : 's'}; the quick startup snapshot was not authorized.`);
+  }
+  const key = target.id;
+  clearLaunchPreparationResources(key);
+  const [launcherRoute, java8Runtime] = await Promise.all([
+    resolveMinecraftLauncherRoute(launcherConfig),
+    java8RuntimeStatus(launcherConfig)
+  ]);
+  const attempt = createLaunchDiagnosticAttempt(target);
+  setLaunchRequirement(attempt, 'installed', 'PASS', `Installed version ${installed.version || 'unknown'}.`);
+  setLaunchRequirement(attempt, 'integrity', 'PASS', `${Number(integrity?.counts?.managed || 0)} managed files passed.`);
+  setLaunchRequirement(attempt, 'minecraftProfile', 'PASS', `${minecraftProfile.profileName || target.name} is prepared.`);
+  setLaunchRequirement(attempt, 'minecraftRuntime', 'PASS', 'Minecraft assets, Forge, and Java were prepared during Update.');
+  setLaunchRequirement(attempt, 'launcherProof', 'PASS', `Fresh trusted proof from ${launcherProof.source || 'the configured signer'}.`);
+  attempt.instanceDir = config.instanceDir;
+  attempt.minecraftRoot = launcherConfig.minecraftLauncher?.rootDir || '';
+  attempt.runtimeConfig = launcherConfig;
+  attempt.pack.installedVersion = String(installed.version || '');
+  attempt.pack.latestVersion = String(latest.version || '');
+  const managedMutationMonitor = await createLaunchPreparationMutationMonitor(config, latest);
+  const entry = {
+    state: 'ready',
+    target,
+    attempt,
+    config,
+    launcherConfig,
+    launcherRoute,
+    identity,
+    latest,
+    installed,
+    integrity,
+    java8Runtime: minecraftProfile.javaRuntime ? { ...java8Runtime, usable: true } : java8Runtime,
+    minecraftProfile,
+    launcherProof,
+    minecraftAssets,
+    managedMutationMonitor,
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    preparedByUpdate: true
+  };
+  await confirmLaunchPreparationMutationMonitor(managedMutationMonitor, integrity?.fingerprint, {
+    changedMessage: 'A managed game file changed while Update was finalizing its quick startup snapshot.',
+    monitoringMessage: 'Managed-file monitoring stopped while Update was finalizing its quick startup snapshot.'
+  });
+  launchPreparationCache.set(key, entry);
+  try {
+    await persistPreparedLaunchEntry(key, entry);
+    scheduleLaunchPreparationProofRefresh(key, entry);
+    await armLaunchPreparationWatcher(key, entry);
+  } catch (error) {
+    managedMutationMonitor?.close?.();
+    invalidateLaunchPreparation(key);
+    throw error;
+  }
+  return entry;
+}
+
+function launchPreparationKey(packValue = 'stable') {
+  return releaseTarget(packValue).id;
+}
+
+function clearLaunchPreparationResources(key) {
+  const proofTimer = launchPreparationProofTimers.get(key);
+  if (proofTimer) clearTimeout(proofTimer);
+  launchPreparationProofTimers.delete(key);
+  const watcher = launchPreparationWatchers.get(key);
+  if (watcher) {
+    try { watcher.close(); } catch {}
+  }
+  launchPreparationWatchers.delete(key);
+}
+
+function revokePreparedLauncherProof(entry = null) {
+  const proof = entry?.launcherProof;
+  const files = new Set([
+    proof?.proofFile,
+    ...(Array.isArray(proof?.proofFiles) ? proof.proofFiles : [])
+  ].map((file) => String(file || '').trim()).filter(Boolean));
+  for (const file of files) {
+    removeFileIfExists(path.resolve(file)).catch(() => {});
+  }
+}
+
+function invalidateLaunchPreparation(packValue = 'stable', reason = '') {
+  const key = launchPreparationKey(packValue);
+  const previous = launchPreparationCache.get(key);
+  clearLaunchPreparationResources(key);
+  launchPreparationCache.delete(key);
+  revokePreparedLauncherProof(previous);
+  if (reason) {
+    launchPreparationCache.set(key, {
+      state: 'blocked',
+      target: releaseTarget(key),
+      error: new Error(reason),
+      completedAt: new Date().toISOString()
+    });
+  }
+}
+
+function invalidateAllLaunchPreparations(reason = '') {
+  const keys = new Set([
+    ...launchPreparationCache.keys(),
+    ...launchPreparationInFlight.keys(),
+    ...launchPreparationProofTimers.keys(),
+    ...launchPreparationWatchers.keys()
+  ]);
+  for (const key of keys) invalidateLaunchPreparation(key, reason);
+}
+
+function launchPreparationForRenderer(entry = null) {
+  const ready = entry?.state === 'ready';
+  const blockedReason = ready ? '' : String(entry?.error?.message || 'Launcher preparation is not ready. Restart A Hard Time Launcher.');
+  return {
+    launchPreparationComplete: Boolean(entry && entry.state !== 'preparing'),
+    launchPreparationState: entry?.state || 'missing',
+    launchPreparedAt: entry?.completedAt || '',
+    launchReady: ready,
+    launchBlockedReason: blockedReason,
+    latest: entry?.latest || undefined,
+    installed: entry?.installed || undefined,
+    integrity: entry?.integrity || undefined,
+    minecraftProfile: ready ? minecraftProfileForRenderer(entry.minecraftProfile) : undefined,
+    java8Runtime: entry?.java8Runtime || undefined,
+    launcherProof: ready ? launcherProofForRenderer(entry.launcherProof) : undefined,
+    minecraftLauncherRoute: ready ? String(entry.launcherRoute?.kind || '') : ''
+  };
+}
+
+async function refreshPreparedLauncherProof(key, expectedEntry) {
+  const current = launchPreparationCache.get(key);
+  if (current !== expectedEntry || current?.state !== 'ready') return null;
+  const launcherProof = await writeSerializedRegisteredLauncherProof({
+    config: current.launcherConfig,
+    identity: current.identity,
+    latest: current.latest,
+    installed: current.installed,
+    minValidityMs: LAUNCH_PREPARATION_PROOF_MIN_VALIDITY_MS
+  });
+  if (launchPreparationCache.get(key) !== current) return null;
+  current.launcherProof = launcherProof;
+  current.proofRefreshedAt = new Date().toISOString();
+  scheduleLaunchPreparationProofRefresh(key, current);
+  return launcherProof;
+}
+
+function scheduleLaunchPreparationProofRefresh(key, entry, delayOverrideMs = null) {
+  const existing = launchPreparationProofTimers.get(key);
+  if (existing) clearTimeout(existing);
+  launchPreparationProofTimers.delete(key);
+  const expiresAt = Date.parse(entry?.launcherProof?.payload?.expiresAt || '');
+  if (!Number.isFinite(expiresAt)) return;
+  const calculatedDelay = expiresAt - Date.now() - LAUNCH_PREPARATION_PROOF_REFRESH_LEAD_MS;
+  const delay = delayOverrideMs === null
+    ? Math.max(5_000, calculatedDelay)
+    : Math.max(250, Number(delayOverrideMs) || 0);
+  const timer = setTimeout(() => {
+    launchPreparationProofTimers.delete(key);
+    refreshPreparedLauncherProof(key, entry).catch((error) => {
+      const current = launchPreparationCache.get(key);
+      if (current !== entry || current?.state !== 'ready') return;
+      const stillUsableUntil = Date.parse(current.launcherProof?.payload?.expiresAt || '');
+      if (Number.isFinite(stillUsableUntil) && stillUsableUntil > Date.now() + 30_000) {
+        scheduleLaunchPreparationProofRefresh(key, current, 15_000);
+        return;
+      }
+      invalidateLaunchPreparation(key, `Launcher session refresh failed: ${error.message || error}`);
+    });
+  }, delay);
+  timer.unref?.();
+  launchPreparationProofTimers.set(key, timer);
+}
+
+async function confirmLaunchPreparationMutationMonitor(monitor, expectedFingerprint, options = {}) {
+  if (!monitor) return expectedFingerprint;
+  const changedMessage = options.changedMessage
+    || 'A managed game file changed after startup. Run Repair before playing.';
+  const monitoringMessage = options.monitoringMessage
+    || 'Managed-file monitoring stopped. Restart A Hard Time Launcher before playing.';
+  const ambiguousMessage = options.ambiguousMessage
+    || 'Managed-file monitoring could not confirm a stable installation. Restart A Hard Time Launcher before playing.';
+  const assertMonitorState = () => {
+    if (monitor.failed) throw new Error(monitoringMessage);
+    if (monitor.changed) throw new Error(changedMessage);
+  };
+
+  assertMonitorState();
+  if (monitor.ambiguousGeneration <= monitor.confirmedAmbiguousGeneration) return expectedFingerprint;
+  if (!Array.isArray(monitor.managedFiles) || !monitor.managedFiles.length
+      || expectedFingerprint?.schemaVersion !== 2) {
+    throw new Error(ambiguousMessage);
+  }
+
+  let confirmedFingerprint = expectedFingerprint;
+  for (let pass = 0; pass < 3; pass += 1) {
+    // A Windows watch notification is a prompt to verify the affected trusted
+    // path, not proof that its bytes changed. Briefly debounce rename/write
+    // pairs, then hash the notified managed path against the signed manifest.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const generation = monitor.ambiguousGeneration;
+    const forcedPaths = [...monitor.pendingPaths];
+    monitor.suppressedPaths.clear();
+    monitor.suppressedFullValidation = false;
+    monitor.suppressWatchEvents = true;
+    let verified;
+    let postVerificationFingerprint;
+    try {
+      verified = await verifyManagedIntegritySnapshot(monitor.instanceDir, {
+        managedFiles: monitor.managedFiles,
+        ignoreLocalManaged: true,
+        previousFileStates: Array.isArray(monitor.verifiedSnapshot?.fileStates)
+          ? monitor.verifiedSnapshot.fileStates
+          : [],
+        legacySince: monitor.verifiedSnapshot?.fingerprint?.capturedAt || expectedFingerprint?.capturedAt || '',
+        forcePaths: forcedPaths,
+        forceAll: monitor.forceFullValidation === true,
+        onlyForced: monitor.forceFullValidation !== true && forcedPaths.length > 0
+      });
+      postVerificationFingerprint = await captureManagedIntegrityFingerprint(monitor.instanceDir, {
+        managedFiles: monitor.managedFiles,
+        ignoreLocalManaged: true
+      });
+      // NTFS can report last-access notifications for the verifier's own reads.
+      // Keep those callbacks suppressed until their queue has drained.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    } finally {
+      monitor.suppressWatchEvents = false;
+    }
+    if (verified.valid !== true) {
+      monitor.changed = true;
+      monitor.changeIssues = verified.issues || [];
+      throw new Error(changedMessage);
+    }
+    if (postVerificationFingerprint?.pathsValid !== true
+        || postVerificationFingerprint.digest !== verified.fingerprint?.digest) {
+      for (const changedPath of monitor.suppressedPaths) monitor.pendingPaths.add(changedPath);
+      if (monitor.suppressedFullValidation || monitor.suppressedPaths.size === 0) {
+        monitor.forceFullValidation = true;
+      }
+      monitor.verifiedSnapshot = verified;
+      monitor.ambiguousGeneration += 1;
+      continue;
+    }
+    monitor.verifiedSnapshot = verified;
+    confirmedFingerprint = verified.fingerprint;
+    assertMonitorState();
+    if (monitor.ambiguousGeneration === generation) {
+      monitor.confirmedAmbiguousGeneration = generation;
+      monitor.pendingPaths.clear();
+      monitor.forceFullValidation = false;
+      return confirmedFingerprint;
+    }
+  }
+  throw new Error(ambiguousMessage);
+}
+
+function scheduleAmbiguousLaunchPreparationValidation(monitor) {
+  if (!monitor?.entry || monitor.validationInFlight
+      || monitor.ambiguousGeneration <= monitor.confirmedAmbiguousGeneration
+      || launchPreparationCache.get(monitor.key) !== monitor.entry) {
+    return monitor?.validationInFlight || null;
+  }
+  const entry = monitor.entry;
+  monitor.validationInFlight = confirmLaunchPreparationMutationMonitor(monitor, entry.integrity?.fingerprint)
+    .then(async (fingerprint) => {
+      if (launchPreparationCache.get(monitor.key) !== entry || entry.state !== 'ready') return fingerprint;
+      const verified = monitor.verifiedSnapshot;
+      if (verified?.valid === true && verified.fingerprint?.schemaVersion === 2) {
+        entry.integrity = { ...(entry.integrity || {}), fingerprint: verified.fingerprint };
+        await persistPreparedLaunchEntry(monitor.key, entry, { managedSnapshot: verified });
+      }
+      return fingerprint;
+    })
+    .catch((error) => {
+      if (launchPreparationCache.get(monitor.key) === entry) {
+        invalidateLaunchPreparation(monitor.key, error?.message || String(error));
+      }
+    })
+    .finally(() => {
+      monitor.validationInFlight = null;
+      if (launchPreparationCache.get(monitor.key) === entry
+          && monitor.ambiguousGeneration > monitor.confirmedAmbiguousGeneration) {
+        scheduleAmbiguousLaunchPreparationValidation(monitor);
+      }
+    });
+  return monitor.validationInFlight;
+}
+
+async function createLaunchPreparationMutationMonitor(config = {}, latest = null, options = {}) {
+  if (developerClientBypassAllowed() || !config.instanceDir) return null;
+  const managedOptions = Array.isArray(options.managedFiles)
+    ? { managedFiles: options.managedFiles, ignoreLocalManaged: true }
+    : await managedIntegrityOptions(config, latest);
+  managedOptions.managedFiles = launchCriticalManagedFiles(managedOptions.managedFiles || []);
+  if (!Array.isArray(managedOptions.managedFiles) || !managedOptions.managedFiles.length) return null;
+  const managedPaths = new Set(managedOptions.managedFiles
+    .map((item) => normalizeRelPath(String(item?.relativePath || item?.path || '')).toLowerCase())
+    .filter(Boolean));
+  const monitor = {
+    changed: false,
+    failed: false,
+    changeIssues: [],
+    ambiguousGeneration: 0,
+    confirmedAmbiguousGeneration: 0,
+    pendingPaths: new Set(),
+    forceFullValidation: false,
+    suppressWatchEvents: false,
+    suppressedPaths: new Set(),
+    suppressedFullValidation: false,
+    verifiedSnapshot: null,
+    validationInFlight: null,
+    instanceDir: config.instanceDir,
+    managedFiles: managedOptions.managedFiles,
+    entry: null,
+    key: '',
+    watcher: null,
+    close() {
+      try { this.watcher?.close(); } catch {}
+      this.watcher = null;
+    }
+  };
+  try {
+    const handleWatchEvent = (_eventType, fileName) => {
+      const relPath = fileName ? normalizeRelPath(String(fileName)).toLowerCase() : '';
+      if (!relPath) {
+        if (monitor.suppressWatchEvents) {
+          monitor.suppressedFullValidation = true;
+          return;
+        }
+        // Windows may omit fileName even when the event came from an unrelated
+        // path. Treat that as a prompt to revalidate, never as proof of a change.
+        monitor.forceFullValidation = true;
+        monitor.ambiguousGeneration += 1;
+        scheduleAmbiguousLaunchPreparationValidation(monitor);
+        return;
+      }
+      const isExactManagedPath = managedPaths.has(relPath);
+      const touchesManagedPath = isExactManagedPath
+        || [...managedPaths].some((managedPath) => managedPath.startsWith(`${relPath}/`));
+      const touchesManagedMods = relPath === 'mods' || relPath.startsWith('mods/');
+      if (!touchesManagedPath && !touchesManagedMods) return;
+      const validationPath = touchesManagedMods && !isExactManagedPath ? 'mods' : relPath;
+      if (monitor.suppressWatchEvents) {
+        monitor.suppressedPaths.add(validationPath);
+        return;
+      }
+      monitor.pendingPaths.add(validationPath);
+      monitor.ambiguousGeneration += 1;
+      scheduleAmbiguousLaunchPreparationValidation(monitor);
+    };
+    monitor.watcher = fsSync.watch(config.instanceDir, { recursive: true }, handleWatchEvent);
+    monitor.watcher.on('error', () => {
+      monitor.failed = true;
+      if (monitor.entry && launchPreparationCache.get(monitor.key) === monitor.entry) {
+        invalidateLaunchPreparation(monitor.key, 'Managed-file monitoring stopped. Restart A Hard Time Launcher before playing.');
+      }
+      if (monitor.key && launchPreparationWatchers.get(monitor.key) === monitor.watcher) {
+        launchPreparationWatchers.delete(monitor.key);
+      }
+    });
+    if (process.env.AHT_TEST_HOOKS === '1'
+        && process.env.AHT_TEST_AMBIGUOUS_MANAGED_WATCH_EVENT === '1') {
+      setImmediate(() => handleWatchEvent('change', null));
+    }
+    return monitor;
+  } catch {
+    monitor.failed = ['win32', 'darwin'].includes(process.platform);
+    return monitor;
+  }
+}
+
+async function armLaunchPreparationWatcher(key, entry) {
+  const existing = launchPreparationWatchers.get(key);
+  if (existing) {
+    try { existing.close(); } catch {}
+    launchPreparationWatchers.delete(key);
+  }
+  if (entry?.integrity?.developerClientBypass === true) return;
+  const monitor = entry?.managedMutationMonitor || await createLaunchPreparationMutationMonitor(entry?.config || {}, entry?.latest || null);
+  if (!monitor?.watcher) return;
+  monitor.key = key;
+  monitor.entry = entry;
+  launchPreparationWatchers.set(key, monitor.watcher);
+  scheduleAmbiguousLaunchPreparationValidation(monitor);
+}
+
+function blockedLaunchPreparation(target, error, extra = {}) {
+  const entry = {
+    ...extra,
+    state: 'blocked',
+    target,
+    error: error instanceof Error ? error : new Error(String(error || 'Launcher preparation failed.')),
+    completedAt: new Date().toISOString()
+  };
+  launchPreparationCache.set(target.id, entry);
+  return entry;
+}
+
+async function hydrateLaunchPreparationFromSnapshot(packValue = 'stable', cached = null) {
+  const target = releaseTarget(packValue);
+  const attempt = createLaunchDiagnosticAttempt(target);
+  let managedMutationMonitor = null;
+  try {
+    if (!cached || cached.targetId !== target.id) {
+      throw new Error(`${target.name} does not have a trusted quick startup snapshot. Run Repair once to rebuild it.`);
+    }
+    const legal = await launcherLegalStatus();
+    if (legal.required) throw new Error('Review and accept the current Terms and Privacy notice before playing.');
+    const config = configForPack(await loadConfig(), target.id);
+    if (launchPreparationConfigSignature(config) !== cached.configSignature) {
+      throw new Error(`${target.name} settings changed after initialization. Run Repair once to rebuild the quick startup snapshot.`);
+    }
+    const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
+    if (!(await pathExists(installedPath))) {
+      throw new Error(`${target.name} is not installed.`);
+    }
+    const installed = await readJsonFile(installedPath);
+    const developerBypassSnapshot = developerClientBypassAllowed() && cached.developerClientBypass === true;
+    const latest = developerBypassSnapshot
+      ? cached.latest
+      : validateLatestReleaseFeed(cached.latest, `${target.name} quick startup cache`);
+    if (String(installed?.packId || '') !== String(cached.installed?.packId || '')
+        || String(installed?.version || '') !== String(cached.installed?.version || '')
+        || startupPreparationReleaseSignature(latest) !== cached.releaseSignature) {
+      throw new Error(`${target.name} changed after initialization. Run Update or Repair to rebuild its quick startup snapshot.`);
+    }
+    const managedFiles = launchCriticalManagedFiles(Array.isArray(cached.managedFiles) ? cached.managedFiles : []);
+    if ((!developerBypassSnapshot && !managedFiles.length) || cached.managedFingerprint?.schemaVersion !== 2) {
+      throw new Error(`${target.name} needs one Repair to create its current quick startup snapshot.`);
+    }
+    managedMutationMonitor = developerBypassSnapshot
+      ? null
+      : await createLaunchPreparationMutationMonitor(config, latest, { managedFiles });
+    const runtimeFiles = Array.isArray(cached.runtimeFiles) ? cached.runtimeFiles : [];
+    const runtimeSnapshotDeclaredV2 = cached.runtimeFilePolicy === LAUNCH_PREPARATION_RUNTIME_POLICY
+      || cached.runtimeFingerprint?.schemaVersion === 2;
+    const trustedRuntimeSnapshot = cached.runtimeFilePolicy === LAUNCH_PREPARATION_RUNTIME_POLICY
+      && cached.runtimeFingerprint?.schemaVersion === 2
+      && Array.isArray(cached.runtimeFileStates)
+      && cached.runtimeFileStates.length === runtimeFiles.length
+      && cached.runtimeFileStates.every((state) => /^[a-f0-9]{64}$/i.test(String(state?.sha256 || '')));
+    let [managedSnapshot, runtimeSnapshot] = await Promise.all([
+      developerBypassSnapshot
+        ? Promise.resolve({
+            valid: true,
+            fingerprint: cached.managedFingerprint,
+            fileStates: [],
+            managedFiles: [],
+            metadataChanges: 0,
+            hashedFiles: 0,
+            issues: []
+          })
+        : verifyManagedIntegritySnapshot(config.instanceDir, {
+            managedFiles,
+            ignoreLocalManaged: true,
+            previousFileStates: cached.managedFilePolicy === LAUNCH_PREPARATION_MANAGED_POLICY
+              ? cached.managedFileStates
+              : [],
+            legacySince: cached.cachedAt || cached.managedFingerprint?.capturedAt || ''
+          }),
+      verifyPreparedRuntimeSnapshot(runtimeFiles, {
+        previousFileStates: trustedRuntimeSnapshot ? cached.runtimeFileStates : []
+      })
+    ]);
+    if (!developerBypassSnapshot && managedSnapshot.valid !== true) {
+      throw new Error(`${target.name} files changed after initialization. Run Repair before playing.`);
+    }
+    if (managedMutationMonitor) managedMutationMonitor.verifiedSnapshot = managedSnapshot;
+    await confirmLaunchPreparationMutationMonitor(managedMutationMonitor, managedSnapshot.fingerprint, {
+      changedMessage: `A managed ${target.name} file changed during quick startup verification.`,
+      monitoringMessage: `Managed-file monitoring stopped during ${target.name} quick startup verification.`
+    });
+    if (managedMutationMonitor?.verifiedSnapshot?.valid === true) {
+      managedSnapshot = managedMutationMonitor.verifiedSnapshot;
+    }
+    const managedFingerprint = managedSnapshot.fingerprint;
+    const runtimeFingerprint = runtimeSnapshot.fingerprint;
+    if (runtimeSnapshotDeclaredV2 && !trustedRuntimeSnapshot) {
+      throw preparedRuntimeVerificationError(target, runtimeSnapshot, { invalidSnapshot: true });
+    }
+    if (runtimeSnapshot.valid !== true
+        || (trustedRuntimeSnapshot && runtimeFingerprint.digest !== cached.runtimeFingerprint?.digest)) {
+      throw preparedRuntimeVerificationError(target, runtimeSnapshot);
+    }
+    await assertPreparedProfileFiles(cached.minecraftProfile);
+    const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+    const [launcherRoute, identity] = await Promise.all([
+      resolveMinecraftLauncherRoute(launcherConfig),
+      identityPayload(launcherConfig)
+    ]);
+    const launcherProof = await writeSerializedRegisteredLauncherProof({
+      config: launcherConfig,
+      latest,
+      installed,
+      identity
+    });
+    const minecraftProfile = preparedProfileForSnapshot(cached.minecraftProfile);
+    setLaunchRequirement(attempt, 'legal', 'PASS', 'Current consent is recorded.');
+    setLaunchRequirement(attempt, 'instance', 'PASS', config.instanceDir);
+    setLaunchRequirement(attempt, 'installed', 'PASS', `Installed version ${installed.version || 'unknown'}.`);
+    setLaunchRequirement(attempt, 'integrity', 'PASS', developerBypassSnapshot
+      ? 'Developer client integrity bypass is active.'
+      : `${managedFiles.length} managed files match the trusted initialization snapshot.`);
+    setLaunchRequirement(attempt, 'minecraftProfile', 'PASS', `${minecraftProfile.profileName || target.name} is prepared.`);
+    setLaunchRequirement(attempt, 'minecraftRuntime', 'PASS', 'Minecraft and Forge runtime files match the trusted initialization snapshot.');
+    setLaunchRequirement(attempt, 'launcherProof', 'PASS', `Fresh trusted proof from ${launcherProof?.source || 'the configured signer'}.`);
+    attempt.instanceDir = config.instanceDir;
+    attempt.minecraftRoot = launcherConfig.minecraftLauncher?.rootDir || '';
+    attempt.runtimeConfig = launcherConfig;
+    attempt.pack.installedVersion = String(installed.version || '');
+    attempt.pack.latestVersion = String(latest.version || '');
+    const entry = {
+      state: 'ready',
+      target,
+      attempt,
+      config,
+      launcherConfig,
+      launcherRoute,
+      identity,
+      latest,
+      installed,
+      integrity: { ...(cached.integrity || {}), fingerprint: managedFingerprint, source: 'quick-startup-cache' },
+      java8Runtime: cached.java8Runtime || null,
+      minecraftProfile,
+      launcherProof,
+      minecraftAssets: cached.minecraftAssets || null,
+      runtimeFiles,
+      runtimeFileStates: runtimeSnapshot.fileStates,
+      runtimeFingerprint,
+      managedFiles,
+      managedMutationMonitor,
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      quickStartup: true
+    };
+    managedMutationMonitor = null;
+    latestReleaseCache.set(latestReleaseCacheKey(config), { latest, fetchedAt: Date.now() });
+    launchPreparationCache.set(target.id, entry);
+    scheduleLaunchPreparationProofRefresh(target.id, entry);
+    await armLaunchPreparationWatcher(target.id, entry);
+    const managedSnapshotNeedsRefresh = !developerBypassSnapshot && (
+      cached.managedFilePolicy !== LAUNCH_PREPARATION_MANAGED_POLICY
+      || !Array.isArray(cached.managedFileStates)
+      || cached.managedFileStates.length !== managedSnapshot.fileStates.length
+      || cached.managedFingerprint?.digest !== managedFingerprint.digest
+      || managedSnapshot.metadataChanges > 0
+    );
+    const runtimeSnapshotNeedsRefresh = !trustedRuntimeSnapshot
+      || cached.runtimeFingerprint?.digest !== runtimeFingerprint.digest
+      || runtimeSnapshot.metadataChanges > 0;
+    if (managedSnapshotNeedsRefresh || runtimeSnapshotNeedsRefresh) {
+      await persistPreparedLaunchEntry(target.id, entry, { managedSnapshot, runtimeSnapshot });
+    }
+    return entry;
+  } catch (error) {
+    managedMutationMonitor?.close?.();
+    markFailedLaunchRequirement(attempt);
+    completeLaunchAttempt(attempt, 'FAILED', error);
+    return blockedLaunchPreparation(target, error, { attempt, runtimeConfig: attempt.runtimeConfig || null });
+  }
+}
+
+async function installedPackDescriptor(baseConfig, packValue = 'stable') {
+  const target = releaseTarget(packValue);
+  const config = configForPack(baseConfig, target.id);
+  const file = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
+  if (!(await pathExists(file))) return { target, config, installed: null };
+  const installed = await readJsonFile(file).catch(() => null);
+  return { target, config, installed };
+}
+
+async function prepareAllPacksAtStartup(sender = null) {
+  if (startupPreparationInFlight) return startupPreparationInFlight;
+  startupPreparationInFlight = (async () => {
+    const startedAtMs = Date.now();
+    const initialization = await readStartupInitializationState();
+    const firstInitialization = !initialization;
+    emitStartupPreparationProgress(sender, {
+      running: true,
+      firstInitialization,
+      phase: firstInitialization ? 'Initializing' : 'Loading launcher',
+      percent: firstInitialization ? 1 : 0,
+      startedAt: new Date(startedAtMs).toISOString(),
+      completedAt: '',
+      error: ''
+    });
+    const baseConfig = await loadConfig();
+    const descriptors = await Promise.all(STARTUP_PREPARATION_PACKS.map((pack) => installedPackDescriptor(baseConfig, pack)));
+    const installedDescriptors = descriptors.filter((item) => item.installed);
+    const results = new Map();
+
+    if (firstInitialization) {
+      const total = Math.max(1, installedDescriptors.length);
+      for (const [index, descriptor] of installedDescriptors.entries()) {
+        const entry = await prepareLaunchForPack(descriptor.target.id, {
+          force: true,
+          persist: true,
+          onProgress: (progress = {}) => {
+            const localPercent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+            emitStartupPreparationProgress(sender, {
+              phase: progress.phase || `Initializing ${descriptor.target.name}`,
+              percent: Math.min(99, Math.round(((index + (localPercent / 100)) / total) * 100))
+            });
+          }
+        });
+        results.set(descriptor.target.id, entry);
+      }
+      await markStartupInitializationComplete({
+        preparedPacks: [...results.values()].filter((entry) => entry.state === 'ready').map((entry) => entry.target.id),
+        blockedPacks: [...results.values()].filter((entry) => entry.state === 'blocked').map((entry) => entry.target.id)
+      });
+    } else {
+      let snapshot = null;
+      let snapshotError = null;
+      try {
+        snapshot = await readStartupPreparationSnapshot();
+      } catch (error) {
+        snapshotError = error;
+      }
+      await Promise.all(installedDescriptors.map(async (descriptor) => {
+        const cached = snapshot?.packs?.[descriptor.target.id] || null;
+        const entry = snapshotError
+          ? blockedLaunchPreparation(descriptor.target, snapshotError)
+          : await hydrateLaunchPreparationFromSnapshot(descriptor.target.id, cached);
+        results.set(descriptor.target.id, entry);
+      }));
+    }
+
+    for (const descriptor of descriptors.filter((item) => !item.installed)) {
+      invalidateLaunchPreparation(descriptor.target.id);
+      results.set(descriptor.target.id, null);
+    }
+    const blocked = [...results.values()].filter((entry) => entry?.state === 'blocked');
+    const completedAt = new Date().toISOString();
+    emitStartupPreparationProgress(sender, {
+      running: false,
+      phase: blocked.length ? 'Ready with repairs required' : 'Ready',
+      percent: 100,
+      completedAt,
+      error: ''
+    });
+    return {
+      ok: true,
+      firstInitialization,
+      elapsedMs: Date.now() - startedAtMs,
+      completedAt,
+      packs: Object.fromEntries(descriptors.map((descriptor) => [
+        descriptor.target.sidebarKey,
+        launchPreparationForRenderer(results.get(descriptor.target.id))
+      ]))
+    };
+  })().catch((error) => {
+    emitStartupPreparationProgress(sender, {
+      running: false,
+      phase: 'Startup preparation failed',
+      completedAt: new Date().toISOString(),
+      error: error.message || String(error)
+    });
+    throw error;
+  }).finally(() => {
+    startupPreparationInFlight = null;
+  });
+  return startupPreparationInFlight;
+}
+
+async function prepareLaunchForPack(packValue = 'stable', options = {}) {
+  const target = releaseTarget(packValue);
+  const key = target.id;
+  if (!options.force) {
+    const cached = launchPreparationCache.get(key);
+    if (cached && cached.state !== 'preparing') return cached;
+    const running = launchPreparationInFlight.get(key);
+    if (running) return running;
+  }
+  if (options.force) invalidateLaunchPreparation(key);
+  const running = launchPreparationInFlight.get(key);
+  if (running) return running;
+  const attempt = createLaunchDiagnosticAttempt(target);
+  const preparingEntry = { state: 'preparing', target, attempt, startedAt: new Date().toISOString() };
+  launchPreparationCache.set(key, preparingEntry);
+  const preparation = (async () => {
+    try {
+      const prepared = await performLaunchPreparation(
+        { packKey: target.id },
+        attempt,
+        { onProgress: typeof options.onProgress === 'function' ? options.onProgress : null }
+      );
+      const entry = {
+        ...prepared,
+        state: 'ready',
+        attempt,
+        startedAt: preparingEntry.startedAt,
+        completedAt: new Date().toISOString()
+      };
+      launchPreparationCache.set(key, entry);
+      if (options.persist !== false) await persistPreparedLaunchEntry(key, entry);
+      scheduleLaunchPreparationProofRefresh(key, entry);
+      await armLaunchPreparationWatcher(key, entry);
+      return entry;
+    } catch (error) {
+      attempt.managedMutationMonitor?.close?.();
+      attempt.managedMutationMonitor = null;
+      markFailedLaunchRequirement(attempt);
+      completeLaunchAttempt(attempt, 'FAILED', error);
+      const entry = {
+        ...(attempt.launchPreparation || {}),
+        state: 'blocked',
+        target,
+        attempt,
+        error,
+        runtimeConfig: attempt.runtimeConfig || null,
+        startedAt: preparingEntry.startedAt,
+        completedAt: new Date().toISOString()
+      };
+      launchPreparationCache.set(key, entry);
+      return entry;
+    }
+  })().finally(() => {
+    if (launchPreparationInFlight.get(key) === preparation) launchPreparationInFlight.delete(key);
+  });
+  launchPreparationInFlight.set(key, preparation);
+  return preparation;
+}
+
+ipcMain.handle('play:prepare', async (_event, payload = {}) => {
+  const entry = await prepareLaunchForPack(payload?.packKey || payload || 'stable', { force: Boolean(payload?.force) });
+  return launchPreparationForRenderer(entry);
+});
+
+ipcMain.handle('startup:get-state', async () => {
+  const initialized = Boolean(await readStartupInitializationState());
+  return {
+    ...startupPreparationStateForRenderer(),
+    initialized,
+    firstInitialization: !initialized
+  };
+});
+
+ipcMain.handle('startup:prepare', async (event) => prepareAllPacksAtStartup(event.sender));
+
+ipcMain.handle('play:select-prepared', async (_event, payload = {}) => {
+  const target = releaseTarget(payload?.packKey || payload || 'stable');
+  const entry = launchPreparationCache.get(target.id);
+  if (entry?.state !== 'ready') return launchPreparationForRenderer(entry);
+  entry.minecraftProfile = await selectPreparedMinecraftLauncherProfile(entry.minecraftProfile);
+  entry.selectedForPlayAt = new Date().toISOString();
+  return launchPreparationForRenderer(entry);
+});
+
+ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, attempt) => {
+  const target = releaseTarget(payload?.packKey || payload || 'stable');
+  const key = target.id;
+  const prepared = launchPreparationCache.get(key);
+  const preparedRuntimeConfig = prepared?.launcherConfig || prepared?.runtimeConfig || prepared?.attempt?.runtimeConfig || null;
+  if (preparedRuntimeConfig) {
+    attempt.runtimeConfig = preparedRuntimeConfig;
+    attempt.instanceDir = preparedRuntimeConfig.instanceDir || attempt.instanceDir;
+    attempt.minecraftRoot = preparedRuntimeConfig.minecraftLauncher?.rootDir || attempt.minecraftRoot;
+  }
+  if (prepared?.attempt?.requirements) {
+    attempt.requirements = JSON.parse(JSON.stringify(prepared.attempt.requirements));
+  }
+  if (Array.isArray(prepared?.attempt?.steps)) {
+    attempt.steps = JSON.parse(JSON.stringify(prepared.attempt.steps));
+  }
+  if (prepared?.state === 'preparing') {
+    await runLaunchStep(
+      attempt,
+      'preparation-cache',
+      'Use startup-prepared launch state',
+      async () => { throw new Error('Launcher preparation is still running. Wait for the loading screen to finish.'); }
+    );
+  }
+  if (prepared?.managedMutationMonitor?.validationInFlight) {
+    await prepared.managedMutationMonitor.validationInFlight;
+  }
+  const currentPrepared = launchPreparationCache.get(key);
+  if (currentPrepared !== prepared) {
+    const preparationError = currentPrepared?.error
+      || new Error('The startup-prepared launch state changed. Restart A Hard Time Launcher.');
+    await runLaunchStep(
+      attempt,
+      'preparation-cache',
+      'Use startup-prepared launch state',
+      async () => { throw preparationError; }
+    );
+  }
+  if (prepared?.state !== 'ready') {
+    const preparationError = prepared?.error || new Error('Launcher preparation is not ready. Restart A Hard Time Launcher.');
+    await runLaunchStep(
+      attempt,
+      'preparation-cache',
+      'Use startup-prepared launch state',
+      async () => { throw preparationError; }
+    );
+  }
+  const proofExpiresAt = Date.parse(prepared.launcherProof?.payload?.expiresAt || '');
+  if (Number.isFinite(proofExpiresAt) && proofExpiresAt <= Date.now() + 5_000) {
+    invalidateLaunchPreparation(key, 'Launcher session expired. Restart A Hard Time Launcher.');
+    throw new Error('Launcher session expired. Restart A Hard Time Launcher.');
+  }
+  attempt.instanceDir = prepared.config.instanceDir;
+  attempt.minecraftRoot = prepared.launcherConfig.minecraftLauncher?.rootDir || '';
+  attempt.runtimeConfig = prepared.launcherConfig;
+  attempt.pack.installedVersion = String(prepared.installed?.version || '');
+  attempt.pack.latestVersion = String(prepared.latest?.version || '');
+  attempt.minecraftSignalBaseline = prepared.attempt?.minecraftSignalBaseline || null;
+  attempt.minecraftInstanceSignalBaseline = prepared.attempt?.minecraftInstanceSignalBaseline || null;
   await runLaunchStep(
     attempt,
-    'profile-write-check',
-    'Confirm the profile stayed selected',
-    async () => assertMinecraftLauncherStayedClosedForProfileWrite(launcherHandoff),
-    'No competing Minecraft Launcher process rewrote the selection.'
+    'preparation-cache',
+    'Use startup-prepared launch state',
+    async () => prepared,
+    (value) => `Integrity, runtime, profile, proof, and ${value.launcherRoute.kind} route were prepared at ${value.completedAt}.`
+  );
+  prepared.minecraftProfile = await runLaunchStep(
+    attempt,
+    'select-profile',
+    `Select the exact ${target.name} profile`,
+    async () => selectPreparedMinecraftLauncherProfile(prepared.minecraftProfile),
+    (value) => `${value?.profileName || target.name}; ${value?.versionId || 'version unresolved'} selected.`
+  );
+  const finalIntegrity = await runLaunchStep(
+    attempt,
+    'final-hot-integrity-gate',
+    'Confirm startup-prepared files at Play',
+    async () => {
+      if (prepared.managedMutationMonitor?.validationInFlight) {
+        await prepared.managedMutationMonitor.validationInFlight;
+      }
+      if (launchPreparationCache.get(key) !== prepared) {
+        throw launchPreparationCache.get(key)?.error || new Error('The startup-prepared launch state changed before Play.');
+      }
+      let managedSnapshot = null;
+      if (prepared.integrity?.developerClientBypass !== true) {
+        const monitor = prepared.managedMutationMonitor;
+        if (!monitor) throw new Error('Managed-file monitoring is unavailable before Play. Restart A Hard Time Launcher.');
+        monitor.forceFullValidation = true;
+        monitor.ambiguousGeneration += 1;
+        await confirmLaunchPreparationMutationMonitor(monitor, prepared.integrity?.fingerprint, {
+          changedMessage: 'A managed game file changed immediately before Play. Run Repair before playing.',
+          monitoringMessage: 'Managed-file monitoring stopped before Play. Restart A Hard Time Launcher.'
+        });
+        managedSnapshot = monitor.verifiedSnapshot;
+        if (managedSnapshot?.valid !== true) {
+          invalidateLaunchPreparation(key, 'A managed game file changed immediately before Play. Run Repair before playing.');
+          throw new Error('A managed game file changed immediately before Play. Run Repair before playing.');
+        }
+      }
+      const runtimeFiles = Array.isArray(prepared.runtimeFiles) ? prepared.runtimeFiles : [];
+      const runtimeSnapshot = await verifyPreparedRuntimeSnapshot(runtimeFiles, {
+        previousFileStates: Array.isArray(prepared.runtimeFileStates) ? prepared.runtimeFileStates : []
+      });
+      if (runtimeSnapshot.valid !== true
+          || runtimeSnapshot.fingerprint?.digest !== prepared.runtimeFingerprint?.digest) {
+        invalidateLaunchPreparation(key, 'Minecraft or Forge files changed immediately before Play. Run Repair before playing.');
+        throw preparedRuntimeVerificationError(target, runtimeSnapshot);
+      }
+      prepared.runtimeFileStates = runtimeSnapshot.fileStates;
+      prepared.runtimeFingerprint = runtimeSnapshot.fingerprint;
+      if (launchPreparationCache.get(key) !== prepared) {
+        throw launchPreparationCache.get(key)?.error || new Error('The startup-prepared launch state changed before Play.');
+      }
+      return {
+        managedHashedFiles: Number(managedSnapshot?.hashedFiles) || 0,
+        runtimeHashedFiles: Number(runtimeSnapshot.hashedFiles) || 0,
+        managedFiles: Number(managedSnapshot?.managedFiles?.length) || 0,
+        runtimeFiles: Number(runtimeSnapshot.fingerprint?.fileCount) || 0
+      };
+    },
+    (value) => `${value.managedFiles} managed and ${value.runtimeFiles} runtime paths confirmed; ${value.managedHashedFiles + value.runtimeHashedFiles} changed-metadata files rehashed.`
+  );
+  attempt.finalHotIntegrity = finalIntegrity;
+  prepared.launcherProof = await runLaunchStep(
+    attempt,
+    'fresh-play-attestation',
+    'Authorize this Play attempt',
+    async () => {
+      const proof = await refreshPreparedLauncherProof(key, prepared);
+      if (!proof?.trusted || launchPreparationCache.get(key) !== prepared) {
+        throw new Error('A fresh one-time launcher session could not be authorized for this Play attempt.');
+      }
+      return proof;
+    },
+    (value) => `Fresh one-time launch ${value?.payload?.launchId || 'session'} authorized.`
   );
   const launchResult = await runLaunchStep(
     attempt,
     'open-launcher',
     'Open and verify the Minecraft Launcher window',
-    async () => openMinecraftLauncher(launcherConfig, {
-      sessionId: launcherHandoff.sessionId,
-      storeRoots: launcherHandoff.storeRoots || []
-    }),
+    async () => openMinecraftLauncher(prepared.launcherConfig, { route: prepared.launcherRoute }),
     (value) => {
       const processId = value?.processPid || value?.pid || 0;
       const processImage = value?.processImage || (value?.processPath ? path.basename(value.processPath) : 'Minecraft Launcher');
@@ -10679,18 +12302,16 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     }
   );
   setLaunchRequirement(attempt, 'minecraftLauncher', 'PASS', 'A visible, responsive Minecraft Launcher window was confirmed.');
+  scheduleLaunchPreparationProofRefresh(key, prepared, 1_000);
   return {
     ...minecraftLaunchResultForRenderer(launchResult),
-    minecraftProfile: minecraftProfileForRenderer(selectedProfile),
-    launcherHandoff: minecraftLauncherHandoffForRenderer(launcherHandoff),
-    launcherProof: launcherProofForRenderer({
-      proofFile: launcherProof.proofFile || '',
-      trusted: Boolean(launcherProof.trusted),
-      source: launcherProof.source || ''
-    }),
-    minecraftAssets
+    minecraftProfile: minecraftProfileForRenderer(prepared.minecraftProfile),
+    launcherHandoff: { restartedExisting: false, profileReloadPrepared: true },
+    launcherProof: launcherProofForRenderer(prepared.launcherProof),
+    minecraftAssets: prepared.minecraftAssets
   };
 }));
+
 ipcMain.handle('dialog:zip', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
@@ -11060,6 +12681,9 @@ if (!singleInstanceLock) {
     if (process.platform !== 'darwin') {
       app.quit();
     }
+  });
+  app.on('before-quit', () => {
+    invalidateAllLaunchPreparations();
   });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

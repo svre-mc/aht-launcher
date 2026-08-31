@@ -127,6 +127,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   developer: { adminBaseUrl: `${workerEndpoint}/`, r2Bucket: 'ahtlauncher' },
+  launcherProof: { enabled: false, required: false, baseUrl: `${workerEndpoint}/` },
   minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -201,7 +202,7 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'renderer');
-  await waitFor(client, "document.querySelector('#playerLabelView').textContent === 'StunningWolf22'", 'active launcher account imported');
+  await waitFor(client, "document.querySelector('#playerLabelView').textContent === 'StunningWolf22'", 'active launcher account imported during first initialization', 480);
   const proof = await evaluate(client, `
     (async () => {
       const status = await window.aht.getStatus();

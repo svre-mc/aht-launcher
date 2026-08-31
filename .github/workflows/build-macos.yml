@@ -3,6 +3,11 @@ name: Build and Publish Launchers
 on:
   workflow_dispatch:
     inputs:
+      validation_only:
+        description: "Run the non-publishing macOS Intel and Apple Silicon validation matrix"
+        required: true
+        type: boolean
+        default: false
       publish_to_r2:
         description: "Upload the built launcher update to Cloudflare R2"
         required: true
@@ -35,6 +40,7 @@ permissions:
 jobs:
   build-launcher:
     name: Build ${{ matrix.label }}
+    if: github.event_name == 'push' || inputs.validation_only != true
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -145,6 +151,193 @@ jobs:
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
 
+  validate-macos-runtime:
+    name: Validate macOS ${{ matrix.label }}
+    if: github.event_name == 'workflow_dispatch' && inputs.validation_only == true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Apple Silicon
+            runner: macos-15
+            arch: arm64
+            app_dir: mac-arm64
+          - label: Intel
+            runner: macos-15-intel
+            arch: x64
+            app_dir: mac
+
+    env:
+      CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      CSC_NAME: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
+      APPLE_DEVELOPER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_KEYCHAIN: ${{ secrets.APPLE_KEYCHAIN }}
+      APPLE_KEYCHAIN_PROFILE: ${{ secrets.APPLE_KEYCHAIN_PROFILE }}
+      AHT_VERIFY_PARALLEL: "3"
+
+    steps:
+      - name: Checkout validation source
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Record runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "validation/${{ matrix.arch }}"
+          {
+            echo "runner=${{ matrix.runner }}"
+            echo "expected_arch=${{ matrix.arch }}"
+            echo "uname_machine=$(uname -m)"
+            echo "uname=$(uname -a)"
+            sw_vers
+            sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+            echo "node=$(node --version)"
+          } | tee "validation/${{ matrix.arch }}/runner.txt"
+          test "$(uname -m)" = "${{ matrix.arch }}"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependency security
+        run: npm run security:audit
+
+      - name: Run full source and Electron regression suite
+        run: npm run verify:local
+
+      - name: Build Intel and Apple Silicon packages
+        run: npm run dist:regular:macos
+
+      - name: Verify native package structure and player boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="release-builds/macos/${{ matrix.app_dir }}/A Hard Time Launcher macOS.app"
+          EXECUTABLE="$APP/Contents/MacOS/A Hard Time Launcher macOS"
+          ASAR="$APP/Contents/Resources/app.asar"
+          REPORT_DIR="validation/${{ matrix.arch }}"
+
+          test -d "$APP"
+          test -x "$EXECUTABLE"
+          test -f "$ASAR"
+          file "$EXECUTABLE" | tee "$REPORT_DIR/executable-file.txt"
+          ARCHES="$(lipo -archs "$EXECUTABLE")"
+          echo "architectures=$ARCHES" | tee "$REPORT_DIR/architectures.txt"
+          case " $ARCHES " in
+            *" ${{ matrix.arch }} "*) ;;
+            *) echo "Expected ${{ matrix.arch }} in native executable architectures: $ARCHES" >&2; exit 1 ;;
+          esac
+
+          ./node_modules/.bin/asar list "$ASAR" > "$REPORT_DIR/asar-files.txt"
+          if grep -Eiq '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' "$REPORT_DIR/asar-files.txt"; then
+            echo "Player package contains a forbidden developer, operator, or secret-bearing path." >&2
+            grep -Ei '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' "$REPORT_DIR/asar-files.txt" >&2
+            exit 1
+          fi
+
+          shasum -a 256 "$EXECUTABLE" "$ASAR" | tee "$REPORT_DIR/native-package-sha256.txt"
+
+      - name: Mount native DMG and copy installed app
+        shell: bash
+        run: |
+          set -euo pipefail
+          DMG="release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').version").dmg"
+          MOUNT_POINT="$RUNNER_TEMP/aht-dmg-${{ matrix.arch }}"
+          INSTALL_ROOT="$RUNNER_TEMP/aht-installed-${{ matrix.arch }}"
+          INSTALLED_APP="$INSTALL_ROOT/A Hard Time Launcher macOS.app"
+
+          test -f "$DMG"
+          rm -rf "$MOUNT_POINT" "$INSTALL_ROOT"
+          mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
+          hdiutil attach "$DMG" -nobrowse -readonly -acceptlicense -mountpoint "$MOUNT_POINT"
+          SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 2 -type d -name 'A Hard Time Launcher macOS.app' -print -quit)"
+          test -n "$SOURCE_APP"
+          /usr/bin/ditto "$SOURCE_APP" "$INSTALLED_APP"
+          hdiutil detach "$MOUNT_POINT"
+
+          test -x "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS"
+          lipo -archs "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS" | tee "validation/${{ matrix.arch }}/installed-architectures.txt"
+          shasum -a 256 "$DMG" "release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').version").zip" | tee "validation/${{ matrix.arch }}/artifacts-sha256.txt"
+
+      - name: Inspect signing, notarization, and Gatekeeper state
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          DMG="release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$VERSION.dmg"
+          APP="$RUNNER_TEMP/aht-installed-${{ matrix.arch }}/A Hard Time Launcher macOS.app"
+          REPORT="validation/${{ matrix.arch }}/apple-trust.txt"
+
+          set +e
+          codesign --verify --deep --strict --verbose=4 "$APP" > "$REPORT" 2>&1
+          CODESIGN_STATUS=$?
+          codesign -d --verbose=4 "$APP" >> "$REPORT" 2>&1
+          spctl --assess --type execute --verbose=4 "$APP" >> "$REPORT" 2>&1
+          GATEKEEPER_STATUS=$?
+          xcrun stapler validate "$DMG" >> "$REPORT" 2>&1
+          STAPLER_STATUS=$?
+          set -e
+
+          {
+            echo "codesign_status=$CODESIGN_STATUS"
+            echo "gatekeeper_status=$GATEKEEPER_STATUS"
+            echo "stapler_status=$STAPLER_STATUS"
+          } | tee -a "$REPORT"
+
+          SIGNING_CONFIGURED=false
+          if [ -n "${CSC_LINK:-}" ] || [ -n "${CSC_NAME:-}" ]; then SIGNING_CONFIGURED=true; fi
+          NOTARIZATION_CONFIGURED=false
+          if { [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; } || { [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; } || { [ -n "${APPLE_KEYCHAIN:-}" ] && [ -n "${APPLE_KEYCHAIN_PROFILE:-}" ]; }; then NOTARIZATION_CONFIGURED=true; fi
+
+          echo "signing_configured=$SIGNING_CONFIGURED" | tee -a "$REPORT"
+          echo "notarization_configured=$NOTARIZATION_CONFIGURED" | tee -a "$REPORT"
+          if [ "$SIGNING_CONFIGURED" = true ] && [ "$CODESIGN_STATUS" -ne 0 ]; then
+            echo "Signing credentials were configured, but strict code-signature verification failed." >&2
+            exit 1
+          fi
+          if [ "$NOTARIZATION_CONFIGURED" = true ] && [ "$STAPLER_STATUS" -ne 0 ]; then
+            echo "Notarization credentials were configured, but the DMG has no valid stapled ticket." >&2
+            exit 1
+          fi
+          if [ "$SIGNING_CONFIGURED" = false ]; then echo "::warning::macOS artifacts are unsigned because Apple signing credentials are not configured."; fi
+          if [ "$NOTARIZATION_CONFIGURED" = false ]; then echo "::warning::macOS artifacts are not notarized because Apple notarization credentials are not configured."; fi
+          if [ "$GATEKEEPER_STATUS" -ne 0 ]; then echo "::warning::Gatekeeper assessment did not accept the installed app; see apple-trust.txt."; fi
+
+      - name: Run packaged-player interaction suite
+        env:
+          AHT_INSTALLED_PLAYER_EXE: ${{ runner.temp }}/aht-installed-${{ matrix.arch }}/A Hard Time Launcher macOS.app/Contents/MacOS/A Hard Time Launcher macOS
+        run: npm run verify:installed-player
+
+      - name: Recheck startup transition against packaged app
+        env:
+          AHT_SMOKE_EXE: ${{ runner.temp }}/aht-installed-${{ matrix.arch }}/A Hard Time Launcher macOS.app/Contents/MacOS/A Hard Time Launcher macOS
+        run: npm run test:startup-transition
+
+      - name: Upload native macOS validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aht-macos-validation-${{ matrix.arch }}
+          path: |
+            validation/${{ matrix.arch }}/**
+            release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-*.dmg
+            release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-*.zip
+          if-no-files-found: warn
+
   publish-launcher-update:
     name: Publish Launcher Update
     runs-on: windows-latest
@@ -152,7 +345,7 @@ jobs:
       run:
         shell: bash
     needs: build-launcher
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && inputs.validation_only != true
     env:
       GH_TOKEN: ${{ github.token }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -129,18 +129,23 @@ body.is-booting .startup-loader {
 .startup-loader-rule {
   position: relative;
   display: block;
-  height: 1px;
+  height: 4px;
   overflow: hidden;
-  background: rgba(222, 229, 225, 0.16);
+  border: 1px solid rgba(222, 229, 225, 0.16);
+  background: rgba(2, 4, 5, 0.7);
 }
 
-.startup-loader-rule::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(222, 205, 157, 0.86), transparent);
-  transform: translateX(-100%);
-  animation: startup-rule-pass 1450ms ease-in-out infinite;
+.startup-loader-rule[hidden] {
+  display: none;
+}
+
+.startup-loader-progress {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(124, 108, 74, 0.82), rgba(236, 224, 175, 0.96));
+  box-shadow: 0 0 9px rgba(222, 205, 157, 0.48);
+  transition: width 180ms ease-out;
 }
 
 .money-loader-system {
@@ -845,23 +850,6 @@ textarea {
 
 .workspace.is-sidebar-switching > .view {
   pointer-events: none;
-}
-
-.sidebar-switch-loader {
-  z-index: 30;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 90ms linear;
-}
-
-.workspace.is-sidebar-switching:not(.is-sidebar-switch-entering) .sidebar-switch-loader {
-  opacity: 0.92;
-  transition-delay: 110ms;
-}
-
-.workspace.is-sidebar-switch-entering .sidebar-switch-loader {
-  opacity: 0;
-  transition-delay: 0s;
 }
 
 #player.view.active {

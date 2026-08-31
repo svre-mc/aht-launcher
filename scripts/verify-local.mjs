@@ -13,6 +13,7 @@ const pureChecks = [
   ['test:legal-consent'],
   ['test:launcher-proof'],
   ['test:launch-diagnostics'],
+  ['test:launch-preparation-snapshot'],
   ['test:launcher-update-manifest'],
   ['test:launcher-update-staging'],
   ['test:github-workflow'],

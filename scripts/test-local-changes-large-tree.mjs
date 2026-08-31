@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureManagedModFingerprint, scanManagedIntegrity } from '../src/localChanges.js';
+import { captureManagedIntegrityFingerprint, captureManagedModFingerprint, scanManagedIntegrity } from '../src/localChanges.js';
 import { hashFile, writeJsonFile } from '../src/utils.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,7 +22,10 @@ try {
   await fs.mkdir(largeDir, { recursive: true });
   await fs.mkdir(stateDir, { recursive: true });
   const knownJar = path.join(managedDir, 'known.jar');
+  const managedConfig = path.join(instanceDir, 'config', 'aht.cfg');
+  await fs.mkdir(path.dirname(managedConfig), { recursive: true });
   await fs.writeFile(knownJar, 'managed jar', 'utf8');
+  await fs.writeFile(managedConfig, 'mode=alpha', 'utf8');
 
   const extraCount = 2500;
   const batchSize = 250;
@@ -34,14 +37,21 @@ try {
     await Promise.all(writes);
   }
 
-  await writeJsonFile(path.join(stateDir, 'managed-files.json'), [{
-    relativePath: 'mods/managed-tree/known.jar',
-    sha256: await hashFile(knownJar, 'sha256'),
-    source: 'test'
-  }]);
+  await writeJsonFile(path.join(stateDir, 'managed-files.json'), [
+    {
+      relativePath: 'mods/managed-tree/known.jar',
+      sha256: await hashFile(knownJar, 'sha256'),
+      source: 'test'
+    },
+    {
+      relativePath: 'config/aht.cfg',
+      sha256: await hashFile(managedConfig, 'sha256'),
+      source: 'test'
+    }
+  ]);
 
   const scan = await scanManagedIntegrity(instanceDir, { limit: 5 });
-  assert.equal(scan.counts.managed, 1);
+  assert.equal(scan.counts.managed, 2);
   assert.equal(scan.counts.changed, 0);
   assert.equal(scan.counts.missing, 0);
   assert.equal(scan.counts.added, 5);
@@ -50,18 +60,27 @@ try {
   assert(scan.added.every((item) => item.path.startsWith('mods/managed-tree/huge/')), JSON.stringify(scan.added));
   assert(scan.fingerprint?.digest, 'full integrity scan must produce a reusable fingerprint');
 
-  const unchangedFingerprint = await captureManagedModFingerprint(instanceDir);
-  assert.equal(unchangedFingerprint.digest, scan.fingerprint.digest, 'unchanged mods must keep the same fingerprint');
+  const unchangedIntegrityFingerprint = await captureManagedIntegrityFingerprint(instanceDir);
+  assert.equal(unchangedIntegrityFingerprint.digest, scan.fingerprint.digest, 'unchanged managed files must keep the same full-installation fingerprint');
+
+  const unchangedModFingerprint = await captureManagedModFingerprint(instanceDir);
 
   await fs.writeFile(knownJar, 'managed JAR', 'utf8');
-  const rewrittenFingerprint = await captureManagedModFingerprint(instanceDir);
-  assert.notEqual(rewrittenFingerprint.digest, unchangedFingerprint.digest, 'same-size mod rewrites must change the fingerprint');
+  const rewrittenModFingerprint = await captureManagedModFingerprint(instanceDir);
+  assert.notEqual(rewrittenModFingerprint.digest, unchangedModFingerprint.digest, 'same-size mod rewrites must change the mod-tree fingerprint');
+  const rewrittenIntegrityFingerprint = await captureManagedIntegrityFingerprint(instanceDir);
+  assert.notEqual(rewrittenIntegrityFingerprint.digest, unchangedIntegrityFingerprint.digest, 'same-size mod rewrites must change the full-installation fingerprint');
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await fs.writeFile(managedConfig, 'mode=omega', 'utf8');
+  const rewrittenConfigFingerprint = await captureManagedIntegrityFingerprint(instanceDir);
+  assert.notEqual(rewrittenConfigFingerprint.digest, rewrittenIntegrityFingerprint.digest, 'same-size rewrites outside mods must change the full-installation fingerprint');
 
   const otgDir = path.join(instanceDir, 'mods', 'OpenTerrainGenerator');
   await fs.mkdir(otgDir, { recursive: true });
   await fs.writeFile(path.join(otgDir, 'runtime.dat'), 'runtime data', 'utf8');
   const otgFingerprint = await captureManagedModFingerprint(instanceDir);
-  assert.equal(otgFingerprint.digest, rewrittenFingerprint.digest, 'OpenTerrainGenerator runtime data must not affect the fingerprint');
+  assert.equal(otgFingerprint.digest, rewrittenModFingerprint.digest, 'OpenTerrainGenerator runtime data must not affect the mod-tree fingerprint');
 
   console.log(JSON.stringify({
     ok: true,

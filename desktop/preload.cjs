@@ -9,7 +9,7 @@ function developerApiAllowed() {
 }
 
 const playerApi = {
-  getStatus: (packKey = 'aht') => ipcRenderer.invoke('status:get', { packKey }),
+  getStatus: (packKey = 'aht', options = {}) => ipcRenderer.invoke('status:get', { packKey, preferCache: Boolean(options.preferCache) }),
   copyErrorReport: (payload) => ipcRenderer.invoke('diagnostics:copyErrorReport', payload || {}),
   saveSettings: (config, packKey = 'aht') => ipcRenderer.invoke('settings:save', { config, packKey }),
   testFeed: (config, packKey = 'aht') => ipcRenderer.invoke('settings:testFeed', { config, packKey }),
@@ -29,6 +29,16 @@ const playerApi = {
   likeUpdateLog: (logId) => ipcRenderer.invoke('update-log:like', { logId }),
   socialList: () => ipcRenderer.invoke('social:list'),
   socialAction: (payload) => ipcRenderer.invoke('social:action', payload || {}),
+  getStartupPreparationState: () => ipcRenderer.invoke('startup:get-state'),
+  prepareStartup: () => ipcRenderer.invoke('startup:prepare'),
+  onStartupPreparationProgress: (listener) => {
+    if (typeof listener !== 'function') return () => {};
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on('startup:preparation-progress', handler);
+    return () => ipcRenderer.removeListener('startup:preparation-progress', handler);
+  },
+  preparePlay: (packKey = 'aht', options = {}) => ipcRenderer.invoke('play:prepare', { packKey, force: Boolean(options.force) }),
+  selectPreparedPlay: (packKey = 'aht') => ipcRenderer.invoke('play:select-prepared', { packKey }),
   play: (packKey = 'aht') => ipcRenderer.invoke('play:start', { packKey }),
   setupRecommend: () => ipcRenderer.invoke('setup:recommend'),
   setupApply: () => ipcRenderer.invoke('setup:apply'),

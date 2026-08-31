@@ -114,11 +114,17 @@ function connect(wsUrl) {
 }
 
 async function evaluate(client, expression) {
-  const result = await client.call('Runtime.evaluate', {
-    expression,
-    awaitPromise: true,
-    returnByValue: true
-  });
+  let result;
+  try {
+    result = await client.call('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true
+    });
+  } catch (error) {
+    error.message = `${error.message}; expression: ${String(expression).replace(/\s+/g, ' ').trim().slice(0, 240)}`;
+    throw error;
+  }
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
@@ -395,7 +401,9 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'renderer');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting')", 'revealed renderer');
   const migratedStatus = await waitFor(client, `
     window.aht.getStatus('aht').then((status) => status.config?.latestUrl ? status : false)
   `, 'migrated developer status');

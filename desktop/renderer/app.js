@@ -283,6 +283,16 @@ if (!window.aht) {
       missing: [{ path: "mods/missing-one.jar" }, { path: "mods/missing-two.jar" }]
     }),
     syncChanges: async () => ({ ok: true }),
+    getStartupPreparationState: async () => ({ initialized: true, firstInitialization: false, running: false, phase: 'Ready', percent: 100 }),
+    prepareStartup: async () => ({ ok: true, firstInitialization: false, elapsedMs: 10, packs: {} }),
+    onStartupPreparationProgress: () => () => {},
+    preparePlay: async () => ({
+      launchPreparationComplete: true,
+      launchPreparationState: 'ready',
+      launchReady: true,
+      launchBlockedReason: ''
+    }),
+    selectPreparedPlay: async () => ({ launchPreparationState: 'ready', launchReady: true }),
     play: async () => ({}),
     selectJson: async () => "D:\\AHT\\dist-r2\\latest.json",
     selectZip: async () => "D:\\Downloads\\A Hard Time-2.8.2.zip",
@@ -547,7 +557,9 @@ const els = {
   appFrame: document.querySelector(".app-frame"),
   workspace: document.querySelector(".workspace"),
   startupLoader: $("#startupLoader"),
-  sidebarSwitchLoader: $("#sidebarSwitchLoader"),
+  startupLoaderLabel: $("#startupLoaderLabel"),
+  startupLoaderRule: $("#startupLoaderRule"),
+  startupLoaderProgress: $("#startupLoaderProgress"),
   tabs: [...document.querySelectorAll(".tab")],
   gameTiles: [...document.querySelectorAll(".game-tile[data-tab]")],
   views: [...document.querySelectorAll(".view")],
@@ -847,6 +859,8 @@ let releaseBusy = false;
 let developerSecretSaveTimer = null;
 let launcherUpdateAutoStarted = false;
 let lastStatusRefreshAt = 0;
+let statusRefreshGeneration = 0;
+let startupFirstInitialization = false;
 let updateCompleteHideTimer = null;
 let friendsBusy = false;
 let friendsLoading = false;
@@ -868,11 +882,10 @@ const NEWS_SURFACE_ENTER_MS = 230;
 const NEWS_CAROUSEL_CROSSFADE_MS = 320;
 const SIDEBAR_SWITCH_EXIT_DELAY_MS = 50;
 const SIDEBAR_SWITCH_EXIT_MS = 180;
-const SIDEBAR_SWITCH_LOAD_HOLD_MS = 180;
 const SIDEBAR_SWITCH_ENTER_MS = 330;
 const STARTUP_MIN_VISIBLE_MS = 700;
-const STARTUP_ESSENTIAL_TIMEOUT_MS = 12_000;
 const STARTUP_ASSET_TIMEOUT_MS = 2_500;
+const STARTUP_QUICK_MAX_MS = 4_000;
 const STARTUP_FADE_MS = 320;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
@@ -961,11 +974,10 @@ function cleanErrorMessage(error) {
 async function copyErrorReportFromToast(payload = {}) {
   if (!window.aht?.copyErrorReport) return;
   try {
-    const result = await window.aht.copyErrorReport(payload);
-    const file = result.fileName ? ` Saved as ${result.fileName}.` : "";
-    showToast("Launch report copied", `${result.chars || 0} characters copied.${file} Paste it into your support message.`, "success", { durationMs: 1800, disableDiagnostics: true });
+    await window.aht.copyErrorReport(payload);
+    showToast("Copied to Clipboard", "", "success", { durationMs: 1800, disableDiagnostics: true });
   } catch {
-    showToast("Copy failed", "Open the AHT instance logs\\launcher folder and send the newest AHT-Launch text file.", "warn", { durationMs: 1800, disableDiagnostics: true });
+    showToast("Copy failed", "Open the AHT instance logs\\launcher folder and send ahtlatest.log.", "warn", { durationMs: 1800, disableDiagnostics: true });
   }
 }
 
@@ -1747,6 +1759,7 @@ async function loadLegalGate() {
 
 async function acceptLegalTerms() {
   if (!currentLegalState || !els.legalAcceptCheckbox?.checked) return;
+  let accepted = false;
   els.legalAcceptButton.disabled = true;
   setUnavailable(els.legalAcceptButton, true);
   els.legalAcceptCheckbox.disabled = true;
@@ -1757,10 +1770,24 @@ async function acceptLegalTerms() {
       privacyVersion: currentLegalState.privacyVersion,
       affirmed: true
     });
+    accepted = true;
+    currentLegalState = { ...currentLegalState, required: false, accepted: true };
     els.legalOverlay.hidden = true;
-    showToast("Terms accepted", "Your acceptance was saved on this device.", "success");
+    showLauncherPreparation();
+    const startupState = await window.aht.getStartupPreparationState();
+    await prepareStartupAndRender({
+      initialState: startupState,
+      deadlineAt: startupState.firstInitialization ? 0 : performance.now() + STARTUP_QUICK_MAX_MS
+    });
+    revealLauncher();
+    showToast("Terms accepted", "Your acceptance was saved and launch preparation is complete.", "success");
     if (currentStatus) renderAccountGate(currentStatus);
   } catch (error) {
+    if (accepted) {
+      renderInitialStatusError(error);
+      revealLauncher();
+      return;
+    }
     els.legalError.textContent = cleanErrorMessage(error);
     els.legalAcceptCheckbox.disabled = false;
     els.legalAcceptButton.disabled = !els.legalAcceptCheckbox.checked;
@@ -3116,13 +3143,14 @@ function renderPrimaryAction(status = currentStatus) {
   const packageActionMode = installMode || updateMode;
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status?.launcherUpdate?.updateRequired);
-  const actionBusy = playBusy || updateRunning;
+  const launchPreparing = sidebarSwitching || status?.launchPreparationState === "preparing";
+  const actionBusy = playBusy || updateRunning || launchPreparing;
   const actionMode = installMode ? "install" : (updateMode ? "update" : "play");
   const label = installMode
     ? (updateRunning ? "Installing..." : "Install")
     : (updateMode
       ? (updateRunning ? "Updating..." : "Update")
-      : (playBusy ? "Preparing..." : "Play"));
+      : (playBusy ? "Opening..." : "Play"));
   const iconClass = packageActionMode ? "icon-download" : "icon-play";
   els.playButton.dataset.actionMode = actionMode;
   els.playButton.classList.toggle("is-install-action", installMode);
@@ -3139,7 +3167,7 @@ function renderPrimaryAction(status = currentStatus) {
     : (updateMode
       ? (status?.updateBlockedReason || (updateRunning ? "Installing the selected AHT update" : "Update the selected AHT installation"))
       : (playBusy
-        ? "Preparing the exact Minecraft Launcher profile"
+        ? "Opening Minecraft Launcher"
         : (status?.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing."))));
 }
 
@@ -4095,6 +4123,7 @@ function renderStatus(status) {
   } else if (status.latest) {
     if (status.launchReady) {
       setBadge("Ready", "ok");
+      els.diffSummary.textContent = "Clean";
       if (logIsEmpty()) setLog("Pack is current.");
     } else {
       setLaunchStatusBadge(status);
@@ -4119,11 +4148,34 @@ function renderStatus(status) {
 }
 
 async function refresh(packKey = activeSidebarPack, options = {}) {
-  const status = await window.aht.getStatus(packKey);
+  const generation = ++statusRefreshGeneration;
+  const status = await window.aht.getStatus(packKey, { preferCache: Boolean(options.preferCache) });
   if (options.renderGate) await options.renderGate;
+  if (generation !== statusRefreshGeneration) return currentStatus || status;
   renderStatus(status);
   lastStatusRefreshAt = Date.now();
   return status;
+}
+
+function mergeLaunchPreparation(status, preparation) {
+  const merged = { ...(status || {}), ...(preparation || {}) };
+  for (const key of ['latest', 'installed', 'integrity', 'minecraftProfile', 'java8Runtime']) {
+    if (preparation?.[key] === undefined) merged[key] = status?.[key];
+  }
+  return merged;
+}
+
+async function refreshPrepared(packKey = activeSidebarPack, options = {}) {
+  const generation = ++statusRefreshGeneration;
+  const status = await window.aht.getStatus(packKey, { preferCache: Boolean(options.preferCache) });
+  if (options.renderGate) await options.renderGate;
+  if (generation === statusRefreshGeneration) renderStatus(status);
+  const preparation = await window.aht.preparePlay(packKey, { force: Boolean(options.forcePreparation) });
+  const preparedStatus = mergeLaunchPreparation(status, preparation);
+  statusRefreshGeneration += 1;
+  renderStatus(preparedStatus);
+  lastStatusRefreshAt = Date.now();
+  return preparedStatus;
 }
 
 async function refreshQuietly() {
@@ -4132,6 +4184,22 @@ async function refreshQuietly() {
     await refresh();
   } catch (error) {
     console.warn("Status refresh failed", error);
+  }
+}
+
+async function refreshPackQuietly(packKey = activeSidebarPack) {
+  if (updatePoll || launcherUpdatePoll) return;
+  try {
+    const status = await window.aht.getStatus(packKey);
+    const statusPack = status.activePack || packKey;
+    packStatusCache.set(statusPack, status);
+    if (statusPack === activeSidebarPack && !sidebarSwitching) {
+      statusRefreshGeneration += 1;
+      renderStatus(status);
+      lastStatusRefreshAt = Date.now();
+    }
+  } catch (error) {
+    console.warn(`Status refresh failed for ${packKey}`, error);
   }
 }
 
@@ -4194,6 +4262,7 @@ async function transitionSidebarSelection(tile) {
   const sourceView = els.views.find((view) => view.classList.contains("active")) || null;
   sidebarSwitching = true;
   activeSidebarPack = nextPack;
+  renderPrimaryAction(currentStatus);
   syncNavigationSelection(nextTab, nextPack);
   els.workspace?.classList.add("is-sidebar-switching");
   els.workspace?.setAttribute("aria-busy", "true");
@@ -4201,20 +4270,25 @@ async function transitionSidebarSelection(tile) {
   const exitGate = (async () => {
     await waitForUiDelay(SIDEBAR_SWITCH_EXIT_DELAY_MS);
     sourceView?.classList.add("sidebar-view-leaving");
-    setBadge("Checking", "warn");
     await waitForUiDelay(SIDEBAR_SWITCH_EXIT_MS);
   })();
-  const minimumEnterGate = (async () => {
+  const statusResultPromise = (async () => {
+    const cachedStatus = packStatusCache.get(nextPack)
+      || await window.aht.getStatus(nextPack, { preferCache: true });
+    const selection = await window.aht.selectPreparedPlay(nextPack);
     await exitGate;
-    await waitForUiDelay(SIDEBAR_SWITCH_LOAD_HOLD_MS);
-  })();
-  const statusResultPromise = refresh(nextPack, { renderGate: exitGate }).then(
+    const status = mergeLaunchPreparation(cachedStatus, selection);
+    statusRefreshGeneration += 1;
+    renderStatus(status);
+    lastStatusRefreshAt = Date.now();
+    return status;
+  })().then(
     (status) => ({ status, error: null }),
     (error) => ({ status: null, error })
   );
 
   try {
-    const [statusResult] = await Promise.all([statusResultPromise, minimumEnterGate]);
+    const [statusResult] = await Promise.all([statusResultPromise, exitGate]);
     let incomingView = document.getElementById(nextTab) || sourceView;
     if (statusResult.error) {
       activeSidebarPack = previousPack;
@@ -4241,6 +4315,10 @@ async function transitionSidebarSelection(tile) {
     els.workspace?.classList.remove("is-sidebar-switching", "is-sidebar-switch-entering");
     els.workspace?.removeAttribute("aria-busy");
     sidebarSwitching = false;
+    renderPrimaryAction(currentStatus);
+    window.setTimeout(() => {
+      void refreshPackQuietly(activeSidebarPack);
+    }, 0);
     const queuedTile = queuedSidebarTile;
     queuedSidebarTile = null;
     if (queuedTile && !queuedTile.disabled) {
@@ -4280,6 +4358,72 @@ function renderInitialStatusError(error) {
   });
 }
 
+function renderStartupPreparationState(state = {}) {
+  startupFirstInitialization = Boolean(state.firstInitialization);
+  els.startupLoader?.classList.toggle("is-initializing", startupFirstInitialization);
+  if (els.startupLoaderLabel) {
+    els.startupLoaderLabel.textContent = startupFirstInitialization
+      ? "Initializing"
+      : "Loading launcher";
+  }
+  if (els.startupLoaderRule) els.startupLoaderRule.hidden = !startupFirstInitialization;
+  if (els.startupLoaderProgress) {
+    const percent = Math.max(0, Math.min(100, Number(state.percent) || 0));
+    els.startupLoaderProgress.style.width = `${percent}%`;
+  }
+}
+
+async function renderPreparedStartupStatuses(preparation = {}) {
+  const packKeys = ["aht", "ptb"];
+  const results = await Promise.allSettled(packKeys.map(async (packKey) => {
+    const status = await window.aht.getStatus(packKey, { preferCache: true });
+    const merged = mergeLaunchPreparation(status, preparation?.packs?.[packKey]);
+    packStatusCache.set(merged.activePack || packKey, merged);
+    return merged;
+  }));
+  const activeIndex = packKeys.indexOf(activeSidebarPack);
+  const activeResult = results[activeIndex >= 0 ? activeIndex : 0];
+  if (activeResult?.status !== "fulfilled") throw activeResult?.reason || new Error("Launcher status is unavailable.");
+  statusRefreshGeneration += 1;
+  renderStatus(activeResult.value);
+  lastStatusRefreshAt = Date.now();
+  return activeResult.value;
+}
+
+async function prepareStartupAndRender(options = {}) {
+  const initialState = options.initialState || await window.aht.getStartupPreparationState();
+  renderStartupPreparationState(initialState);
+  const unsubscribe = window.aht.onStartupPreparationProgress((progress) => {
+    if (startupFirstInitialization || progress?.firstInitialization) renderStartupPreparationState(progress);
+  });
+  try {
+    const preparationPromise = window.aht.prepareStartup();
+    const preparation = options.deadlineAt && !initialState.firstInitialization
+      ? await Promise.race([
+        preparationPromise,
+        waitForUiDelay(Math.max(1, options.deadlineAt - performance.now())).then(() => {
+          throw new Error("Quick startup preparation exceeded the five-second limit. Run Repair for the selected pack.");
+        })
+      ])
+      : await preparationPromise;
+    renderStartupPreparationState({ ...preparation, firstInitialization: Boolean(preparation.firstInitialization), percent: 100 });
+    return renderPreparedStartupStatuses(preparation);
+  } finally {
+    unsubscribe?.();
+  }
+}
+
+function showLauncherPreparation() {
+  if (els.startupLoader) {
+    els.startupLoader.hidden = false;
+    els.startupLoader.setAttribute("aria-hidden", "false");
+  }
+  els.appFrame?.setAttribute("inert", "");
+  els.appFrame?.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("is-launcher-ready");
+  document.body.classList.add("is-booting");
+}
+
 function revealLauncher() {
   if (!document.body.classList.contains("is-booting")) return;
   els.appFrame?.removeAttribute("inert");
@@ -4294,29 +4438,50 @@ function revealLauncher() {
 
 async function bootstrapLauncher() {
   const startedAt = performance.now();
-  let essentialsSettled = false;
+  const quickDeadlineAt = startedAt + STARTUP_QUICK_MAX_MS;
   const fontsReady = document.fonts?.ready || Promise.resolve();
-  const initialStatusReady = refresh().catch((error) => {
-    renderInitialStatusError(error);
+  const criticalImagesReady = Promise.race([waitForCriticalImages(), waitForUiDelay(STARTUP_ASSET_TIMEOUT_MS)]);
+  const startupStateReady = window.aht.getStartupPreparationState().then((state) => {
+    renderStartupPreparationState(state);
+    return state;
   });
-  const essentials = Promise.allSettled([
-    loadLegalGate(),
+  const legalReady = loadLegalGate();
+  const startupState = await startupStateReady;
+  const initialStatusReady = (async () => {
+    await legalReady;
+    if (currentLegalState?.required) {
+      return refresh(activeSidebarPack, { preferCache: true });
+    }
+    return prepareStartupAndRender({ initialState: startupState, deadlineAt: quickDeadlineAt });
+  })().catch((error) => {
+    renderInitialStatusError(error);
+    return null;
+  });
+  const startupTasks = Promise.allSettled([
+    legalReady,
+    startupStateReady,
     initialStatusReady,
     waitForWindowLoad(),
-    fontsReady
-  ]).then(() => {
-    essentialsSettled = true;
-  });
-  await Promise.race([essentials, waitForUiDelay(STARTUP_ESSENTIAL_TIMEOUT_MS)]);
-  if (!essentialsSettled && !currentStatus) {
-    renderInitialStatusError(new Error("Launcher startup timed out while loading status."));
+    fontsReady,
+    criticalImagesReady
+  ]);
+  if (startupState.firstInitialization) {
+    await startupTasks;
+  } else {
+    await Promise.race([
+      startupTasks,
+      waitForUiDelay(Math.max(1, quickDeadlineAt - performance.now()))
+    ]);
   }
-  await Promise.race([waitForCriticalImages(), waitForUiDelay(STARTUP_ASSET_TIMEOUT_MS)]);
   const remaining = Math.max(0, STARTUP_MIN_VISIBLE_MS - (performance.now() - startedAt));
   if (remaining) await waitForUiDelay(remaining);
   await waitForNextPaint();
   await waitForNextPaint();
   revealLauncher();
+  window.setTimeout(() => {
+    void refreshPackQuietly("aht");
+    void refreshPackQuietly("ptb");
+  }, 0);
 }
 
 async function openExternalDestination(button) {
@@ -4387,7 +4552,11 @@ async function pollUpdate() {
       showToast(completedKind === "repair" ? "Repair complete" : "Update complete", `Installed ${state.lastResult.installed.version}.`, "success");
     }
     activeUpdateKind = "";
-    await refresh();
+    if (!state.error && state.lastResult?.installed?.version) {
+      await refresh(activeSidebarPack, { preferCache: true });
+    } else {
+      await refresh();
+    }
     if (completedKind === "repair" && !state.error && !(currentStatus?.integrity?.counts?.corrupted > 0)) {
       lastIntegrityScan = null;
       closeRepairPrompt();
@@ -4624,8 +4793,8 @@ async function applyRecommendedSetup() {
   setUnavailable(els.setupAutoButton, true);
   setUnavailable(els.settingsAutoSetupButton, true);
   try {
-    const status = await window.aht.setupApply();
-    renderStatus(status);
+    await window.aht.setupApply();
+    const status = await refreshPrepared(activeSidebarPack, { forcePreparation: true });
     const detail = status.config.latestUrl
       ? "Release feed and instance path were applied."
       : "Instance path was applied. Add a latest.json feed to continue.";
@@ -4714,8 +4883,8 @@ els.playButton.addEventListener("click", async () => {
   const requestedPackName = requestedPackKey === "ptb" ? "A Hard Time PTB" : "A Hard Time";
   if (els.copyLatestLaunchReportButton) els.copyLatestLaunchReportButton.hidden = true;
   setPlayBusy(true);
-  setLog(`Preparing ${requestedPackName} and Minecraft Launcher...`);
-  showToast("Preparing Minecraft Launcher", `Selecting the exact ${requestedPackName} installation.`, "info");
+  setLog(`Opening Minecraft Launcher for ${requestedPackName}...`);
+  showToast("Opening Minecraft Launcher", `Using the prepared ${requestedPackName} installation.`, "info");
   try {
     const result = await window.aht.play(requestedPackKey);
     const profileName = result?.minecraftProfile?.profileName || requestedPackName;
@@ -4864,7 +5033,7 @@ els.saveSettingsButton.addEventListener("click", async () => {
   try {
     await saveDeveloperSecrets({ quiet: false });
     const result = await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
-    await refresh();
+    await refreshPrepared(activeSidebarPack);
     if (result?.profileUpdated) {
       showToast("Settings saved", "Minecraft Launcher profile was updated.", "success");
     } else if (result?.profileError) {

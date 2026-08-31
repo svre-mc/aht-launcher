@@ -89,6 +89,7 @@
     "test:launcher-proof": "node scripts/test-launcher-proof.mjs",
     "test:launcher-proof-update-stability": "node scripts/test-launcher-proof-update-stability.mjs",
     "test:launch-diagnostics": "node scripts/test-launch-diagnostics.mjs",
+    "test:launch-preparation-snapshot": "node scripts/test-launch-preparation-managed-snapshot.mjs",
     "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
   },
   "dependencies": {
