@@ -102,12 +102,35 @@ async function windowsClipboardFiles() {
 }
 
 async function waitForReportFiles(directory, pattern, minimumCount = 1) {
+  let previousSignature = '';
+  let stablePasses = 0;
+  let lastReadyNames = [];
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    const names = fs.existsSync(directory) ? fs.readdirSync(directory).filter((name) => pattern.test(name)) : [];
-    if (names.length >= minimumCount) return names;
+    const names = fs.existsSync(directory)
+      ? fs.readdirSync(directory).filter((name) => pattern.test(name)).sort()
+      : [];
+    const ready = names.map((name) => {
+      try {
+        const stat = fs.statSync(path.join(directory, name));
+        return { name, size: stat.size, modified: stat.mtimeMs };
+      } catch {
+        return { name, size: 0, modified: 0 };
+      }
+    }).filter((entry) => entry.size > 0);
+    if (ready.length >= minimumCount) {
+      const signature = ready.map((entry) => `${entry.name}:${entry.size}:${entry.modified}`).join('|');
+      stablePasses = signature === previousSignature ? stablePasses + 1 : 1;
+      previousSignature = signature;
+      lastReadyNames = ready.map((entry) => entry.name);
+      if (stablePasses >= 2) return lastReadyNames;
+    } else {
+      previousSignature = '';
+      stablePasses = 0;
+      lastReadyNames = [];
+    }
     await sleep(25);
   }
-  return fs.existsSync(directory) ? fs.readdirSync(directory).filter((name) => pattern.test(name)) : [];
+  return lastReadyNames;
 }
 
 async function writeJson(file, value) {
