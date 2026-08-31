@@ -17,7 +17,6 @@ const mcRoot = path.join(root, 'minecraft');
 const screenshotDir = path.join(root, 'screenshots');
 const updateLogRequests = [];
 const likeRequests = [];
-const NEWS_CAROUSEL_CROSSFADE_MS = 320;
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -531,19 +530,28 @@ try {
   await movePointer(client, '.news-carousel-media');
   await sleep(180);
   await clickNode(client, '.news-carousel-next');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
-  const carouselNextProof = await evaluate(client, `({
-    index: document.querySelector('.news-feature-carousel')?.dataset.activeIndex || '',
-    title: document.querySelector('.news-carousel-caption-title')?.textContent || '',
-    layers: document.querySelectorAll('.news-carousel-slide').length,
-    transform: getComputedStyle(document.querySelector('.news-feature-carousel')).transform
-  })`);
+  const carouselNextProof = await waitFor(client, `(() => {
+    const proof = {
+      index: document.querySelector('.news-feature-carousel')?.dataset.activeIndex || '',
+      title: document.querySelector('.news-carousel-caption-title')?.textContent || '',
+      layers: document.querySelectorAll('.news-carousel-slide').length,
+      transform: getComputedStyle(document.querySelector('.news-feature-carousel')).transform
+    };
+    return proof.index === '1' && proof.title === 'Third newest' && proof.layers === 1 && proof.transform === 'none'
+      ? proof
+      : false;
+  })()`, 'completed News carousel next crossfade');
   screenshots.push(await captureScreenshot(client, 'news-carousel-slide'));
   if (carouselNextProof.index !== '1' || carouselNextProof.title !== 'Third newest' || carouselNextProof.layers !== 1 || carouselNextProof.transform !== 'none') {
     throw new Error(`News carousel arrow did not complete one fixed-geometry crossfade: ${JSON.stringify(carouselNextProof)}`);
   }
   await clickNode(client, '.news-carousel-pager button:first-child');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
+  await waitFor(client, `(() => {
+    const card = document.querySelector('.news-feature-carousel');
+    return card?.dataset.activeIndex === '0'
+      && document.querySelectorAll('.news-carousel-slide').length === 1
+      && !card.classList.contains('is-switching');
+  })()`, 'completed News carousel pager crossfade');
   await clickNode(client, '.news-carousel-media');
   const inlineMediaProof = await waitFor(client, `(() => {
     const card = document.querySelector('.news-feature-carousel');
@@ -564,17 +572,27 @@ try {
     throw new Error(`Playable featured News did not remain inline in the fixed hero: ${JSON.stringify(inlineMediaProof)}`);
   }
   await clickNode(client, '.news-carousel-next');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
-  const mediaExitProof = await evaluate(client, `({
-    index: document.querySelector('.news-feature-carousel')?.dataset.activeIndex || '',
-    mediaHidden: document.querySelector('.news-carousel-inline-media')?.hidden ?? false,
-    iframeCount: document.querySelectorAll('.news-carousel-inline-media iframe').length
-  })`);
+  const mediaExitProof = await waitFor(client, `(() => {
+    const card = document.querySelector('.news-feature-carousel');
+    const proof = {
+      index: card?.dataset.activeIndex || '',
+      mediaHidden: document.querySelector('.news-carousel-inline-media')?.hidden ?? false,
+      iframeCount: document.querySelectorAll('.news-carousel-inline-media iframe').length,
+      layers: document.querySelectorAll('.news-carousel-slide').length
+    };
+    return proof.index === '1' && proof.mediaHidden && proof.iframeCount === 0 && proof.layers === 1
+      && !card.classList.contains('is-switching') ? proof : false;
+  })()`, 'completed carousel media-exit crossfade');
   if (mediaExitProof.index !== '1' || !mediaExitProof.mediaHidden || mediaExitProof.iframeCount !== 0) {
     throw new Error(`Carousel navigation did not stop inline media before changing slides: ${JSON.stringify(mediaExitProof)}`);
   }
   await clickNode(client, '.news-carousel-pager button:first-child');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
+  await waitFor(client, `(() => {
+    const card = document.querySelector('.news-feature-carousel');
+    return card?.dataset.activeIndex === '0'
+      && document.querySelectorAll('.news-carousel-slide').length === 1
+      && !card.classList.contains('is-switching');
+  })()`, 'completed carousel return crossfade');
   await movePointer(client, { x: 250, y: 120 });
   await sleep(180);
 
