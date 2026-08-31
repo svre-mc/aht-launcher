@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { defaultInstanceDirForPlatform } from '../src/platformProfile.js';
 
 const port = Number(process.argv[2] || 9700);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -16,6 +17,11 @@ const electronBin = smokeExe || (process.platform === 'win32'
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-defaults-'));
 const userData = path.join(root, 'userData');
 const fakeHome = path.join(root, 'home');
+const expectedInstanceDir = defaultInstanceDirForPlatform(process.platform, {
+  ...process.env,
+  HOME: fakeHome,
+  USERPROFILE: fakeHome
+});
 const fakeAppData = process.platform === 'win32'
   ? path.join(fakeHome, 'AppData', 'Roaming')
   : path.join(root, 'appdata');
@@ -242,7 +248,7 @@ try {
   if (!status.updateRequired) {
     throw new Error(`Fresh player did not detect required update: ${JSON.stringify(status)}`);
   }
-  if (!status.config.instanceDir.includes('AHT') || !status.config.instanceDir.includes('A Hard Time')) {
+  if (path.resolve(status.config.instanceDir) !== path.resolve(expectedInstanceDir)) {
     throw new Error(`Fresh player did not use managed AHT instance dir: ${JSON.stringify(status.config)}`);
   }
   const legacyInstanceFragments = ['curseforge', 'RLCraft Dregora', 'A Hard Time Dregora'];
@@ -297,7 +303,7 @@ try {
   `, 'apply recommended setup');
   const appliedPathText = `${appliedSetup.instanceDir}\n${appliedSetup.playCwd}`;
   const leakedAppliedInstanceFragments = legacyInstanceFragments.filter((item) => appliedPathText.toLowerCase().includes(item.toLowerCase()));
-  if (leakedAppliedInstanceFragments.length || !appliedSetup.instanceDir.includes('AHT') || !appliedSetup.instanceDir.includes('A Hard Time')) {
+  if (leakedAppliedInstanceFragments.length || path.resolve(appliedSetup.instanceDir) !== path.resolve(expectedInstanceDir)) {
     throw new Error(`Player auto-setup selected an unsafe instance path: ${JSON.stringify({ leakedAppliedInstanceFragments, appliedSetup })}`);
   }
   console.log(JSON.stringify({
