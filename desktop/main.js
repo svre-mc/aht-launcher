@@ -10482,6 +10482,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: process.env.AHT_TEST_HOOKS !== '1',
       webviewTag: false
     }
   });

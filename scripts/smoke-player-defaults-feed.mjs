@@ -82,7 +82,7 @@ function connect(wsUrl) {
   return new Promise((resolve, reject) => {
     socket.addEventListener('open', () => {
       resolve({
-        call(method, params = {}) {
+        call(method, params = {}, label = method) {
           const id = nextId;
           nextId += 1;
           socket.send(JSON.stringify({ id, method, params }));
@@ -91,7 +91,7 @@ function connect(wsUrl) {
             setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
-              callReject(new Error(`CDP call timed out: ${method}`));
+              callReject(new Error(`CDP call timed out: ${label} (${method})`));
             }, 30000);
           });
         },
@@ -104,12 +104,12 @@ function connect(wsUrl) {
   });
 }
 
-async function evaluate(client, expression) {
+async function evaluate(client, expression, label = 'renderer expression') {
   const result = await client.call('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true
-  });
+  }, label);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
@@ -118,7 +118,7 @@ async function evaluate(client, expression) {
 
 async function waitFor(client, expression, label, attempts = 160) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const value = await evaluate(client, expression);
+    const value = await evaluate(client, expression, label);
     if (value) return value;
     await sleep(250);
   }
@@ -223,9 +223,10 @@ const child = spawn(electronBin, electronArgs, {
 let client;
 try {
   const target = await waitForTarget();
+  console.log(JSON.stringify({ cdpTarget: { id: target.id, title: target.title, url: target.url } }));
   client = await connect(target.webSocketDebuggerUrl);
-  await client.call('Runtime.enable');
-  await client.call('Page.enable');
+  await client.call('Runtime.enable', {}, 'enable renderer runtime');
+  await client.call('Page.enable', {}, 'enable renderer page');
   await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.9.9' ? status : false)
@@ -288,7 +289,7 @@ try {
       playCwd: result.config?.playCommand?.cwd || '',
       setup: result.setup || {}
     }))
-  `);
+  `, 'apply recommended setup');
   const appliedPathText = `${appliedSetup.instanceDir}\n${appliedSetup.playCwd}`;
   const leakedAppliedInstanceFragments = legacyInstanceFragments.filter((item) => appliedPathText.toLowerCase().includes(item.toLowerCase()));
   if (leakedAppliedInstanceFragments.length || !appliedSetup.instanceDir.includes('AHT') || !appliedSetup.instanceDir.includes('A Hard Time')) {
