@@ -6336,7 +6336,7 @@ done
 install_to_target() {
   parent_dir=$(dirname "$target_app")
   mkdir -p "$parent_dir" || return 11
-  backup_app="${target_app}.previous-update"
+  backup_app="\${target_app}.previous-update"
   rm -rf "$backup_app"
   if [ -d "$target_app" ]; then
     mv "$target_app" "$backup_app" || return 12

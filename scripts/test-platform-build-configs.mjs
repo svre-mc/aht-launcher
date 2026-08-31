@@ -419,6 +419,7 @@ assert(launcherUpdateTransactionSmoke.includes("AHT_TRANSACTION_MODE || 'version
 assert(!desktopMain.includes('/usr/bin/open "$zip_path"'), 'macOS self-update helper must not open the update ZIP on failure.');
 assert(desktopMain.includes('function macAppPathLooksTransient') && desktopMain.includes("normalized.startsWith('/volumes/')") && desktopMain.includes("normalized.includes('/apptranslocation/')"), 'macOS launcher update must detect DMG/App Translocation paths.');
 assert(desktopMain.includes("path.join(app.getPath('home'), 'Applications'") && desktopMain.includes('fallback_app') && desktopMain.includes('Primary install target failed'), 'macOS launcher update must fall back to the user Applications folder when app replacement fails.');
+assert(desktopMain.includes('backup_app="\\${target_app}.previous-update"'), 'macOS launcher update helper must preserve shell target_app expansion instead of evaluating it as a JavaScript template variable.');
 const gameTileButtonStart = rendererHtml.indexOf('id="gameTileButton"');
 const gameTileButtonEnd = rendererHtml.indexOf('coming-soon', gameTileButtonStart);
 const gameTileButtonHtml = gameTileButtonStart >= 0 && gameTileButtonEnd > gameTileButtonStart
