@@ -3657,7 +3657,17 @@ async function reportCurrentLauncherVersion(config = {}, identity = {}) {
   if (!version || !installId || !minecraftUsername || launcherVersionWasReported(identity, version)) {
     return { skipped: true, reason: 'launcher version already reported or player identity is incomplete' };
   }
-  const previousVersion = String(identity.lastReportedLauncherVersion || '').trim();
+  // A status request can finish identity discovery after an earlier request has
+  // already reported this version. Re-read the durable identity immediately
+  // before the network write so that a stale queued snapshot cannot emit a
+  // duplicate launcher-update event after the in-flight guard has cleared.
+  const persistedIdentity = await loadIdentity();
+  const persistedMatches = String(persistedIdentity.installId || '').trim() === installId
+    && normalizeMinecraftUsername(persistedIdentity.minecraftUsername).toLowerCase() === minecraftUsername.toLowerCase();
+  if (persistedMatches && launcherVersionWasReported(persistedIdentity, version)) {
+    return { skipped: true, reason: 'launcher version already reported by a concurrent status request' };
+  }
+  const previousVersion = String((persistedMatches ? persistedIdentity : identity).lastReportedLauncherVersion || '').trim();
   const result = await sendLauncherEvent(config, runtimeIdentity(identity), {
     type: 'launcher_update_completed',
     version,

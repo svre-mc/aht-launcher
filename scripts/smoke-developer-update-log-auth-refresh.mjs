@@ -26,6 +26,8 @@ const updateLogAuthHeaders = [];
 const launcherProofAuthHeaders = [];
 const alternateOriginSummaryAuthHeaders = [];
 const usernameRegistrationRequests = [];
+const remoteAdminTimeoutMs = 500;
+const stalledAdminLoginDelayMs = 1500;
 const requestPaths = [];
 let rootLoginCount = 0;
 let loginMode = 'normal';
@@ -231,7 +233,7 @@ const server = http.createServer(async (request, response) => {
     const body = await readJsonBody(request);
     loginCalls.push(body);
     const requestLoginMode = loginMode;
-    await sleep(requestLoginMode === 'timeout' ? 500 : 75);
+    await sleep(requestLoginMode === 'timeout' ? stalledAdminLoginDelayMs : 75);
     const status = body.username === 'admin' && body.password === 'test-dev-password' ? 200 : 401;
     if (status !== 200) {
       sendJson(status, { error: 'Invalid username or password' });
@@ -394,7 +396,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
-    AHT_TEST_REMOTE_ADMIN_TIMEOUT_MS: '120',
+    AHT_TEST_REMOTE_ADMIN_TIMEOUT_MS: String(remoteAdminTimeoutMs),
     APPDATA: appData,
     SystemDrive: root,
     ELECTRON_ENABLE_LOGGING: '0'

@@ -246,10 +246,11 @@ try {
     await sleep(100);
   }
   await sleep(200);
-  await evaluate(client, 'Promise.all([window.aht.getStatus(), window.aht.getStatus()])');
+  await evaluate(client, 'Promise.all(Array.from({ length: 8 }, () => window.aht.getStatus()))');
   for (let attempt = 0; attempt < 80 && launcherUpdateEvents.length < 2; attempt += 1) {
     await sleep(100);
   }
+  await sleep(300);
   const reportedIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
   const updateEvent = launcherUpdateEvents[1];
   if (
