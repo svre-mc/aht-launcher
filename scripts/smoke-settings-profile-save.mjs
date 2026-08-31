@@ -17,7 +17,7 @@ const instanceDir = path.join(root, 'A Hard Time');
 const minecraftRoot = path.join(root, '.minecraft');
 const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
 const javaHome = path.join(root, 'adoptium-jre8');
-const javaPath = path.join(javaHome, 'bin', 'java.exe');
+const javaPath = path.join(javaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const latestPath = path.join(root, 'latest.json');
 const tempDefaults = path.join(root, 'app.defaults.json');
@@ -207,7 +207,7 @@ try {
   if (
     status.config?.minecraftLauncher?.enabled !== true
     || status.config?.minecraftLauncher?.java8InstallOverride !== true
-    || status.java8Runtime?.installOverride !== true
+    || path.resolve(status.config?.minecraftLauncher?.javaPath || '') !== path.resolve(javaPath)
     || consumedJavaSelection.allowManagedJava8 !== true
     || !consumedJavaSelection.consumedAt
   ) {
@@ -293,7 +293,7 @@ try {
     })()
   `);
   if (
-    status.java8Runtime?.usable !== true
+    status.java8Runtime !== null
     || java8SettingsProof.cardPresent
     || java8SettingsProof.inputPresent
     || java8SettingsProof.diagnosticsPresent
