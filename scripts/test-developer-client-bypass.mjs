@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
+import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 10030);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -11,6 +13,9 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-developer-client-bypass-
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
+const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
+const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
+const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -132,6 +137,15 @@ const latest = {
 const expectedContent = 'managed=true\n';
 const changedContent = 'managed=false\n';
 
+await writeMinecraftBaseFixture(minecraftBaseFixtureDir, {
+  includeExcludedLibraryForCurrentPlatform: true
+});
+await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
+await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(path.dirname(fakeJavaPath), 'javaw.exe'), 'fake windowless Java 8 executable\n', 'utf8');
+}
+await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
 await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: latest.packId,
   instanceDir,
@@ -141,7 +155,17 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   developer: { adminBaseUrl: '', defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
   launcherUpdate: { enabled: false, latestUrl: '' },
   launcherProof: { enabled: false, required: false, baseUrl: '', keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, rootDir: mcRoot, profileId: latest.packId, profileName: latest.name, memoryMb: 6144 },
+  minecraftLauncher: {
+    enabled: true,
+    rootDir: mcRoot,
+    profileId: latest.packId,
+    profileName: latest.name,
+    memoryMb: 6144,
+    javaPath: fakeJavaPath,
+    syncDefaultRoots: false,
+    openCommand: process.execPath,
+    openArgs: ['--version']
+  },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'developer-smoke-install', minecraftUsername: 'DeveloperSmoke' });
@@ -167,10 +191,7 @@ await fsp.writeFile(path.join(instanceDir, 'config', 'developer-extra.cfg'), cha
 await fsp.mkdir(path.join(instanceDir, 'mods'), { recursive: true });
 await fsp.writeFile(path.join(instanceDir, 'mods', 'developer-extra.jar'), changedContent, 'utf8');
 await fsp.writeFile(path.join(instanceDir, 'mods', 'developer-only-tool.jar'), 'developer tool\n', 'utf8');
-await writeJson(
-  path.join(mcRoot, 'versions', '1.12.2-forge-14.23.5.2860', '1.12.2-forge-14.23.5.2860.json'),
-  { id: '1.12.2-forge-14.23.5.2860', type: 'release' }
-);
+await writeForgeInstallationFixture(mcRoot, { versionId: '1.12.2-forge-14.23.5.2860' });
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
@@ -180,7 +201,12 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_ALLOW_DEVELOPER: '1',
-    AHT_LAUNCHER_SOURCE_ROOT: process.cwd()
+    AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
+    AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
+    AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'arm64' : 'amd64',
+    AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir
   },
   stdio: 'ignore',
   windowsHide: true

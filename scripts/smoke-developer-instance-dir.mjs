@@ -134,6 +134,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
+    APPDATA: userData,
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
