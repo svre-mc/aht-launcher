@@ -163,10 +163,12 @@ jobs:
           - label: Apple Silicon
             runner: macos-15
             arch: arm64
+            machine: arm64
             app_dir: mac-arm64
           - label: Intel
             runner: macos-15-intel
             arch: x64
+            machine: x86_64
             app_dir: mac
 
     env:
@@ -202,13 +204,14 @@ jobs:
           {
             echo "runner=${{ matrix.runner }}"
             echo "expected_arch=${{ matrix.arch }}"
+            echo "expected_machine=${{ matrix.machine }}"
             echo "uname_machine=$(uname -m)"
             echo "uname=$(uname -a)"
             sw_vers
             sysctl -n machdep.cpu.brand_string 2>/dev/null || true
             echo "node=$(node --version)"
           } | tee "validation/${{ matrix.arch }}/runner.txt"
-          test "$(uname -m)" = "${{ matrix.arch }}"
+          test "$(uname -m)" = "${{ matrix.machine }}"
 
       - name: Install dependencies
         run: npm ci

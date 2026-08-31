@@ -312,7 +312,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.8.7' && status.updateRequired ? status : false)
   `, 'update-required status');

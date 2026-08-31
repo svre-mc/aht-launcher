@@ -142,7 +142,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'developer DOM');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'developer DOM');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.developerMode && status.config?.instanceDir ? status : false)
   `, 'developer status');

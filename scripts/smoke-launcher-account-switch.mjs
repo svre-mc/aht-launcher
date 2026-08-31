@@ -201,7 +201,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'renderer');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'renderer');
   await waitFor(client, "document.querySelector('#playerLabelView').textContent === 'StunningWolf22'", 'active launcher account imported during first initialization', 480);
   const proof = await evaluate(client, `
     (async () => {

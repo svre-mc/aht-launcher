@@ -294,7 +294,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && document.querySelector('#launcherUpdateOverlay')", 'launcher update DOM');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(document.querySelector('#launcherUpdateOverlay'))", 'launcher update DOM');
   await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false", 'launcher update overlay visible');
   await Promise.race([
     artifactRequestStarted,

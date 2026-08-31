@@ -405,7 +405,7 @@ try {
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
-  await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht) && Boolean(document.querySelector('#closeLauncherWhenGameStartsInput'))", 'player DOM');
   const fixedWindowProof = await evaluate(client, `({
     innerWidth: window.innerWidth,
     innerHeight: window.innerHeight,

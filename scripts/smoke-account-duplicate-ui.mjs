@@ -220,7 +220,7 @@ try {
   await client.call('Page.enable');
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'launcher DOM');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'launcher DOM');
   const recovery = await waitFor(client, `
     window.aht.getStatus().then((status) => {
       if (status.identity?.minecraftUsername !== 'TakenUser_1') return false;

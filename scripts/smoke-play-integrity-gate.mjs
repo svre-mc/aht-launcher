@@ -442,7 +442,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   const initialStatusFailure = await waitFor(client, `(() => {
     const button = document.querySelector('#playButton');
     const copy = [...document.querySelectorAll('#toastStack .toast.error')]
