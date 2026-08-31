@@ -45,6 +45,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function comparablePath(value) {
+  const resolved = path.resolve(String(value || ''));
+  let canonical = resolved;
+  try {
+    canonical = fs.realpathSync.native(resolved);
+  } catch {
+    // Preserve the resolved path for assertions that intentionally reference
+    // a location before its fixture has been created.
+  }
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+}
+
+function samePath(left, right) {
+  if (!String(left || '').trim() || !String(right || '').trim()) return false;
+  return comparablePath(left) === comparablePath(right);
+}
+
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -592,21 +609,21 @@ try {
   }
   const profiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
   const profile = profiles.profiles?.['a-hard-time-dregora'];
-  if (!profile || profile.lastVersionId !== versionId || path.resolve(profile.gameDir) !== path.resolve(instanceDir)) {
+  if (!profile || profile.lastVersionId !== versionId || !samePath(profile.gameDir, instanceDir)) {
     throw new Error(`Minecraft Launcher profile was not written for the installed instance: ${JSON.stringify(profile)}`);
   }
   if (!profile.javaArgs.includes('-Xmx6144m') || !profile.javaArgs.includes('-Daht.launcher.proofFile=') || !profile.javaArgs.includes('-Dminecraft.applet.TargetDirectory=')) {
     throw new Error(`Minecraft Launcher profile is missing required Java args: ${profile.javaArgs}`);
   }
-  if (path.resolve(profile.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)) {
+  if (!samePath(profile.javaDir, fakeMinecraftJavaPath)) {
     throw new Error(`Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(profile)}`);
   }
   const syncedProfiles = JSON.parse(fs.readFileSync(path.join(syncedMcRoot, 'launcher_profiles.json'), 'utf8'));
   const syncedProfile = syncedProfiles.profiles?.['a-hard-time-dregora'];
-  if (!syncedProfile || syncedProfile.lastVersionId !== versionId || path.resolve(syncedProfile.gameDir) !== path.resolve(instanceDir)) {
+  if (!syncedProfile || syncedProfile.lastVersionId !== versionId || !samePath(syncedProfile.gameDir, instanceDir)) {
     throw new Error(`Synced Minecraft Launcher profile was not written for the installed instance: ${JSON.stringify(syncedProfile)}`);
   }
-  if (path.resolve(syncedProfile.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)) {
+  if (!samePath(syncedProfile.javaDir, fakeMinecraftJavaPath)) {
     throw new Error(`Synced Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(syncedProfile)}`);
   }
 
@@ -648,7 +665,7 @@ try {
     throw new Error('Play returned success, but the Minecraft Launcher command was not spawned.');
   }
   const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
-  if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
+  if (!samePath(launcherMarker.cwd, mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
   }
   if (launcherMarker.disableRtss !== '1' || launcherMarker.disableObs !== '1') {
@@ -718,12 +735,12 @@ try {
   const syncedPtbProfile = syncedAfterPtbProfiles.profiles?.['a-hard-time-ptb'];
   if (
     Object.keys(afterPtbProfiles.profiles || {}).at(-1) !== 'a-hard-time-ptb'
-    || path.resolve(ptbProfile?.gameDir || '') !== path.resolve(ptbInstanceDir)
-    || path.resolve(ptbProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+    || !samePath(ptbProfile?.gameDir, ptbInstanceDir)
+    || !samePath(ptbProfile?.javaDir, fakeMinecraftJavaPath)
     || Date.parse(ptbProfile?.lastUsed || '') <= Date.parse(stableFirstLastUsed || '')
     || Object.keys(syncedAfterPtbProfiles.profiles || {}).at(-1) !== 'a-hard-time-ptb'
-    || path.resolve(syncedPtbProfile?.gameDir || '') !== path.resolve(ptbInstanceDir)
-    || path.resolve(syncedPtbProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+    || !samePath(syncedPtbProfile?.gameDir, ptbInstanceDir)
+    || !samePath(syncedPtbProfile?.javaDir, fakeMinecraftJavaPath)
   ) {
     throw new Error(`Installed PTB Play did not prepare every launcher root with the exact PTB instance and Java: ${JSON.stringify({ afterPtbProfiles, syncedAfterPtbProfiles })}`);
   }
@@ -828,12 +845,12 @@ try {
   const syncedFinalStableProfile = syncedFinalProfiles.profiles?.['a-hard-time-dregora'];
   if (
     Object.keys(finalProfiles.profiles || {}).at(-1) !== 'a-hard-time-dregora'
-    || path.resolve(finalStableProfile?.gameDir || '') !== path.resolve(instanceDir)
-    || path.resolve(finalStableProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+    || !samePath(finalStableProfile?.gameDir, instanceDir)
+    || !samePath(finalStableProfile?.javaDir, fakeMinecraftJavaPath)
     || Date.parse(finalStableProfile?.lastUsed || '') <= Date.parse(ptbProfile?.lastUsed || '')
     || Object.keys(syncedFinalProfiles.profiles || {}).at(-1) !== 'a-hard-time-dregora'
-    || path.resolve(syncedFinalStableProfile?.gameDir || '') !== path.resolve(instanceDir)
-    || path.resolve(syncedFinalStableProfile?.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+    || !samePath(syncedFinalStableProfile?.gameDir, instanceDir)
+    || !samePath(syncedFinalStableProfile?.javaDir, fakeMinecraftJavaPath)
   ) {
     throw new Error(`Installed stable to PTB to stable reversal did not restore every exact stable instance: ${JSON.stringify({ finalProfiles, syncedFinalProfiles })}`);
   }
