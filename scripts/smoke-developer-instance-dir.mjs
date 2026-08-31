@@ -3,14 +3,18 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { defaultInstanceDirForPlatform } from '../src/platformProfile.js';
 
 const port = Number(process.argv[2] || 10042);
 const endpoint = `http://127.0.0.1:${port}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-dev-instance-dir-'));
 const userData = path.join(root, 'userData');
-const oldPlayerDir = process.platform === 'win32'
-  ? 'C:\\AHT\\A Hard Time'
-  : path.join(root, 'A Hard Time');
+const fakeHome = path.join(root, 'home');
+const oldPlayerDir = defaultInstanceDirForPlatform(process.platform, {
+  ...process.env,
+  HOME: fakeHome,
+  USERPROFILE: fakeHome
+});
 const expectedDeveloperDir = process.platform === 'win32'
   ? 'C:\\AHT\\A Hard Time Developer'
   : process.platform === 'darwin'
@@ -117,6 +121,7 @@ async function waitFor(client, expression, label, attempts = 160) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+await fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true });
 await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
   instanceDir: oldPlayerDir,
@@ -135,6 +140,8 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
     APPDATA: userData,
+    HOME: fakeHome,
+    USERPROFILE: fakeHome,
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
