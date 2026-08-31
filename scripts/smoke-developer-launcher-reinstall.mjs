@@ -513,7 +513,10 @@ async function waitForTarget(port, label, attempts = 400) {
       if (response.ok) {
         const targets = await response.json();
         const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
-        const page = pages.find((target) => /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || '')));
+        const page = pages.find((target) => (
+          /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || ''))
+          && String(target.title || '').trim() === 'A Hard Time Launcher'
+        ));
         if (page) return page;
       }
     } catch (error) {
