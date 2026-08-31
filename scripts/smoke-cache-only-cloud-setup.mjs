@@ -258,8 +258,27 @@ try {
     })()
   `);
   await waitFor(client, "document.querySelector('#setupCloudButton').getAttribute('aria-disabled') !== 'true'", 'cache-only setup enabled');
-  await evaluate(client, "document.querySelector('#setupCloudButton').click()");
+  await evaluate(client, `(() => {
+    const feed = document.querySelector('#playerFeedUrlInput');
+    window.__ahtFeedFocusAttempts = 0;
+    window.__ahtFeedFocusTimer = window.setInterval(() => {
+      if (feed.value) return;
+      feed.focus();
+      window.__ahtFeedFocusAttempts += 1;
+    }, 5);
+    document.querySelector('#setupCloudButton').click();
+  })()`);
   await waitFor(client, "document.querySelector('#releaseCheckState').textContent === 'Cloud ready'", 'cloud ready');
+  const focusedFeedProof = await evaluate(client, `(() => {
+    window.clearInterval(window.__ahtFeedFocusTimer);
+    return {
+      attempts: window.__ahtFeedFocusAttempts,
+      savedFeedUrl: document.querySelector('#playerFeedUrlInput').value
+    };
+  })()`);
+  if (focusedFeedProof.attempts < 1 || focusedFeedProof.savedFeedUrl !== `${workerEndpoint}/latest.json`) {
+    throw new Error(`Cloud setup did not replace the repeatedly focused Player Feed field with the deployed URL: ${JSON.stringify(focusedFeedProof)}`);
+  }
   const secretNames = fs.readFileSync(secretLog, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).name);
   if (secretNames.includes('CURSEFORGE_API_KEY')) {
     throw new Error(`Cache-only setup should not write CURSEFORGE_API_KEY: ${JSON.stringify(secretNames)}`);

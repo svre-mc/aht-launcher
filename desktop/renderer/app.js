@@ -5339,12 +5339,19 @@ function requireOk(result, label) {
 }
 
 async function writePlayerDefaultsForCurrentFeed(options = {}) {
-  if (!/^https?:\/\//i.test(playerFeedUrl())) return null;
+  const publicLatestUrl = playerFeedUrl();
+  if (!/^https?:\/\//i.test(publicLatestUrl)) {
+    throw new Error("Player Feed URL is required before writing player defaults.");
+  }
   const result = await window.aht.devWritePlayerDefaults({
-    publicLatestUrl: playerFeedUrl(),
+    publicLatestUrl,
     bucket: releaseBucketName(),
     cacheOnlyMode: options.cacheOnlyMode ?? cacheOnlyMode()
   });
+  requireOk(result, "Player defaults");
+  if (!Array.isArray(result.written) || !result.written.length) {
+    throw new Error("Player defaults were not written to any configured location.");
+  }
   const locations = (result.written || []).map((item) => item.path).join("\n");
   if (locations) {
     setDevLog(`${els.devLog.textContent ? `${els.devLog.textContent}\n\n` : ""}Player defaults written:\n${locations}`);
@@ -5426,7 +5433,7 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
     if (!deploy.latestUrl) {
       throw new Error("Cloudflare Worker deploy did not return a Player Feed URL.");
     }
-    setInputValue(els.playerFeedUrlInput, deploy.latestUrl);
+    setInputValue(els.playerFeedUrlInput, deploy.latestUrl, { force: true });
     await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
     await writePlayerDefaultsForCurrentFeed({ cacheOnlyMode: setupCacheOnlyMode });
     setDevLog({ cloudAccount: login.summary || login.output || '', login, buckets, secrets, deploy });

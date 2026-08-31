@@ -18,6 +18,7 @@ const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
 const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
+const fakeMinecraftMacApp = path.join(root, 'Minecraft.app');
 const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
 const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const outDir = path.join(root, 'release');
@@ -143,6 +144,15 @@ await fsp.mkdir(fakeBin, { recursive: true });
 await fsp.mkdir(path.join(fakeR2Root, bucket), { recursive: true });
 await fsp.mkdir(path.join(instanceDir, '.aht-launcher'), { recursive: true });
 await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
+if (process.platform === 'win32') {
+  await fsp.mkdir(mcRoot, { recursive: true });
+  await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), 'fake Minecraft Launcher executable\n', 'utf8');
+} else if (process.platform === 'darwin') {
+  const fakeMinecraftMacExecutable = path.join(fakeMinecraftMacApp, 'Contents', 'MacOS', 'Minecraft');
+  await fsp.mkdir(path.dirname(fakeMinecraftMacExecutable), { recursive: true });
+  await fsp.writeFile(fakeMinecraftMacExecutable, '#!/bin/sh\nexit 0\n', 'utf8');
+  await fsp.chmod(fakeMinecraftMacExecutable, 0o755);
+}
 await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
 await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
 if (process.platform === 'win32') {
@@ -369,6 +379,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: 'amd64',
     AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
+    AHT_MINECRAFT_MAC_APP: fakeMinecraftMacApp,
 
     ELECTRON_ENABLE_LOGGING: '0'
   },
