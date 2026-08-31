@@ -140,6 +140,16 @@ async function waitFor(client, expression, label, attempts = 180) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+async function waitForStatus(client, predicate, label, attempts = 180) {
+  let lastStatus = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    lastStatus = await evaluate(client, 'window.aht.getStatus()');
+    if (predicate(lastStatus)) return lastStatus;
+    await sleep(250);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(lastStatus)}`);
+}
+
 async function waitForInstalledClientFiles() {
   const requiredPaths = [
     path.join(instanceDir, 'config', 'aht-ui-test.cfg'),
@@ -442,18 +452,24 @@ try {
   await evaluate(client, `
     (() => {
       document.querySelector('#packZipInput').value = ${JSON.stringify(packZip)};
-      document.querySelector('#playerFeedUrlInput').value = '';
+      document.querySelector('#playerFeedUrlInput').value = ${JSON.stringify(`${workerEndpoint}/latest.json`)};
       document.querySelector('#curseforgeApiKeyInput').value = 'fake-cf-key';
       document.querySelector('#launcherProofSecretInput').value = 'proof-secret';
       document.querySelector('#socialServerSecretInput').value = 'test-social-server-secret-at-least-32-bytes';
       document.querySelector('#cacheModsInput').value = '';
       document.querySelector('#bucketInput').value = ${JSON.stringify(bucket)};
       document.querySelector('#githubTokenInput').value = 'test-token';
-      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#socialServerSecretInput', '#cacheModsInput', '#bucketInput', '#githubTokenInput']) {
+      document.querySelector('#instanceInput').value = ${JSON.stringify(instanceDir)};
+      document.querySelector('#minecraftRootInput').value = ${JSON.stringify(mcRoot)};
+      for (const selector of ['#packZipInput', '#playerFeedUrlInput', '#curseforgeApiKeyInput', '#launcherProofSecretInput', '#socialServerSecretInput', '#cacheModsInput', '#bucketInput', '#githubTokenInput', '#instanceInput', '#minecraftRootInput']) {
         document.querySelector(selector).dispatchEvent(new Event('input', { bubbles: true }));
       }
     })()
   `);
+  await waitFor(client, `(() => (
+    document.querySelector('#instanceInput')?.value === ${JSON.stringify(instanceDir)}
+      && document.querySelector('#minecraftRootInput')?.value === ${JSON.stringify(mcRoot)}
+  ))()`, 'owned developer paths');
   await waitFor(client, "document.querySelector('#setupCloudButton').getAttribute('aria-disabled') !== 'true'", 'setup cloud enabled with CurseForge key and proof secret');
   await waitFor(client, "document.querySelector('#publishReleaseButton').getAttribute('aria-disabled') !== 'true'", 'publish enabled');
   await fsp.mkdir(path.join(outDir, 'client-zips'), { recursive: true });
@@ -474,12 +490,15 @@ try {
   if (uiProof.state !== 'Upload complete') {
     throw new Error(`Release UI publish did not complete: ${JSON.stringify(uiProof)}`);
   }
-  const statusBeforeUpdate = await evaluate(client, "window.aht.getStatus()");
+  const statusBeforeUpdate = await waitForStatus(client, (status) => {
+    const updateVisible = status.updateRequired
+      || (status.developerClientBypass && status.latest?.version !== status.installed?.version);
+    return updateVisible
+      && status.latest?.version === '2.8.3'
+      && path.resolve(status.config?.instanceDir || '') === path.resolve(instanceDir);
+  }, 'UI-published update on the owned instance path');
   const updateVisible = statusBeforeUpdate.updateRequired
     || (statusBeforeUpdate.developerClientBypass && statusBeforeUpdate.latest?.version !== statusBeforeUpdate.installed?.version);
-  if (!updateVisible || statusBeforeUpdate.latest?.version !== '2.8.3') {
-    throw new Error(`Player launcher did not detect UI-published update: ${JSON.stringify(statusBeforeUpdate)}`);
-  }
   const updateResult = await evaluate(client, "window.aht.startUpdate(false)");
   if (updateResult.installed?.version !== '2.8.3') {
     throw new Error(`Player update failed after UI publish: ${JSON.stringify(updateResult)}`);
