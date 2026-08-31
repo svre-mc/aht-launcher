@@ -15,7 +15,10 @@ const alternateWorkerPort = workerPort + 1;
 const alternateWorkerEndpoint = `http://127.0.0.1:${alternateWorkerPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-dev-log-auth-'));
 const userData = path.join(root, 'userData');
-const stableInstanceDir = path.join(root, 'AHT', 'A Hard Time Developer');
+const appData = path.join(root, 'appData');
+const stableInstanceDir = process.platform === 'win32'
+  ? path.join(root, 'AHT', 'A Hard Time Developer')
+  : path.join(appData, 'A Hard Time', 'Developer Instance');
 const ptbInstanceDir = path.join(root, 'AHT', 'A Hard Time PTB');
 const playerdataSentinel = path.join(ptbInstanceDir, 'saves', 'SmokeWorld', 'playerdata', 'preserve-me.dat');
 const loginCalls = [];
@@ -392,6 +395,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_REMOTE_ADMIN_TIMEOUT_MS: '120',
+    APPDATA: appData,
     SystemDrive: root,
     ELECTRON_ENABLE_LOGGING: '0'
   },
