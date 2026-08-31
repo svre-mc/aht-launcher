@@ -22,6 +22,7 @@ const fakeAppData = process.platform === 'win32'
 const fakeLocalAppData = process.platform === 'win32'
   ? path.join(fakeHome, 'AppData', 'Local')
   : path.join(root, 'localappdata');
+const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const minecraftRoot = path.join(root, '.minecraft');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
@@ -216,6 +217,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile
   },
@@ -311,6 +313,10 @@ try {
       memoryMb: status.config.minecraftLauncher?.memoryMb
     }
   }, null, 2));
+} catch (error) {
+  const startupProbe = await fsp.readFile(startupProbePath, 'utf8').catch(() => 'No startup probe was written.');
+  console.error(`AHT startup probe:\n${startupProbe.trim()}`);
+  throw error;
 } finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});

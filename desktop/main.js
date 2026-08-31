@@ -4665,17 +4665,28 @@ function minecraftLauncherHandoffForRenderer(handoff = {}) {
 }
 
 async function getStatus(configOverride = null, packValue = 'stable', options = {}) {
+  const statusStartedAtMs = Date.now();
   const target = releaseTarget(packValue);
+  const statusProbe = (stage) => writeTestStartupProbe('status-get', {
+    stage,
+    releaseTarget: target.id,
+    elapsedMs: Date.now() - statusStartedAtMs
+  });
+  statusProbe('start');
   const baseConfig = configOverride || await loadConfig();
   const config = configForPack(baseConfig, target.id);
   const launcherConfig = await minecraftLauncherRuntimeConfig(config);
+  statusProbe('config-ready');
   const prepared = launchPreparationCache.get(target.id);
+  statusProbe('identity-start');
   const identity = await identityPayload(launcherConfig);
+  statusProbe('identity-ready');
   queueCurrentLauncherVersionReport(config, identity);
   let latest = null;
   let latestError = null;
   let updateLogs = [];
   let updateLogsError = null;
+  statusProbe('feeds-start');
   try {
     latest = options.preferCache
       ? (cachedLatestRelease(config, Number.MAX_SAFE_INTEGER) || prepared?.latest || null)
@@ -4690,6 +4701,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
       updateLogsError = error.message;
     }
   }
+  statusProbe('feeds-ready');
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   let installed = null;
   if (await pathExists(installedPath)) {
@@ -4700,10 +4712,12 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
     }
   }
   const developerClientBypass = developerClientBypassAllowed();
+  statusProbe('integrity-start');
   let integrity = developerClientBypass ? developerBypassIntegrityState(config) : await readIntegrityState(config);
   if (!developerClientBypass) {
     integrity = await refreshStaleIntegrityState(config, latest, integrity);
   }
+  statusProbe('integrity-ready');
   const launchLatest = latest || (developerClientBypass && installed ? installed : null);
   const launchLatestError = developerClientBypass && installed ? null : latestError;
   const [minecraftProfile, java8Runtime] = prepared?.state === 'ready'
@@ -4711,11 +4725,12 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
     : (options.preferCache
         ? [prepared?.minecraftProfile || null, prepared?.java8Runtime || null]
         : (!installed
-          ? [uninstalledMinecraftProfileForStatus(launcherConfig), isDeveloperMode() ? null : await java8RuntimeStatus(launcherConfig)]
+          ? [uninstalledMinecraftProfileForStatus(launcherConfig), null]
           : await Promise.all([
             inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
             java8RuntimeStatus(launcherConfig)
           ])));
+  statusProbe('runtime-status-ready');
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
   const updateRequired = !updateBlockedReason && latest && latest.required !== false
@@ -4763,6 +4778,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
     };
     launchPreparationState = 'preparing';
   }
+  statusProbe('launcher-update-start');
   const pendingLauncherUpdate = await hydratePendingLauncherUpdateState();
   let launcherUpdate = options.preferCache ? null : await readLauncherUpdate(config);
   if (pendingLauncherUpdate?.version && (
@@ -4784,6 +4800,11 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
       error: ''
     };
   }
+  statusProbe('launcher-update-ready');
+  statusProbe('setup-start');
+  const setup = setupForRenderer(await setupRecommendations(config));
+  statusProbe('setup-ready');
+  statusProbe('complete');
   return {
     activePack: target.sidebarKey,
     releaseTarget: target.id,
@@ -4817,7 +4838,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
         r2SecretAccessKey: ''
       }))
       : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', socialServerSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
-    setup: setupForRenderer(await setupRecommendations(config)),
+    setup,
     minecraftProfile: minecraftProfileForRenderer(effectiveMinecraftProfile),
     java8Runtime: effectiveJava8Runtime,
     latest,
