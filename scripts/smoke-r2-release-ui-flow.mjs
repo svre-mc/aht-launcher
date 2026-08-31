@@ -13,7 +13,7 @@ const port = Number(process.argv[2] || 9480);
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-r2-ui-flow-'));
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'aht-r2-ui-flow-')));
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
@@ -138,6 +138,43 @@ async function waitFor(client, expression, label, attempts = 180) {
     await sleep(250);
   }
   throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function waitForInstalledClientFiles() {
+  const requiredPaths = [
+    path.join(instanceDir, 'config', 'aht-ui-test.cfg'),
+    path.join(instanceDir, 'resourcepacks', 'aht-ui-test.zip'),
+    path.join(instanceDir, 'scripts', 'aht-ui.zs')
+  ];
+  let previousSignature = '';
+  let stablePasses = 0;
+  let lastProof = null;
+  for (let attempt = 0; attempt < 160; attempt += 1) {
+    const modsDir = path.join(instanceDir, 'mods');
+    const versionLocks = fs.existsSync(modsDir)
+      ? fs.readdirSync(modsDir).filter((name) => /^aht-version-lock-[0-9][0-9A-Za-z.-]*\.jar$/i.test(name))
+      : [];
+    const files = [...versionLocks.map((name) => path.join(modsDir, name)), ...requiredPaths].map((file) => {
+      try {
+        const stat = fs.statSync(file);
+        return { file, size: stat.size, modified: stat.mtimeMs };
+      } catch {
+        return { file, size: 0, modified: 0 };
+      }
+    });
+    lastProof = { versionLocks, files };
+    if (versionLocks.length === 1 && files.every((item) => item.size > 0)) {
+      const signature = files.map((item) => `${item.file}:${item.size}:${item.modified}`).join('|');
+      stablePasses = signature === previousSignature ? stablePasses + 1 : 1;
+      previousSignature = signature;
+      if (stablePasses >= 2) return lastProof;
+    } else {
+      previousSignature = '';
+      stablePasses = 0;
+    }
+    await sleep(25);
+  }
+  throw new Error(`Updated client files did not become complete and stable: ${JSON.stringify(lastProof)}`);
 }
 
 await fsp.mkdir(fakeBin, { recursive: true });
@@ -447,20 +484,11 @@ try {
   if (updateResult.installed?.version !== '2.8.3') {
     throw new Error(`Player update failed after UI publish: ${JSON.stringify(updateResult)}`);
   }
-  const versionLocks = fs.readdirSync(path.join(instanceDir, 'mods'))
-    .filter((name) => /^aht-version-lock-[0-9][0-9A-Za-z.-]*\.jar$/i.test(name));
-  if (versionLocks.length !== 1) {
-    throw new Error(`Exact client ZIP install did not contain one current AHT version lock: ${JSON.stringify(versionLocks)}`);
+  if (Number(updateResult.downloadedModCount) !== 1) {
+    throw new Error(`Exact client ZIP update did not report one managed mod: ${JSON.stringify(updateResult)}`);
   }
-  for (const requiredPath of [
-    path.join(instanceDir, 'config', 'aht-ui-test.cfg'),
-    path.join(instanceDir, 'resourcepacks', 'aht-ui-test.zip'),
-    path.join(instanceDir, 'scripts', 'aht-ui.zs')
-  ]) {
-    if (!fs.existsSync(requiredPath)) {
-      throw new Error(`Exact client ZIP install misplaced or missed ${requiredPath}`);
-    }
-  }
+  const installedClientFiles = await waitForInstalledClientFiles();
+  const versionLocks = installedClientFiles.versionLocks;
   const stableUploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);
   if (stableUploadOrder.at(-1) !== 'latest.json') {
     throw new Error(`Stable latest.json was not uploaded last: ${JSON.stringify(stableUploadOrder)}`);
