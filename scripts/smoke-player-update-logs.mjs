@@ -155,11 +155,11 @@ async function evaluate(client, expression) {
   return result.result?.value;
 }
 
-async function waitFor(client, expression, label, attempts = 160) {
+async function waitFor(client, expression, label, attempts = 160, intervalMs = 250) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const value = await evaluate(client, expression);
     if (value) return value;
-    await sleep(250);
+    await sleep(intervalMs);
   }
   throw new Error(`Timed out waiting for ${label}`);
 }
@@ -726,15 +726,14 @@ try {
   }
 
   await clickNode(client, '#updateLogCloseButton');
-  await sleep(55);
-  const backExitTransition = await evaluate(client, `({
-    switching: document.querySelector('#news')?.classList.contains('is-transitioning') || false,
-    leaving: document.querySelector('#updateLogOverlay')?.classList.contains('news-surface-leaving') || false,
-    loaderOpacity: getComputedStyle(document.querySelector('.news-transition-loader')).opacity
-  })`);
-  if (!backExitTransition.switching || !backExitTransition.leaving || Number(backExitTransition.loaderOpacity) <= 0) {
-    throw new Error(`News Back click skipped the measured dim/loader transition: ${JSON.stringify(backExitTransition)}`);
-  }
+  const backExitTransition = await waitFor(client, `(() => {
+    const transition = {
+      switching: document.querySelector('#news')?.classList.contains('is-transitioning') || false,
+      leaving: document.querySelector('#updateLogOverlay')?.classList.contains('news-surface-leaving') || false,
+      loaderOpacity: getComputedStyle(document.querySelector('.news-transition-loader')).opacity
+    };
+    return transition.switching && transition.leaving && Number(transition.loaderOpacity) > 0 ? transition : null;
+  })()`, 'measured News Back dim/loader transition', 40, 10);
   await waitFor(client, "document.querySelector('#updateLogOverlay').hidden && !document.querySelector('#news').classList.contains('is-transitioning')", 'return from liked article');
   screenshots.push(await captureScreenshot(client, 'news-view'));
   await clickNode(client, '#gameTab');
