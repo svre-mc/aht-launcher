@@ -266,7 +266,7 @@ jobs:
           test -f "$DMG"
           rm -rf "$MOUNT_POINT" "$INSTALL_ROOT"
           mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
-          hdiutil attach "$DMG" -nobrowse -readonly -acceptlicense -mountpoint "$MOUNT_POINT"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
           SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 2 -type d -name 'A Hard Time Launcher macOS.app' -print -quit)"
           test -n "$SOURCE_APP"
           /usr/bin/ditto "$SOURCE_APP" "$INSTALLED_APP"

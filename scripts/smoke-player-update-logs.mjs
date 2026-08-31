@@ -611,12 +611,14 @@ try {
     throw new Error(`News like did not become an idempotent one-device action: ${JSON.stringify({ likeProof, likeRequests })}`);
   }
   await clickNode(client, '#newsFeedGrid .news-feed-card:nth-child(2) .news-card-open');
-  await sleep(55);
-  const articleExitTransition = await evaluate(client, `({
-    switching: document.querySelector('#news')?.classList.contains('is-transitioning') || false,
-    leaving: document.querySelector('.news-view-shell')?.classList.contains('news-surface-leaving') || false,
-    loaderOpacity: getComputedStyle(document.querySelector('.news-transition-loader')).opacity
-  })`);
+  const articleExitTransition = await waitFor(client, `(() => {
+    const proof = {
+      switching: document.querySelector('#news')?.classList.contains('is-transitioning') || false,
+      leaving: document.querySelector('.news-view-shell')?.classList.contains('news-surface-leaving') || false,
+      loaderOpacity: getComputedStyle(document.querySelector('.news-transition-loader')).opacity
+    };
+    return proof.switching && proof.leaving && Number(proof.loaderOpacity) > 0 ? proof : false;
+  })()`, 'measured News article dim/loader transition', 24, 5);
   if (!articleExitTransition.switching || !articleExitTransition.leaving || Number(articleExitTransition.loaderOpacity) <= 0) {
     throw new Error(`News article click skipped the measured dim/loader transition: ${JSON.stringify(articleExitTransition)}`);
   }
