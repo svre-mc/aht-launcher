@@ -257,6 +257,7 @@ const oversizedLogin = await worker.fetch(request('/admin/login', {
 if (oversizedLogin.status !== 413) {
   throw new Error(`Oversized admin request was not rejected before parsing: ${oversizedLogin.status}`);
 }
+const reconnectFixtureNow = Date.now();
 const reconnectProof = workerLauncherProofFixture({
   minecraftUsername: username,
   minecraftUuid,
@@ -264,9 +265,9 @@ const reconnectProof = workerLauncherProofFixture({
   deviceId: device.deviceId,
   launcherVersion: '0.1.86',
   launcherChannel: 'player',
-  issuedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
-  expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
-  reconnectExpiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString()
+  issuedAt: new Date(reconnectFixtureNow - 11 * 60 * 1000).toISOString(),
+  expiresAt: new Date(reconnectFixtureNow - 60 * 1000).toISOString(),
+  reconnectExpiresAt: new Date(reconnectFixtureNow + 12 * 60 * 60 * 1000).toISOString()
 });
 const reconnectSession = await workerJson('/api/launcher-proof/verify', {
   headers: { Authorization: `Bearer ${reconnectProof.token}` }

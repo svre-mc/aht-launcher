@@ -512,7 +512,8 @@ async function waitForTarget(port, label, attempts = 400) {
       const response = await fetch(`http://127.0.0.1:${port}/json/list`);
       if (response.ok) {
         const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const page = pages.find((target) => /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || '')));
         if (page) return page;
       }
     } catch (error) {

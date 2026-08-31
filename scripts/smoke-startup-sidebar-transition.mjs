@@ -41,7 +41,8 @@ async function waitForTarget(debugEndpoint = endpoint) {
       const response = await fetch(`${debugEndpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const page = pages.find((target) => /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || '')));
         if (page) return page;
       }
     } catch (error) {
