@@ -160,9 +160,12 @@ async function waitFor(client, expression, label, attempts = 180) {
 }
 
 function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(`Launcher process ${child.pid} did not exit within ${timeoutMs}ms after window close.`));
+      reject(new Error(`Launcher process ${child.pid} did not exit within ${timeoutMs}ms after the close request.`));
     }, timeoutMs);
     child.once('exit', (code, signal) => {
       clearTimeout(timer);
@@ -341,18 +344,22 @@ try {
   if (bytesWritten === 0) {
     throw new Error('Pack ZIP request started, but no download bytes were sent before the close test.');
   }
-  await client.call('Page.close', {}, 5000).catch((error) => {
+  const closeMethod = process.platform === 'darwin' || process.env.AHT_TEST_FORCE_BROWSER_CLOSE === '1'
+    ? 'Browser.close'
+    : 'Page.close';
+  await client.call(closeMethod, {}, 5000).catch((error) => {
     if (!/closed|Target closed/i.test(error.message || '')) throw error;
   });
   const exit = await waitForExit(child, 15000);
   if (child.exitCode === null && !child.killed) {
-    throw new Error('Launcher process stayed alive after closing the only player window during update.');
+    throw new Error(`Launcher process stayed alive after ${closeMethod} during update.`);
   }
   console.log(JSON.stringify({
     ok: true,
     root,
     pid: child.pid,
     exit,
+    closeMethod,
     packRequestStarted,
     responseClosed,
     bytesWritten,
