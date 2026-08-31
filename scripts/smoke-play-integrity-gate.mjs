@@ -62,6 +62,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function comparablePath(value) {
+  const resolved = path.resolve(String(value || ''));
+  let canonical = resolved;
+  try {
+    canonical = fs.realpathSync.native(resolved);
+  } catch {
+    // Preserve the resolved path when a negative-path assertion intentionally
+    // points at a file that does not exist yet.
+  }
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+}
+
+function samePath(left, right) {
+  if (!String(left || '').trim() || !String(right || '').trim()) return false;
+  return comparablePath(left) === comparablePath(right);
+}
+
 async function windowsClipboardFiles() {
   if (process.platform !== 'win32') return [];
   return new Promise((resolve, reject) => {
@@ -584,7 +601,7 @@ try {
   }
   if (process.platform === 'win32') {
     const clipboardFiles = await windowsClipboardFiles();
-    if (clipboardFiles.length !== 1 || path.resolve(clipboardFiles[0]) !== path.resolve(copiedFailure.filePath)) {
+    if (clipboardFiles.length !== 1 || !samePath(clipboardFiles[0], copiedFailure.filePath)) {
       throw new Error(`Copy latest launch report did not place ahtlatest.log on the Windows file clipboard: ${JSON.stringify({ clipboardFiles, copiedFailure })}`);
     }
   }
@@ -675,7 +692,7 @@ try {
     throw new Error('Clean Play returned success, but the Minecraft Launcher command was not spawned.');
   }
   const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
-  if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
+  if (!samePath(launcherMarker.cwd, mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
   }
   if (launcherMarker.disableRtss !== '1' || launcherMarker.disableObs !== '1') {
@@ -700,7 +717,7 @@ try {
   if (
     !cleanStatus.java8Runtime?.usable
     || !cleanProfile?.javaArgs?.includes('-Xmx6144m')
-    || path.resolve(cleanProfile.javaDir || '') !== path.resolve(expectedProfileJavaPath)
+    || !samePath(cleanProfile.javaDir, expectedProfileJavaPath)
   ) {
     throw new Error(`Clean Play did not write the 6 GB and Java 8 launcher profile: ${JSON.stringify(cleanProfile)}`);
   }
@@ -753,12 +770,12 @@ try {
       throw new Error(`Configured-root desktop Minecraft Launcher fallback failed: ${JSON.stringify(desktopFallbackPlayResult)}`);
     }
     const desktopSpawnCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
-    if (path.resolve(desktopSpawnCapture.command || '') !== path.resolve(desktopLauncherPath)) {
+    if (!samePath(desktopSpawnCapture.command, desktopLauncherPath)) {
       throw new Error(`Configured-root Play did not use the desktop Minecraft Launcher fallback: ${JSON.stringify(desktopSpawnCapture)}`);
     }
     if (
       JSON.stringify(desktopSpawnCapture.args) !== JSON.stringify(['--workDir', mcRoot])
-      || path.resolve(desktopSpawnCapture.cwd || '') !== path.resolve(mcRoot)
+      || !samePath(desktopSpawnCapture.cwd, mcRoot)
       || desktopSpawnCapture.windowsHide !== false
       || desktopSpawnCapture.captureCount !== 1
     ) {
@@ -943,10 +960,10 @@ try {
       },
       ui: completedPlayUi
     };
-    if (path.resolve(spawnCapture.command) !== path.resolve(curseForgeRoot, 'minecraft.exe')) {
+    if (!samePath(spawnCapture.command, path.join(curseForgeRoot, 'minecraft.exe'))) {
       throw new Error(`Play launched the wrong Minecraft executable: ${JSON.stringify(spawnCapture)}`);
     }
-    if (JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', curseForgeRoot]) || path.resolve(spawnCapture.cwd) !== path.resolve(curseForgeRoot)) {
+    if (JSON.stringify(spawnCapture.args) !== JSON.stringify(['--workDir', curseForgeRoot]) || !samePath(spawnCapture.cwd, curseForgeRoot)) {
       throw new Error(`Play did not use the CurseForge storage root: ${JSON.stringify(spawnCapture)}`);
     }
     if (spawnCapture.windowsHide !== false) {
@@ -957,7 +974,7 @@ try {
     }
     const curseForgeProfiles = JSON.parse(fs.readFileSync(path.join(curseForgeRoot, 'launcher_profiles.json'), 'utf8'));
     const curseForgeProfile = curseForgeProfiles.profiles?.['a-hard-time-dregora'];
-    if (!curseForgeProfile || path.resolve(curseForgeProfile.gameDir) !== path.resolve(instanceDir)) {
+    if (!curseForgeProfile || !samePath(curseForgeProfile.gameDir, instanceDir)) {
       throw new Error(`AHT profile was not synchronized into CurseForge: ${JSON.stringify(curseForgeProfile)}`);
     }
     const officialFallbackRoot = path.join(fakeAppData, '.minecraft');
@@ -965,7 +982,7 @@ try {
     const officialFallbackProfile = officialFallbackProfiles.profiles?.['a-hard-time-dregora'];
     if (
       !officialFallbackProfile
-      || path.resolve(officialFallbackProfile.gameDir) !== path.resolve(instanceDir)
+      || !samePath(officialFallbackProfile.gameDir, instanceDir)
       || officialFallbackProfile.lastVersionId !== curseForgeProfile.lastVersionId
     ) {
       throw new Error(`Official Minecraft Launcher fallback did not receive the exact selected AHT profile: ${JSON.stringify(officialFallbackProfile)}`);
@@ -974,7 +991,7 @@ try {
     const migrationBackups = fs.readdirSync(userData)
       .filter((entry) => entry.startsWith('launcher.config.json.aht-before-curseforge-') && entry.endsWith('.bak'));
     if (
-      path.resolve(migratedConfig.minecraftLauncher?.rootDir || '') !== path.resolve(curseForgeRoot)
+      !samePath(migratedConfig.minecraftLauncher?.rootDir, curseForgeRoot)
       || migratedConfig.minecraftLauncher?.profileId !== 'a-hard-time-dregora'
       || migratedConfig.sync?.playerLabel !== 'SmokeUser'
       || migrationBackups.length !== 1
@@ -983,7 +1000,7 @@ try {
     }
     const migrationBackup = JSON.parse(fs.readFileSync(path.join(userData, migrationBackups[0]), 'utf8'));
     if (
-      path.resolve(migrationBackup.minecraftLauncher?.rootDir || '') !== path.resolve(mcRoot)
+      !samePath(migrationBackup.minecraftLauncher?.rootDir, mcRoot)
       || migrationBackup.minecraftLauncher?.profileId !== 'a-hard-time-dregora'
       || migrationBackup.sync?.playerLabel !== 'SmokeUser'
     ) {

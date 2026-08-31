@@ -129,45 +129,35 @@ import path from 'node:path';
 const args = process.argv.slice(2);
 if (args.includes('--version')) {
   console.log('wrangler 4.0.0-smoke');
-  process.exit(0);
-}
-if (args.includes('whoami')) {
+} else if (args.includes('whoami')) {
   console.log('smoke@example.com');
-  process.exit(0);
-}
-if (args.includes('login')) {
+} else if (args.includes('login')) {
   console.log('Successfully logged in');
-  process.exit(0);
-}
-const createIndex = args.indexOf('create');
-if (args.includes('bucket') && createIndex !== -1) {
+} else if (args.includes('bucket') && args.indexOf('create') !== -1) {
+  const createIndex = args.indexOf('create');
   console.log('Created bucket ' + args[createIndex + 1]);
-  process.exit(0);
-}
-if (args.includes('secret') && args.includes('put')) {
+} else if (args.includes('secret') && args.includes('put')) {
   const name = args[args.indexOf('put') + 1];
   await fs.appendFile(process.env.FAKE_SECRET_LOG, JSON.stringify({ name }) + '\\n');
   console.log('Created secret ' + name);
-  process.exit(0);
-}
-if (args.includes('deploy')) {
+} else if (args.includes('deploy')) {
   console.log('Deployed ' + process.env.FAKE_WORKER_URL);
-  process.exit(0);
+} else {
+  const putIndex = args.indexOf('put');
+  if (putIndex === -1) throw new Error('Only r2 object put is supported by this smoke fake');
+  const target = args[putIndex + 1];
+  const fileArg = args.find((arg) => arg.startsWith('--file='));
+  if (!target || !fileArg) throw new Error('Missing target or --file');
+  const slash = target.indexOf('/');
+  const bucket = target.slice(0, slash);
+  const key = target.slice(slash + 1);
+  const source = fileArg.slice('--file='.length);
+  const dest = path.join(process.env.FAKE_R2_ROOT, bucket, ...key.split('/'));
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.copyFile(source, dest);
+  await fs.appendFile(process.env.FAKE_UPLOAD_LOG, JSON.stringify({ bucket, key }) + '\\n');
+  console.log('uploaded ' + key);
 }
-const putIndex = args.indexOf('put');
-if (putIndex === -1) throw new Error('Only r2 object put is supported by this smoke fake');
-const target = args[putIndex + 1];
-const fileArg = args.find((arg) => arg.startsWith('--file='));
-if (!target || !fileArg) throw new Error('Missing target or --file');
-const slash = target.indexOf('/');
-const bucket = target.slice(0, slash);
-const key = target.slice(slash + 1);
-const source = fileArg.slice('--file='.length);
-const dest = path.join(process.env.FAKE_R2_ROOT, bucket, ...key.split('/'));
-await fs.mkdir(path.dirname(dest), { recursive: true });
-await fs.copyFile(source, dest);
-await fs.appendFile(process.env.FAKE_UPLOAD_LOG, JSON.stringify({ bucket, key }) + '\\n');
-console.log('uploaded ' + key);
 `, 'utf8');
 if (process.platform === 'win32') {
   await fsp.writeFile(path.join(fakeBin, 'npx.cmd'), `@echo off\r\nnode "%~dp0fake-wrangler.mjs" %*\r\n`, 'utf8');

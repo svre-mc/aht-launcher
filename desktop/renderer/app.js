@@ -5422,11 +5422,13 @@ async function setupCloudForDeveloper({ keepBusy = false } = {}) {
       releaseBucket: releaseBucketName(),
       dataBucket: dataBucketName()
     });
-    if (deploy.latestUrl) {
-      setInputValue(els.playerFeedUrlInput, deploy.latestUrl);
-      await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
-      await writePlayerDefaultsForCurrentFeed({ cacheOnlyMode: setupCacheOnlyMode }).catch(() => null);
+    requireOk(deploy, "Worker deploy");
+    if (!deploy.latestUrl) {
+      throw new Error("Cloudflare Worker deploy did not return a Player Feed URL.");
     }
+    setInputValue(els.playerFeedUrlInput, deploy.latestUrl);
+    await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
+    await writePlayerDefaultsForCurrentFeed({ cacheOnlyMode: setupCacheOnlyMode });
     setDevLog({ cloudAccount: login.summary || login.output || '', login, buckets, secrets, deploy });
     setReleaseCheck("ok", "Cloud ready", deploy.latestUrl || deploy.workerUrl || "Cloudflare Worker ready", "The player feed URL is saved for this launcher.");
     showToast("Cloud setup complete", deploy.latestUrl || "Cloudflare Worker ready.", "success");
