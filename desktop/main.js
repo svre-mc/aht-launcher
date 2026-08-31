@@ -168,6 +168,12 @@ function configureTestRemoteDebugPort() {
   writeTestStartupProbe('after-remote-debug-hook', { port });
 }
 
+function configureTestMacKeychain() {
+  if (process.env.AHT_TEST_HOOKS !== '1' || process.platform !== 'darwin') return;
+  app.commandLine.appendSwitch('use-mock-keychain');
+  writeTestStartupProbe('after-mock-keychain-hook');
+}
+
 function configureTestUserDataPath() {
   if (process.env.AHT_TEST_HOOKS !== '1') return;
   const rawPath = String(process.env.AHT_TEST_USER_DATA || explicitUserDataDirArg() || '').trim();
@@ -177,6 +183,7 @@ function configureTestUserDataPath() {
   writeTestStartupProbe('after-user-data-hook', { userData: resolvedPath });
 }
 
+configureTestMacKeychain();
 configureTestRemoteDebugPort();
 configureTestUserDataPath();
 
