@@ -407,6 +407,9 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await client.call('Page.bringToFront');
+  await client.call('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }]
+  });
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
   await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht) && Boolean(document.querySelector('#closeLauncherWhenGameStartsInput'))", 'player DOM');
