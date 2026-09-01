@@ -154,11 +154,13 @@ async function connectReadyLauncherPage() {
     const target = await waitForTarget();
     const candidate = await connect(target.webSocketDebuggerUrl);
     try {
+      await candidate.call('Runtime.enable', {}, 5000);
+      await candidate.call('Page.enable', {}, 5000);
       const probe = await candidate.call('Runtime.evaluate', {
-        expression: '1',
+        expression: "document.readyState === 'complete' && Boolean(window.aht)",
         returnByValue: true
       }, 5000);
-      if (probe.result?.value === 1) return { client: candidate, target };
+      if (probe.result?.value === true) return { client: candidate, target };
       throw new Error(`Unexpected CDP readiness response: ${JSON.stringify(probe)}`);
     } catch (error) {
       lastError = error;
@@ -360,7 +362,6 @@ try {
   });
   checkpoint('debugger target ready');
   client = attached.client;
-  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   checkpoint('player DOM ready');
   await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.8.7' && status.updateRequired ? status : false)
