@@ -712,6 +712,14 @@ assert(
   'The public workflow must accept only consistently Valid or consistently NotSigned Windows artifact pairs.'
 );
 assert(releaseWorkflow.includes('npm run security:audit') && packageScripts['security:audit']?.includes('npm audit signatures'), 'Public builds must pass dependency vulnerability and registry-signature audits.');
+assert(
+  releaseWorkflow.includes('arch: x64')
+    && releaseWorkflow.includes('machine: x86_64')
+    && releaseWorkflow.includes('machine: arm64')
+    && releaseWorkflow.includes('expected_machine=${{ matrix.machine }}')
+    && releaseWorkflow.includes('test "$(uname -m)" = "${{ matrix.machine }}"'),
+  'Native macOS validation must distinguish the Intel uname machine value from the x64 Electron artifact label.'
+);
 assert(releaseWorkflow.includes('Enforce immutable launcher versions') && releaseWorkflow.includes('check-launcher-release-immutability.mjs') && !releaseWorkflow.includes('--clobber'), 'Public launcher releases must reject an existing version and never clobber release assets.');
 assert(packageJson.dependencies?.['adm-zip'] === '^0.6.0' && packageJson.devDependencies?.electron === '^42.10.1', 'Launcher ZIP/runtime and Electron dependencies must stay on the audited security baselines.');
 assert(releaseWorkflow.includes('"scripts/validate-launcher-update-manifest.mjs"'), 'GitHub workflow path triggers must include the generated-manifest validator.');
