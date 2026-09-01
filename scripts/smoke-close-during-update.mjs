@@ -16,6 +16,9 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
+const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
+const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft Launcher.app');
 const fakeHome = path.join(root, 'home');
 const fakeAppData = process.platform === 'win32'
   ? path.join(fakeHome, 'AppData', 'Roaming')
@@ -32,9 +35,14 @@ const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+const smokeStartedAt = Date.now();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkpoint(label) {
+  console.log(`[close-during-update +${Date.now() - smokeStartedAt}ms] ${label}`);
 }
 
 async function writeJson(file, value) {
@@ -95,8 +103,9 @@ function connect(wsUrl) {
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
     pending.delete(message.id);
+    clearTimeout(timer);
     if (message.error) {
       reject(new Error(`${message.error.message}: ${message.error.data || ''}`.trim()));
     } else {
@@ -104,7 +113,8 @@ function connect(wsUrl) {
     }
   });
   socket.addEventListener('close', () => {
-    for (const { reject } of pending.values()) {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
       reject(new Error('CDP socket closed'));
     }
     pending.clear();
@@ -117,12 +127,12 @@ function connect(wsUrl) {
           nextId += 1;
           socket.send(JSON.stringify({ id, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(id, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
             }, timeoutMs);
+            pending.set(id, { resolve: callResolve, reject: callReject, timer });
           });
         },
         close() {
@@ -203,6 +213,7 @@ await writeJson(defaultsPath, {
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 6144,
+    javaPath: fakeJavaPath,
     syncDefaultRoots: false,
     autoImportAccount: false,
     openCommand: process.execPath,
@@ -280,6 +291,15 @@ await Promise.all([
   fsp.mkdir(fakeLocalAppData, { recursive: true }),
   fsp.mkdir(userData, { recursive: true })
 ]);
+await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
+await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
+await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
+await fsp.mkdir(mcRoot, { recursive: true });
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
+} else if (process.platform === 'darwin') {
+  await fsp.mkdir(macMinecraftApp, { recursive: true });
+}
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
@@ -295,6 +315,9 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
@@ -309,13 +332,16 @@ try {
     }
     throw error;
   });
+  checkpoint('debugger target ready');
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  checkpoint('player DOM ready');
   await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.8.7' && status.updateRequired ? status : false)
   `, 'update-required status');
+  checkpoint('update-required status ready');
   await evaluate(client, `
     (() => {
       window.__ahtCloseDuringUpdate = window.aht.startUpdate({ forceRepair: false, replaceGameSettings: false })
@@ -324,23 +350,28 @@ try {
       return true;
     })()
   `);
+  checkpoint('update started');
   await waitFor(client, 'window.aht.getUpdateState().then((state) => state.running ? state : false)', 'running update state');
+  checkpoint('running update state observed');
   for (let attempt = 0; attempt < 80 && !packRequestStarted; attempt += 1) {
     await sleep(100);
   }
   if (!packRequestStarted) {
     throw new Error('Update entered running state but did not request the pack ZIP.');
   }
+  checkpoint('pack request started');
   for (let attempt = 0; attempt < 80 && bytesWritten === 0; attempt += 1) {
     await sleep(100);
   }
   if (bytesWritten === 0) {
     throw new Error('Pack ZIP request started, but no download bytes were sent before the close test.');
   }
+  checkpoint('pack response began');
   await client.call('Page.close', {}, 5000).catch((error) => {
     if (!/closed|Target closed/i.test(error.message || '')) throw error;
   });
   const exit = await waitForExit(child, 15000);
+  checkpoint('launcher exited');
   if (child.exitCode === null && !child.killed) {
     throw new Error('Launcher process stayed alive after closing the only player window during update.');
   }
