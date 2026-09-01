@@ -1028,6 +1028,7 @@ assert(releaseWorkflow.includes('release-builds/macos/*.zip'), 'GitHub macOS wor
 assert(releaseWorkflow.includes('release-builds/windows/*.zip'), 'GitHub Windows workflow must upload the staged ZIP update artifact.');
 assert(releaseWorkflow.includes('release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-launcher-update/launcher-latest.json)') && releaseWorkflow.includes('Windows and macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only.') && !releaseWorkflow.includes('for asset in ci-artifacts/* ci-launcher-update/launcher-latest.json'), 'GitHub public releases must expose only manual installers while keeping Windows/macOS ZIPs for R2 self-update.');
 assert(desktopMain.includes('launchMacLauncherUpdateHelper'), 'macOS launcher self-update must use the app-bundle restart helper.');
+assert(!desktopMain.includes('backup_app="${target_app}.previous-update"') && desktopMain.includes('backup_app="$target_app.previous-update"'), 'macOS launcher self-update must preserve target_app as a shell variable instead of evaluating it as JavaScript.');
 
 assert(!fs.existsSync(new URL('../build/electron-builder.ubuntu.cjs', import.meta.url)), 'Ubuntu builder config must not exist.');
 assert(!packageJson.scripts['dist:linux'], 'Linux package script must not exist.');
