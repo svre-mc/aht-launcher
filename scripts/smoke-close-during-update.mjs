@@ -82,7 +82,7 @@ async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2000) });
       if (response.ok) {
         const targets = await response.json();
         const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -124,7 +124,25 @@ function connect(wsUrl) {
     pending.clear();
   });
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const rejectBeforeOpen = (message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
+      try {
+        socket.close();
+      } catch {
+        // The socket may still be connecting. The open timeout remains authoritative.
+      }
+      reject(new Error(message));
+    };
+    const openTimer = setTimeout(() => {
+      rejectBeforeOpen(`CDP socket open timed out: ${wsUrl}`);
+    }, 5000);
     socket.addEventListener('open', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
       resolve({
         call(method, params = {}, timeoutMs = 45000) {
           const id = nextId;
@@ -144,7 +162,8 @@ function connect(wsUrl) {
         }
       });
     }, { once: true });
-    socket.addEventListener('error', () => reject(new Error(`Failed to connect to ${wsUrl}`)), { once: true });
+    socket.addEventListener('error', () => rejectBeforeOpen(`Failed to connect to ${wsUrl}`), { once: true });
+    socket.addEventListener('close', () => rejectBeforeOpen(`CDP socket closed before opening: ${wsUrl}`), { once: true });
   });
 }
 
@@ -176,28 +195,38 @@ async function connectReadyLauncherPage() {
   throw new Error(`Launcher debugger did not become responsive: ${lastError?.message || 'no response'}`);
 }
 
-async function evaluate(client, expression) {
+async function evaluate(client, expression, timeoutMs = 5000) {
   const result = await client.call('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true
-  });
+  }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
   return result.result?.value;
 }
 
-async function waitFor(client, expression, label, attempts = 180) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const value = await evaluate(client, expression);
-    if (value) return value;
-    await sleep(250);
+async function waitFor(client, expression, label, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const value = await evaluate(client, expression, Math.min(5000, remainingMs));
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
   }
-  throw new Error(`Timed out waiting for ${label}`);
+  throw new Error(`Timed out waiting for ${label}: ${lastError?.message || 'condition stayed false'}`);
 }
 
 function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`Launcher process ${child.pid} did not exit within ${timeoutMs}ms after window close.`));
@@ -206,6 +235,27 @@ function waitForExit(child, timeoutMs) {
       clearTimeout(timer);
       resolve({ code, signal });
     });
+  });
+}
+
+function closeHttpServer(server, timeoutMs = 5000) {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      server.closeAllConnections?.();
+      finish(new Error(`HTTP test server did not close within ${timeoutMs}ms.`));
+    }, timeoutMs);
+    server.close(finish);
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
   });
 }
 
@@ -404,6 +454,13 @@ try {
   if (child.exitCode === null && !child.killed) {
     throw new Error('Launcher process stayed alive after closing the only player window during update.');
   }
+  for (let attempt = 0; attempt < 20 && !responseClosed; attempt += 1) {
+    await sleep(100);
+  }
+  if (!responseClosed) {
+    throw new Error('Pack response stayed open after the launcher exited.');
+  }
+  checkpoint('pack response closed');
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -424,5 +481,7 @@ try {
   if (child.exitCode === null && !child.killed) {
     child.kill();
   }
-  await new Promise((resolve) => server.close(resolve));
+  checkpoint('closing HTTP test server');
+  await closeHttpServer(server);
+  checkpoint('HTTP test server closed');
 }
