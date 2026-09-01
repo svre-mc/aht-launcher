@@ -271,7 +271,7 @@ jobs:
           mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
           cleanup_mount() { hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true; }
           trap cleanup_mount EXIT
-          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+          printf 'Y\n' | hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
           SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 2 -type d -name 'A Hard Time Launcher macOS.app' -print -quit)"
           test -n "$SOURCE_APP"
           /usr/bin/ditto "$SOURCE_APP" "$INSTALLED_APP"
