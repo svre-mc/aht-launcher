@@ -162,9 +162,16 @@ try {
     })()
   `);
   await waitFor(client, "document.body.classList.contains('dev-locked') === false && !document.querySelector('#developerConsole').hidden", 'developer unlock');
+  await waitFor(
+    client,
+    "document.querySelector('#playerFeedUrlInput').value.trim().length > 0",
+    'launcher settings hydration'
+  );
   await evaluate(client, `
     (() => {
-      document.querySelector('#playerFeedUrlInput').value = ${JSON.stringify(`${workerEndpoint}/latest.json`)};
+      const feedInput = document.querySelector('#playerFeedUrlInput');
+      feedInput.focus();
+      feedInput.value = ${JSON.stringify(`${workerEndpoint}/latest.json`)};
       document.querySelector('#bucketInput').value = 'ahtlauncher';
       for (const selector of ['#playerFeedUrlInput', '#bucketInput']) {
         document.querySelector(selector).dispatchEvent(new Event('input', { bubbles: true }));

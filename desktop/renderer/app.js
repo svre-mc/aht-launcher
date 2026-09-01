@@ -2506,11 +2506,13 @@ function cacheOnlyValidationBlockReason(validation) {
 function updateReleaseUploadState() {
   const reason = publishBlockReason("stable");
   const setupReason = setupCloudBlockReason();
-  const defaultsReason = !developerAuthenticated
-    ? "Developer login is required before writing player defaults."
-    : !/^https?:\/\//i.test(playerFeedUrl())
-      ? "Enter the public Player Feed URL first."
-      : "";
+  const defaultsReason = !currentStatus?.config
+    ? "Launcher settings are still loading."
+    : !developerAuthenticated
+      ? "Developer login is required before writing player defaults."
+      : !/^https?:\/\//i.test(playerFeedUrl())
+        ? "Enter the public Player Feed URL first."
+        : "";
   setUnavailable(els.publishReleaseButton, releaseBusy || Boolean(reason));
   const ptbCreateReason = developerAuthenticated ? "" : "Developer login is required before creating PTB releases.";
   setUnavailable(els.buildPtbClientZipButton, releaseBusy || Boolean(ptbCreateReason));
