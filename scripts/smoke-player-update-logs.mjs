@@ -107,13 +107,21 @@ function connect(wsUrl) {
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
     pending.delete(message.id);
+    clearTimeout(timer);
     if (message.error) {
       reject(new Error(`${message.error.message}: ${message.error.data || ''}`.trim()));
     } else {
       resolve(message.result || {});
     }
+  });
+  socket.addEventListener('close', () => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(new Error('CDP socket closed'));
+    }
+    pending.clear();
   });
   return new Promise((resolve, reject) => {
     socket.addEventListener('open', () => {
@@ -123,12 +131,12 @@ function connect(wsUrl) {
           nextId += 1;
           socket.send(JSON.stringify({ id, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(id, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
             }, 30000);
+            pending.set(id, { resolve: callResolve, reject: callReject, timer });
           });
         },
         close() {
@@ -214,6 +222,31 @@ async function clickNode(client, selector) {
   await pressPointer(client, point);
   await releasePointer(client, point);
   return point;
+}
+
+async function ensurePointerHoverOrFocus(client, hoverSelector, focusSelector = hoverSelector) {
+  const proof = await evaluate(client, `(() => {
+    const hoverNode = document.querySelector(${JSON.stringify(hoverSelector)});
+    const focusNode = document.querySelector(${JSON.stringify(focusSelector)});
+    const pointerHover = Boolean(hoverNode?.matches(':hover'));
+    if (!pointerHover) focusNode?.focus({ preventScroll: true });
+    return {
+      pointerHover,
+      focusWithin: Boolean(hoverNode?.matches(':focus-within')),
+      activeTag: document.activeElement?.tagName || ''
+    };
+  })()`);
+  if (!proof.pointerHover && !proof.focusWithin) {
+    throw new Error(`Pointer/focus interaction could not activate ${hoverSelector}: ${JSON.stringify(proof)}`);
+  }
+  return proof.pointerHover ? 'pointer' : 'keyboard-focus';
+}
+
+async function clearInteractionFocus(client) {
+  await evaluate(client, `(() => {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    return true;
+  })()`);
 }
 
 await writeJson(path.join(userData, 'launcher.config.json'), {
@@ -452,6 +485,7 @@ try {
     };
   })()`);
   const heroPoint = await movePointer(client, '.news-carousel-media');
+  const heroInteractionMode = await ensurePointerHoverOrFocus(client, '.news-feature-carousel', '.news-carousel-media');
   await waitFor(client, `(() => {
     const card = document.querySelector('.news-feature-carousel');
     const caption = card?.querySelector('.news-carousel-caption');
@@ -484,6 +518,7 @@ try {
   })`);
   await movePointer(client, { x: 250, y: 120 });
   await releasePointer(client, { x: 250, y: 120 });
+  await clearInteractionFocus(client);
   await sleep(180);
   if (
     heroNeutral.transform !== 'none'
@@ -525,6 +560,7 @@ try {
   await sleep(180);
   const rowNeutral = await evaluate(client, rowStateExpression);
   const rowPoint = await movePointer(client, '#newsFeedGrid .news-feed-card:not(.large) .feature-art');
+  const rowInteractionMode = await ensurePointerHoverOrFocus(client, '#newsFeedGrid .news-feed-card:not(.large)', '#newsFeedGrid .news-feed-card:not(.large) .news-card-open');
   await sleep(180);
   const rowHover = await evaluate(client, rowStateExpression);
   screenshots.push(await captureScreenshot(client, 'news-row-hover'));
@@ -533,6 +569,7 @@ try {
   const rowPressed = await evaluate(client, rowStateExpression);
   await movePointer(client, { x: 250, y: 120 });
   await releasePointer(client, { x: 250, y: 120 });
+  await clearInteractionFocus(client);
   await sleep(180);
   await movePointer(client, '#newsFeedGrid .news-feed-card:not(.large) .news-card-like');
   await sleep(180);
@@ -553,6 +590,7 @@ try {
   }
 
   await movePointer(client, '.news-carousel-media');
+  const carouselNavigationMode = await ensurePointerHoverOrFocus(client, '.news-feature-carousel', '.news-carousel-media');
   await sleep(180);
   await clickNode(client, '.news-carousel-next');
   const carouselNextProof = await waitForNewsCarouselSettled(client, 1, 'News carousel next-slide crossfade');
@@ -594,6 +632,7 @@ try {
   await clickNode(client, '.news-carousel-pager button:first-child');
   await waitForNewsCarouselSettled(client, 0, 'News carousel final first-slide crossfade');
   await movePointer(client, { x: 250, y: 120 });
+  await clearInteractionFocus(client);
   await sleep(180);
 
   await evaluate(client, `document.querySelector('#newsFeedGrid .news-feed-card:nth-child(2) .news-card-like').click(); true`);
@@ -814,6 +853,9 @@ try {
     likeRequests,
     heroNeutral,
     heroHover,
+    heroInteractionMode,
+    rowInteractionMode,
+    carouselNavigationMode,
     rowNeutral,
     rowHover,
     carouselNextProof,

@@ -1882,7 +1882,8 @@ textarea {
 }
 
 .news-feed-card:not(.large) .news-card-open:hover .feature-art,
-.news-feed-card:not(.large) .news-card-open:focus-visible .feature-art {
+.news-feed-card:not(.large) .news-card-open:focus-visible .feature-art,
+.news-feed-card:not(.large):focus-within .feature-art {
   filter: brightness(1.1);
 }
 
