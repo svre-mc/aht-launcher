@@ -2636,9 +2636,10 @@ function renderUploadState(state) {
     setReleaseUploadProgress(progress || { percent }, false, target);
     setReleaseCheck("bad", "Upload failed", `${completed}/${total} files uploaded`, state.error, target);
   } else if (state.lastResult) {
-    setReleaseUploadProgress({ percent: 100, phase: "Upload complete" }, false, target);
+    const publishedLabel = target === "ptb" ? "PTB published" : "Upload complete";
+    setReleaseUploadProgress({ percent: 100, phase: publishedLabel }, false, target);
     const verified = state.verification?.publicLatestUrl || state.lastResult?.verification?.publicLatestUrl || "";
-    setReleaseCheck("ok", "Upload complete", `${completed}/${total} files uploaded`, verified ? `Player feed verified: ${verified}` : "Release artifacts are in remote R2.", target);
+    setReleaseCheck("ok", publishedLabel, `${completed}/${total} files uploaded`, verified ? `Player feed verified: ${verified}` : "Release artifacts are in remote R2.", target);
   } else {
     setReleaseUploadProgress(null, true, target);
   }
