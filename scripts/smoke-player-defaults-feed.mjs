@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 9700);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -166,6 +167,20 @@ if (process.platform === 'win32') {
 await fsp.mkdir(path.dirname(java8FixtureExecutable), { recursive: true });
 await fsp.writeFile(java8FixtureExecutable, 'AHT Java 8 executable fixture', 'utf8');
 await fsp.writeFile(path.join(java8FixtureHome, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
+const deviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: deviceCredential.schemaVersion,
+  protocol: deviceCredential.protocol,
+  algorithm: deviceCredential.algorithm,
+  deviceId: deviceCredential.deviceId,
+  publicKey: deviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(deviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: deviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
@@ -226,6 +241,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile,
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64'
   },

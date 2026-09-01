@@ -5041,10 +5041,10 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
         ? [prepared?.minecraftProfile || null, prepared?.java8Runtime || null]
         : (!installed
           ? [uninstalledMinecraftProfileForStatus(launcherConfig), isDeveloperMode() ? null : await java8RuntimeStatus(launcherConfig)]
-           : await Promise.all([
-             inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
-             java8RuntimeStatus(launcherConfig)
-           ])));
+          : await Promise.all([
+            inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
+            java8RuntimeStatus(launcherConfig)
+          ])));
   statusProbe('prerequisites-ready');
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
