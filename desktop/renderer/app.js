@@ -4394,6 +4394,18 @@ async function renderPreparedStartupStatuses(preparation = {}) {
       throw retryError || activeResult?.reason || new Error("Launcher status is unavailable.");
     }
   }
+  const activeStatus = activeResult.value;
+  const firstInitializationNeedsFeed = Boolean(
+    preparation?.firstInitialization
+    && activeStatus?.config?.latestUrl
+    && !activeStatus?.latest
+  );
+  if (firstInitializationNeedsFeed) {
+    const status = await window.aht.getStatus(activePackKey, { preferCache: false });
+    const merged = mergeLaunchPreparation(status, preparation?.packs?.[activePackKey]);
+    packStatusCache.set(merged.activePack || activePackKey, merged);
+    activeResult = { status: "fulfilled", value: merged };
+  }
   statusRefreshGeneration += 1;
   renderStatus(activeResult.value);
   lastStatusRefreshAt = Date.now();
