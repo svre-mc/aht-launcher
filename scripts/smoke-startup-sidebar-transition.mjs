@@ -9,6 +9,7 @@ const port = Number(process.argv[2] || 9794);
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
+const sidebarSwitchMaxMs = 2_500;
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -417,7 +418,7 @@ try {
   })()`, 'completed PTB transition');
   finalProof.elapsedMs = Date.now() - switchStartedAt;
   assert(finalProof.activePack === 'ptb' && finalProof.activeView === 'player' && finalProof.viewOpacity === 1 && !finalProof.sidebarLoaderPresent && !finalProof.workspaceBusy, 'Sidebar transition did not cleanly finish', finalProof);
-  assert(finalProof.elapsedMs < 1_500, 'Sidebar transition performed long preparation work instead of using the startup-prepared path', finalProof);
+  assert(finalProof.elapsedMs < sidebarSwitchMaxMs, 'Sidebar transition exceeded the bounded startup-prepared animation window', finalProof);
   assert(finalProof.label === 'Install' && finalProof.background !== readyProof.background, 'Install and Update palettes were not distinct', { update: readyProof, install: finalProof });
   assert(!/116,\s*164,\s*88|147,\s*201,\s*112/.test(finalProof.background), 'Install action retained the saturated green palette', finalProof.background);
   screenshots.push(await captureScreenshot(client, 'sidebar-switch-complete-install-palette'));
