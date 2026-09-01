@@ -39,13 +39,13 @@ const pureChecks = [
 const electronChecks = [
   // Run the least-recently validated cross-platform flows first so native CI
   // surfaces a new platform assumption without replaying every proven smoke.
-  ['test:release-flow'],
-  ['test:release-ui-flow'],
-  ['test:single-instance'],
-  ['test:close-during-update'],
   ['test:developer-client-bypass'],
   ['test:developer-instance-dir'],
   ['test:developer-modpack-zip'],
+  ['test:close-during-update'],
+  ['test:release-flow'],
+  ['test:release-ui-flow'],
+  ['test:single-instance'],
   ['test:cloud-login'],
   ['test:cache-only-cloud'],
   ['test:launcher-self-update'],

@@ -85,7 +85,11 @@ async function waitForTarget() {
       const response = await fetch(`${endpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const page = pages.find((target) => (
+          /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || ''))
+          && String(target.title || '').trim() === 'A Hard Time Launcher'
+        ));
         if (page) return page;
       }
     } catch (error) {
@@ -336,7 +340,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   checkpoint('player DOM ready');
   await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.8.7' && status.updateRequired ? status : false)
