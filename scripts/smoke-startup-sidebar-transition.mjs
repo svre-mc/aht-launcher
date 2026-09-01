@@ -23,9 +23,12 @@ const defaultsPath = path.join(root, 'app.defaults.json');
 const screenshotDir = process.env.AHT_SMOKE_OUTPUT_DIR
   ? path.resolve(process.env.AHT_SMOKE_OUTPUT_DIR)
   : path.join(root, 'screenshots');
+const reducedMotionArgs = process.env.AHT_TEST_FORCE_REDUCED_MOTION === '1'
+  ? ['--force-prefers-reduced-motion=reduce']
+  : [];
 const electronArgsFor = (debugPort) => smokeExe
-  ? [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`];
+  ? [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`, ...reducedMotionArgs]
+  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`, ...reducedMotionArgs];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -295,6 +298,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  await client.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.querySelector('#startupLoader') && document.querySelector('.app-frame')", 'startup DOM');
@@ -397,12 +401,14 @@ try {
     sidebarMoneyAnimation: getComputedStyle(document.querySelector('#sidebarSwitchLoader .startup-money-logo')).animationName,
     sidebarLoaderZIndex: getComputedStyle(document.querySelector('#sidebarSwitchLoader')).zIndex,
     sidebarMoneyOpacity: Number(getComputedStyle(document.querySelector('#sidebarSwitchLoader .money-loader-system')).opacity),
+    reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
     sidebarLoaderRect: (() => {
       const rect = document.querySelector('#sidebarSwitchLoader').getBoundingClientRect();
       return [rect.right, rect.bottom, innerWidth, innerHeight];
     })()
   }))()`);
   assert(immediateProof.ptbSelected && !immediateProof.ahtSelected && immediateProof.switching, 'Sidebar selection did not commit immediately', immediateProof);
+  assert(!immediateProof.reducedMotion, 'The animation smoke did not establish its normal-motion media policy', immediateProof);
   assert(immediateProof.sidebarLoaderVisible && immediateProof.sidebarLoaderLabel === 'Switching to PTB' && immediateProof.sidebarMoneyLogo === 'assets/aht-bill-transparent.png' && immediateProof.sidebarMoneyStars === 8 && immediateProof.sidebarMoneyAnimation.includes('startup-money-drift') && immediateProof.sidebarLoaderZIndex === '9999' && immediateProof.sidebarMoneyOpacity >= 0.95, 'The bottom-right money animation was not shown above the launcher as soon as the pack switch began', immediateProof);
   assert(Math.abs(immediateProof.sidebarLoaderRect[0] - immediateProof.sidebarLoaderRect[2]) < 1 && Math.abs(immediateProof.sidebarLoaderRect[1] - immediateProof.sidebarLoaderRect[3]) < 1, 'The pack-switch money animation was not anchored to the bottom-right corner', immediateProof.sidebarLoaderRect);
   assert(immediateProof.viewOpacity > 0.98 && immediateProof.viewTransform === 'none', 'Outgoing view moved or faded before the measured lead-in', immediateProof);
@@ -415,6 +421,7 @@ try {
       opacity: Number(getComputedStyle(view).opacity),
       leaving: view.classList.contains('sidebar-view-leaving'),
       transform: getComputedStyle(view).transform,
+      transitionDuration: getComputedStyle(view).transitionDuration,
       sidebarLoaderVisible: !loader?.hidden && getComputedStyle(loader).display !== 'none'
     };
   })()`);
@@ -509,6 +516,7 @@ try {
   client = await connect(quickTarget.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  await client.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.querySelector('#startupLoader') && document.querySelector('.app-frame')", 'quick-relaunch startup DOM');
