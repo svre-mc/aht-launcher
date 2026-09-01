@@ -666,7 +666,7 @@ try {
     throw new Error('Play rewrote Minecraft/CurseForge launcher profile metadata instead of using the profile selected during initialization.');
   }
   const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
-  if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
+  if (fs.realpathSync.native(launcherMarker.cwd) !== fs.realpathSync.native(mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
   }
   if (launcherMarker.disableRtss !== '1' || launcherMarker.disableObs !== '1') {
