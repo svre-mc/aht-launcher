@@ -223,6 +223,7 @@ function spawnLauncher(debugPort) {
       AHT_TEST_HOOKS: '1',
       AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort),
       AHT_TEST_USER_DATA: userData,
+      AHT_TEST_STATUS_FAILURE_COUNT: '2',
       ELECTRON_ENABLE_LOGGING: '0'
     },
     stdio: 'ignore',

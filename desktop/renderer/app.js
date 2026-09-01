@@ -4382,8 +4382,18 @@ async function renderPreparedStartupStatuses(preparation = {}) {
     return merged;
   }));
   const activeIndex = packKeys.indexOf(activeSidebarPack);
-  const activeResult = results[activeIndex >= 0 ? activeIndex : 0];
-  if (activeResult?.status !== "fulfilled") throw activeResult?.reason || new Error("Launcher status is unavailable.");
+  const activePackKey = packKeys[activeIndex >= 0 ? activeIndex : 0];
+  let activeResult = results[activeIndex >= 0 ? activeIndex : 0];
+  if (activeResult?.status !== "fulfilled") {
+    try {
+      const status = await window.aht.getStatus(activePackKey, { preferCache: true });
+      const merged = mergeLaunchPreparation(status, preparation?.packs?.[activePackKey]);
+      packStatusCache.set(merged.activePack || activePackKey, merged);
+      activeResult = { status: "fulfilled", value: merged };
+    } catch (retryError) {
+      throw retryError || activeResult?.reason || new Error("Launcher status is unavailable.");
+    }
+  }
   statusRefreshGeneration += 1;
   renderStatus(activeResult.value);
   lastStatusRefreshAt = Date.now();

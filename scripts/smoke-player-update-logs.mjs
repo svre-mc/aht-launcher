@@ -186,7 +186,14 @@ async function nodeCenter(client, selector) {
 
 async function movePointer(client, selectorOrPoint) {
   const point = typeof selectorOrPoint === 'string' ? await nodeCenter(client, selectorOrPoint) : selectorOrPoint;
-  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' });
+  await client.call('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: point.x,
+    y: point.y,
+    button: 'none',
+    buttons: 0,
+    pointerType: 'mouse'
+  });
   return point;
 }
 
@@ -435,21 +442,29 @@ try {
     };
   })()`);
   const heroPoint = await movePointer(client, '.news-carousel-media');
-  await sleep(180);
-  const heroHover = await evaluate(client, `(() => {
+  await movePointer(client, { x: heroPoint.x - 1, y: heroPoint.y });
+  await movePointer(client, heroPoint);
+  const heroHover = await waitFor(client, `(() => {
     const card = document.querySelector('.news-feature-carousel');
     const art = card?.querySelector('.news-carousel-slide.is-active');
     const caption = card?.querySelector('.news-carousel-caption');
     const arrow = card?.querySelector('.news-carousel-next');
     const pager = card?.querySelector('.news-carousel-pager');
-    return {
+    const proof = {
+      hovered: card?.matches(':hover') || false,
       transform: getComputedStyle(card).transform,
       artFilter: getComputedStyle(art).filter,
       captionOpacity: getComputedStyle(caption).opacity,
       arrowOpacity: getComputedStyle(arrow).opacity,
       pagerOpacity: getComputedStyle(pager).opacity
     };
-  })()`);
+    return proof.hovered
+      && Number(proof.captionOpacity) >= 0.99
+      && Number(proof.arrowOpacity) >= 0.99
+      && Number(proof.pagerOpacity) >= 0.99
+      ? proof
+      : false;
+  })()`, 'settled Featured News pointer hover', 120, 10);
   screenshots.push(await captureScreenshot(client, 'news-hero-hover'));
   await pressPointer(client, heroPoint);
   await sleep(45);
