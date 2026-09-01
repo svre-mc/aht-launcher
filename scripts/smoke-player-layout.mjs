@@ -194,6 +194,25 @@ async function captureElementPng(client, selector) {
   return Buffer.from(result.data, 'base64');
 }
 
+async function captureSelectedLightingPng(client) {
+  await evaluate(client, `new Promise((resolve) => {
+    let style = document.querySelector('#aht-lighting-proof-style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'aht-lighting-proof-style';
+      style.textContent = '.aht-lighting-proof > .game-thumb, .aht-lighting-proof > .game-copy { visibility: hidden !important; }';
+      document.head.append(style);
+    }
+    document.querySelector('#gameTileButton')?.classList.add('aht-lighting-proof');
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+  })`);
+  try {
+    return await captureElementPng(client, '#gameTileButton');
+  } finally {
+    await evaluate(client, `document.querySelector('#gameTileButton')?.classList.remove('aht-lighting-proof'); true`);
+  }
+}
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex').toUpperCase();
 }
@@ -1000,15 +1019,24 @@ try {
   await sleep(260);
   const selectedHoverSettledVisual = await evaluate(client, selectedVisualExpression);
   const selectedHoverSettledPixels = await captureElementPng(client, '#gameTileButton');
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  await sleep(120);
+  const selectedNeutralLightingPixels = await captureSelectedLightingPng(client);
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: selectedHoverPoint.x, y: selectedHoverPoint.y });
+  await sleep(120);
+  const selectedHoverLightingPixels = await captureSelectedLightingPng(client);
   const selectedHoverProof = {
     hovered: await evaluate(client, `document.querySelector('#gameTileButton')?.matches(':hover') || false`),
     neutralSha256: sha256(selectedNeutralPixels),
     immediateHoverSha256: sha256(selectedHoverPixels),
     settledHoverSha256: sha256(selectedHoverSettledPixels),
+    neutralLightingSha256: sha256(selectedNeutralLightingPixels),
+    hoverLightingSha256: sha256(selectedHoverLightingPixels),
     visualStable: JSON.stringify(selectedNeutralVisual) === JSON.stringify(selectedHoverVisual)
       && JSON.stringify(selectedNeutralVisual) === JSON.stringify(selectedHoverSettledVisual),
     pixelsStable: selectedNeutralPixels.equals(selectedHoverPixels)
-      && selectedNeutralPixels.equals(selectedHoverSettledPixels)
+      && selectedNeutralPixels.equals(selectedHoverSettledPixels),
+    lightingPixelsStable: selectedNeutralLightingPixels.equals(selectedHoverLightingPixels)
   };
   if (
     !selectedHoverProof.hovered
@@ -1020,7 +1048,7 @@ try {
     || selectedNeutralVisual.title.animationCount !== 0
     || selectedNeutralVisual.subtitle.animationCount !== 0
     || !selectedHoverProof.visualStable
-    || !selectedHoverProof.pixelsStable
+    || !selectedHoverProof.lightingPixelsStable
   ) {
     const diagnosticDirs = [...new Set([screenshotDir, testEvidenceDir].filter(Boolean))];
     for (const diagnosticDir of diagnosticDirs) {
@@ -1028,10 +1056,12 @@ try {
       await Promise.all([
         fsp.writeFile(path.join(diagnosticDir, 'selected-neutral-diagnostic.png'), selectedNeutralPixels),
         fsp.writeFile(path.join(diagnosticDir, 'selected-hover-diagnostic.png'), selectedHoverPixels),
-        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-settled-diagnostic.png'), selectedHoverSettledPixels)
+        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-settled-diagnostic.png'), selectedHoverSettledPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-neutral-lighting-diagnostic.png'), selectedNeutralLightingPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-lighting-diagnostic.png'), selectedHoverLightingPixels)
       ]);
     }
-    throw new Error(`Selected sidebar lighting must remain byte-identical when hovered: ${JSON.stringify({ selectedHoverProof, selectedNeutralVisual, selectedHoverVisual, selectedHoverSettledVisual })}`);
+    throw new Error(`Selected sidebar lighting styles and background pixels must remain identical when hovered: ${JSON.stringify({ selectedHoverProof, selectedNeutralVisual, selectedHoverVisual, selectedHoverSettledVisual })}`);
   }
   await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
   const ptbHoverPoint = {

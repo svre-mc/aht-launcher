@@ -11,6 +11,8 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-developer-client-bypass-
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
+const java8Path = path.join(root, 'java8', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft Launcher.app');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -137,7 +139,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   developer: { adminBaseUrl: '', defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
   launcherUpdate: { enabled: false, latestUrl: '' },
   launcherProof: { enabled: false, required: false, baseUrl: '', keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, rootDir: mcRoot, profileId: latest.packId, profileName: latest.name, memoryMb: 6144 },
+  minecraftLauncher: { enabled: true, rootDir: mcRoot, profileId: latest.packId, profileName: latest.name, memoryMb: 6144, javaPath: java8Path },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'developer-smoke-install', minecraftUsername: 'DeveloperSmoke' });
@@ -167,6 +169,14 @@ await writeJson(
   path.join(mcRoot, 'versions', '1.12.2-forge-14.23.5.2860', '1.12.2-forge-14.23.5.2860.json'),
   { id: '1.12.2-forge-14.23.5.2860', type: 'release' }
 );
+await fsp.mkdir(path.dirname(java8Path), { recursive: true });
+await fsp.writeFile(java8Path, '', 'utf8');
+await fsp.writeFile(path.join(root, 'java8', 'release'), 'JAVA_VERSION="1.8.0_402"\n', 'utf8');
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
+} else if (process.platform === 'darwin') {
+  await fsp.mkdir(macMinecraftApp, { recursive: true });
+}
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
@@ -174,6 +184,9 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd()
