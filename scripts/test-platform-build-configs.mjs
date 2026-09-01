@@ -36,6 +36,8 @@ const smokeDeveloperAuthRefresh = readText(new URL('../scripts/smoke-developer-u
 const smokeStartupTransition = readText(new URL('../scripts/smoke-startup-sidebar-transition.mjs', import.meta.url));
 const smokePlayerUpdateLogs = readText(new URL('../scripts/smoke-player-update-logs.mjs', import.meta.url));
 const smokePlayerUpdatePlay = readText(new URL('../scripts/smoke-player-update-play-flow.mjs', import.meta.url));
+const smokeR2ReleaseFlow = readText(new URL('../scripts/smoke-r2-release-flow.mjs', import.meta.url));
+const smokeR2ReleaseUiFlow = readText(new URL('../scripts/smoke-r2-release-ui-flow.mjs', import.meta.url));
 const smokePlayIntegrityGate = readText(new URL('../scripts/smoke-play-integrity-gate.mjs', import.meta.url));
 const smokeCloseDuringUpdate = readText(new URL('../scripts/smoke-close-during-update.mjs', import.meta.url));
 const smokeLauncherSelfUpdate = readText(new URL('../scripts/smoke-launcher-self-update.mjs', import.meta.url));
@@ -1031,6 +1033,7 @@ assert(desktopMain.includes('launchMacLauncherUpdateHelper'), 'macOS launcher se
 assert(!desktopMain.includes('backup_app="${target_app}.previous-update"') && desktopMain.includes('backup_app="$target_app.previous-update"'), 'macOS launcher self-update must preserve target_app as a shell variable instead of evaluating it as JavaScript.');
 assert(smokePlayerUpdatePlay.includes('fs.realpathSync.native(launcherMarker.cwd) !== fs.realpathSync.native(mcRoot)'), 'Cross-platform Play validation must treat macOS /var and /private/var aliases as the same Minecraft launcher directory.');
 assert(smokePlayerUpdateLogs.includes('waitForNewsCarouselSettled') && smokePlayerUpdateLogs.includes("label, 20"), 'News carousel validation must wait for bounded transition cleanup instead of assuming an exact runner timer.');
+assert([smokeR2ReleaseFlow, smokeR2ReleaseUiFlow].every((source) => source.includes("AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : ''") && source.includes("path.join(mcRoot, 'minecraft.exe')")), 'Stable and PTB release smokes must provide deterministic native Minecraft Launcher fixtures before Update validation.');
 
 assert(!fs.existsSync(new URL('../build/electron-builder.ubuntu.cjs', import.meta.url)), 'Ubuntu builder config must not exist.');
 assert(!packageJson.scripts['dist:linux'], 'Linux package script must not exist.');

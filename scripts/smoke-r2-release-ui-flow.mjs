@@ -20,6 +20,7 @@ const mcRoot = path.join(root, 'minecraft');
 const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
 const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
 const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft Launcher.app');
 const outDir = path.join(root, 'release');
 const fakeBin = path.join(root, 'bin');
 const fakeR2Root = path.join(root, 'r2');
@@ -145,6 +146,12 @@ if (process.platform === 'win32') {
   await fsp.writeFile(path.join(path.dirname(fakeJavaPath), 'javaw.exe'), 'fake windowless Java 8 executable\n', 'utf8');
 }
 await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
+await fsp.mkdir(mcRoot, { recursive: true });
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
+} else if (process.platform === 'darwin') {
+  await fsp.mkdir(macMinecraftApp, { recursive: true });
+}
 
 const fakeWrangler = path.join(fakeBin, 'fake-wrangler.mjs');
 await fsp.writeFile(fakeWrangler, `
@@ -365,6 +372,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: 'amd64',
     AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
 
     ELECTRON_ENABLE_LOGGING: '0'
   },
