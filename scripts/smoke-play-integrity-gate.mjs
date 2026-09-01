@@ -511,18 +511,54 @@ try {
   })()`);
   await waitFor(client, `document.querySelector('#legalOverlay')?.hidden === true`, 'legal acceptance after initial status failure');
   await waitFor(client, `!document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden`, 'post-consent launch preparation');
-  await evaluate(client, `document.querySelector('#playButton').click(); true`);
-  const initialPlayFailure = await waitFor(client, `(() => {
+  const diagnosticPlayReady = await waitFor(client, `(() => {
     const button = document.querySelector('#playButton');
-    const toast = [...document.querySelectorAll('#toastStack .toast.error')]
-      .find((item) => /Launch failed/i.test(item.textContent));
-    const copy = toast?.querySelector('button.toast-copy-action');
-    return button?.getAttribute('aria-busy') === 'false'
-      && button?.getAttribute('aria-disabled') === 'false'
-      && copy?.textContent.trim() === 'Click here to copy'
-      ? { toast: toast.textContent.trim(), copy: copy.textContent.trim() }
+    const proof = {
+      actionMode: button?.dataset.actionMode || '',
+      busy: button?.getAttribute('aria-busy') || '',
+      disabled: button?.getAttribute('aria-disabled') || '',
+      title: button?.title || '',
+      startupHidden: document.querySelector('#startupLoader')?.hidden === true,
+      legalHidden: document.querySelector('#legalOverlay')?.hidden === true
+    };
+    return proof.actionMode === 'play'
+      && proof.busy === 'false'
+      && proof.disabled === 'false'
+      && proof.startupHidden
+      && proof.legalHidden
+      ? proof
       : false;
-  })()`, 'failed Play report after initial status failure');
+  })()`, 'ready diagnostic Play after post-consent preparation');
+  await evaluate(client, `document.querySelector('#playButton').click(); true`);
+  let initialPlayFailure;
+  try {
+    initialPlayFailure = await waitFor(client, `(() => {
+      const button = document.querySelector('#playButton');
+      const toast = [...document.querySelectorAll('#toastStack .toast.error')]
+        .find((item) => /Launch failed/i.test(item.textContent));
+      const copy = toast?.querySelector('button.toast-copy-action');
+      return button?.getAttribute('aria-busy') === 'false'
+        && button?.getAttribute('aria-disabled') === 'false'
+        && copy?.textContent.trim() === 'Click here to copy'
+        ? { toast: toast.textContent.trim(), copy: copy.textContent.trim() }
+        : false;
+    })()`, 'failed Play report after initial status failure');
+  } catch (error) {
+    const stalledPlay = await evaluate(client, `(() => {
+      const button = document.querySelector('#playButton');
+      return {
+        actionMode: button?.dataset.actionMode || '',
+        busy: button?.getAttribute('aria-busy') || '',
+        disabled: button?.getAttribute('aria-disabled') || '',
+        label: button?.textContent.trim() || '',
+        title: button?.title || '',
+        log: document.querySelector('#log')?.textContent.trim() || '',
+        toasts: [...document.querySelectorAll('#toastStack .toast')].map((toast) => toast.textContent.trim()),
+        updateOptionsHidden: document.querySelector('#updateOptionsOverlay')?.hidden !== false
+      };
+    })()`);
+    throw new Error(`${error.message}: ${JSON.stringify({ diagnosticPlayReady, stalledPlay })}`);
+  }
   const initialLaunchLogsDir = path.join(instanceDir, 'logs', 'launcher');
   const initialFailureReports = await waitForReportFiles(initialLaunchLogsDir, /^AHT-Launch-.*-FAILED-.*\.txt$/i, 1);
   if (initialFailureReports.length !== 1) {

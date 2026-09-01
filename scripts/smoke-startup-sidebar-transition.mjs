@@ -331,22 +331,21 @@ try {
   assert(immediateProof.ptbSelected && !immediateProof.ahtSelected && immediateProof.switching, 'Sidebar selection did not commit immediately', immediateProof);
   assert(immediateProof.viewOpacity > 0.98 && immediateProof.viewTransform === 'none', 'Outgoing view moved or faded before the measured lead-in', immediateProof);
 
-  await sleep(105);
-  const exitProof = await evaluate(client, `(() => {
+  const exitProof = await waitFor(client, `(() => {
     const view = document.querySelector('.view.active');
-    return { opacity: Number(getComputedStyle(view).opacity), leaving: view.classList.contains('sidebar-view-leaving'), transform: getComputedStyle(view).transform };
-  })()`);
+    const proof = { opacity: Number(getComputedStyle(view).opacity), leaving: view.classList.contains('sidebar-view-leaving'), transform: getComputedStyle(view).transform };
+    return proof.leaving && proof.opacity > 0.05 && proof.opacity < 0.98 && proof.transform === 'none' ? proof : false;
+  })()`, 'measured outgoing sidebar opacity-only fade', 46, 5);
   assert(exitProof.leaving && exitProof.opacity > 0.05 && exitProof.opacity < 0.98 && exitProof.transform === 'none', 'Outgoing view did not use the measured opacity-only fade', exitProof);
 
-  await sleep(190);
-  const midProof = await evaluate(client, `(() => {
+  const midProof = await waitFor(client, `(() => {
     const view = document.querySelector('.view.active');
     const workspace = document.querySelector('.workspace');
     const sidebar = document.querySelector('.sidebar');
     const topbar = document.querySelector('.topbar');
     const sidebarRect = sidebar.getBoundingClientRect();
     const topbarRect = topbar.getBoundingClientRect();
-    return {
+    const proof = {
       viewOpacity: Number(getComputedStyle(view).opacity),
       workspaceBusy: workspace.getAttribute('aria-busy'),
       sidebarOpacity: Number(getComputedStyle(sidebar).opacity),
@@ -356,7 +355,8 @@ try {
       sidebarLoaderPresent: Boolean(document.querySelector('#sidebarSwitchLoader')),
       shell: { sidebar: [sidebarRect.x, sidebarRect.y, sidebarRect.width, sidebarRect.height], topbar: [topbarRect.x, topbarRect.y, topbarRect.width, topbarRect.height] }
     };
-  })()`);
+    return proof.entering && proof.viewOpacity > 0.05 && proof.viewOpacity < 0.98 && proof.transform === 'none' ? proof : false;
+  })()`, 'measured incoming sidebar opacity-only fade', 100, 5);
   assert(!midProof.sidebarLoaderPresent && midProof.workspaceBusy === 'true', 'Sidebar switch restored a loading icon or failed to keep its short transition busy state', midProof);
   assert(midProof.sidebarOpacity === 1 && midProof.topbarOpacity === 1 && JSON.stringify(midProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, mid: midProof });
   const enterProof = { ...midProof, opacity: midProof.viewOpacity };
