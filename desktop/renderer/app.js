@@ -5332,6 +5332,13 @@ async function loginDeveloper() {
       password: els.adminPasswordInput.value
     });
     els.adminPasswordInput.value = "";
+    els.developerLoginStatus.textContent = "Loading launcher settings...";
+    let refreshError = "";
+    try {
+      await refresh();
+    } catch (error) {
+      refreshError = cleanErrorMessage(error);
+    }
     developerAuthenticated = true;
     document.body.classList.remove("dev-locked");
     els.developerTab.hidden = false;
@@ -5343,7 +5350,7 @@ async function loginDeveloper() {
       : "Session active";
     activateTab("developer");
     updateReleaseUploadState();
-    setDevLog(result);
+    setDevLog(refreshError ? { ...result, statusRefreshError: refreshError } : result);
     const recoveryDetail = result.credentialsRecovered
       ? "Saved developer credentials were recovered and re-encrypted for this Windows profile."
       : "";
@@ -5354,12 +5361,8 @@ async function loginDeveloper() {
         : result.remoteError
           ? `Worker data not connected: ${result.remoteError}`
           : "";
-    showToast("Developer login successful", [recoveryDetail, remoteDetail].filter(Boolean).join(" ") || (result.expiresAt ? `Expires ${new Date(result.expiresAt).toLocaleString()}` : ""), "success");
-    refresh().catch((error) => {
-      const message = cleanErrorMessage(error);
-      setDevLog(message);
-      showToast("Status refresh failed", message, "error");
-    });
+    const refreshDetail = refreshError ? `Launcher settings could not refresh: ${refreshError}` : "";
+    showToast("Developer login successful", [recoveryDetail, remoteDetail, refreshDetail].filter(Boolean).join(" ") || (result.expiresAt ? `Expires ${new Date(result.expiresAt).toLocaleString()}` : ""), refreshError ? "info" : "success");
   } catch (error) {
     const message = cleanErrorMessage(error);
     developerAuthenticated = false;
