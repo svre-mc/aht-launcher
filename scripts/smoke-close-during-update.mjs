@@ -156,12 +156,16 @@ async function connectReadyLauncherPage() {
     try {
       await candidate.call('Runtime.enable', {}, 5000);
       await candidate.call('Page.enable', {}, 5000);
-      const probe = await candidate.call('Runtime.evaluate', {
-        expression: "document.readyState === 'complete' && Boolean(window.aht)",
-        returnByValue: true
-      }, 5000);
-      if (probe.result?.value === true) return { client: candidate, target };
-      throw new Error(`Unexpected CDP readiness response: ${JSON.stringify(probe)}`);
+      let probe;
+      for (let readinessAttempt = 0; readinessAttempt < 20; readinessAttempt += 1) {
+        probe = await candidate.call('Runtime.evaluate', {
+          expression: "document.readyState === 'complete' && Boolean(window.aht) && document.body.classList.contains('is-launcher-ready') && !document.body.classList.contains('is-booting')",
+          returnByValue: true
+        }, 5000);
+        if (probe.result?.value === true) return { client: candidate, target };
+        await sleep(250);
+      }
+      throw new Error(`Launcher DOM did not reach its ready state: ${JSON.stringify(probe)}`);
     } catch (error) {
       lastError = error;
       candidate.close();
