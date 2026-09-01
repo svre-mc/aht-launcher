@@ -21,6 +21,9 @@ const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const defaultsPath = tempDefaults;
 const screenshotDir = path.join(root, 'screenshots');
+const testEvidenceDir = String(process.env.AHT_TEST_EVIDENCE_DIR || '').trim()
+  ? path.resolve(process.env.AHT_TEST_EVIDENCE_DIR)
+  : '';
 const sidebarSelectedLightPath = path.resolve('desktop', 'renderer', 'assets', 'sidebar-selected-light.png');
 const sidebarSelectedLight = fs.readFileSync(sidebarSelectedLightPath);
 const sidebarSelectedLightIdentity = {
@@ -70,9 +73,12 @@ for (const asset of footerGlowAssets) {
     throw new Error(`Footer glow asset drifted from the native BSG alpha field: ${JSON.stringify({ path: asset.path, ...identity })}`);
   }
 }
+const reducedMotionArgs = process.env.AHT_TEST_FORCE_REDUCED_MOTION === '1'
+  ? ['--force-prefers-reduced-motion=reduce']
+  : [];
 const electronArgs = smokeExe
-  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...reducedMotionArgs]
+  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...reducedMotionArgs];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 
 function sleep(ms) {
@@ -1016,12 +1022,15 @@ try {
     || !selectedHoverProof.visualStable
     || !selectedHoverProof.pixelsStable
   ) {
-    await fsp.mkdir(screenshotDir, { recursive: true });
-    await Promise.all([
-      fsp.writeFile(path.join(screenshotDir, 'selected-neutral-diagnostic.png'), selectedNeutralPixels),
-      fsp.writeFile(path.join(screenshotDir, 'selected-hover-diagnostic.png'), selectedHoverPixels),
-      fsp.writeFile(path.join(screenshotDir, 'selected-hover-settled-diagnostic.png'), selectedHoverSettledPixels)
-    ]);
+    const diagnosticDirs = [...new Set([screenshotDir, testEvidenceDir].filter(Boolean))];
+    for (const diagnosticDir of diagnosticDirs) {
+      await fsp.mkdir(diagnosticDir, { recursive: true });
+      await Promise.all([
+        fsp.writeFile(path.join(diagnosticDir, 'selected-neutral-diagnostic.png'), selectedNeutralPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-diagnostic.png'), selectedHoverPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-settled-diagnostic.png'), selectedHoverSettledPixels)
+      ]);
+    }
     throw new Error(`Selected sidebar lighting must remain byte-identical when hovered: ${JSON.stringify({ selectedHoverProof, selectedNeutralVisual, selectedHoverVisual, selectedHoverSettledVisual })}`);
   }
   await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });

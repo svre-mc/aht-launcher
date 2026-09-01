@@ -221,6 +221,8 @@ jobs:
 
       - name: Run full source and Electron regression suite
         run: npm run verify:local
+        env:
+          AHT_TEST_EVIDENCE_DIR: validation/${{ matrix.arch }}
 
       - name: Build Intel and Apple Silicon packages
         run: npm run dist:regular:macos
