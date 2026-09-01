@@ -5115,6 +5115,10 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
       error: ''
     };
   }
+  const setup = setupForRenderer(usePreparedPrerequisites && !isDeveloperMode()
+    ? preparedSetupForStatus(config, prepared)
+    : await setupRecommendations(config));
+  statusProbe('setup-ready');
   statusProbe('get-complete');
   return {
     activePack: target.sidebarKey,
@@ -5148,10 +5152,8 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
         r2AccessKeyId: '',
         r2SecretAccessKey: ''
       }))
-      : { saved: false, encrypted: false, encryptionAvailable: safeStorageAvailable(), warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', socialServerSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
-    setup: setupForRenderer(usePreparedPrerequisites && !isDeveloperMode()
-      ? preparedSetupForStatus(config, prepared)
-      : await setupRecommendations(config)),
+      : { saved: false, encrypted: false, encryptionAvailable: false, warning: '', curseforgeApiKey: '', serverSshPassword: '', launcherProofSecret: '', socialServerSecret: '', githubToken: '', r2AccountId: '', r2AccessKeyId: '', r2SecretAccessKey: '' },
+    setup,
     minecraftProfile: minecraftProfileForRenderer(effectiveMinecraftProfile),
     java8Runtime: effectiveJava8Runtime,
     latest,
