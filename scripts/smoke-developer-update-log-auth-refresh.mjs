@@ -16,7 +16,11 @@ const alternateWorkerPort = workerPort + 1;
 const alternateWorkerEndpoint = `http://127.0.0.1:${alternateWorkerPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-dev-log-auth-'));
 const userData = path.join(root, 'userData');
-const stableInstanceDir = path.join(root, 'AHT', 'A Hard Time Developer');
+const stableInstanceDir = process.platform === 'win32'
+  ? path.join(root, 'AHT', 'A Hard Time Developer')
+  : process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'A Hard Time', 'Developer Instance')
+    : (() => { throw new Error(`Unsupported AHT launcher test platform: ${process.platform}`); })();
 const ptbInstanceDir = path.join(root, 'AHT', 'A Hard Time PTB');
 const playerdataSentinel = path.join(ptbInstanceDir, 'saves', 'SmokeWorld', 'playerdata', 'preserve-me.dat');
 const developerCredentialsFile = path.join(userData, 'developer.credentials.json');

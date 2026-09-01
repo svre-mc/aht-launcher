@@ -3,19 +3,18 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { defaultInstanceDirForPlatform } from '../src/platformProfile.js';
 
 const port = Number(process.argv[2] || 10042);
 const endpoint = `http://127.0.0.1:${port}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-dev-instance-dir-'));
 const userData = path.join(root, 'userData');
-const oldPlayerDir = process.platform === 'win32'
-  ? 'C:\\AHT\\A Hard Time'
-  : path.join(root, 'A Hard Time');
+const oldPlayerDir = defaultInstanceDirForPlatform(process.platform, process.env);
 const expectedDeveloperDir = process.platform === 'win32'
   ? 'C:\\AHT\\A Hard Time Developer'
   : process.platform === 'darwin'
-    ? path.join(userData, 'A Hard Time', 'Developer Instance')
-    : path.join(userData, 'A Hard Time Developer');
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'A Hard Time', 'Developer Instance')
+    : (() => { throw new Error(`Unsupported AHT launcher test platform: ${process.platform}`); })();
 const electronBin = process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron');
