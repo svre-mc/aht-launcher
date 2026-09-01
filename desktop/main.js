@@ -13371,7 +13371,9 @@ if (!singleInstanceLock) {
     createWindow();
   });
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
+    const testQuitOnAllWindowsClosed = process.env.AHT_TEST_HOOKS === '1'
+      && process.env.AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED === '1';
+    if (process.platform !== 'darwin' || testQuitOnAllWindowsClosed) {
       app.quit();
     }
   });

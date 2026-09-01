@@ -402,6 +402,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+    AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
     AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
