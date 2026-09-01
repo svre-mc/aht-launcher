@@ -527,10 +527,8 @@ try {
   })()`);
   await waitFor(client, "document.querySelector('#ptbModpackTools').hidden === false && document.querySelector('#buildPtbClientZipButton').getAttribute('aria-disabled') !== 'true'", 'PTB create and upload enabled');
   await evaluate(client, "document.querySelector('#buildPtbClientZipButton').click()");
-  await waitFor(client, `(() => {
-    const state = document.querySelector('#ptbReleaseCheckState')?.textContent || '';
-    return ['PTB published', 'GitHub mirror failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
-  })()`, 'PTB publish terminal state', 360);
+  await waitFor(client, "document.querySelector('#buildPtbClientZipButton').getAttribute('aria-disabled') === 'true'", 'PTB create and upload busy state', 80);
+  await waitFor(client, "document.querySelector('#buildPtbClientZipButton').getAttribute('aria-disabled') !== 'true'", 'PTB create and upload completion', 360);
   const ptbUiProof = await evaluate(client, `({
     state: document.querySelector('#ptbReleaseCheckState').textContent,
     title: document.querySelector('#ptbReleaseCheckTitle').textContent,

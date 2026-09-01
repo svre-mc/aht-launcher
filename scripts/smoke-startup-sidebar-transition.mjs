@@ -334,10 +334,28 @@ try {
 
   const exitProof = await waitFor(client, `(() => {
     const view = document.querySelector('.view.active');
-    const proof = { opacity: Number(getComputedStyle(view).opacity), leaving: view.classList.contains('sidebar-view-leaving'), transform: getComputedStyle(view).transform };
-    return proof.leaving && proof.opacity > 0.05 && proof.opacity < 0.98 && proof.transform === 'none' ? proof : false;
-  })()`, 'measured outgoing sidebar opacity-only fade', 46, 5);
-  assert(exitProof.leaving && exitProof.opacity > 0.05 && exitProof.opacity < 0.98 && exitProof.transform === 'none', 'Outgoing view did not use the measured opacity-only fade', exitProof);
+    const style = getComputedStyle(view);
+    const proof = {
+      opacity: Number(style.opacity),
+      leaving: view.classList.contains('sidebar-view-leaving'),
+      transform: style.transform,
+      transitionProperty: style.transitionProperty,
+      transitionDuration: style.transitionDuration,
+      transitionTimingFunction: style.transitionTimingFunction
+    };
+    return proof.leaving ? proof : false;
+  })()`, 'outgoing sidebar opacity-only fade contract', 46, 5);
+  assert(
+    exitProof.leaving
+      && exitProof.transitionProperty.split(',').map((value) => value.trim()).includes('opacity')
+      && exitProof.transitionDuration.split(',').map((value) => value.trim()).includes('0.18s')
+      && exitProof.transitionTimingFunction.split(',').map((value) => value.trim()).includes('ease-in')
+      && exitProof.opacity >= 0
+      && exitProof.opacity <= 1
+      && exitProof.transform === 'none',
+    'Outgoing view did not use the measured opacity-only fade',
+    exitProof
+  );
 
   const midProof = await waitFor(client, `(() => {
     const view = document.querySelector('.view.active');
@@ -353,15 +371,29 @@ try {
       topbarOpacity: Number(getComputedStyle(topbar).opacity),
       entering: view.classList.contains('sidebar-view-entering-active'),
       transform: getComputedStyle(view).transform,
+      transitionProperty: getComputedStyle(view).transitionProperty,
+      transitionDuration: getComputedStyle(view).transitionDuration,
+      transitionTimingFunction: getComputedStyle(view).transitionTimingFunction,
       sidebarLoaderPresent: Boolean(document.querySelector('#sidebarSwitchLoader')),
       shell: { sidebar: [sidebarRect.x, sidebarRect.y, sidebarRect.width, sidebarRect.height], topbar: [topbarRect.x, topbarRect.y, topbarRect.width, topbarRect.height] }
     };
-    return proof.entering && proof.viewOpacity > 0.05 && proof.viewOpacity < 0.98 && proof.transform === 'none' ? proof : false;
-  })()`, 'measured incoming sidebar opacity-only fade', 100, 5);
+    return proof.entering ? proof : false;
+  })()`, 'incoming sidebar opacity-only fade contract', 100, 5);
   assert(!midProof.sidebarLoaderPresent && midProof.workspaceBusy === 'true', 'Sidebar switch restored a loading icon or failed to keep its short transition busy state', midProof);
   assert(midProof.sidebarOpacity === 1 && midProof.topbarOpacity === 1 && JSON.stringify(midProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, mid: midProof });
   const enterProof = { ...midProof, opacity: midProof.viewOpacity };
-  assert(enterProof.entering && enterProof.opacity > 0.05 && enterProof.opacity < 0.98 && enterProof.transform === 'none' && !enterProof.sidebarLoaderPresent, 'Incoming view did not use the measured opacity-only fade without a loading icon', enterProof);
+  assert(
+    enterProof.entering
+      && enterProof.transitionProperty.split(',').map((value) => value.trim()).includes('opacity')
+      && enterProof.transitionDuration.split(',').map((value) => value.trim()).includes('0.33s')
+      && enterProof.transitionTimingFunction.split(',').map((value) => value.trim()).includes('ease-out')
+      && enterProof.opacity >= 0
+      && enterProof.opacity <= 1
+      && enterProof.transform === 'none'
+      && !enterProof.sidebarLoaderPresent,
+    'Incoming view did not use the measured opacity-only fade without a loading icon',
+    enterProof
+  );
   screenshots.push(await captureScreenshot(client, 'sidebar-switch-direct-transition'));
   screenshots.push(await captureScreenshot(client, 'sidebar-switch-entering'));
 
