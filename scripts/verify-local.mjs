@@ -37,18 +37,8 @@ const pureChecks = [
 ];
 
 const electronChecks = [
-  ['test:player-defaults'],
-  ['test:player-layout'],
-  ['test:friends-panel'],
-  ['test:legal-panel'],
-  ['test:player-privacy'],
-  ['test:settings-profile'],
-  ['test:write-defaults'],
-  ['test:developer-secret'],
-  ['test:developer-update-log-auth'],
-  ['test:developer-client-bypass'],
-  ['test:developer-instance-dir'],
-  ['test:developer-modpack-zip'],
+  // Run the least-recently validated cross-platform flows first so native CI
+  // surfaces a new platform assumption without replaying every proven smoke.
   ['test:cloud-login'],
   ['test:cache-only-cloud'],
   ['test:launcher-self-update'],
@@ -62,7 +52,19 @@ const electronChecks = [
   ['test:release-flow'],
   ['test:release-ui-flow'],
   ['test:single-instance'],
-  ['test:close-during-update']
+  ['test:close-during-update'],
+  ['test:developer-client-bypass'],
+  ['test:developer-instance-dir'],
+  ['test:developer-modpack-zip'],
+  ['test:player-defaults'],
+  ['test:player-layout'],
+  ['test:friends-panel'],
+  ['test:legal-panel'],
+  ['test:player-privacy'],
+  ['test:settings-profile'],
+  ['test:write-defaults'],
+  ['test:developer-secret'],
+  ['test:developer-update-log-auth'],
 ];
 
 const verbose = process.argv.includes('--verbose') || process.env.AHT_VERIFY_VERBOSE === '1';
