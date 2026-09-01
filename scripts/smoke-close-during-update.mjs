@@ -148,6 +148,28 @@ function connect(wsUrl) {
   });
 }
 
+async function connectReadyLauncherPage() {
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const target = await waitForTarget();
+    const candidate = await connect(target.webSocketDebuggerUrl);
+    try {
+      const probe = await candidate.call('Runtime.evaluate', {
+        expression: '1',
+        returnByValue: true
+      }, 5000);
+      if (probe.result?.value === 1) return { client: candidate, target };
+      throw new Error(`Unexpected CDP readiness response: ${JSON.stringify(probe)}`);
+    } catch (error) {
+      lastError = error;
+      candidate.close();
+      checkpoint(`debugger readiness retry ${attempt + 1}: ${error.message || error}`);
+      await sleep(250);
+    }
+  }
+  throw new Error(`Launcher debugger did not become responsive: ${lastError?.message || 'no response'}`);
+}
+
 async function evaluate(client, expression) {
   const result = await client.call('Runtime.evaluate', {
     expression,
@@ -330,16 +352,14 @@ const child = spawn(electronBin, electronArgs, {
 
 let client;
 try {
-  const target = await waitForTarget().catch((error) => {
+  const attached = await connectReadyLauncherPage().catch((error) => {
     if (fs.existsSync(startupProbePath)) {
       error.message = `${error.message}; startup probe: ${fs.readFileSync(startupProbePath, 'utf8').trim()}`;
     }
     throw error;
   });
   checkpoint('debugger target ready');
-  client = await connect(target.webSocketDebuggerUrl);
-  await client.call('Runtime.enable');
-  await client.call('Page.enable');
+  client = attached.client;
   await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   checkpoint('player DOM ready');
   await waitFor(client, `
