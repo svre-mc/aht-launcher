@@ -269,11 +269,14 @@ jobs:
           test -f "$DMG"
           rm -rf "$MOUNT_POINT" "$INSTALL_ROOT"
           mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
-          hdiutil attach "$DMG" -nobrowse -readonly -acceptlicense -mountpoint "$MOUNT_POINT"
+          cleanup_mount() { hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true; }
+          trap cleanup_mount EXIT
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
           SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 2 -type d -name 'A Hard Time Launcher macOS.app' -print -quit)"
           test -n "$SOURCE_APP"
           /usr/bin/ditto "$SOURCE_APP" "$INSTALLED_APP"
           hdiutil detach "$MOUNT_POINT"
+          trap - EXIT
 
           test -x "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS"
           lipo -archs "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS" | tee "validation/${{ matrix.arch }}/installed-architectures.txt"
