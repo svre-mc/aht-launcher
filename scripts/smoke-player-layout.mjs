@@ -868,6 +868,7 @@ try {
     const sidebar = document.querySelector('.sidebar');
     const sidebarStyle = getComputedStyle(sidebar);
     return {
+      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
       sidebar: {
         backgroundColor: sidebarStyle.backgroundColor,
         backgroundImage: sidebarStyle.backgroundImage,
@@ -882,6 +883,10 @@ try {
   const activeSidebar = sidebarStateProof.active;
   const neutralSidebar = sidebarStateProof.neutral;
   const sidebarCloseTo = (actual, expected, tolerance = 0.75) => Math.abs(Number(actual) - Number(expected)) <= tolerance;
+  const neutralThumbTransitionSeconds = Number.parseFloat(neutralSidebar?.thumbTransitionDuration);
+  const neutralThumbTransitionMatchesMotionPolicy = sidebarStateProof.reducedMotion
+    ? Number.isFinite(neutralThumbTransitionSeconds) && neutralThumbTransitionSeconds <= 0.001
+    : neutralSidebar?.thumbTransitionDuration === '0.2s';
   if (
     sidebarStateProof.sidebar.backgroundColor !== 'rgb(22, 25, 26)'
     || sidebarStateProof.sidebar.backgroundImage !== 'none'
@@ -925,7 +930,7 @@ try {
     || neutralSidebar.subtitleColor !== 'rgb(106, 113, 117)'
     || Math.abs(neutralSidebar.thumbOpacity - 0.75) > 0.001
     || neutralSidebar.thumbFilter !== 'none'
-    || neutralSidebar.thumbTransitionDuration !== '0.2s'
+    || !neutralThumbTransitionMatchesMotionPolicy
     || neutralSidebar.copyOpacity !== 1
     || neutralSidebar.copyFilter !== 'none'
   ) {
