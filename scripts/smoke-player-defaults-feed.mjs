@@ -327,8 +327,14 @@ try {
   `, 'apply recommended setup');
   const appliedPathText = `${appliedSetup.instanceDir}\n${appliedSetup.playCwd}`;
   const leakedAppliedInstanceFragments = legacyInstanceFragments.filter((item) => appliedPathText.toLowerCase().includes(item.toLowerCase()));
-  if (leakedAppliedInstanceFragments.length || !appliedSetup.instanceDir.includes('AHT') || !appliedSetup.instanceDir.includes('A Hard Time')) {
-    throw new Error(`Player auto-setup selected an unsafe instance path: ${JSON.stringify({ leakedAppliedInstanceFragments, appliedSetup })}`);
+  const appliedInstanceMatchesPolicy = path.resolve(appliedSetup.instanceDir) === path.resolve(expectedInstanceDir);
+  const appliedWorkingDirMatchesPolicy = path.resolve(appliedSetup.playCwd) === path.resolve(expectedInstanceDir);
+  if (leakedAppliedInstanceFragments.length || !appliedInstanceMatchesPolicy || !appliedWorkingDirMatchesPolicy) {
+    throw new Error(`Player auto-setup selected an unsafe instance path: ${JSON.stringify({
+      expectedInstanceDir,
+      leakedAppliedInstanceFragments,
+      appliedSetup
+    })}`);
   }
   console.log(JSON.stringify({
     ok: true,
