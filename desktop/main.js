@@ -3743,8 +3743,18 @@ async function reportCurrentLauncherVersion(config = {}, identity = {}) {
   if (!version || !installId || !minecraftUsername || launcherVersionWasReported(identity, version)) {
     return { skipped: true, reason: 'launcher version already reported or player identity is incomplete' };
   }
-  const previousVersion = String(identity.lastReportedLauncherVersion || '').trim();
-  const result = await sendLauncherEvent(config, runtimeIdentity(identity), {
+  const latestIdentity = await loadIdentity();
+  if (
+    String(latestIdentity.installId || '').trim() !== installId
+    || normalizeMinecraftUsername(latestIdentity.minecraftUsername).toLowerCase() !== minecraftUsername.toLowerCase()
+  ) {
+    return { skipped: true, reason: 'player identity changed before launcher update submission' };
+  }
+  if (launcherVersionWasReported(latestIdentity, version)) {
+    return { skipped: true, reason: 'launcher version was reported by an earlier request' };
+  }
+  const previousVersion = String(latestIdentity.lastReportedLauncherVersion || '').trim();
+  const result = await sendLauncherEvent(config, runtimeIdentity(latestIdentity), {
     type: 'launcher_update_completed',
     version,
     toVersion: version,
