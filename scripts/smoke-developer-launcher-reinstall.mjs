@@ -734,7 +734,7 @@ try {
   const developerTarget = await waitForTarget(developerPort, 'Developer Launcher debugger');
   developerClient = await connect(developerTarget.webSocketDebuggerUrl);
   await developerClient.call('Runtime.enable');
-  await waitFor(developerClient, "document.readyState === 'complete' && document.querySelector('#developerLoginForm') && window.aht", 'developer launcher DOM');
+  await waitFor(developerClient, "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm') && window.aht", 'hydrated developer launcher DOM');
   await installToastProbe(developerClient);
 
   await evaluate(developerClient, `
