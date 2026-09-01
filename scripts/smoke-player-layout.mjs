@@ -314,6 +314,12 @@ const ptbLatest = {
   zipFormat: 'aht-full-client-zip',
   zip: { path: 'packs/a-hard-time-ptb-10.0.0-ptb.1.zip', size: 321, sha256: '1'.repeat(64) }
 };
+const launcherSocialLinks = Object.freeze({
+  discord: 'https://discord.com/invite/LayoutSmoke',
+  youtube: 'https://www.youtube.com/@AHardTimeLayout',
+  tiktok: 'https://www.tiktok.com/@ahardtimelayout',
+  forum: 'https://ahardtime.net/forum/launcher-layout'
+});
 
 await writeJson(path.join(userData, 'identity.json'), {
   installId: 'layout-smoke-install',
@@ -353,6 +359,17 @@ const server = http.createServer((request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(ptbLatest));
+    return;
+  }
+  if (url.pathname === '/update-media/launcher-social-links.json') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify({
+      schema: 'aht-launcher-social-links/v1',
+      links: launcherSocialLinks,
+      publishedAt: '2026-08-30T12:00:00.000Z',
+      publishedBy: 'Player Layout Smoke'
+    }));
     return;
   }
   if (url.pathname === '/api/update-logs') {
@@ -484,6 +501,7 @@ try {
       const editableField = document.querySelector('input');
       const repairIcon = scanButton?.querySelector('.button-icon');
       if (!(frame && workspace && heroPanel && heroArt && actions && scanButton && settingsButton && launchStrip && launchInfo && launchActions && playButton && footerLogo && footerLogoImage?.complete && oldFacts && statusBadge && editableField && repairIcon)) return false;
+      if (playButton.classList.contains('is-disabled') || playButton.getAttribute('aria-disabled') === 'true') return false;
       const workspaceRect = workspace.getBoundingClientRect();
       const stripRect = launchStrip.getBoundingClientRect();
       const actionRect = launchActions.getBoundingClientRect();
@@ -1308,17 +1326,145 @@ try {
   if (!newsNavigationProof.activeTab || !newsNavigationProof.packSelected || newsNavigationProof.firstTitle !== 'Launcher Stability Pass' || newsNavigationProof.redundantHeader || newsNavigationProof.openButtons !== 2 || newsNavigationProof.likeButtons !== 2) {
     throw new Error(`News navigation must retain pack context and separate each article action from its like action: ${JSON.stringify(newsNavigationProof)}`);
   }
+  const refreshedSocialLinks = await evaluate(client, `loadLauncherSocialLinks({ forceRefresh: true })`);
+  if (
+    refreshedSocialLinks?.source !== 'published'
+    || JSON.stringify(refreshedSocialLinks?.links) !== JSON.stringify(launcherSocialLinks)
+  ) {
+    throw new Error(`Player launcher did not load the published Social Links manifest: ${JSON.stringify(refreshedSocialLinks)}`);
+  }
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  await evaluate(client, `document.querySelector('#gameTab').focus(); true`);
+  await sleep(220);
+  const socialMenuRestProof = await evaluate(client, `(() => {
+    const menu = document.querySelector('#launcherSocialMenu');
+    const discord = document.querySelector('#discordSocialLink');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const profile = document.querySelector('#profileFriendsButton');
+    const style = getComputedStyle(dropdown);
+    return {
+      source: menu?.dataset.source || '',
+      directButtons: [...menu.children].filter((node) => node.matches?.('.social-link')).map((node) => node.id),
+      dropdownButtons: [...dropdown.querySelectorAll(':scope > .social-link')].map((node) => node.id),
+      profileImmediatelyAfter: menu?.nextElementSibling === profile && profile?.previousElementSibling === menu,
+      menuBackground: getComputedStyle(menu).backgroundColor,
+      discordBackground: getComputedStyle(discord).backgroundColor,
+      dropdownBackground: style.backgroundColor,
+      dropdownVisibility: style.visibility,
+      dropdownOpacity: Number(style.opacity),
+      dropdownPointerEvents: style.pointerEvents,
+      expanded: discord?.getAttribute('aria-expanded')
+    };
+  })()`);
+  if (
+    socialMenuRestProof.source !== 'published'
+    || JSON.stringify(socialMenuRestProof.directButtons) !== JSON.stringify(['discordSocialLink'])
+    || JSON.stringify(socialMenuRestProof.dropdownButtons) !== JSON.stringify(['youtubeSocialLink', 'tiktokSocialLink', 'forumSocialLink'])
+    || !socialMenuRestProof.profileImmediatelyAfter
+    || !/rgba\(0, 0, 0, 0\)|transparent/.test(socialMenuRestProof.menuBackground)
+    || !/rgba\(0, 0, 0, 0\)|transparent/.test(socialMenuRestProof.discordBackground)
+    || !/rgba\(0, 0, 0, 0\)|transparent/.test(socialMenuRestProof.dropdownBackground)
+    || socialMenuRestProof.dropdownVisibility !== 'hidden'
+    || socialMenuRestProof.dropdownOpacity !== 0
+    || socialMenuRestProof.dropdownPointerEvents !== 'none'
+    || socialMenuRestProof.expanded !== 'false'
+  ) {
+    throw new Error(`Social menu rest state must be one background-free Discord icon immediately left of the profile: ${JSON.stringify(socialMenuRestProof)}`);
+  }
+  const discordHoverPoint = await evaluate(client, `(() => {
+    const rect = document.querySelector('#discordSocialLink').getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`);
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: discordHoverPoint.x, y: discordHoverPoint.y });
+  const socialMenuExpandedProof = await waitFor(client, `(() => {
+    const discord = document.querySelector('#discordSocialLink');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const style = getComputedStyle(dropdown);
+    if (style.visibility !== 'visible' || Number(style.opacity) < 0.99) return false;
+    const discordRect = discord.getBoundingClientRect();
+    const rows = [...dropdown.querySelectorAll(':scope > .social-link')].map((node) => {
+      const rect = node.getBoundingClientRect();
+      return { id: node.id, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    });
+    return {
+      expanded: discord.getAttribute('aria-expanded'),
+      pointerEvents: style.pointerEvents,
+      discordBottom: discordRect.bottom,
+      rows
+    };
+  })()`, 'vertical Social Links dropdown');
+  const socialRows = socialMenuExpandedProof.rows || [];
+  if (
+    socialMenuExpandedProof.expanded !== 'true'
+    || socialMenuExpandedProof.pointerEvents !== 'auto'
+    || socialRows.length !== 3
+    || socialRows[0].top <= socialMenuExpandedProof.discordBottom
+    || !(socialRows[0].top < socialRows[1].top && socialRows[1].top < socialRows[2].top)
+    || socialRows.some((row) => Math.abs(row.left - socialRows[0].left) > 0.75)
+    || socialRows.some((row) => row.width < 40 || row.height < 40)
+  ) {
+    throw new Error(`Social Links hover/focus menu is not a single vertical column below Discord: ${JSON.stringify(socialMenuExpandedProof)}`);
+  }
+  const diagonalCorridorPoint = {
+    x: socialRows[0].left - 8,
+    y: socialMenuExpandedProof.discordBottom + ((socialRows[0].top - socialMenuExpandedProof.discordBottom) / 2)
+  };
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: diagonalCorridorPoint.x, y: diagonalCorridorPoint.y });
+  await sleep(80);
+  const corridorProof = await evaluate(client, `(() => {
+    const menu = document.querySelector('#launcherSocialMenu');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const hit = document.elementFromPoint(${JSON.stringify(diagonalCorridorPoint.x)}, ${JSON.stringify(diagonalCorridorPoint.y)});
+    const style = getComputedStyle(dropdown);
+    return {
+      menuHover: menu.matches(':hover'),
+      visible: style.visibility === 'visible' && Number(style.opacity) > 0.5,
+      hitInsideDropdown: Boolean(hit?.closest?.('#launcherSocialDropdown')),
+      expanded: document.querySelector('#discordSocialLink').getAttribute('aria-expanded')
+    };
+  })()`);
+  if (!corridorProof.menuHover || !corridorProof.visible || !corridorProof.hitInsideDropdown || corridorProof.expanded !== 'true') {
+    throw new Error(`Social Links diagonal pointer corridor collapsed between Discord and the dropdown: ${JSON.stringify({ diagonalCorridorPoint, corridorProof })}`);
+  }
+  const youtubePoint = {
+    x: socialRows[0].left + (socialRows[0].width / 2),
+    y: socialRows[0].top + (socialRows[0].height / 2)
+  };
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: youtubePoint.x, y: youtubePoint.y });
+  await sleep(80);
+  const youtubeHoverProof = await evaluate(client, `(() => ({
+    visible: getComputedStyle(document.querySelector('#launcherSocialDropdown')).visibility,
+    hovered: document.querySelector('#youtubeSocialLink').matches(':hover'),
+    expanded: document.querySelector('#discordSocialLink').getAttribute('aria-expanded')
+  }))()`);
+  if (youtubeHoverProof.visible !== 'visible' || !youtubeHoverProof.hovered || youtubeHoverProof.expanded !== 'true') {
+    throw new Error(`Social Links dropdown disappeared before the pointer reached YouTube: ${JSON.stringify(youtubeHoverProof)}`);
+  }
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  await evaluate(client, `document.querySelector('#gameTab').focus(); true`);
+  const socialMenuClosedProof = await waitFor(client, `(() => {
+    const discord = document.querySelector('#discordSocialLink');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const style = getComputedStyle(dropdown);
+    return style.visibility === 'hidden' && Number(style.opacity) === 0 && discord.getAttribute('aria-expanded') === 'false';
+  })()`, 'Social Links dropdown close after focus leaves');
   const externalLinkProof = await evaluate(client, `
-    Promise.all([window.aht.openExternal('store'), window.aht.openExternal('unapproved')]).then(([allowed, denied]) => ({ allowed, denied }))
+    Promise.all(['store', 'discord', 'youtube', 'tiktok', 'forum', 'unapproved'].map(async (destination) => [destination, await window.aht.openExternal(destination)]))
+      .then((entries) => Object.fromEntries(entries))
   `);
   if (
-    externalLinkProof.allowed?.ok !== true
-    || externalLinkProof.allowed?.captured !== true
-    || externalLinkProof.allowed?.target !== 'https://ahardtime.net/shop'
-    || externalLinkProof.denied?.ok !== false
-    || externalLinkProof.denied?.opened !== false
+    externalLinkProof.store?.ok !== true
+    || externalLinkProof.store?.captured !== true
+    || externalLinkProof.store?.target !== 'https://ahardtime.net/shop'
+    || externalLinkProof.discord?.target !== launcherSocialLinks.discord
+    || externalLinkProof.youtube?.target !== launcherSocialLinks.youtube
+    || externalLinkProof.tiktok?.target !== launcherSocialLinks.tiktok
+    || externalLinkProof.forum?.target !== launcherSocialLinks.forum
+    || ['discord', 'youtube', 'tiktok', 'forum'].some((key) => externalLinkProof[key]?.ok !== true || externalLinkProof[key]?.captured !== true)
+    || externalLinkProof.unapproved?.ok !== false
+    || externalLinkProof.unapproved?.opened !== false
   ) {
-    throw new Error(`External-link allowlist did not permit only the official AHT store: ${JSON.stringify(externalLinkProof)}`);
+    throw new Error(`External-link allowlist did not map the exact published social destinations and deny unknown keys: ${JSON.stringify(externalLinkProof)}`);
   }
   await click(client, '#storeTab');
   await click(client, '#gameTab');
@@ -1563,6 +1709,12 @@ try {
     ok: true,
     root,
     screenshots,
+    socialMenu: {
+      rest: socialMenuRestProof,
+      expanded: socialMenuExpandedProof,
+      closed: socialMenuClosedProof,
+      externalLinks: externalLinkProof
+    },
     toastLifetimeMs: {
       defaultError: toastLifetimeProof.defaultError.durationMs,
       overriddenSuccess: toastLifetimeProof.overriddenSuccess.durationMs

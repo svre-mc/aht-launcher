@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
+import { launcherProofPath, launcherProofStorageDir } from '../src/launcherProof.js';
 
 const port = Number(process.argv[2] || 10210);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -18,6 +19,15 @@ const userData = path.join(root, 'userData');
 const stableInstanceDir = path.join(root, 'AHT', 'A Hard Time Developer');
 const ptbInstanceDir = path.join(root, 'AHT', 'A Hard Time PTB');
 const playerdataSentinel = path.join(ptbInstanceDir, 'saves', 'SmokeWorld', 'playerdata', 'preserve-me.dat');
+const developerCredentialsFile = path.join(userData, 'developer.credentials.json');
+const socialLinksPublishCapturePath = path.join(root, 'launcher-social-links-publish.json');
+const corruptCredentialCiphertext = Buffer.from('not-a-valid-safe-storage-record', 'utf8').toString('base64');
+const publishedSocialLinks = {
+  discord: 'https://discord.com/invite/AHTSmoke',
+  youtube: 'https://www.youtube.com/@AHardTimeSmoke',
+  tiktok: 'https://www.tiktok.com/@ahardtimesmoke',
+  forum: 'https://ahardtime.net/forum/social-smoke'
+};
 const loginCalls = [];
 const updateLogAuthHeaders = [];
 const launcherProofAuthHeaders = [];
@@ -114,11 +124,17 @@ function connect(wsUrl) {
 }
 
 async function evaluate(client, expression) {
-  const result = await client.call('Runtime.evaluate', {
-    expression,
-    awaitPromise: true,
-    returnByValue: true
-  });
+  let result;
+  try {
+    result = await client.call('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true
+    });
+  } catch (error) {
+    error.message = `${error.message}; expression: ${String(expression).replace(/\s+/g, ' ').trim().slice(0, 240)}`;
+    throw error;
+  }
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
@@ -167,6 +183,16 @@ await writeJson(path.join(userData, 'identity.json'), {
   installId: 'dev-smoke-install',
   minecraftUsername: 'DevSmoke'
 });
+await writeJson(developerCredentialsFile, {
+  schemaVersion: 2,
+  username: 'admin',
+  protectedPassword: {
+    encrypted: true,
+    value: corruptCredentialCiphertext
+  },
+  createdAt: '2026-08-01T00:00:00.000Z',
+  protectedBy: 'electron-safe-storage'
+});
 await writeJson(path.join(stableInstanceDir, '.aht-launcher', 'launcher-proof.json'), {
   protocol: 'aht-launcher-proof-v1',
   schemaVersion: 1,
@@ -204,6 +230,20 @@ const server = http.createServer(async (request, response) => {
   };
   if (url.pathname === '/latest.json') {
     sendJson(200, { packId: 'a-hard-time-dregora', name: 'A Hard Time', version: '2.8.5', required: true, zip: { url: 'packs/a-hard-time-2.8.5.zip' } });
+    return;
+  }
+  if (url.pathname === '/update-media/launcher-social-links.json') {
+    sendJson(200, {
+      schema: 'aht-launcher-social-links/v1',
+      links: {
+        discord: 'https://discord.com/invite/AHTPublished',
+        youtube: 'https://www.youtube.com/@AHardTimePublished',
+        tiktok: 'https://www.tiktok.com/@ahardtimepublished',
+        forum: 'https://ahardtime.net/forum/published'
+      },
+      publishedAt: '2026-08-30T12:00:00.000Z',
+      publishedBy: 'Developer Smoke'
+    });
     return;
   }
   if (url.pathname === '/ptb/latest.json') {
@@ -378,10 +418,11 @@ const child = spawn(electronBin, electronArgs, {
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
     AHT_DEVELOPER_USERNAME: 'admin',
-    AHT_DEVELOPER_PASSWORD: 'test-dev-password',
+    AHT_DEVELOPER_PASSWORD: '',
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_REMOTE_ADMIN_TIMEOUT_MS: '120',
+    AHT_TEST_SOCIAL_LINKS_PUBLISH_CAPTURE_PATH: socialLinksPublishCapturePath,
     SystemDrive: root,
     ELECTRON_ENABLE_LOGGING: '0'
   },
@@ -395,7 +436,9 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'renderer');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting')", 'revealed renderer');
   const migratedStatus = await waitFor(client, `
     window.aht.getStatus('aht').then((status) => status.config?.latestUrl ? status : false)
   `, 'migrated developer status');
@@ -432,6 +475,22 @@ try {
   if (!proof.login?.remoteAuthenticated || proof.login?.remotePending) {
     throw new Error(`Developer login returned before Worker authentication was ready: ${JSON.stringify(proof.login)}`);
   }
+  if (!proof.login?.credentialsRecovered || proof.login?.credentialRecoverySource !== 'worker-safe-storage-recovery') {
+    throw new Error(`Malformed protected credentials were not recovered through the authoritative Worker login: ${JSON.stringify(proof.login)}`);
+  }
+  const recoveredCredentials = JSON.parse(fs.readFileSync(developerCredentialsFile, 'utf8'));
+  const recoveredCredentialJson = JSON.stringify(recoveredCredentials);
+  if (
+    recoveredCredentials.schemaVersion !== 2
+    || recoveredCredentials.username !== 'admin'
+    || recoveredCredentials.protectedPassword?.encrypted !== true
+    || recoveredCredentials.protectedPassword?.value === corruptCredentialCiphertext
+    || recoveredCredentials.recoveredFrom !== 'worker-safe-storage-recovery'
+    || !recoveredCredentials.recoveredAt
+    || recoveredCredentialJson.includes('test-dev-password')
+  ) {
+    throw new Error(`Recovered developer credentials were not rewritten with current OS encryption: ${recoveredCredentialJson}`);
+  }
   if (!proof.social?.available || proof.social?.username !== 'DevSmoke') {
     throw new Error(`Immediate developer proof/social request failed: ${JSON.stringify(proof.social)}`);
   }
@@ -458,7 +517,9 @@ try {
   ) {
     throw new Error(`Immediate launcher proof did not replace stale developer auth for every retry: ${JSON.stringify(launcherProofAuthHeaders)}`);
   }
-  const developerProofPath = path.join(userData, '.aht-launcher', 'launcher-proof.developer.json');
+  const developerProofPath = launcherProofPath(stableInstanceDir, 'developer', {
+    proofDir: launcherProofStorageDir(path.join(userData, '.aht-launcher'), stableInstanceDir)
+  });
   const refreshedLauncherProof = JSON.parse(fs.readFileSync(developerProofPath, 'utf8'));
   if (
     refreshedLauncherProof.payload?.launcherChannel !== 'developer'
@@ -474,6 +535,45 @@ try {
   }
   if (updateLogAuthHeaders.join('|') !== 'Bearer fresh-token') {
     throw new Error(`Expected update logs to use the refreshed token, got ${JSON.stringify(updateLogAuthHeaders)}`);
+  }
+
+  await evaluate(client, `(() => {
+    developerAuthenticated = true;
+    developerSocialLinksLoaded = true;
+    document.body.classList.remove('dev-locked');
+    activateTab('developer');
+    activateDeveloperSection('socialLinkTools');
+    const values = ${JSON.stringify(publishedSocialLinks)};
+    for (const [key, selector] of Object.entries({
+      discord: '#discordUrlInput',
+      youtube: '#youtubeUrlInput',
+      tiktok: '#tiktokUrlInput',
+      forum: '#forumUrlInput'
+    })) {
+      const input = document.querySelector(selector);
+      input.value = values[key];
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    document.querySelector('#r2AccountIdInput').value = '0123456789abcdef0123456789abcdef';
+    document.querySelector('#r2AccessKeyIdInput').value = 'smoke-r2-access-key';
+    document.querySelector('#r2SecretAccessKeyInput').value = 'smoke-r2-secret-key';
+    document.querySelector('#publishSocialLinksButton').click();
+    return true;
+  })()`);
+  await waitFor(client, `(() => {
+    const status = document.querySelector('#socialLinksPublishStatus');
+    return status?.classList.contains('ok') && /Social links published/i.test(status.textContent);
+  })()`, 'Social Links publish confirmation');
+  const socialLinksPublishCapture = JSON.parse(fs.readFileSync(socialLinksPublishCapturePath, 'utf8'));
+  if (
+    socialLinksPublishCapture.bucket !== 'ahtlauncher'
+    || socialLinksPublishCapture.key !== 'update-media/launcher-social-links.json'
+    || socialLinksPublishCapture.manifest?.schema !== 'aht-launcher-social-links/v1'
+    || JSON.stringify(socialLinksPublishCapture.manifest?.links) !== JSON.stringify(publishedSocialLinks)
+    || socialLinksPublishCapture.manifest?.publishedBy !== 'admin'
+    || !/^[a-f0-9]{64}$/.test(socialLinksPublishCapture.sha256 || '')
+  ) {
+    throw new Error(`Social Links publish did not capture the exact fixed-key manifest: ${JSON.stringify(socialLinksPublishCapture)}`);
   }
 
   await evaluate(client, 'loadPlayerDownloadHistory()');
@@ -652,6 +752,13 @@ try {
     ok: true,
     root,
     loginCalls: loginCalls.length,
+    credentialRecoverySource: proof.login.credentialRecoverySource,
+    credentialReencrypted: true,
+    socialLinksPublish: {
+      key: socialLinksPublishCapture.key,
+      links: socialLinksPublishCapture.manifest.links,
+      verified: true
+    },
     launcherProofAuthHeaders,
     updateLogAuthHeaders,
     alternateOriginSummaryAuthHeaders,

@@ -7,6 +7,7 @@ import {
   createLaunchAttempt,
   formatLaunchReport,
   LAUNCH_LOG_FILE_PREFIX,
+  LATEST_LAUNCH_LOG_FILE,
   LAUNCH_LOG_RETENTION,
   runLaunchStep,
   sanitizeDiagnosticText,
@@ -72,19 +73,37 @@ try {
     '--accessToken very-secret',
     'Process crashed with exit code 1'
   ];
-  completeLaunchAttempt(attempt, 'FAILED', new Error('Repair required. 1 mod file issue found. password=hunter2'));
+  const diagnosticError = new Error('Repair required. 1 mod file issue found. password=hunter2');
+  diagnosticError.name = 'AhtManagedIntegrityError';
+  diagnosticError.code = 'AHT_MANAGED_FILE_MISSING';
+  diagnosticError.subsystem = 'managed-modpack-integrity';
+  diagnosticError.diagnosticFlags = [
+    { status: 'FAIL', code: 'MANAGED_FILE_MISSING', detail: 'mods/example.jar; expected sha256 abc123' },
+    { status: 'INFO', code: 'MANAGED_FILES_CHECKED', detail: '305 managed files checked.' }
+  ];
+  completeLaunchAttempt(attempt, 'FAILED', diagnosticError);
   const saved = await writeLaunchReport(instanceDir, attempt);
   const expectedDirectory = path.join(instanceDir, 'logs', 'launcher');
   assert.equal(path.dirname(saved.path), expectedDirectory, 'Launch report escaped the selected AHT instance logs folder.');
-  assert.match(path.basename(saved.path), /^AHT-Launch-2026-08-04T03-15-20-123Z-FAILED-11111111\.txt$/);
+  assert.equal(path.basename(saved.path), LATEST_LAUNCH_LOG_FILE, 'Latest launch report did not use the stable support filename.');
+  assert.match(path.basename(saved.archivePath), /^AHT-Launch-2026-08-04T03-15-20-123Z-FAILED-11111111\.txt$/);
+  assert.equal(await fs.readFile(saved.path, 'utf8'), saved.text, 'ahtlatest.log did not contain the latest plain-text report.');
   assert.match(saved.text, /^A HARD TIME LAUNCH REPORT\r?\n/);
-  for (const heading of ['LIKELY CAUSE', 'RECOMMENDED ACTION', 'LAUNCH PROCESS', 'REQUIREMENTS', 'PC AND RUNTIME', 'RECENT MINECRAFT LAUNCHER SIGNALS', 'TECHNICAL DETAILS', 'PRIVACY']) {
+  for (const heading of ['LIKELY CAUSE', 'LAUNCH PROCESS', 'REQUIREMENTS', 'ERROR FLAGS', 'PC AND RUNTIME', 'RECENT MINECRAFT LAUNCHER SIGNALS', 'TECHNICAL DETAILS']) {
     assert(saved.text.includes(heading), `Launch report is missing ${heading}.`);
   }
+  for (const removed of ['Attempt ID:', 'Started:', 'Finished:', 'RECOMMENDED ACTION', 'Passwords, Microsoft/Minecraft tokens']) {
+    assert(!saved.text.includes(removed), `Launch report still includes removed text: ${removed}`);
+  }
+  assert(!/(?:^|\r?\n)PRIVACY\r?\n/.test(saved.text), 'Launch report still includes the removed PRIVACY section.');
   assert(saved.text.includes('One or more managed modpack files are missing'), 'Likely cause was not derived from the exact failed stage.');
   assert(saved.text.includes('[FAIL       ] 1. Verify managed modpack files'), 'Failed process step was not listed cleanly.');
   assert(saved.text.includes('Windows 11 10.0.26100') && saved.text.includes('Test CPU') && saved.text.includes('Test GPU'), 'PC specification summary is incomplete.');
   assert(saved.text.includes('64-bit Java 8'), 'Requirements checklist is incomplete.');
+  assert(saved.text.includes('[FAIL       ] FAILED_STEP - integrity: Verify managed modpack files'), 'Failed-step flag is missing.');
+  assert(saved.text.includes('[FAIL       ] AHT_MANAGED_FILE_MISSING - AhtManagedIntegrityError / managed-modpack-integrity'), 'Typed error flag is missing.');
+  assert(saved.text.includes('[FAIL       ] MANAGED_FILE_MISSING - mods/example.jar; expected sha256 abc123'), 'Deep subsystem diagnostic flag is missing.');
+  assert(saved.text.includes('Trace: AhtManagedIntegrityError: Repair required.'), 'Sanitized JavaScript trace is missing.');
   assert(!saved.text.includes('private-value') && !saved.text.includes('very-secret') && !saved.text.includes('hunter2'), 'Launch report leaked a credential or token.');
   assert(!saved.text.trim().startsWith('{'), 'Launch report regressed to a raw JSON dump.');
 
@@ -111,7 +130,12 @@ try {
   const newest = reportNames.sort().at(-1);
   const newestText = await fs.readFile(path.join(expectedDirectory, newest), 'utf8');
   assert(newestText.includes('Result: HANDOFF CONFIRMED'), 'Successful handoff was mislabeled as full game success.');
-  assert(newestText.includes('If Minecraft later exits'), 'Handoff report does not explain the separate post-launch crash boundary.');
+  assert(newestText.includes('completed its handoff to a verified Minecraft Launcher window'), 'Handoff report lost its exact outcome boundary.');
+  assert.equal(
+    await fs.readFile(path.join(expectedDirectory, LATEST_LAUNCH_LOG_FILE), 'utf8'),
+    newestText,
+    'ahtlatest.log was not replaced with the newest launch report.'
+  );
 
   const postHandoffCrash = createLaunchAttempt({
     attemptId: '99999999-2222-4333-8444-555555555555',

@@ -3,8 +3,24 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { hashFile, normalizeRelPath, pathExists, readJsonFile, safeJoin } from './utils.js';
 
-const MONITORED_ROOTS = ['mods'];
+const MODS_ONLY_MONITORED_ROOTS = Object.freeze(['mods']);
+const LAUNCH_CRITICAL_MONITORED_ROOTS = Object.freeze([
+  'fancymenu_data',
+  'mods',
+  'resourcepacks',
+  'resources',
+  'scripts',
+  'structures'
+]);
 const ALLOWED_UNMANAGED_MOD_DIRECTORIES = new Set(['openterraingenerator']);
+const PLAYER_MUTABLE_MANAGED_ROOTS = new Set(['config']);
+const PLAYER_MUTABLE_MANAGED_FILES = new Set([
+  'options.txt',
+  'optionsof.txt',
+  'optionsshaders.txt',
+  'servers.dat',
+  'servers.dat_old'
+]);
 
 function yieldToEventLoop() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -51,6 +67,17 @@ function managedFiles(managed = [], requiredManaged = []) {
     byPath.set(item.relativePath, item);
   }
   return [...byPath.values()];
+}
+
+export function isLaunchCriticalManagedPath(relativePath = '') {
+  const normalized = normalizeRelPath(String(relativePath || '')).toLowerCase();
+  if (!normalized || PLAYER_MUTABLE_MANAGED_FILES.has(normalized)) return false;
+  const [root] = normalized.split('/');
+  return !PLAYER_MUTABLE_MANAGED_ROOTS.has(root);
+}
+
+export function launchCriticalManagedFiles(managed = []) {
+  return managedFiles(managed, []).filter((item) => isLaunchCriticalManagedPath(item.relativePath));
 }
 
 function managedModFiles(managed = [], requiredManaged = []) {
@@ -133,7 +160,6 @@ function managedDirectoryPrefixes(managedSet) {
 async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
   const added = [];
   const yieldEvery = Math.max(1, Number(options.yieldEvery) || 25);
-  const managedDirs = managedDirectoryPrefixes(managedSet);
   let visited = 0;
 
   const addFileIssue = async (abs, rel, size) => {
@@ -147,20 +173,10 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
     });
   };
 
-  const addDirectoryIssue = (rel) => {
-    const folderPath = rel.endsWith('/') ? rel : `${rel}/`;
-    if (managedSet.has(rel) || managedSet.has(folderPath) || isAllowedUnmanagedModPath(folderPath)) {
-      return;
-    }
-    added.push({
-      path: folderPath,
-      size: 0,
-      source: 'unmanaged-directory',
-      entryType: 'directory'
-    });
-  };
-
-  for (const root of MONITORED_ROOTS) {
+  const monitoredRoots = Array.isArray(options.monitoredRoots) && options.monitoredRoots.length
+    ? options.monitoredRoots
+    : MODS_ONLY_MONITORED_ROOTS;
+  for (const root of monitoredRoots) {
     const rootPath = safeJoin(instanceDir, root);
     const entries = await fs.readdir(rootPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -176,20 +192,15 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
         continue;
       }
       if (entry.isDirectory()) {
-        const folderPath = `${rel}/`;
-        if (!managedDirs.has(folderPath.toLowerCase())) {
-          addDirectoryIssue(rel);
-        } else {
-          for (const file of await walkFiles(rootPath, entry.name, { yieldEvery, maxFiles: Math.max(0, limit - added.length + managedSet.size) })) {
-            const fileRel = normalizeRelPath(`${root}/${file.rel}`);
-            visited += 1;
-            await addFileIssue(file.abs, fileRel, file.size);
-            if (visited % yieldEvery === 0) {
-              await yieldToEventLoop();
-            }
-            if (added.length >= limit) {
-              break;
-            }
+        for (const file of await walkFiles(rootPath, entry.name, { yieldEvery, maxFiles: Math.max(0, limit - added.length + managedSet.size) })) {
+          const fileRel = normalizeRelPath(`${root}/${file.rel}`);
+          visited += 1;
+          await addFileIssue(file.abs, fileRel, file.size);
+          if (visited % yieldEvery === 0) {
+            await yieldToEventLoop();
+          }
+          if (added.length >= limit) {
+            break;
           }
         }
       } else if (entry.isFile()) {
@@ -229,9 +240,22 @@ function statNanoseconds(stat, field) {
   return BigInt(Math.round(Number(stat?.[`${field}Ms`] || 0) * 1_000_000));
 }
 
+async function mapWithConcurrency(items = [], concurrency = 32, mapper = async (value) => value) {
+  const values = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(items.length || 1, Number(concurrency) || 1));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      values[index] = await mapper(items[index], index);
+    }
+  }));
+  return values;
+}
+
 async function captureFingerprintFromManaged(instanceDir, managed = [], options = {}) {
   const managedSet = new Set(managed.map((item) => item.relativePath));
-  const managedDirs = managedDirectoryPrefixes(managedSet);
   const actualEntries = [];
   const actualFiles = new Set();
   const pending = [];
@@ -264,7 +288,10 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
     }
   }
 
-  for (const root of MONITORED_ROOTS) {
+  const monitoredRoots = Array.isArray(options.monitoredRoots) && options.monitoredRoots.length
+    ? options.monitoredRoots
+    : MODS_ONLY_MONITORED_ROOTS;
+  for (const root of monitoredRoots) {
     const rootPath = safeJoin(instanceDir, root);
     const entries = await fs.readdir(rootPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -272,74 +299,263 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
     }
   }
 
+  const traversalConcurrency = Math.max(1, Number(options.fingerprintConcurrency) || 48);
   while (pending.length) {
-    const current = pending.pop();
-    if (isAllowedUnmanagedModPath(current.rel)) continue;
-    let stat = null;
-    try {
-      stat = await fs.lstat(current.abs, { bigint: true });
-    } catch (error) {
-      if (error?.code === 'ENOENT') continue;
-      throw error;
-    }
-    const type = stat.isFile() ? 'file' : (stat.isDirectory() ? 'directory' : 'other');
-    const mtimeNs = statNanoseconds(stat, 'mtime');
-    const ctimeNs = statNanoseconds(stat, 'ctime');
-    latestChangeMs = Math.max(latestChangeMs, Number(mtimeNs / 1_000_000n), Number(ctimeNs / 1_000_000n));
-    actualEntries.push({
-      path: current.rel,
-      type,
-      size: stat.size.toString(),
-      mtimeNs: mtimeNs.toString(),
-      ctimeNs: ctimeNs.toString(),
-      ino: stat.ino.toString()
-    });
-    if (type === 'file') {
-      actualFiles.add(current.rel);
-    } else if (type === 'directory') {
-      const entries = await fs.readdir(current.abs, { withFileTypes: true }).catch(() => []);
-      for (const entry of entries) {
-        pending.push({
-          abs: path.join(current.abs, entry.name),
-          rel: normalizeRelPath(`${current.rel}/${entry.name}`)
-        });
+    const batch = pending.splice(0, traversalConcurrency);
+    const outcomes = await mapWithConcurrency(batch, traversalConcurrency, async (current) => {
+      if (isAllowedUnmanagedModPath(current.rel)) return null;
+      let stat = null;
+      try {
+        options.onFingerprintPhysicalStat?.(current.rel);
+        stat = await fs.lstat(current.abs, { bigint: true });
+      } catch (error) {
+        if (error?.code === 'ENOENT') return null;
+        throw error;
       }
+      const type = stat.isFile() ? 'file' : (stat.isDirectory() ? 'directory' : 'other');
+      const mtimeNs = statNanoseconds(stat, 'mtime');
+      const ctimeNs = statNanoseconds(stat, 'ctime');
+      const state = {
+        path: current.rel,
+        type,
+        size: stat.size.toString(),
+        mtimeNs: mtimeNs.toString(),
+        ctimeNs: ctimeNs.toString(),
+        ino: stat.ino.toString()
+      };
+      const children = [];
+      if (type === 'directory') {
+        const entries = await fs.readdir(current.abs, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          children.push({
+            abs: path.join(current.abs, entry.name),
+            rel: normalizeRelPath(`${current.rel}/${entry.name}`)
+          });
+        }
+      }
+      return { state, children };
+    });
+    for (const outcome of outcomes) {
+      if (!outcome) continue;
+      const { state, children } = outcome;
+      latestChangeMs = Math.max(
+        latestChangeMs,
+        Number(BigInt(state.mtimeNs) / 1_000_000n),
+        Number(BigInt(state.ctimeNs) / 1_000_000n)
+      );
+      actualEntries.push(state);
+      if (state.type === 'file') actualFiles.add(state.path);
+      pending.push(...children);
+      visited += 1;
     }
-    visited += 1;
-    if (visited % 50 === 0) await yieldToEventLoop();
+    if (visited && visited % 50 < batch.length) await yieldToEventLoop();
   }
 
   const expected = [...managed]
     .sort((left, right) => left.relativePath.localeCompare(right.relativePath))
     .map((item) => `${item.relativePath}|${item.sha256 || ''}|${item.sha1 || ''}`);
-  const actual = actualEntries
+  // Directories are traversal scaffolding, not launchable managed content.
+  // Ignore empty directory topology while retaining every file and non-file
+  // node so an unmanaged payload or link still invalidates preparation.
+  const contentEntries = actualEntries.filter((item) => item.type !== 'directory');
+  const actual = contentEntries
     .sort((left, right) => left.path.localeCompare(right.path))
     .map((item) => `${item.path}|${item.type}|${item.size}|${item.mtimeNs}|${item.ctimeNs}|${item.ino}`);
   const digest = createHash('sha256')
     .update(`managed\n${expected.join('\n')}\nactual\n${actual.join('\n')}\n`)
     .digest('hex');
-  const unexpectedEntry = actualEntries.some((item) => {
+  const unexpectedEntry = contentEntries.some((item) => {
     if (item.type === 'manifest') return false;
     if (item.type === 'file') return !managedSet.has(item.path);
-    if (item.type === 'directory') return !managedDirs.has(`${item.path}/`.toLowerCase());
     return true;
   });
   const pathsValid = !unexpectedEntry && managed.every((item) => actualFiles.has(item.relativePath));
 
-  return {
+  const fingerprint = {
     schemaVersion: 1,
     capturedAt: new Date().toISOString(),
     digest,
     managedCount: managed.length,
-    entryCount: actualEntries.length,
+    entryCount: contentEntries.length,
     pathsValid,
     latestChangeMs
   };
+  if (options.includeFileStates === true) {
+    fingerprint.fileStates = actualEntries
+      .filter((item) => item.type !== 'directory')
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((item) => ({ ...item }));
+  }
+  return fingerprint;
 }
 
 export async function captureManagedModFingerprint(instanceDir, options = {}) {
   const managed = managedModFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
-  return captureFingerprintFromManaged(instanceDir, managed, options);
+  return captureFingerprintFromManaged(instanceDir, managed, {
+    ...options,
+    monitoredRoots: MODS_ONLY_MONITORED_ROOTS
+  });
+}
+
+async function captureIntegrityFingerprintFromManaged(instanceDir, managed = [], options = {}) {
+  const normalizedManaged = managedFiles(managed, []);
+  const launchCritical = launchCriticalManagedFiles(normalizedManaged);
+  const pathSetFingerprint = await captureFingerprintFromManaged(
+    instanceDir,
+    launchCritical,
+    { ...options, monitoredRoots: LAUNCH_CRITICAL_MONITORED_ROOTS, includeFileStates: true }
+  );
+  const traversedFileStates = new Map((pathSetFingerprint.fileStates || [])
+    .map((item) => [normalizeRelPath(String(item?.path || '')), item]));
+  delete pathSetFingerprint.fileStates;
+  let latestChangeMs = Number(pathSetFingerprint.latestChangeMs) || 0;
+  const actual = await mapWithConcurrency(
+    normalizedManaged,
+    options.fingerprintConcurrency || 48,
+    async (item) => {
+      const relativePath = item.relativePath;
+      const traversed = traversedFileStates.get(relativePath);
+      if (traversed) return { ...traversed };
+      const target = safeJoin(instanceDir, relativePath);
+      try {
+        options.onFingerprintPhysicalStat?.(relativePath);
+        const stat = await fs.lstat(target, { bigint: true });
+        const mtimeNs = statNanoseconds(stat, 'mtime');
+        const ctimeNs = statNanoseconds(stat, 'ctime');
+        latestChangeMs = Math.max(
+          latestChangeMs,
+          Number(mtimeNs / 1_000_000n),
+          Number(ctimeNs / 1_000_000n)
+        );
+        return {
+          path: relativePath,
+          type: stat.isFile() ? 'file' : (stat.isDirectory() ? 'directory' : 'other'),
+          size: stat.size.toString(),
+          mtimeNs: mtimeNs.toString(),
+          ctimeNs: ctimeNs.toString(),
+          ino: stat.ino.toString()
+        };
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          return { path: relativePath, type: 'missing', size: '0', mtimeNs: '0', ctimeNs: '0', ino: '0' };
+        }
+        throw error;
+      }
+    }
+  );
+  const expected = [...normalizedManaged]
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath))
+    .map((item) => `${item.relativePath}|${item.sha256 || ''}|${item.sha1 || ''}`);
+  const actualRows = [...actual]
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map((item) => `${item.path}|${item.type}|${item.size}|${item.mtimeNs}|${item.ctimeNs}|${item.ino}`);
+  const digest = createHash('sha256')
+    .update(`managed\n${expected.join('\n')}\nactual\n${actualRows.join('\n')}\npath-set\n${pathSetFingerprint.digest}\n`)
+    .digest('hex');
+
+  const fingerprint = {
+    schemaVersion: 2,
+    capturedAt: new Date().toISOString(),
+    digest,
+    managedCount: normalizedManaged.length,
+    entryCount: actual.length + Number(pathSetFingerprint.entryCount || 0),
+    pathsValid: pathSetFingerprint.pathsValid && actual.every((item) => item.type === 'file'),
+    latestChangeMs,
+    pathSetDigest: pathSetFingerprint.digest,
+    // Retained for schema-v2 cache compatibility; it now covers every
+    // launch-critical content root, not only mods.
+    modsDigest: pathSetFingerprint.digest
+  };
+  if (options.includeFileStates === true) {
+    fingerprint.fileStates = [...actual]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((item) => ({ ...item }));
+  }
+  return fingerprint;
+}
+
+export async function captureManagedIntegrityFingerprint(instanceDir, options = {}) {
+  const managed = managedFiles(await loadManaged(instanceDir, options), options.requiredManaged || []);
+  return captureIntegrityFingerprintFromManaged(instanceDir, managed, options);
+}
+
+function fingerprintFileStateChanged(current = null, previous = null) {
+  if (!current || !previous) return true;
+  return ['type', 'size', 'mtimeNs', 'ctimeNs', 'ino']
+    .some((field) => String(current[field] ?? '') !== String(previous[field] ?? ''));
+}
+
+function fingerprintStateChangedAfter(state = null, sinceMs = Number.NaN) {
+  if (!state || !Number.isFinite(sinceMs)) return true;
+  const cutoffNs = BigInt(Math.max(0, Math.floor(sinceMs))) * 1_000_000n;
+  return BigInt(state.mtimeNs || '0') > cutoffNs || BigInt(state.ctimeNs || '0') > cutoffNs;
+}
+
+export async function verifyManagedIntegritySnapshot(instanceDir, options = {}) {
+  const managed = launchCriticalManagedFiles(await loadManaged(instanceDir, options));
+  const fingerprintWithStates = await captureIntegrityFingerprintFromManaged(instanceDir, managed, {
+    ...options,
+    includeFileStates: true
+  });
+  const fileStates = Array.isArray(fingerprintWithStates.fileStates)
+    ? fingerprintWithStates.fileStates
+    : [];
+  const fingerprint = { ...fingerprintWithStates };
+  delete fingerprint.fileStates;
+
+  const previousStates = Array.isArray(options.previousFileStates) ? options.previousFileStates : [];
+  const previousByPath = new Map(previousStates.map((item) => [normalizeRelPath(String(item?.path || '')), item]));
+  const currentByPath = new Map(fileStates.map((item) => [normalizeRelPath(String(item?.path || '')), item]));
+  const legacySinceMs = Date.parse(String(options.legacySince || ''));
+  const hasPreviousStates = previousByPath.size > 0;
+  const forcedPaths = new Set((Array.isArray(options.forcePaths) ? options.forcePaths : [])
+    .map((item) => normalizeRelPath(String(item || '')))
+    .filter(Boolean));
+  const forceAll = options.forceAll === true;
+  const onlyForced = options.onlyForced === true && (forceAll || forcedPaths.size > 0);
+  const candidates = managed.filter((item) => {
+    const current = currentByPath.get(item.relativePath);
+    const forced = forceAll || [...forcedPaths]
+      .some((forcedPath) => item.relativePath === forcedPath || item.relativePath.startsWith(`${forcedPath}/`));
+    if (forced) return true;
+    if (onlyForced) return false;
+    if (!current || current.type !== 'file') return true;
+    if (hasPreviousStates) {
+      return fingerprintFileStateChanged(current, previousByPath.get(item.relativePath));
+    }
+    return fingerprintStateChangedAfter(current, legacySinceMs);
+  });
+  const issues = [];
+  await mapWithConcurrency(candidates, options.hashConcurrency || 8, async (item) => {
+    const state = currentByPath.get(item.relativePath);
+    if (!state || state.type !== 'file') {
+      issues.push({ path: item.relativePath, reason: state?.type || 'missing' });
+      return;
+    }
+    const algorithm = item.sha256 ? 'sha256' : (item.sha1 ? 'sha1' : '');
+    const expected = String(item[algorithm] || '').toLowerCase();
+    if (!algorithm || !expected) {
+      issues.push({ path: item.relativePath, reason: 'missing-trusted-hash' });
+      return;
+    }
+    const actual = String(await hashFile(safeJoin(instanceDir, item.relativePath), algorithm)).toLowerCase();
+    if (actual !== expected) {
+      issues.push({ path: item.relativePath, reason: 'content-changed' });
+    }
+  });
+  if (!fingerprint.pathsValid && !issues.length) {
+    issues.push({ path: 'launch-critical-roots', reason: 'managed-path-set-changed' });
+  }
+  issues.sort((left, right) => left.path.localeCompare(right.path));
+  return {
+    valid: fingerprint.pathsValid === true && issues.length === 0,
+    fingerprint,
+    fileStates,
+    managedFiles: managed,
+    metadataChanges: candidates.length,
+    hashedFiles: candidates.length,
+    issues
+  };
 }
 
 export async function scanLocalChanges(instanceDir, options = {}) {
@@ -390,7 +606,10 @@ export async function scanLocalChanges(instanceDir, options = {}) {
   }
 
   reportProgress('Scanning extra mods', managedToCheck.length, managedToCheck.length);
-  added.push(...await scanAddedModFiles(instanceDir, managedSet, limit, { yieldEvery: 25 }));
+  added.push(...await scanAddedModFiles(instanceDir, managedSet, limit, {
+    yieldEvery: 25,
+    monitoredRoots: MODS_ONLY_MONITORED_ROOTS
+  }));
   reportProgress('Scan complete', managedToCheck.length, managedToCheck.length);
 
   return {
@@ -413,9 +632,9 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
   const limit = options.limit || 500;
   const loadedManaged = await loadManaged(instanceDir, options);
   const managed = managedFiles(loadedManaged, options.requiredManaged || []);
-  const managedMods = managedModFiles(loadedManaged, options.requiredManaged || []);
+  const launchCritical = launchCriticalManagedFiles(managed);
   const managedToCheck = managed.filter((item) => item.relativePath);
-  const managedModSet = new Set(managedMods.map((item) => item.relativePath));
+  const launchCriticalSet = new Set(launchCritical.map((item) => item.relativePath));
   const changed = [];
   const missing = [];
   const progressPhase = 'Verifying installed files';
@@ -459,11 +678,14 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
     }
   }
 
-  reportProgress('Scanning extra mods', managedToCheck.length, managedToCheck.length);
-  const added = await scanAddedModFiles(instanceDir, managedModSet, limit, { yieldEvery: 25 });
+  reportProgress('Scanning extra launch content', managedToCheck.length, managedToCheck.length);
+  const added = await scanAddedModFiles(instanceDir, launchCriticalSet, limit, {
+    yieldEvery: 25,
+    monitoredRoots: LAUNCH_CRITICAL_MONITORED_ROOTS
+  });
   reportProgress('Integrity scan complete', managedToCheck.length, managedToCheck.length);
   const corruptCount = changed.length + missing.length + added.length;
-  const fingerprint = await captureFingerprintFromManaged(instanceDir, managedMods, options);
+  const fingerprint = await captureIntegrityFingerprintFromManaged(instanceDir, managed, options);
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,

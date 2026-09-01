@@ -9,6 +9,7 @@ import {
   inspectLauncherProof,
   launcherProofJavaArgs,
   launcherProofPath,
+  launcherProofStorageDir,
   writeLauncherProof
 } from '../src/launcherProof.js';
 
@@ -182,6 +183,55 @@ await expectRejected('Short Validity', (_fixture, payload) => {
   });
 });
 
+const multiInstanceProofRoot = path.join(root, 'multi-instance-user-data', '.aht-launcher');
+const firstInstanceDir = path.join(root, 'A Hard Time Stable');
+const secondInstanceDir = path.join(root, 'A Hard Time PTB');
+const firstLatest = { ...latest, version: '2.8.534' };
+const secondLatest = { ...latest, version: '2.8.6' };
+const firstConfig = {
+  ...config,
+  instanceDir: firstInstanceDir,
+  launcherProof: {
+    ...config.launcherProof,
+    proofDir: launcherProofStorageDir(multiInstanceProofRoot, firstInstanceDir)
+  }
+};
+const secondConfig = {
+  ...config,
+  instanceDir: secondInstanceDir,
+  launcherProof: {
+    ...config.launcherProof,
+    proofDir: launcherProofStorageDir(multiInstanceProofRoot, secondInstanceDir)
+  }
+};
+const fixtureFetch = async (_url, options) => {
+  const payload = JSON.parse(options.body);
+  return { ok: true, json: async () => workerLauncherProofFixture(payload) };
+};
+const firstPreparedProof = await writeLauncherProof({
+  config: firstConfig,
+  identity,
+  latest: firstLatest,
+  installed: firstLatest,
+  recoverySecret: 'recovery_secret_that_is_long_enough_123456',
+  fetchImpl: fixtureFetch
+});
+const secondPreparedProof = await writeLauncherProof({
+  config: secondConfig,
+  identity,
+  latest: secondLatest,
+  installed: secondLatest,
+  recoverySecret: 'recovery_secret_that_is_long_enough_123456',
+  fetchImpl: fixtureFetch
+});
+assert.notEqual(firstPreparedProof.proofFile, secondPreparedProof.proofFile, 'prepared pack proofs must not share a file');
+const [firstStillUsable, secondStillUsable] = await Promise.all([
+  inspectLauncherProof({ config: firstConfig, identity, latest: firstLatest, installed: firstLatest, minValidityMs: 30_000 }),
+  inspectLauncherProof({ config: secondConfig, identity, latest: secondLatest, installed: secondLatest, minValidityMs: 30_000 })
+]);
+assert.equal(firstStillUsable.usable, true, `second pack refresh replaced the first proof: ${firstStillUsable.reason}`);
+assert.equal(secondStillUsable.usable, true, secondStillUsable.reason);
+
 const localSourceFile = launcherProofPath(instanceDir);
 const saved = JSON.parse(await fs.readFile(localSourceFile, 'utf8'));
 await fs.writeFile(localSourceFile, `${JSON.stringify({ ...saved, source: 'local-hmac' }, null, 2)}\n`, 'utf8');
@@ -203,5 +253,6 @@ console.log(JSON.stringify({
   localTrustedSigningDisabled: true,
   malformedResponsesRejected: 4,
   packLocalMirrorRemoved: true,
+  multiInstanceProofIsolation: true,
   proofFile
 }, null, 2));

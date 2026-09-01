@@ -129,18 +129,23 @@ body.is-booting .startup-loader {
 .startup-loader-rule {
   position: relative;
   display: block;
-  height: 1px;
+  height: 4px;
   overflow: hidden;
-  background: rgba(222, 229, 225, 0.16);
+  border: 1px solid rgba(222, 229, 225, 0.16);
+  background: rgba(2, 4, 5, 0.7);
 }
 
-.startup-loader-rule::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(222, 205, 157, 0.86), transparent);
-  transform: translateX(-100%);
-  animation: startup-rule-pass 1450ms ease-in-out infinite;
+.startup-loader-rule[hidden] {
+  display: none;
+}
+
+.startup-loader-progress {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(124, 108, 74, 0.82), rgba(236, 224, 175, 0.96));
+  box-shadow: 0 0 9px rgba(222, 205, 157, 0.48);
+  transition: width 180ms ease-out;
 }
 
 .money-loader-system {
@@ -153,6 +158,33 @@ body.is-booting .startup-loader {
   perspective: 260px;
   transform-style: preserve-3d;
   opacity: 0.96;
+}
+
+.sidebar-switch-loader {
+  position: fixed;
+  z-index: 9999;
+  right: 0;
+  bottom: 0;
+  width: 192px;
+  height: 132px;
+  overflow: visible;
+  isolation: isolate;
+  pointer-events: none;
+}
+
+.sidebar-switch-loader::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 8px 0 0 8px;
+  background: radial-gradient(ellipse at 58% 60%, rgba(3, 5, 6, 0.82), rgba(3, 5, 6, 0.42) 46%, transparent 74%);
+  pointer-events: none;
+}
+
+.sidebar-switch-loader .money-loader-system {
+  z-index: 1;
+  right: 14px;
+  bottom: 7px;
 }
 
 .startup-money-logo {
@@ -388,6 +420,8 @@ body {
 
 .nav,
 .nav-item,
+.topbar-social,
+.social-link,
 .profile-card,
 .window-controls,
 .window-control,
@@ -395,10 +429,12 @@ body {
 .sidebar-download { -webkit-app-region: no-drag; }
 
 .topbar {
+  z-index: 60;
   flex: 0 0 106px;
   min-height: 106px;
   max-height: 106px;
   padding: 0 44px 0 0;
+  overflow: visible;
   background:
     linear-gradient(90deg, rgba(13, 16, 17, 0.99), rgba(19, 25, 26, 0.96) 62%, rgba(8, 11, 12, 0.995)),
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 4px);
@@ -484,6 +520,116 @@ body {
   margin-right: 12px;
   background: transparent;
   box-shadow: none;
+}
+
+.topbar-social {
+  position: relative;
+  z-index: 30;
+  display: grid;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  margin-left: auto;
+  place-items: center;
+}
+
+.topbar-social + .profile-card,
+.topbar-social + .profile-card:hover,
+.topbar-social + .profile-card:focus-visible {
+  margin-left: 5px;
+}
+
+.social-link {
+  appearance: none;
+  -webkit-appearance: none;
+  display: grid;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 2px;
+  outline: 0;
+  background: transparent;
+  color: rgba(224, 228, 228, 0.72);
+  cursor: pointer;
+  box-shadow: none;
+  transition: color 120ms ease, background-color 120ms ease, filter 120ms ease, transform 120ms ease;
+}
+
+.social-link svg {
+  display: block;
+  width: 23px;
+  height: 23px;
+  overflow: visible;
+  fill: currentColor;
+}
+
+.social-link-forum svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.social-link:hover,
+.social-link:focus-visible {
+  background: rgba(224, 232, 232, 0.09);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.social-link-discord:hover,
+.social-link-discord:focus-visible {
+  color: #7683ff;
+  filter: drop-shadow(0 0 7px rgba(88, 101, 242, 0.62));
+}
+
+.social-link-youtube:hover,
+.social-link-youtube:focus-visible {
+  color: #ff263d;
+  filter: drop-shadow(0 0 7px rgba(255, 0, 51, 0.52));
+}
+
+.social-link-tiktok:hover,
+.social-link-tiktok:focus-visible {
+  color: #f7ffff;
+  filter: drop-shadow(-2px 0 0 rgba(37, 244, 238, 0.72)) drop-shadow(2px 0 0 rgba(254, 44, 85, 0.68));
+}
+
+.social-link-forum:hover,
+.social-link-forum:focus-visible {
+  color: #e0bd78;
+  filter: drop-shadow(0 0 6px rgba(224, 189, 120, 0.42));
+}
+
+.social-dropdown {
+  position: absolute;
+  top: 43px;
+  left: 50%;
+  z-index: 40;
+  display: grid;
+  box-sizing: border-box;
+  width: 74px;
+  gap: 2px;
+  padding: 5px 16px 10px;
+  justify-items: center;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, -8px);
+  transition: opacity 120ms ease, transform 150ms ease, visibility 0s linear 150ms;
+}
+
+.topbar-social:hover .social-dropdown,
+.topbar-social:focus-within .social-dropdown,
+.topbar-social.is-social-menu-open .social-dropdown {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+  transition-delay: 0s;
 }
 
 .profile-card:hover .profile-copy strong,
@@ -845,23 +991,6 @@ textarea {
 
 .workspace.is-sidebar-switching > .view {
   pointer-events: none;
-}
-
-.sidebar-switch-loader {
-  z-index: 30;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 90ms linear;
-}
-
-.workspace.is-sidebar-switching:not(.is-sidebar-switch-entering) .sidebar-switch-loader {
-  opacity: 0.92;
-  transition-delay: 110ms;
-}
-
-.workspace.is-sidebar-switch-entering .sidebar-switch-loader {
-  opacity: 0;
-  transition-delay: 0s;
 }
 
 #player.view.active {

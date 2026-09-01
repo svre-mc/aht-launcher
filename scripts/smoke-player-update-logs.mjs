@@ -15,6 +15,7 @@ const instanceDir = path.join(root, 'instance');
 const ptbInstanceDir = path.join(root, 'instance-ptb');
 const mcRoot = path.join(root, 'minecraft');
 const screenshotDir = path.join(root, 'screenshots');
+const updateLogArtwork = fs.readFileSync(path.resolve('desktop', 'renderer', 'assets', 'aht-cover.png'));
 const updateLogRequests = [];
 const likeRequests = [];
 const NEWS_CAROUSEL_CROSSFADE_MS = 320;
@@ -247,6 +248,12 @@ const server = http.createServer((request, response) => {
     response.end(JSON.stringify({ logs: logs.slice(0, limit) }));
     return;
   }
+  if (/^\/update-media\/log-[34]\.webp$/.test(url.pathname)) {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'image/png');
+    response.end(updateLogArtwork);
+    return;
+  }
   const likeMatch = url.pathname.match(/^\/api\/update-logs\/([0-9a-f-]{36})\/like$/i);
   if (request.method === 'POST' && likeMatch) {
     likeRequests.push(likeMatch[1].toLowerCase());
@@ -432,7 +439,15 @@ try {
     };
   })()`);
   const heroPoint = await movePointer(client, '.news-carousel-media');
-  await sleep(180);
+  await waitFor(client, `(() => {
+    const card = document.querySelector('.news-feature-carousel');
+    const caption = card?.querySelector('.news-carousel-caption');
+    const arrow = card?.querySelector('.news-carousel-next');
+    const pager = card?.querySelector('.news-carousel-pager');
+    return Number(getComputedStyle(caption).opacity) >= 0.99
+      && Number(getComputedStyle(arrow).opacity) >= 0.99
+      && Number(getComputedStyle(pager).opacity) >= 0.99;
+  })()`, 'completed featured News hover transition');
   const heroHover = await evaluate(client, `(() => {
     const card = document.querySelector('.news-feature-carousel');
     const art = card?.querySelector('.news-carousel-slide.is-active');

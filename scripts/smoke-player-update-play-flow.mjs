@@ -8,6 +8,7 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
+import { launcherProofPath, launcherProofStorageDir } from '../src/launcherProof.js';
 
 const port = Number(process.argv[2] || 10130);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -31,6 +32,13 @@ const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32'
 const fakeMinecraftJavaPath = process.platform === 'win32'
   ? path.join(path.dirname(fakeJavaPath), 'javaw.exe')
   : fakeJavaPath;
+const launcherProofBaseDir = path.join(userData, '.aht-launcher');
+const stableLauncherProofPath = launcherProofPath(instanceDir, 'player', {
+  proofDir: launcherProofStorageDir(launcherProofBaseDir, instanceDir)
+});
+const ptbLauncherProofPath = launcherProofPath(ptbInstanceDir, 'player', {
+  proofDir: launcherProofStorageDir(launcherProofBaseDir, ptbInstanceDir)
+});
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -66,12 +74,24 @@ function launchReportsFor(instancePath) {
     }));
 }
 
+async function waitForLaunchReports(instancePath, count, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  let reports = [];
+  do {
+    reports = launchReportsFor(instancePath).filter((report) => report.text.length > 0);
+    if (reports.length >= count) return reports;
+    await sleep(50);
+  } while (Date.now() < deadline);
+  return reports;
+}
+
 function makeResourcePackBuffer() {
   const zip = new AdmZip();
   zip.addFile('pack.mcmeta', Buffer.from(JSON.stringify({ pack: { pack_format: 3, description: 'AHT smoke resource pack' } }, null, 2)));
   zip.addFile('assets/aht/lang/en_us.lang', Buffer.from('aht.smoke=Installed\n'));
   return zip.toBuffer();
 }
+const resourcePackBuffer = makeResourcePackBuffer();
 
 async function makeClientZip(file) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
@@ -93,7 +113,7 @@ async function makeClientZip(file) {
   zip.addFile('aht-client-pack.json', Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`));
   zip.addFile('mods/aht-required.jar', Buffer.from('required mod bytes\n'));
   zip.addFile('mods/aht-version-lock-7.7.7.jar', Buffer.from('version lock bytes\n'));
-  zip.addFile('resourcepacks/aht-smoke-resourcepack.zip', makeResourcePackBuffer());
+  zip.addFile('resourcepacks/aht-smoke-resourcepack.zip', resourcePackBuffer);
   zip.addFile('config/aht-client.cfg', Buffer.from('clientConfig=true\n'));
   zip.addFile('options.txt', Buffer.from('pack-options\n'));
   zip.writeZip(file);
@@ -183,7 +203,7 @@ async function waitForCleanScanUiReset(client, attempts = 60) {
   let last;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     last = await evaluate(client, `
-      (() => {
+      (async () => {
         const badge = document.querySelector('#statusBadge')?.textContent || '';
         const diff = document.querySelector('#diffSummary')?.textContent || '';
         const progressWrap = document.querySelector('#progressWrap');
@@ -193,7 +213,8 @@ async function waitForCleanScanUiReset(client, attempts = 60) {
         const progressCount = document.querySelector('#progressCount')?.textContent || document.querySelector('#sidebarProgressCount')?.textContent || '';
         const scanDisabled = document.querySelector('#scanButton')?.getAttribute('aria-disabled') === 'true';
         const playDisabled = document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'true';
-        return { badge, diff, progressHidden, progressLabel, progressCount, scanDisabled, playDisabled };
+        const status = await window.aht.getStatus();
+        return { badge, diff, progressHidden, progressLabel, progressCount, scanDisabled, playDisabled, launchPreparationState: status.launchPreparationState, launchBlockedReason: status.launchBlockedReason };
       })()
     `);
     if (last.badge === 'Ready' && last.diff === 'Clean' && last.progressHidden && !last.scanDisabled && !last.playDisabled) {
@@ -217,6 +238,14 @@ const clientManifest = {
     relativePath: 'mods/aht-version-lock-7.7.7.jar',
     size: Buffer.byteLength('version lock bytes\n'),
     sha256: sha256('version lock bytes\n')
+  }, {
+    relativePath: 'resourcepacks/aht-smoke-resourcepack.zip',
+    size: resourcePackBuffer.length,
+    sha256: sha256(resourcePackBuffer)
+  }, {
+    relativePath: 'config/aht-client.cfg',
+    size: Buffer.byteLength('clientConfig=true\n'),
+    sha256: sha256('clientConfig=true\n')
   }]
 };
 const clientManifestBody = JSON.stringify(clientManifest);
@@ -402,31 +431,36 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
-const child = spawn(electronBin, electronArgs, {
-  cwd: electronCwd,
-  env: {
-    ...process.env,
-    AHT_APP_DEFAULTS: defaultsPath,
-    AHT_TEST_HOOKS: '1',
-    AHT_TEST_USER_DATA: userData,
-    AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
-    AHT_TEST_REMOTE_DEBUG_PORT: String(port),
-    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
-    AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
-    AHT_TEST_EXPECT_FORGE_INSTALLER_URL: forgeInstallerUrl,
-    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
-    AHT_TEST_JAVA_ARCH: 'amd64',
-    AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
-    ELECTRON_ENABLE_LOGGING: '0'
-  },
-  stdio: 'ignore',
-  windowsHide: true
-});
+function spawnPlayerLauncher() {
+  return spawn(electronBin, electronArgs, {
+    cwd: electronCwd,
+    env: {
+      ...process.env,
+      AHT_APP_DEFAULTS: defaultsPath,
+      AHT_TEST_HOOKS: '1',
+      AHT_TEST_USER_DATA: userData,
+      AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
+      AHT_TEST_REMOTE_DEBUG_PORT: String(port),
+      AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+      AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+      AHT_TEST_EXPECT_FORGE_INSTALLER_URL: forgeInstallerUrl,
+      AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+      AHT_TEST_JAVA_ARCH: 'amd64',
+      AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
+      ELECTRON_ENABLE_LOGGING: '0'
+    },
+    stdio: 'ignore',
+    windowsHide: true
+  });
+}
+
+const child = spawnPlayerLauncher();
 const childExitPromise = new Promise((resolve) => {
   child.once('exit', (code, signal) => resolve({ code, signal }));
 });
 
 let client;
+let warmChild = null;
 try {
   const target = await waitForTarget().catch((error) => {
     if (fs.existsSync(startupProbePath)) {
@@ -515,13 +549,25 @@ try {
     throw new Error(`First-ever install incorrectly opened the keep-settings prompt: ${JSON.stringify(firstInstallPromptProof)}`);
   }
   const updateResult = await waitFor(client, `
-    window.aht.getStatus().then((status) => status.installed?.version === '7.7.7'
-      ? ({ ok: true, result: { installed: status.installed } })
-      : false)
-  `, 'fresh player UI update without settings prompt');
+    Promise.all([window.aht.getUpdateState(), window.aht.getStatus()]).then(([update, status]) =>
+      !update.running && update.error
+        ? ({ ok: false, error: update.error, result: update.lastResult })
+        : (!update.running
+          && update.lastResult?.installed?.version === '7.7.7'
+          && status.installed?.version === '7.7.7'
+          ? ({ ok: true, result: update.lastResult })
+          : false))
+  `, 'fresh player UI update transaction without settings prompt', 480);
   if (!updateResult.ok || updateResult.result?.installed?.version !== '7.7.7') {
     throw new Error(`Fresh player update failed: ${JSON.stringify(updateResult)}`);
   }
+  await waitFor(client, `window.aht.getStatus().then((status) =>
+    status.installed?.version === '7.7.7'
+      && status.launchPreparationState === 'ready'
+      && status.launchReady
+      ? status
+      : false
+  )`, 'post-update startup-equivalent launch preparation');
   if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 1 || proofRequests.length < 2) {
     throw new Error(`Update did not refresh stale launcher proof registration after Worker rejection: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
   }
@@ -596,6 +642,9 @@ try {
   await evaluate(client, `document.querySelector('#scanButton')?.click(); true`);
   const cleanScanUi = await waitForCleanScanUiReset(client, 60);
 
+  const stableProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
+    sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
+  ));
   const playResult = await evaluate(client, `
     window.aht.play()
       .then((result) => ({ ok: true, result }))
@@ -610,6 +659,12 @@ try {
   if (!fs.existsSync(fakeLauncherMarker)) {
     throw new Error('Play returned success, but the Minecraft Launcher command was not spawned.');
   }
+  const stableProfilesAfterPlay = [mcRoot, syncedMcRoot].map((rootDir) => (
+    sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
+  ));
+  if (stableProfilesAfterPlay.some((hash, index) => hash !== stableProfilesBeforePlay[index])) {
+    throw new Error('Play rewrote Minecraft/CurseForge launcher profile metadata instead of using the profile selected during initialization.');
+  }
   const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));
   if (path.resolve(launcherMarker.cwd) !== path.resolve(mcRoot)) {
     throw new Error(`Minecraft Launcher opened with the wrong cwd: ${JSON.stringify(launcherMarker)}`);
@@ -617,14 +672,14 @@ try {
   if (launcherMarker.disableRtss !== '1' || launcherMarker.disableObs !== '1') {
     throw new Error(`Minecraft Launcher environment hardening was not applied: ${JSON.stringify(launcherMarker)}`);
   }
-  const proof = JSON.parse(fs.readFileSync(path.join(userData, '.aht-launcher', 'launcher-proof.json'), 'utf8'));
+  const proof = JSON.parse(fs.readFileSync(stableLauncherProofPath, 'utf8'));
   if (!proof.trusted || proof.source !== 'worker' || !Array.isArray(proof.javaProperties) || !proof.javaProperties.some((arg) => arg.startsWith('-Daht.launcher.proofFile='))) {
     throw new Error(`Clean Play did not write trusted launcher proof Java properties: ${JSON.stringify(proof)}`);
   }
   if (fs.existsSync(path.join(instanceDir, '.aht-launcher', 'launcher-proof.json'))) {
     throw new Error('A pack-local launcher-proof.json compatibility mirror was written for the player instance.');
   }
-  const stableReportsAfterFirstPlay = launchReportsFor(instanceDir);
+  const stableReportsAfterFirstPlay = await waitForLaunchReports(instanceDir, 1);
   if (
     stableReportsAfterFirstPlay.length !== 1
     || !stableReportsAfterFirstPlay[0].text.includes('Result: HANDOFF CONFIRMED')
@@ -643,21 +698,42 @@ try {
   ptbInstalled.packId = 'a-hard-time-ptb';
   ptbInstalled.name = 'A Hard Time PTB';
   await writeJson(ptbInstalledPath, ptbInstalled);
-
+  for (const rootDir of [mcRoot, syncedMcRoot]) {
+    const profilesPath = path.join(rootDir, 'launcher_profiles.json');
+    const launcherProfiles = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
+    const stableProfile = launcherProfiles.profiles?.['a-hard-time-dregora'];
+    launcherProfiles.profiles['a-hard-time-ptb'] = {
+      ...stableProfile,
+      name: 'A Hard Time PTB',
+      gameDir: ptbInstanceDir,
+      lastUsed: '1970-01-01T00:00:00.000Z'
+    };
+    await writeJson(profilesPath, launcherProfiles);
+  }
+  const seededPtbPreparation = await evaluate(client, `window.aht.preparePlay('ptb', { force: true })`);
+  if (!seededPtbPreparation?.launchReady || seededPtbPreparation?.launchPreparationState !== 'ready') {
+    throw new Error(`The dynamically seeded PTB fixture could not be prepared before its sidebar click: ${JSON.stringify(seededPtbPreparation)}`);
+  }
   await fsp.rm(fakeLauncherMarker, { force: true });
   await evaluate(client, `document.querySelector('#ptbTileButton')?.click(); true`);
   await waitFor(client, `window.aht.getStatus('ptb').then((status) =>
     document.querySelector('#ptbTileButton')?.classList.contains('active')
+      && !document.querySelector('.workspace')?.classList.contains('is-sidebar-switching')
       && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'
+      && document.querySelector('#playButton')?.dataset.actionMode === 'play'
       && status.launchReady
+      && status.launchPreparationState === 'ready'
       && status.config?.minecraftLauncher?.profileId === 'a-hard-time-ptb'
   )`, 'installed PTB tile readiness');
+  const ptbProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
+    sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
+  ));
   const ptbClickState = await evaluate(client, `(() => {
     const button = document.querySelector('#playButton');
     button.click();
     return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
   })()`);
-  if (ptbClickState.text !== 'Preparing...' || ptbClickState.ariaBusy !== 'true') {
+  if (ptbClickState.text !== 'Opening...' || ptbClickState.ariaBusy !== 'true') {
     throw new Error(`Installed PTB tile did not route Play through the busy button path: ${JSON.stringify(ptbClickState)}`);
   }
   for (let attempt = 0; attempt < 80 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
@@ -668,6 +744,23 @@ try {
   }
   await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'
     && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'`, 'installed PTB Play completion');
+  const ptbProfilesAfterPlay = [mcRoot, syncedMcRoot].map((rootDir) => (
+    sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
+  ));
+  if (ptbProfilesAfterPlay.some((hash, index) => hash !== ptbProfilesBeforePlay[index])) {
+    throw new Error('PTB Play rewrote launcher profile metadata instead of using the profile selected during the sidebar switch.');
+  }
+  const stablePreparedProof = JSON.parse(fs.readFileSync(stableLauncherProofPath, 'utf8'));
+  const ptbPreparedProof = JSON.parse(fs.readFileSync(ptbLauncherProofPath, 'utf8'));
+  if (
+    path.resolve(stableLauncherProofPath) === path.resolve(ptbLauncherProofPath)
+    || stablePreparedProof.payload?.instanceDirHash !== sha256(path.resolve(instanceDir))
+    || ptbPreparedProof.payload?.instanceDirHash !== sha256(path.resolve(ptbInstanceDir))
+    || stablePreparedProof.payload?.latestVersion !== '7.7.7'
+    || ptbPreparedProof.payload?.latestVersion !== '7.7.7'
+  ) {
+    throw new Error(`Stable and PTB Play did not retain distinct instance-bound proof files: ${JSON.stringify({ stableLauncherProofPath, ptbLauncherProofPath, stable: stablePreparedProof.payload, ptb: ptbPreparedProof.payload })}`);
+  }
   const afterPtbProfiles = JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8'));
   const syncedAfterPtbProfiles = JSON.parse(fs.readFileSync(path.join(syncedMcRoot, 'launcher_profiles.json'), 'utf8'));
   const ptbProfile = afterPtbProfiles.profiles?.['a-hard-time-ptb'];
@@ -683,7 +776,7 @@ try {
   ) {
     throw new Error(`Installed PTB Play did not prepare every launcher root with the exact PTB instance and Java: ${JSON.stringify({ afterPtbProfiles, syncedAfterPtbProfiles })}`);
   }
-  const ptbReportsAfterPlay = launchReportsFor(ptbInstanceDir);
+  const ptbReportsAfterPlay = await waitForLaunchReports(ptbInstanceDir, 1);
   if (
     ptbReportsAfterPlay.length !== 1
     || !ptbReportsAfterPlay[0].text.includes('Result: HANDOFF CONFIRMED')
@@ -692,6 +785,50 @@ try {
     || launchReportsFor(instanceDir).length !== 1
   ) {
     throw new Error(`PTB Play launch report was not isolated to the exact PTB instance: ${JSON.stringify({ stable: launchReportsFor(instanceDir), ptb: ptbReportsAfterPlay })}`);
+  }
+
+  const ptbPreparationBeforeSettings = await evaluate(client, `window.aht.getStatus('ptb', { preferCache: true })`);
+  await evaluate(client, `(() => {
+    for (const toast of document.querySelectorAll('#toastStack .toast')) toast.remove();
+    activateTab('settings');
+    const closeInput = document.querySelector('#closeLauncherWhenGameStartsInput');
+    closeInput.checked = true;
+    closeInput.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('#saveSettingsButton').click();
+    return true;
+  })()`);
+  const ptbPreparationAfterSettings = await waitFor(client, `
+    window.aht.getStatus('ptb', { preferCache: true }).then((status) => {
+      const saved = [...document.querySelectorAll('#toastStack .toast.success')]
+        .some((toast) => /Settings saved/i.test(toast.textContent));
+      return saved && status.launchReady && status.launchPreparationState === 'ready' ? status : false;
+    })
+  `, 'PTB non-preparation settings save');
+  if (
+    !ptbPreparationBeforeSettings.launchPreparedAt
+    || ptbPreparationAfterSettings.launchPreparedAt !== ptbPreparationBeforeSettings.launchPreparedAt
+  ) {
+    throw new Error(`A non-path Game Settings save rebuilt the prepared PTB snapshot: ${JSON.stringify({ before: ptbPreparationBeforeSettings.launchPreparedAt, after: ptbPreparationAfterSettings.launchPreparedAt })}`);
+  }
+
+  await fsp.rm(fakeLauncherMarker, { force: true });
+  await evaluate(client, `document.querySelector('#ptbTileButton')?.click(); true`);
+  await waitFor(client, `!document.querySelector('.workspace')?.classList.contains('is-sidebar-switching')
+    && document.querySelector('#player')?.classList.contains('active')
+    && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'`, 'return from Game Settings to prepared PTB');
+  const secondPtbPlayStartedAt = Date.now();
+  await evaluate(client, `document.querySelector('#playButton').click(); true`);
+  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
+    await sleep(25);
+  }
+  const secondPtbPlayHandoffMs = Date.now() - secondPtbPlayStartedAt;
+  if (!fs.existsSync(fakeLauncherMarker) || secondPtbPlayHandoffMs >= 1000) {
+    throw new Error(`Second PTB Play after Game Settings did not open the prepared Minecraft Launcher route within one second: ${secondPtbPlayHandoffMs}ms.`);
+  }
+  await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'`, 'second PTB Play completion');
+  const ptbPreparationAfterSecondPlay = await evaluate(client, `window.aht.getStatus('ptb', { preferCache: true })`);
+  if (!ptbPreparationAfterSecondPlay.launchReady || ptbPreparationAfterSecondPlay.launchPreparedAt !== ptbPreparationBeforeSettings.launchPreparedAt) {
+    throw new Error(`Second PTB Play did not reuse the startup-prepared snapshot: ${JSON.stringify(ptbPreparationAfterSecondPlay)}`);
   }
 
   await fsp.rm(fakeLauncherMarker, { force: true });
@@ -711,8 +848,11 @@ try {
   await evaluate(client, `document.querySelector('#gameTileButton')?.click(); true`);
   await waitFor(client, `window.aht.getStatus('stable').then((status) =>
     document.querySelector('#gameTileButton')?.classList.contains('active')
+      && !document.querySelector('.workspace')?.classList.contains('is-sidebar-switching')
       && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'
+      && document.querySelector('#playButton')?.dataset.actionMode === 'play'
       && status.launchReady
+      && status.launchPreparationState === 'ready'
       && status.config?.minecraftLauncher?.profileId === 'a-hard-time-dregora'
   )`, 'installed stable tile readiness');
   const stableClickState = await evaluate(client, `(() => {
@@ -720,7 +860,7 @@ try {
     button.click();
     return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
   })()`);
-  if (stableClickState.text !== 'Preparing...' || stableClickState.ariaBusy !== 'true') {
+  if (stableClickState.text !== 'Opening...' || stableClickState.ariaBusy !== 'true') {
     throw new Error(`Installed stable tile did not route Play through the busy button path: ${JSON.stringify(stableClickState)}`);
   }
   for (let attempt = 0; attempt < 80 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
@@ -746,13 +886,15 @@ try {
   ) {
     throw new Error(`Installed stable to PTB to stable reversal did not restore every exact stable instance: ${JSON.stringify({ finalProfiles, syncedFinalProfiles })}`);
   }
-  const finalStableReports = launchReportsFor(instanceDir);
+  const finalStableReports = await waitForLaunchReports(instanceDir, 2);
+  const finalPtbReports = await waitForLaunchReports(ptbInstanceDir, 2);
   if (
     finalStableReports.length !== 2
     || finalStableReports.some((report) => !report.text.includes('Pack: A Hard Time 7.7.7 (stable)'))
-    || launchReportsFor(ptbInstanceDir).length !== 1
+    || finalPtbReports.length !== 2
+    || finalPtbReports.some((report) => !report.text.includes('Pack: A Hard Time PTB 7.7.7 (ptb)'))
   ) {
-    throw new Error(`Stable/PTB report isolation changed after switching back to stable: ${JSON.stringify({ stable: finalStableReports, ptb: launchReportsFor(ptbInstanceDir) })}`);
+    throw new Error(`Stable/PTB report isolation changed after switching back to stable: ${JSON.stringify({ stable: finalStableReports, ptb: finalPtbReports })}`);
   }
 
   await fsp.appendFile(
@@ -777,6 +919,63 @@ try {
     throw new Error('A fresh modpack game-start signal did not close AHT Launcher when the saved preference was enabled.');
   }
 
+  client.close();
+  client = null;
+  const agedAt = new Date(Date.now() - (31 * 60 * 1000));
+  for (const cacheFile of [
+    path.join(userData, 'startup-initialization.json'),
+    path.join(userData, 'startup-preparation-cache.json'),
+    path.join(userData, 'startup-news-cache.json')
+  ]) {
+    if (fs.existsSync(cacheFile)) await fsp.utimes(cacheFile, agedAt, agedAt);
+  }
+  // Simulate ordinary filesystem metadata churn and a large player-owned
+  // config surface. Warm startup must not enumerate or hash any of it.
+  await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-required.jar'), 'required mod bytes\n', 'utf8');
+  const unrelatedConfigDir = path.join(instanceDir, 'config', 'startup-ignored');
+  await fsp.mkdir(unrelatedConfigDir, { recursive: true });
+  for (let offset = 0; offset < 1_500; offset += 250) {
+    await Promise.all(Array.from({ length: 250 }, (_, index) => (
+      fsp.writeFile(path.join(unrelatedConfigDir, `player-${offset + index}.cfg`), `value=${offset + index}\n`, 'utf8')
+    )));
+  }
+  await fsp.rm(fakeLauncherMarker, { force: true });
+  const warmSpawnedAt = Date.now();
+  warmChild = spawnPlayerLauncher();
+  const warmTarget = await waitForTarget();
+  client = await connect(warmTarget.webSocketDebuggerUrl);
+  await client.call('Runtime.enable');
+  await client.call('Page.enable');
+  await waitFor(client, "!document.body.classList.contains('is-booting')", '31-minute warm startup', 200);
+  const warmStartupMs = Date.now() - warmSpawnedAt;
+  const warmStatus = await evaluate(client, `window.aht.getStatus('stable', { preferCache: true })`);
+  if (warmStartupMs >= 5_000 || !warmStatus.launchReady || warmStatus.launchPreparationState !== 'ready') {
+    throw new Error(`A 31-minute warm startup re-evaluated the modpack instead of reusing saved prerequisites: ${JSON.stringify({ warmStartupMs, warmStatus })}`);
+  }
+  const warmProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
+    sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
+  ));
+  const warmPlayStartedAt = Date.now();
+  await evaluate(client, `window.__ahtWarmPlay = window.aht.play()
+    .then((result) => ({ ok: true, result }))
+    .catch((error) => ({ ok: false, message: String(error?.message || error || '') })); true`);
+  for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) await sleep(25);
+  const warmPlayHandoffMs = Date.now() - warmPlayStartedAt;
+  if (!fs.existsSync(fakeLauncherMarker) || warmPlayHandoffMs >= 500) {
+    throw new Error(`Warm Play did not immediately open the saved launcher route: ${warmPlayHandoffMs}ms.`);
+  }
+  const warmPlayResult = await evaluate(client, 'window.__ahtWarmPlay');
+  if (!warmPlayResult?.ok || !warmPlayResult.result?.ok) {
+    throw new Error(`Warm Play failed after its immediate handoff: ${JSON.stringify(warmPlayResult)}`);
+  }
+  const warmProfilesAfterPlay = [mcRoot, syncedMcRoot].map((rootDir) => (
+    sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
+  ));
+  if (warmProfilesAfterPlay.some((hash, index) => hash !== warmProfilesBeforePlay[index])) {
+    throw new Error('Warm Play rewrote launcher metadata instead of reusing initialization state.');
+  }
+  await evaluate(client, 'window.aht?.windowClose?.(); true').catch(() => {});
+
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -790,6 +989,13 @@ try {
     },
     cleanScanUi,
     usernameSurfaceAbsent,
+    secondPtbPlayAfterSettings: { handoffMs: secondPtbPlayHandoffMs, preparationReused: true },
+    warmAfter31Minutes: {
+      startupMs: warmStartupMs,
+      playHandoffMs: warmPlayHandoffMs,
+      unrelatedConfigFilesIgnored: 1_500,
+      launcherMetadataUnchangedByPlay: true
+    },
     closeWhenGameStarts: { enabled: true, exit: closeResult },
     launchCommand: playResult.result.command,
     profileSwitch: {
@@ -802,7 +1008,7 @@ try {
     },
     launchReports: {
       stable: finalStableReports.map((report) => report.name),
-      ptb: ptbReportsAfterPlay.map((report) => report.name)
+      ptb: finalPtbReports.map((report) => report.name)
     },
     proofSource: proof.source,
     securityState: {
@@ -817,5 +1023,6 @@ try {
     client.close();
   }
   child.kill();
+  if (warmChild && !warmChild.killed) warmChild.kill();
   await new Promise((resolve) => server.close(resolve));
 }

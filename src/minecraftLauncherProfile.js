@@ -505,7 +505,7 @@ function minecraftLibraryRuleMatches(rule = {}, { platform = process.platform, a
   return true;
 }
 
-function minecraftLibraryAllowed(library = {}, options = {}) {
+export function minecraftLibraryAllowed(library = {}, options = {}) {
   const rules = Array.isArray(library?.rules) ? library.rules : [];
   if (!rules.length) return true;
   let allowed = false;
@@ -1037,11 +1037,15 @@ function nextProfileSelectionTimestamp(profiles = {}, nowMs = Date.now()) {
   return new Date(Math.min(upperBound, latestTimestamp + 1)).toISOString();
 }
 
+function usesLegacySelectedProfile(profiles = {}) {
+  const schemaVersion = Number(profiles.version);
+  return Number.isFinite(schemaVersion) && schemaVersion > 0 && schemaVersion < 3;
+}
+
 function updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable, selectForPlay }) {
   const ownsSelection = Object.prototype.hasOwnProperty.call(profiles, 'selectedProfile');
   const selectedProfile = String(profiles.selectedProfile || '').trim();
-  const schemaVersion = Number(profiles.version);
-  const legacySelectionSchema = Number.isFinite(schemaVersion) && schemaVersion > 0 && schemaVersion < 3;
+  const legacySelectionSchema = usesLegacySelectedProfile(profiles);
   if (ownsSelection && (
     selectedProfile === state.profileId
     || (migrateLegacyStable && selectedProfile === 'a-hard-time')
@@ -1053,9 +1057,6 @@ function updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable,
     }
   }
   if (selectForPlay && legacySelectionSchema) {
-    profiles.selectedProfile = state.profileId;
-  }
-  if (selectForPlay && !legacySelectionSchema) {
     profiles.selectedProfile = state.profileId;
   }
 }
@@ -1100,8 +1101,9 @@ async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = 
     delete profiles.profiles['a-hard-time'];
   }
   if (selectForPlay) {
-    // Keep both selection signals aligned: modern launchers use recent-profile
-    // state while older launchers still honor selectedProfile.
+    // Modern launchers use recent-profile order/lastUsed plus quick-play state.
+    // Keep their schema free of the legacy selectedProfile field so CurseForge
+    // can continue to own and rewrite its launcher metadata independently.
     delete profiles.profiles[state.profileId];
   }
   profiles.profiles[state.profileId] = next;
@@ -1126,7 +1128,9 @@ async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = 
     && String(writtenProfile.lastUsed || '') === selectedAt
     && writtenKeys.at(-1) === state.profileId
     && newerCompetitors.length === 0
-    && (!selectForPlay || String(written.selectedProfile || '') === state.profileId));
+    && (!selectForPlay
+      || !usesLegacySelectedProfile(written)
+      || String(written.selectedProfile || '') === state.profileId));
   if (selectForPlay && !selectionPrepared) {
     if (newerCompetitors.length) {
       throw new Error(`Minecraft Launcher has another installation with a future last-used time (${newerCompetitors[0][0]}). Correct the computer clock or open that installation once, then click Play again.`);
@@ -1180,5 +1184,28 @@ export async function ensureMinecraftLauncherProfile({ config, latest = null, in
     ...primaryProfile,
     syncedProfiles,
     syncedProfileCount: syncedProfiles.length
+  };
+}
+
+export async function selectPreparedMinecraftLauncherProfile(profile = null) {
+  const candidates = Array.isArray(profile?.syncedProfiles) && profile.syncedProfiles.length
+    ? profile.syncedProfiles
+    : (profile ? [profile] : []);
+  if (!candidates.length) {
+    throw new Error('The prepared Minecraft Launcher profile is missing. Restart A Hard Time Launcher.');
+  }
+  const selected = [];
+  for (const candidate of candidates) {
+    if (!candidate?.rootDir || !candidate?.profilesPath || !candidate?.profileId || !candidate?.versionId) {
+      throw new Error('The prepared Minecraft Launcher profile is incomplete. Restart A Hard Time Launcher.');
+    }
+    selected.push(await writeMinecraftLauncherProfile(candidate, { selectForPlay: true }));
+  }
+  const primaryRoot = launcherRootKey(profile?.rootDir || '');
+  const primary = selected.find((candidate) => launcherRootKey(candidate.rootDir) === primaryRoot) || selected[0];
+  return {
+    ...primary,
+    syncedProfiles: selected,
+    syncedProfileCount: selected.length
   };
 }

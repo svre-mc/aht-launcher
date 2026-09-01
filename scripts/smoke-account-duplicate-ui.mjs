@@ -218,18 +218,22 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'launcher DOM');
   const recovery = await waitFor(client, `
-    window.aht.getStatus().then((status) => status.identity?.minecraftUsername === 'TakenUser_1'
-      ? ({
+    window.aht.getStatus().then((status) => {
+      if (status.identity?.minecraftUsername !== 'TakenUser_1') return false;
+      renderStatus(status);
+      return ({
           status,
           playerLabel: document.querySelector('#playerLabelView')?.textContent || '',
           usernameSurfaceAbsent: !document.querySelector('#accountOverlay')
             && !document.querySelector('#minecraftUsernameInput')
             && !document.querySelector('#playerLabelInput')
             && typeof window.aht.accountRegister === 'undefined'
-        })
-      : false)
+        });
+    })
   `, 'automatic Minecraft Launcher account recovery');
   const recoveredIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
   const storedConfig = JSON.parse(fs.readFileSync(path.join(userData, 'launcher.config.json'), 'utf8'));

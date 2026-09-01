@@ -4,6 +4,7 @@ import path from 'node:path';
 
 export const LAUNCH_LOG_FOLDER = path.join('logs', 'launcher');
 export const LAUNCH_LOG_FILE_PREFIX = 'AHT-Launch-';
+export const LATEST_LAUNCH_LOG_FILE = 'ahtlatest.log';
 export const LAUNCH_LOG_RETENTION = 30;
 
 const REQUIREMENTS = [
@@ -82,6 +83,7 @@ export function createLaunchAttempt(options = {}) {
     requirements: newRequirementState(),
     system: null,
     minecraftSignals: [],
+    diagnosticFlags: [],
     error: null,
     reportPath: ''
   };
@@ -143,8 +145,19 @@ export function completeLaunchAttempt(attempt, result, error = null) {
     attempt.error = {
       name: sanitizeDiagnosticText(error.name || 'Error', 80),
       code: sanitizeDiagnosticText(error.code || '', 80),
-      message: sanitizeDiagnosticText(error.message || error, 1200)
+      subsystem: sanitizeDiagnosticText(error.subsystem || '', 120),
+      message: sanitizeDiagnosticText(error.message || error, 1200),
+      trace: sanitizeDiagnosticText(error.stack || '', 3000)
     };
+    attempt.diagnosticFlags = (Array.isArray(error.diagnosticFlags) ? error.diagnosticFlags : [])
+      .slice(0, 32)
+      .map((flag) => ({
+        status: ['FAIL', 'WARN', 'PASS', 'INFO'].includes(String(flag?.status || '').toUpperCase())
+          ? String(flag.status).toUpperCase()
+          : 'INFO',
+        code: sanitizeDiagnosticText(flag?.code || 'DIAGNOSTIC', 100),
+        detail: sanitizeDiagnosticText(flag?.detail || '', 900)
+      }));
   }
   for (const step of attempt.steps) {
     if (step.status === 'RUNNING') finishLaunchStep(step, 'WARN', 'The launch stopped before this step finished.');
@@ -342,9 +355,6 @@ export function formatLaunchReport(attempt) {
   lines.push('A HARD TIME LAUNCH REPORT');
   lines.push('================================================================');
   lines.push(`Result: ${attempt.result}`);
-  lines.push(`Attempt ID: ${attempt.attemptId}`);
-  lines.push(`Started: ${attempt.startedAt}`);
-  lines.push(`Finished: ${attempt.finishedAt || 'Not finished'}`);
   lines.push(`Launcher: ${attempt.app.name} ${attempt.app.version || 'Unknown'} (${attempt.app.mode})`);
   lines.push(`Pack: ${attempt.pack.name}${attempt.pack.latestVersion ? ` ${attempt.pack.latestVersion}` : ''} (${attempt.pack.channel})`);
   lines.push(`Instance: ${attempt.instanceDir || 'Not resolved'}`);
@@ -353,9 +363,6 @@ export function formatLaunchReport(attempt) {
   lines.push('');
   lines.push('LIKELY CAUSE');
   lines.push(`  ${analysis.cause}`);
-  lines.push('');
-  lines.push('RECOMMENDED ACTION');
-  analysis.actions.forEach((action, index) => lines.push(`  ${index + 1}. ${action}`));
   lines.push('');
   lines.push('LAUNCH PROCESS');
   if (!attempt.steps.length) {
@@ -372,6 +379,22 @@ export function formatLaunchReport(attempt) {
     lines.push(statusLine(item.status, item.label, item.detail));
   }
   lines.push('');
+  lines.push('ERROR FLAGS');
+  const failed = failedStep(attempt);
+  if (!attempt.error) {
+    lines.push(statusLine('INFO', 'NO_LAUNCH_ERROR', 'No AHT Launcher exception was recorded for this report.'));
+  } else {
+    lines.push(statusLine('FAIL', 'FAILED_STEP', failed ? `${failed.key}: ${failed.label}` : 'No failed step was recorded.'));
+    lines.push(statusLine(
+      'FAIL',
+      attempt.error.code || 'UNCLASSIFIED_ERROR',
+      [attempt.error.name, attempt.error.subsystem].filter(Boolean).join(' / ')
+    ));
+    for (const flag of Array.isArray(attempt.diagnosticFlags) ? attempt.diagnosticFlags : []) {
+      lines.push(statusLine(flag.status, flag.code, flag.detail));
+    }
+  }
+  lines.push('');
   pushSystemLines(lines, attempt.system || {});
   const signals = Array.isArray(attempt.minecraftSignals) ? attempt.minecraftSignals.filter(Boolean).slice(-24) : [];
   lines.push('RECENT MINECRAFT LAUNCHER SIGNALS');
@@ -386,13 +409,12 @@ export function formatLaunchReport(attempt) {
     lines.push(`  Failed step: ${failedStep(attempt)?.label || 'Unknown'}`);
     lines.push(`  Error: ${attempt.error.message || 'Unknown error'}`);
     if (attempt.error.code) lines.push(`  Code: ${attempt.error.code}`);
+    if (attempt.error.subsystem) lines.push(`  Subsystem: ${attempt.error.subsystem}`);
+    if (attempt.error.trace) lines.push(`  Trace: ${attempt.error.trace}`);
   } else {
     lines.push('  No AHT Launcher error was recorded.');
   }
   if (attempt.reportWriteError) lines.push(`  Report file: ${sanitizeDiagnosticText(attempt.reportWriteError, 500)}`);
-  lines.push('');
-  lines.push('PRIVACY');
-  lines.push('  Passwords, Microsoft/Minecraft tokens, AHT proof tokens, API keys, and environment secrets are not included.');
   lines.push('================================================================');
   return `${lines.join('\r\n')}\r\n`;
 }
@@ -414,6 +436,10 @@ export function launchReportPath(instanceDir, attempt) {
   );
 }
 
+export function latestLaunchReportPath(instanceDir) {
+  return path.join(launchLogDirectory(instanceDir), LATEST_LAUNCH_LOG_FILE);
+}
+
 async function pruneLaunchReports(directory, retention = LAUNCH_LOG_RETENTION) {
   const entries = await fs.readdir(directory, { withFileTypes: true });
   const reports = entries
@@ -429,14 +455,16 @@ export async function writeLaunchReport(instanceDir, attempt, options = {}) {
   const directory = launchLogDirectory(instanceDir);
   await fs.mkdir(directory, { recursive: true });
   const previousReportPath = attempt.reportPath || '';
-  const reportPath = launchReportPath(instanceDir, attempt);
+  const archivePath = launchReportPath(instanceDir, attempt);
+  const reportPath = latestLaunchReportPath(instanceDir);
   attempt.reportPath = reportPath;
   attempt.reportWriteError = '';
   try {
     const text = formatLaunchReport(attempt);
+    await fs.writeFile(archivePath, text, 'utf8');
     await fs.writeFile(reportPath, text, 'utf8');
     await pruneLaunchReports(directory, Number(options.retention) || LAUNCH_LOG_RETENTION).catch(() => {});
-    return { path: reportPath, directory, text, chars: text.length };
+    return { path: reportPath, archivePath, directory, text, chars: text.length };
   } catch (error) {
     attempt.reportPath = previousReportPath;
     throw error;

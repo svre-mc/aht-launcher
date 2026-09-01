@@ -73,6 +73,12 @@ export function windowsLauncherRecordHasUsableWindow(record = {}) {
     && normalized.responding;
 }
 
+export function windowsLauncherRecordLooksLikeLauncherUi(record = {}) {
+  const normalized = normalizeWindowsLauncherRecord(record);
+  return windowsLauncherRecordHasUsableWindow(normalized)
+    && /\bminecraft\s+launcher\b/i.test(normalized.mainWindowTitle);
+}
+
 export function windowsLauncherRecordIdentity(record = {}) {
   const normalized = normalizeWindowsLauncherRecord(record);
   return `${normalized.pid}|${normalized.image}|${normalized.pathKey}|${normalized.sessionId}|${normalized.startTimeUtc}`;

@@ -1,6 +1,6 @@
 {
   "name": "aht-launcher",
-  "version": "0.1.93",
+  "version": "0.1.96",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -22,6 +22,7 @@
     "test:managed-security": "node scripts/test-managed-security-state.mjs",
     "test:social-client": "node scripts/test-social-client.mjs",
     "test:social-worker": "node scripts/test-worker-social.mjs",
+    "test:social-links": "node scripts/test-social-links.mjs",
     "test:friends-panel": "node scripts/smoke-friends-panel.mjs",
     "test:legal-consent": "node scripts/test-legal-consent.mjs",
     "test:legal-panel": "node scripts/smoke-legal-consent-panel.mjs",
@@ -49,8 +50,8 @@
     "r2:retention": "node scripts/r2-retention.mjs",
     "test:server-transfer-plan": "node scripts/smoke-server-transfer-plan.mjs",
     "test:mod-only-changes": "node scripts/smoke-mod-only-changes.mjs",
-    "test:play-gate": "node scripts/smoke-play-integrity-gate.mjs",
-    "test:play-integrity-gate": "node scripts/smoke-play-integrity-gate.mjs",
+    "test:play-gate": "node scripts/smoke-player-update-play-flow.mjs",
+    "test:play-integrity-gate": "node scripts/smoke-player-update-play-flow.mjs",
     "test:player-update-play": "node scripts/smoke-player-update-play-flow.mjs",
     "test:developer-client-bypass": "node scripts/test-developer-client-bypass.mjs",
     "test:developer-instance-dir": "node scripts/smoke-developer-instance-dir.mjs",
@@ -89,6 +90,7 @@
     "test:launcher-proof": "node scripts/test-launcher-proof.mjs",
     "test:launcher-proof-update-stability": "node scripts/test-launcher-proof-update-stability.mjs",
     "test:launch-diagnostics": "node scripts/test-launch-diagnostics.mjs",
+    "test:launch-preparation-snapshot": "node scripts/test-launch-preparation-managed-snapshot.mjs",
     "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
   },
   "dependencies": {

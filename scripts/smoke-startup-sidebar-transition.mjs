@@ -23,9 +23,9 @@ const defaultsPath = path.join(root, 'app.defaults.json');
 const screenshotDir = process.env.AHT_SMOKE_OUTPUT_DIR
   ? path.resolve(process.env.AHT_SMOKE_OUTPUT_DIR)
   : path.join(root, 'screenshots');
-const electronArgs = smokeExe
-  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+const electronArgsFor = (debugPort) => smokeExe
+  ? [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`]
+  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -34,11 +34,11 @@ async function writeJson(file, value) {
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-async function waitForTarget() {
+async function waitForTarget(debugEndpoint = endpoint) {
   let lastError;
   for (let attempt = 0; attempt < 240; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${debugEndpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
         const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -49,7 +49,7 @@ async function waitForTarget() {
     }
     await sleep(50);
   }
-  throw new Error(`Timed out waiting for Electron debugger target: ${lastError?.message || 'no target'}`);
+  throw new Error(`Timed out waiting for Electron debugger target at ${debugEndpoint}: ${lastError?.message || 'no target'}`);
 }
 
 function connect(wsUrl) {
@@ -183,6 +183,41 @@ await writeJson(defaultsPath, {
 });
 
 let stableLatestRequests = 0;
+const newsArtwork = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP4z8DAwMDAxMDAwMAAAAQGAQF7n0QAAAAASUVORK5CYII=', 'base64');
+let holdNewsArtwork = true;
+let updateLogRequests = 0;
+let updateLogResponses = 0;
+let holdQuickUpdateLogs = true;
+const pendingUpdateLogResponses = new Set();
+let newsArtworkRequests = 0;
+let newsArtworkResponses = 0;
+const pendingNewsArtworkResponses = new Set();
+const sendNewsArtwork = (response) => {
+  pendingNewsArtworkResponses.delete(response);
+  if (response.destroyed || response.writableEnded) return;
+  newsArtworkResponses += 1;
+  response.statusCode = 200;
+  response.setHeader('Content-Type', 'image/png');
+  response.setHeader('Content-Length', String(newsArtwork.length));
+  response.setHeader('Cache-Control', 'public, max-age=3600');
+  response.end(newsArtwork);
+};
+const releaseNewsArtwork = () => {
+  holdNewsArtwork = false;
+  for (const response of [...pendingNewsArtworkResponses]) sendNewsArtwork(response);
+};
+const sendUpdateLogs = (response) => {
+  pendingUpdateLogResponses.delete(response);
+  if (response.destroyed || response.writableEnded) return;
+  updateLogResponses += 1;
+  response.statusCode = 200;
+  response.setHeader('Content-Type', 'application/json; charset=utf-8');
+  response.end(JSON.stringify({ logs: [{ version: '2.0.0', title: 'Transition proof', body: 'Renderer transition fixture.', imageUrl: `${workerEndpoint}/news-art.png` }] }));
+};
+const releaseQuickUpdateLogs = () => {
+  holdQuickUpdateLogs = false;
+  for (const response of [...pendingUpdateLogResponses]) sendUpdateLogs(response);
+};
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   const sendJson = (value, delayMs = 0) => {
@@ -203,26 +238,55 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url.pathname === '/api/update-logs') {
-    sendJson({ logs: [{ version: '2.0.0', title: 'Transition proof', body: 'Renderer transition fixture.' }] });
+    updateLogRequests += 1;
+    if (holdQuickUpdateLogs && updateLogRequests > 1) {
+      pendingUpdateLogResponses.add(response);
+      response.once('close', () => pendingUpdateLogResponses.delete(response));
+    } else {
+      sendUpdateLogs(response);
+    }
+    return;
+  }
+  if (url.pathname === '/news-art.png') {
+    newsArtworkRequests += 1;
+    if (holdNewsArtwork) {
+      pendingNewsArtworkResponses.add(response);
+      response.once('close', () => pendingNewsArtworkResponses.delete(response));
+    } else {
+      sendNewsArtwork(response);
+    }
     return;
   }
   sendJson({ ok: true });
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
-const child = spawn(electronBin, electronArgs, {
-  cwd: electronCwd,
-  env: {
-    ...process.env,
-    AHT_APP_DEFAULTS: defaultsPath,
-    AHT_TEST_HOOKS: '1',
-    AHT_TEST_REMOTE_DEBUG_PORT: String(port),
-    AHT_TEST_USER_DATA: userData,
-    ELECTRON_ENABLE_LOGGING: '0'
-  },
-  stdio: 'ignore',
-  windowsHide: true
-});
+function spawnLauncher(debugPort) {
+  return spawn(electronBin, electronArgsFor(debugPort), {
+    cwd: electronCwd,
+    env: {
+      ...process.env,
+      AHT_APP_DEFAULTS: defaultsPath,
+      AHT_TEST_HOOKS: '1',
+      AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort),
+      AHT_TEST_USER_DATA: userData,
+      ELECTRON_ENABLE_LOGGING: '0'
+    },
+    stdio: 'ignore',
+    windowsHide: true
+  });
+}
+
+async function waitForChildExit(child, timeoutMs = 5_000) {
+  if (!child || child.exitCode !== null) return true;
+  return Promise.race([
+    new Promise((resolve) => child.once('exit', () => resolve(true))),
+    sleep(timeoutMs).then(() => false)
+  ]);
+}
+
+let child = spawnLauncher(port);
+let quickChild = null;
 
 let client;
 const screenshots = [];
@@ -234,11 +298,13 @@ try {
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.querySelector('#startupLoader') && document.querySelector('.app-frame')", 'startup DOM');
+  await waitFor(client, "document.querySelector('#startupLoaderLabel')?.textContent === 'Initializing'", 'first-ever initialization label');
 
   const startupProof = await evaluate(client, `(() => {
     const loader = document.querySelector('#startupLoader');
     const frame = document.querySelector('.app-frame');
     const moneySystem = loader.querySelector('.money-loader-system');
+    const progressRule = document.querySelector('#startupLoaderRule');
     const moneyRect = moneySystem.getBoundingClientRect();
     return {
       booting: document.body.classList.contains('is-booting'),
@@ -248,6 +314,9 @@ try {
       frameVisibility: getComputedStyle(frame).visibility,
       frameInert: frame.hasAttribute('inert'),
       statusStillPending: document.querySelector('#launcherVersionLabel')?.textContent === 'Launcher v-',
+      label: document.querySelector('#startupLoaderLabel')?.textContent || '',
+      progressHidden: progressRule?.hidden,
+      progressWidth: document.querySelector('#startupLoaderProgress')?.style.width || '',
       moneyLogoSrc: moneySystem.querySelector('.startup-money-logo')?.getAttribute('src') || '',
       moneyStarCount: moneySystem.querySelectorAll('.startup-orbit-star').length,
       legacyGlobePresent: Boolean(moneySystem.querySelector('.news-loader-globe')),
@@ -256,8 +325,20 @@ try {
   })()`);
   assert(startupProof.booting && startupProof.loaderOpacity === 1 && startupProof.loaderVisibility === 'visible', 'Startup screen was not opaque while status was pending', startupProof);
   assert(startupProof.frameOpacity === 0 && startupProof.frameVisibility === 'hidden' && startupProof.frameInert, 'Partially loaded launcher shell was exposed', startupProof);
+  assert(startupProof.label === 'Initializing' && startupProof.progressHidden === false, 'First-ever startup did not show Initializing with its progress rule beneath the AHT logo', startupProof);
   assert(startupProof.moneyLogoSrc === 'assets/aht-bill-transparent.png' && startupProof.moneyStarCount === 8 && !startupProof.legacyGlobePresent, 'Startup did not expose the required money-and-stars loader component', startupProof);
   screenshots.push(await captureScreenshot(client, 'startup-loading-screen'));
+
+  for (let attempt = 0; attempt < 300 && newsArtworkRequests === 0; attempt += 1) await sleep(50);
+  const pendingArtworkProof = await evaluate(client, `(() => ({
+    booting: document.body.classList.contains('is-booting'),
+    loaderOpacity: Number(getComputedStyle(document.querySelector('#startupLoader')).opacity),
+    frameHidden: document.querySelector('.app-frame')?.hasAttribute('inert'),
+    homeNewsCards: document.querySelectorAll('.home-news-card').length
+  }))()`);
+  assert(newsArtworkRequests > 0 && newsArtworkResponses === 0, 'The startup path never requested News artwork while the loading screen was active', { newsArtworkRequests, newsArtworkResponses });
+  assert(pendingArtworkProof.booting && pendingArtworkProof.loaderOpacity === 1 && pendingArtworkProof.frameHidden, 'The launcher shell was revealed while News artwork was still pending', pendingArtworkProof);
+  releaseNewsArtwork();
 
   try {
     await waitFor(client, "!document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden", 'startup reveal');
@@ -284,10 +365,15 @@ try {
       activePack: document.querySelector('.game-tile.active')?.dataset.pack || '',
       actionMode: button.dataset.actionMode || '',
       installedVersion: document.querySelector('#installedVersion')?.textContent || '',
-      latestVersion: document.querySelector('#latestVersion')?.textContent || ''
+      latestVersion: document.querySelector('#latestVersion')?.textContent || '',
+      homeNewsCards: document.querySelectorAll('.home-news-card').length,
+      newsFeedCards: document.querySelectorAll('.news-feed-card').length,
+      homeNewsBackground: getComputedStyle(document.querySelector('.home-news-card .feature-art')).backgroundImage
     };
   })()`);
   assert(readyProof.label === 'Update' && readyProof.actionMode === 'update' && readyProof.frameOpacity === 1 && readyProof.frameVisibility === 'visible' && readyProof.activePack === 'aht', 'Ready state was incomplete', readyProof);
+  assert(newsArtworkResponses > 0 && readyProof.homeNewsCards > 0 && readyProof.newsFeedCards > 0 && readyProof.homeNewsBackground.includes('news-art.png'), 'Startup revealed before News articles and their artwork were rendered and decoded', { newsArtworkRequests, newsArtworkResponses, readyProof });
+  assert(updateLogRequests === 1, 'Startup fetched the identical News feed more than once', { updateLogRequests });
   assert(!/190,\s*61,\s*51|217,\s*74,\s*62/.test(readyProof.background), 'Update action retained the saturated red palette', readyProof.background);
   screenshots.push(await captureScreenshot(client, 'startup-ready-update-palette'));
 
@@ -296,65 +382,86 @@ try {
     const topbar = document.querySelector('.topbar').getBoundingClientRect();
     return { sidebar: [sidebar.x, sidebar.y, sidebar.width, sidebar.height], topbar: [topbar.x, topbar.y, topbar.width, topbar.height] };
   })()`);
+  const switchStartedAt = Date.now();
   await pointerClick(client, '#ptbTileButton');
   const immediateProof = await evaluate(client, `(() => ({
     ptbSelected: document.querySelector('#ptbTileButton').classList.contains('active'),
     ahtSelected: document.querySelector('#gameTileButton').classList.contains('active'),
     switching: document.querySelector('.workspace').classList.contains('is-sidebar-switching'),
     viewOpacity: Number(getComputedStyle(document.querySelector('.view.active')).opacity),
-    viewTransform: getComputedStyle(document.querySelector('.view.active')).transform
+    viewTransform: getComputedStyle(document.querySelector('.view.active')).transform,
+    sidebarLoaderVisible: !document.querySelector('#sidebarSwitchLoader')?.hidden && getComputedStyle(document.querySelector('#sidebarSwitchLoader')).display !== 'none',
+    sidebarLoaderLabel: document.querySelector('#sidebarSwitchLoader')?.getAttribute('aria-label') || '',
+    sidebarMoneyLogo: document.querySelector('#sidebarSwitchLoader .startup-money-logo')?.getAttribute('src') || '',
+    sidebarMoneyStars: document.querySelectorAll('#sidebarSwitchLoader .startup-orbit-star').length,
+    sidebarMoneyAnimation: getComputedStyle(document.querySelector('#sidebarSwitchLoader .startup-money-logo')).animationName,
+    sidebarLoaderZIndex: getComputedStyle(document.querySelector('#sidebarSwitchLoader')).zIndex,
+    sidebarMoneyOpacity: Number(getComputedStyle(document.querySelector('#sidebarSwitchLoader .money-loader-system')).opacity),
+    sidebarLoaderRect: (() => {
+      const rect = document.querySelector('#sidebarSwitchLoader').getBoundingClientRect();
+      return [rect.right, rect.bottom, innerWidth, innerHeight];
+    })()
   }))()`);
   assert(immediateProof.ptbSelected && !immediateProof.ahtSelected && immediateProof.switching, 'Sidebar selection did not commit immediately', immediateProof);
+  assert(immediateProof.sidebarLoaderVisible && immediateProof.sidebarLoaderLabel === 'Switching to PTB' && immediateProof.sidebarMoneyLogo === 'assets/aht-bill-transparent.png' && immediateProof.sidebarMoneyStars === 8 && immediateProof.sidebarMoneyAnimation.includes('startup-money-drift') && immediateProof.sidebarLoaderZIndex === '9999' && immediateProof.sidebarMoneyOpacity >= 0.95, 'The bottom-right money animation was not shown above the launcher as soon as the pack switch began', immediateProof);
+  assert(Math.abs(immediateProof.sidebarLoaderRect[0] - immediateProof.sidebarLoaderRect[2]) < 1 && Math.abs(immediateProof.sidebarLoaderRect[1] - immediateProof.sidebarLoaderRect[3]) < 1, 'The pack-switch money animation was not anchored to the bottom-right corner', immediateProof.sidebarLoaderRect);
   assert(immediateProof.viewOpacity > 0.98 && immediateProof.viewTransform === 'none', 'Outgoing view moved or faded before the measured lead-in', immediateProof);
 
   await sleep(105);
   const exitProof = await evaluate(client, `(() => {
     const view = document.querySelector('.view.active');
-    return { opacity: Number(getComputedStyle(view).opacity), leaving: view.classList.contains('sidebar-view-leaving'), transform: getComputedStyle(view).transform };
+    const loader = document.querySelector('#sidebarSwitchLoader');
+    return {
+      opacity: Number(getComputedStyle(view).opacity),
+      leaving: view.classList.contains('sidebar-view-leaving'),
+      transform: getComputedStyle(view).transform,
+      sidebarLoaderVisible: !loader?.hidden && getComputedStyle(loader).display !== 'none'
+    };
   })()`);
-  assert(exitProof.leaving && exitProof.opacity > 0.05 && exitProof.opacity < 0.98 && exitProof.transform === 'none', 'Outgoing view did not use the measured opacity-only fade', exitProof);
+  assert(exitProof.leaving && exitProof.opacity > 0.05 && exitProof.opacity < 0.98 && exitProof.transform === 'none' && exitProof.sidebarLoaderVisible, 'The loader did not remain visible while the pack switch was genuinely unresolved', exitProof);
 
-  await sleep(190);
-  const holdProof = await evaluate(client, `(() => {
+  const commitProof = await waitFor(client, `(() => {
+    const button = document.querySelector('#playButton');
+    if (button?.dataset.actionMode !== 'install') return false;
     const view = document.querySelector('.view.active');
     const workspace = document.querySelector('.workspace');
-    const loader = document.querySelector('#sidebarSwitchLoader');
     const sidebar = document.querySelector('.sidebar');
     const topbar = document.querySelector('.topbar');
+    const loader = document.querySelector('#sidebarSwitchLoader');
     const sidebarRect = sidebar.getBoundingClientRect();
     const topbarRect = topbar.getBoundingClientRect();
-    const loaderRect = loader.getBoundingClientRect();
     return {
       viewOpacity: Number(getComputedStyle(view).opacity),
-      loaderOpacity: Number(getComputedStyle(loader).opacity),
       workspaceBusy: workspace.getAttribute('aria-busy'),
       sidebarOpacity: Number(getComputedStyle(sidebar).opacity),
       topbarOpacity: Number(getComputedStyle(topbar).opacity),
-      moneyLogoSrc: loader.querySelector('.startup-money-logo')?.getAttribute('src') || '',
-      moneyStarCount: loader.querySelectorAll('.startup-orbit-star').length,
-      legacyGlobePresent: Boolean(loader.querySelector('.news-loader-globe')),
-      moneyGeometry: [loaderRect.width, loaderRect.height, loaderRect.right, loaderRect.bottom],
-      shell: { sidebar: [sidebarRect.x, sidebarRect.y, sidebarRect.width, sidebarRect.height], topbar: [topbarRect.x, topbarRect.y, topbarRect.width, topbarRect.height] }
-    };
-  })()`);
-  assert(holdProof.viewOpacity < 0.02 && holdProof.loaderOpacity > 0.85 && holdProof.workspaceBusy === 'true', 'Blank loading hold did not match BSG', holdProof);
-  assert(holdProof.moneyLogoSrc === startupProof.moneyLogoSrc && holdProof.moneyStarCount === startupProof.moneyStarCount && !holdProof.legacyGlobePresent && JSON.stringify(holdProof.moneyGeometry) === JSON.stringify(startupProof.moneyGeometry), 'Game-mode switching did not reuse the exact startup money-and-stars loader', { startup: startupProof, hold: holdProof });
-  assert(holdProof.sidebarOpacity === 1 && holdProof.topbarOpacity === 1 && JSON.stringify(holdProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, hold: holdProof });
-  screenshots.push(await captureScreenshot(client, 'sidebar-switch-loading-hold'));
-
-  await waitFor(client, "document.querySelector('.workspace')?.classList.contains('is-sidebar-switch-entering') && document.querySelector('.view.active')?.classList.contains('sidebar-view-entering-active')", 'sidebar enter phase');
-  await sleep(105);
-  const enterProof = await evaluate(client, `(() => {
-    const view = document.querySelector('.view.active');
-    return {
-      opacity: Number(getComputedStyle(view).opacity),
       entering: view.classList.contains('sidebar-view-entering-active'),
       transform: getComputedStyle(view).transform,
-      loaderOpacity: Number(getComputedStyle(document.querySelector('#sidebarSwitchLoader')).opacity)
+      playActionMode: button.dataset.actionMode,
+      sidebarLoaderHidden: Boolean(loader?.hidden),
+      sidebarLoaderVisible: !loader?.hidden && getComputedStyle(loader).display !== 'none',
+      shell: { sidebar: [sidebarRect.x, sidebarRect.y, sidebarRect.width, sidebarRect.height], topbar: [topbarRect.x, topbarRect.y, topbarRect.width, topbarRect.height] }
     };
-  })()`);
-  assert(enterProof.entering && enterProof.opacity > 0.05 && enterProof.opacity < 0.98 && enterProof.transform === 'none', 'Incoming view did not use the measured opacity-only fade', enterProof);
-  screenshots.push(await captureScreenshot(client, 'sidebar-switch-entering'));
+  })()`, 'PTB status and view commit');
+  commitProof.elapsedMs = Date.now() - switchStartedAt;
+  assert(commitProof.sidebarLoaderHidden && !commitProof.sidebarLoaderVisible && commitProof.workspaceBusy === 'true', 'The bottom-right money animation remained visible after the selected pack and Play action committed', commitProof);
+  assert(commitProof.sidebarOpacity === 1 && commitProof.topbarOpacity === 1 && JSON.stringify(commitProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, commit: commitProof });
+
+  const enterProof = await waitFor(client, `(() => {
+    const view = document.querySelector('.view.active');
+    const opacity = Number(getComputedStyle(view).opacity);
+    if (!view.classList.contains('sidebar-view-entering-active') || opacity <= 0.05 || opacity >= 0.98) return false;
+    const loader = document.querySelector('#sidebarSwitchLoader');
+    return {
+      opacity,
+      entering: true,
+      transform: getComputedStyle(view).transform,
+      sidebarLoaderHidden: Boolean(loader?.hidden),
+      sidebarLoaderVisible: !loader?.hidden && getComputedStyle(loader).display !== 'none'
+    };
+  })()`, 'incoming opacity fade after loader cleanup');
+  assert(enterProof.transform === 'none' && enterProof.sidebarLoaderHidden && !enterProof.sidebarLoaderVisible, 'The money loader overlapped the incoming pack view or Play action', enterProof);
+  screenshots.push(await captureScreenshot(client, 'sidebar-switch-entering-loader-hidden'));
 
   const finalProof = await waitFor(client, `(() => {
     const workspace = document.querySelector('.workspace');
@@ -365,31 +472,85 @@ try {
       activePack: document.querySelector('.game-tile.active')?.dataset.pack || '',
       activeView: activeView?.id || '',
       viewOpacity: Number(getComputedStyle(activeView).opacity),
-      loaderOpacity: Number(getComputedStyle(document.querySelector('#sidebarSwitchLoader')).opacity),
+      sidebarLoaderHidden: Boolean(document.querySelector('#sidebarSwitchLoader')?.hidden),
       label: button.textContent.trim(),
       background: getComputedStyle(button).backgroundImage,
       workspaceBusy: workspace.hasAttribute('aria-busy')
     };
   })()`, 'completed PTB transition');
-  assert(finalProof.activePack === 'ptb' && finalProof.activeView === 'player' && finalProof.viewOpacity === 1 && finalProof.loaderOpacity === 0 && !finalProof.workspaceBusy, 'Sidebar transition did not cleanly finish', finalProof);
+  finalProof.elapsedMs = Date.now() - switchStartedAt;
+  assert(finalProof.activePack === 'ptb' && finalProof.activeView === 'player' && finalProof.viewOpacity === 1 && finalProof.sidebarLoaderHidden && !finalProof.workspaceBusy, 'Sidebar transition did not cleanly finish and hide its money animation', finalProof);
+  assert(finalProof.elapsedMs < 1_500, 'Sidebar transition performed long preparation work instead of using the startup-prepared path', finalProof);
   assert(finalProof.label === 'Install' && finalProof.background !== readyProof.background, 'Install and Update palettes were not distinct', { update: readyProof, install: finalProof });
   assert(!/116,\s*164,\s*88|147,\s*201,\s*112/.test(finalProof.background), 'Install action retained the saturated green palette', finalProof.background);
   screenshots.push(await captureScreenshot(client, 'sidebar-switch-complete-install-palette'));
+
+  const initializationMarker = JSON.parse(await fsp.readFile(path.join(userData, 'startup-initialization.json'), 'utf8'));
+  assert(initializationMarker.completedAt && Array.isArray(initializationMarker.blockedPacks), 'First-ever startup did not persist its cross-version initialization marker', initializationMarker);
+
+  await evaluate(client, "window.aht?.windowClose?.(); true").catch(() => {});
+  client.close();
+  client = null;
+  if (!(await waitForChildExit(child))) child.kill();
+
+  const durableNewsCachePath = path.join(userData, 'startup-news-cache.json');
+  const durableNewsCache = JSON.parse(await fsp.readFile(durableNewsCachePath, 'utf8'));
+  const agedNewsCacheAt = new Date(Date.now() - (31 * 60 * 1000)).toISOString();
+  durableNewsCache.updatedAt = agedNewsCacheAt;
+  for (const entry of Object.values(durableNewsCache.entries || {})) entry.fetchedAt = agedNewsCacheAt;
+  await fsp.writeFile(durableNewsCachePath, `${JSON.stringify(durableNewsCache, null, 2)}\n`, 'utf8');
+
+  const quickPort = port + 2;
+  const quickEndpoint = `http://127.0.0.1:${quickPort}`;
+  const quickSpawnedAt = Date.now();
+  const updateLogRequestsBeforeQuick = updateLogRequests;
+  quickChild = spawnLauncher(quickPort);
+  const quickTarget = await waitForTarget(quickEndpoint);
+  client = await connect(quickTarget.webSocketDebuggerUrl);
+  await client.call('Runtime.enable');
+  await client.call('Page.enable');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await waitFor(client, "document.querySelector('#startupLoader') && document.querySelector('.app-frame')", 'quick-relaunch startup DOM');
+  const quickVisibleAt = Date.now();
+  const quickStartupState = await evaluate(client, 'window.aht.getStartupPreparationState()');
+  const quickLoadingProof = await evaluate(client, `(() => ({
+    booting: document.body.classList.contains('is-booting'),
+    label: document.querySelector('#startupLoaderLabel')?.textContent || '',
+    progressHidden: document.querySelector('#startupLoaderRule')?.hidden,
+    frameHidden: document.querySelector('.app-frame')?.getAttribute('aria-hidden') === 'true'
+  }))()`);
+  assert(quickStartupState.firstInitialization === false && quickStartupState.initialized === true, 'The persisted initialization marker was not reused on relaunch', quickStartupState);
+  assert(quickLoadingProof.label === 'Loading launcher' && quickLoadingProof.progressHidden === true, 'A normal relaunch incorrectly restored the one-time Initializing progress UI', quickLoadingProof);
+  for (let attempt = 0; attempt < 120 && updateLogRequests === updateLogRequestsBeforeQuick; attempt += 1) await sleep(40);
+  assert(updateLogRequests - updateLogRequestsBeforeQuick === 1 && updateLogResponses === 1, 'The controlled warm-start News request was not held after the first-process response', { updateLogRequestsBeforeQuick, updateLogRequests, updateLogResponses });
+  await waitFor(client, "!document.body.classList.contains('is-booting')", 'quick relaunch reveal', 120, 40);
+  const quickStartupElapsedMs = Date.now() - quickSpawnedAt;
+  const quickRendererElapsedMs = Date.now() - quickVisibleAt;
+  const quickFinalState = await evaluate(client, 'window.aht.getStartupPreparationState()');
+  assert(quickStartupElapsedMs < 5_000, 'Normal cached startup exceeded the five-second maximum', { quickStartupElapsedMs, quickStartupState, quickFinalState, quickLoadingProof });
+  assert(updateLogRequests - updateLogRequestsBeforeQuick === 1, 'Quick relaunch fetched the identical News feed more than once', { updateLogRequestsBeforeQuick, updateLogRequests });
+  assert(updateLogResponses === 1, 'Warm startup waited for the held remote News response instead of using its durable last-known-good feed', { updateLogRequests, updateLogResponses, quickStartupElapsedMs });
+  releaseQuickUpdateLogs();
 
   console.log(JSON.stringify({
     ok: true,
     mode: smokeExe ? 'installed' : 'source',
     startup: startupProof,
+    quickRelaunch: { elapsedMs: quickStartupElapsedMs, rendererElapsedMs: quickRendererElapsedMs, agedNewsCacheMinutes: 31, state: quickStartupState, finalState: quickFinalState, loading: quickLoadingProof },
     ready: readyProof,
-    transition: { immediate: immediateProof, exit: exitProof, hold: holdProof, enter: enterProof, final: finalProof },
+    transition: { immediate: immediateProof, exit: exitProof, commit: commitProof, enter: enterProof, final: finalProof },
     screenshots
   }, null, 2));
 } finally {
+  releaseQuickUpdateLogs();
+  releaseNewsArtwork();
   if (client) {
     await evaluate(client, "window.aht?.windowClose?.(); true").catch(() => {});
     client.close();
   }
   if (!child.killed) child.kill();
+  if (quickChild && !quickChild.killed) quickChild.kill();
   const closePromise = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections?.();
   await closePromise;

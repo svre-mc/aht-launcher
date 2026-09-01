@@ -168,6 +168,18 @@ export function launcherProofPath(instanceDir = '', identityOrChannel = 'player'
   return path.join(proofDir || path.join(instanceDir, '.aht-launcher'), fileName);
 }
 
+export function launcherProofStorageDir(baseDir = '', instanceDir = '') {
+  const storageRoot = String(baseDir || '').trim();
+  const instanceRoot = String(instanceDir || '').trim();
+  if (!storageRoot) throw new Error('Launcher proof storage root is required.');
+  if (!instanceRoot) throw new Error('Launcher proof instance path is required.');
+  // The signed payload is bound to this same resolved instance path. Keeping
+  // each instance in its own launcher-owned directory prevents another
+  // prepared pack's background refresh from replacing the selected proof.
+  const instanceScope = sha256Hex(path.resolve(instanceRoot));
+  return path.join(path.resolve(storageRoot), 'instances', instanceScope);
+}
+
 function launcherProofFiles(config = {}, identity = {}) {
   const instanceProof = launcherProofPath(config.instanceDir || '', identity);
   const configuredProof = config.launcherProof?.proofDir

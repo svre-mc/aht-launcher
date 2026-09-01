@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import { HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024;
@@ -147,5 +147,43 @@ export async function uploadR2ObjectDirect({
     size: stat.size,
     partSize,
     queueSize
+  };
+}
+
+export async function uploadR2JsonDirect({
+  accountId,
+  accessKeyId,
+  secretAccessKey,
+  bucket,
+  key,
+  value,
+  sha256 = '',
+  metadata = {}
+} = {}) {
+  assertDirectR2Credentials({ accountId, accessKeyId, secretAccessKey });
+  const body = typeof value === 'string' ? value : JSON.stringify(value);
+  const size = Buffer.byteLength(body, 'utf8');
+  if (!body || size > 256 * 1024) {
+    throw new Error('Direct R2 JSON upload must contain between 1 byte and 256 KB.');
+  }
+  const client = r2Client({ accountId, accessKeyId, secretAccessKey });
+  const uploadMetadata = {
+    ...metadata,
+    ...(sha256 ? { 'aht-sha256': String(sha256).toLowerCase() } : {})
+  };
+  await client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: body,
+    ContentType: 'application/json; charset=utf-8',
+    CacheControl: 'public, max-age=60, must-revalidate',
+    ...(Object.keys(uploadMetadata).length ? { Metadata: uploadMetadata } : {})
+  }));
+  return {
+    method: 'direct-put-json',
+    endpoint: r2Endpoint(accountId),
+    bucket,
+    key,
+    size
   };
 }

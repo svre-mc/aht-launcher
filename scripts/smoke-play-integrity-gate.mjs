@@ -8,6 +8,7 @@ import path from 'node:path';
 import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
 import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
+import { launcherProofPath, launcherProofStorageDir } from '../src/launcherProof.js';
 
 const port = Number(process.argv[2] || 10010);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -27,6 +28,7 @@ const fakeProgramFilesX86 = path.join(root, 'program-files-x86');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'instance');
+const isolatedPtbInstanceDir = path.join(root, 'ptb-uninstalled');
 const mcRoot = path.join(root, 'minecraft');
 const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
 const fakeLauncherMarker = path.join(root, 'fake-minecraft-launcher.json');
@@ -44,11 +46,13 @@ const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
-const electronArgs = smokeExe
-  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+const electronArgsFor = (debugPort) => smokeExe
+  ? [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`]
+  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
-await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
+await writeMinecraftBaseFixture(minecraftBaseFixtureDir, {
+  includeExcludedLibraryForCurrentPlatform: true
+});
 await Promise.all([
   fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true }),
   fsp.mkdir(fakeAppData, { recursive: true }),
@@ -58,6 +62,37 @@ await Promise.all([
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function windowsClipboardFiles() {
+  if (process.platform !== 'win32') return [];
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-STA',
+      '-Command',
+      'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetFileDropList() | ForEach-Object { [Console]::WriteLine([string]$_) }'
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code !== 0) reject(new Error(stderr.trim() || `Clipboard inspection exited with code ${code}.`));
+      else resolve(stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    });
+  });
+}
+
+async function waitForReportFiles(directory, pattern, minimumCount = 1) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const names = fs.existsSync(directory) ? fs.readdirSync(directory).filter((name) => pattern.test(name)) : [];
+    if (names.length >= minimumCount) return names;
+    await sleep(25);
+  }
+  return fs.existsSync(directory) ? fs.readdirSync(directory).filter((name) => pattern.test(name)) : [];
 }
 
 async function writeJson(file, value) {
@@ -75,13 +110,15 @@ const integrityStatePath = path.join(
   sha256(path.resolve(instanceDir)).slice(0, 24),
   'integrity.json'
 );
-const launcherProofStatePath = path.join(userData, '.aht-launcher', 'launcher-proof.json');
+const launcherProofStatePath = launcherProofPath(instanceDir, 'player', {
+  proofDir: launcherProofStorageDir(path.join(userData, '.aht-launcher'), instanceDir)
+});
 
-async function waitForTarget() {
+async function waitForTarget(debugEndpoint = endpoint) {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${debugEndpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
         const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -92,7 +129,15 @@ async function waitForTarget() {
     }
     await sleep(250);
   }
-  throw new Error(`Timed out waiting for Electron debugger target: ${lastError?.message || 'no target'}`);
+  throw new Error(`Timed out waiting for Electron debugger target at ${debugEndpoint}: ${lastError?.message || 'no target'}`);
+}
+
+async function waitForChildExit(child, timeoutMs = 5_000) {
+  if (!child || child.exitCode !== null) return true;
+  return Promise.race([
+    new Promise((resolve) => child.once('exit', () => resolve(true))),
+    sleep(timeoutMs).then(() => false)
+  ]);
 }
 
 function connect(wsUrl) {
@@ -204,6 +249,7 @@ await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
   latestUrl: `${workerEndpoint}/latest.json`,
+  packs: { ptb: { packId: 'a-hard-time-ptb', name: 'A Hard Time PTB', latestUrl: '', instanceDir: isolatedPtbInstanceDir } },
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
@@ -213,6 +259,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   packId: 'a-hard-time-dregora',
   instanceDir,
   latestUrl: `${workerEndpoint}/latest.json`,
+  packs: { ptb: { packId: 'a-hard-time-ptb', name: 'A Hard Time PTB', latestUrl: '', instanceDir: isolatedPtbInstanceDir } },
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: 'SmokeUser' },
   developer: { adminBaseUrl: `${workerEndpoint}/`, defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
@@ -253,7 +300,7 @@ const initialWindowsProcessState = {
     sessionId: 7,
     startTimeUtc: '2026-08-03T12:00:00.000Z',
     mainWindowHandle: 51001,
-    mainWindowTitle: 'Minecraft Launcher',
+    mainWindowTitle: 'A Hard Time 1.12.2',
     responding: true,
     windowVisible: true,
     windowMinimized: false,
@@ -294,6 +341,9 @@ await writeForgeInstallationFixture(mcRoot, { versionId: '1.12.2-forge-14.23.5.2
 
 const registeredUsers = new Map();
 const launcherProofRequests = [];
+let updateLogsRequests = 0;
+let launcherProofDelayMs = 0;
+let launcherProofResponses = 0;
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/latest.json') {
@@ -341,6 +391,7 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url.pathname === '/api/update-logs') {
+    updateLogsRequests += 1;
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify({ logs: [] }));
@@ -360,9 +411,19 @@ const server = http.createServer((request, response) => {
         response.end(JSON.stringify({ error: 'Minecraft username is not registered to this launcher install.' }));
         return;
       }
-      response.statusCode = 200;
-      response.setHeader('Content-Type', 'application/json; charset=utf-8');
-      response.end(JSON.stringify(workerLauncherProofFixture(payload, { signature: 'smoke-signature' })));
+      const sendProof = () => {
+        if (response.destroyed || response.writableEnded) return;
+        response.statusCode = 200;
+        response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.end(JSON.stringify(workerLauncherProofFixture(payload, { signature: 'smoke-signature' })));
+        launcherProofResponses += 1;
+      };
+      if (launcherProofDelayMs > 0) {
+        const timer = setTimeout(sendProof, launcherProofDelayMs);
+        timer.unref?.();
+      } else {
+        sendProof();
+      }
     });
     return;
   }
@@ -372,9 +433,10 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
-const child = spawn(electronBin, electronArgs, {
-  cwd: electronCwd,
-  env: {
+function spawnLauncher(debugPort, options = {}) {
+  return spawn(electronBin, electronArgsFor(debugPort), {
+    cwd: electronCwd,
+    env: {
     ...process.env,
     APPDATA: fakeAppData,
     LOCALAPPDATA: fakeLocalAppData,
@@ -386,23 +448,31 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: defaultsPath,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
-    AHT_TEST_STATUS_FAILURE_COUNT: '1',
+    AHT_TEST_STATUS_FAILURE_COUNT: options.initialStatusFailure === true ? '1' : '0',
+    AHT_TEST_AMBIGUOUS_MANAGED_WATCH_EVENT: options.ambiguousManagedWatchEvent === true ? '1' : '0',
+    AHT_TEST_STALL_IMAGE_DECODE: options.stallImageDecode === true ? '1' : '0',
     AHT_TEST_REQUIRE_LEGAL: '1',
     AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile,
     AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
     AHT_TEST_WINDOWS_PROCESS_STATE_PATH: windowsProcessStatePath,
+    AHT_TEST_WINDOWS_LAUNCHER_FOCUS_ALLOWED: '0',
     AHT_TEST_MINECRAFT_HANDOFF_CAPTURE_PATH: minecraftHandoffCapture,
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: 'amd64',
     AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
     AHT_TEST_MINECRAFT_SPAWN_CAPTURE_PATH: curseForgeSpawnCapture
-  },
-  stdio: 'ignore',
-  windowsHide: true
-});
+    },
+    stdio: 'ignore',
+    windowsHide: true
+  });
+}
+
+let child = spawnLauncher(port, { initialStatusFailure: true, ambiguousManagedWatchEvent: true });
+let cachedStartupChild = null;
 
 let client;
+let cachedStartupProof = null;
 try {
   const target = await waitForTarget();
   client = await connect(target.webSocketDebuggerUrl);
@@ -432,6 +502,7 @@ try {
     return true;
   })()`);
   await waitFor(client, `document.querySelector('#legalOverlay')?.hidden === true`, 'legal acceptance after initial status failure');
+  await waitFor(client, `!document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden`, 'post-consent launch preparation');
   await evaluate(client, `document.querySelector('#playButton').click(); true`);
   const initialPlayFailure = await waitFor(client, `(() => {
     const button = document.querySelector('#playButton');
@@ -445,10 +516,17 @@ try {
       : false;
   })()`, 'failed Play report after initial status failure');
   const initialLaunchLogsDir = path.join(instanceDir, 'logs', 'launcher');
-  const initialFailureReports = fs.readdirSync(initialLaunchLogsDir)
-    .filter((name) => /^AHT-Launch-.*-FAILED-.*\.txt$/i.test(name));
+  const initialFailureReports = await waitForReportFiles(initialLaunchLogsDir, /^AHT-Launch-.*-FAILED-.*\.txt$/i, 1);
   if (initialFailureReports.length !== 1) {
     throw new Error(`Initial status failure Play did not create exactly one report: ${JSON.stringify({ initialPlayFailure, initialFailureReports })}`);
+  }
+  const initialFailureText = fs.readFileSync(path.join(initialLaunchLogsDir, initialFailureReports[0]), 'utf8');
+  if (
+    !initialFailureText.includes('Failed step: Use startup-prepared launch state')
+    || initialFailureText.includes('No launch steps were recorded.')
+    || initialFailureText.includes('Failed step: Unknown')
+  ) {
+    throw new Error(`Startup preparation failure regressed to an empty launch report: ${initialFailureText.slice(0, 1400)}`);
   }
   await fsp.rm(integrityStatePath, { force: true });
   for (const name of initialFailureReports) {
@@ -474,8 +552,8 @@ try {
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '2.8.2' ? status : false)
   `, 'release feed');
-  if (!before.launchReady) {
-    throw new Error(`Pre-play status should be launch-ready before the forced integrity scan: ${JSON.stringify(before)}`);
+  if (before.launchReady || !/Repair required.*managed file issue/i.test(before.launchBlockedReason || '')) {
+    throw new Error(`Startup preparation trusted a forged integrity cache instead of the authoritative scan: ${JSON.stringify(before)}`);
   }
 
   const playResult = await evaluate(client, `
@@ -491,8 +569,8 @@ try {
     throw new Error(`Status did not stay blocked after play integrity scan: ${JSON.stringify(after)}`);
   }
   const changedPaths = (after.integrity?.changed || []).map((entry) => entry.path).sort();
-  if (after.integrity?.counts?.corrupted !== 2 || JSON.stringify(changedPaths) !== JSON.stringify(['config/aht-integrity-test.cfg', 'mods/aht-integrity-test.jar'])) {
-    throw new Error(`Integrity state did not record both corrupted managed files: ${JSON.stringify(after.integrity)}`);
+  if (after.integrity?.counts?.corrupted !== 1 || JSON.stringify(changedPaths) !== JSON.stringify(['mods/aht-integrity-test.jar'])) {
+    throw new Error(`Integrity state did not isolate the corrupted launch-critical mod: ${JSON.stringify(after.integrity)}`);
   }
   const blockedPlayUi = await evaluate(client, `(() => {
     renderStatus(${JSON.stringify(after)});
@@ -504,32 +582,43 @@ try {
   }
 
   const persistedIntegrity = JSON.parse(fs.readFileSync(integrityStatePath, 'utf8'));
-  if (persistedIntegrity.source !== 'play-check' || persistedIntegrity.counts?.corrupted !== 2) {
-    throw new Error(`Play check integrity state was not persisted: ${JSON.stringify(persistedIntegrity)}`);
+  if (persistedIntegrity.source !== 'forged-local-cache' || persistedIntegrity.counts?.corrupted !== 0) {
+    throw new Error(`Forged cache fixture unexpectedly changed before the in-memory gate was checked: ${JSON.stringify(persistedIntegrity)}`);
   }
-  if (!persistedIntegrity.fingerprint?.digest || persistedIntegrity.checkMode !== 'full-hash') {
-    throw new Error(`Full Play integrity scan did not establish a fingerprint: ${JSON.stringify(persistedIntegrity)}`);
+  if (after.integrity?.source !== 'play-check' || after.integrity?.checkMode !== 'full-hash' || after.integrity?.counts?.corrupted !== 1) {
+    throw new Error(`Startup preparation did not retain its authoritative full-hash result in memory: ${JSON.stringify(after.integrity)}`);
   }
 
   const launchLogsDir = path.join(instanceDir, 'logs', 'launcher');
-  const firstFailureReports = fs.readdirSync(launchLogsDir).filter((name) => /^AHT-Launch-.*-FAILED-.*\.txt$/i.test(name));
+  const firstFailureReports = await waitForReportFiles(launchLogsDir, /^AHT-Launch-.*-FAILED-.*\.txt$/i, 1);
   if (firstFailureReports.length !== 1) {
     throw new Error(`Direct failed Play did not write exactly one timestamped report: ${JSON.stringify(firstFailureReports)}`);
   }
   const firstFailureText = fs.readFileSync(path.join(launchLogsDir, firstFailureReports[0]), 'utf8');
-  for (const expected of ['Result: FAILED', 'LIKELY CAUSE', 'LAUNCH PROCESS', 'REQUIREMENTS', 'PC AND RUNTIME', 'Repair required. 2 managed file issues found']) {
+  for (const expected of ['Result: FAILED', 'LIKELY CAUSE', 'LAUNCH PROCESS', 'REQUIREMENTS', 'PC AND RUNTIME', 'Repair required. 1 managed file issue found']) {
     if (!firstFailureText.includes(expected)) {
       throw new Error(`Failed Play report is missing ${expected}: ${firstFailureText.slice(0, 1200)}`);
     }
   }
+  for (const removed of ['Attempt ID:', 'Started:', 'Finished:', 'RECOMMENDED ACTION', 'Passwords, Microsoft/Minecraft tokens']) {
+    if (firstFailureText.includes(removed)) throw new Error(`Failed Play report still includes removed text: ${removed}`);
+  }
+  if (/(?:^|\r?\n)PRIVACY\r?\n/.test(firstFailureText)) throw new Error('Failed Play report still includes the removed PRIVACY section.');
   if (firstFailureText.trimStart().startsWith('{') || firstFailureText.includes('process.versions')) {
     throw new Error('Failed Play report regressed to a raw diagnostic dump.');
   }
   const copiedFailure = await evaluate(client, `
     window.aht.copyErrorReport({ title: 'Launch failed', context: 'play:start', packKey: 'stable' })
   `);
-  if (!copiedFailure?.copied || copiedFailure.chars < 1000 || copiedFailure.fileName !== firstFailureReports[0]) {
+  if (!copiedFailure?.copied || copiedFailure.chars < 1000 || copiedFailure.fileName !== 'ahtlatest.log'
+      || (process.platform === 'win32' && copiedFailure.copyKind !== 'file')) {
     throw new Error(`Failed Play report was not copied from the saved attempt: ${JSON.stringify(copiedFailure)}`);
+  }
+  if (process.platform === 'win32') {
+    const clipboardFiles = await windowsClipboardFiles();
+    if (clipboardFiles.length !== 1 || path.resolve(clipboardFiles[0]) !== path.resolve(copiedFailure.filePath)) {
+      throw new Error(`Copy latest launch report did not place ahtlatest.log on the Windows file clipboard: ${JSON.stringify({ clipboardFiles, copiedFailure })}`);
+    }
   }
 
   const failureClickStarted = await evaluate(client, `(() => {
@@ -537,8 +626,8 @@ try {
     button.click();
     return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
   })()`);
-  if (failureClickStarted.text !== 'Preparing...' || failureClickStarted.ariaBusy !== 'true') {
-    throw new Error(`Failed Play UI did not enter Preparing state: ${JSON.stringify(failureClickStarted)}`);
+  if (failureClickStarted.text !== 'Opening...' || failureClickStarted.ariaBusy !== 'true') {
+    throw new Error(`Failed Play UI did not enter Opening state: ${JSON.stringify(failureClickStarted)}`);
   }
   const failureUi = await waitFor(client, `(() => {
     const button = document.querySelector('#playButton');
@@ -566,9 +655,9 @@ try {
   })()`);
   await waitFor(client, `
     [...document.querySelectorAll('#toastStack .toast.success')]
-      .some((toast) => /Launch report copied/i.test(toast.textContent) && /Paste it into your support message/i.test(toast.textContent))
+      .some((toast) => toast.textContent.trim() === 'Copied to Clipboard' && toast.querySelectorAll('span, button').length === 0)
   `, 'copy-success toast');
-  const uiFailureReports = fs.readdirSync(launchLogsDir).filter((name) => /^AHT-Launch-.*-FAILED-.*\.txt$/i.test(name));
+  const uiFailureReports = await waitForReportFiles(launchLogsDir, /^AHT-Launch-.*-FAILED-.*\.txt$/i, 2);
   if (uiFailureReports.length !== 2) {
     throw new Error(`UI failed Play did not create its own timestamped report: ${JSON.stringify(uiFailureReports)}`);
   }
@@ -576,6 +665,33 @@ try {
   await fsp.writeFile(path.join(instanceDir, 'config', 'aht-integrity-test.cfg'), expectedContent, 'utf8');
   await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
   await fsp.rm(fakeLauncherMarker, { force: true });
+  const repairedPreparation = await evaluate(client, `window.aht.preparePlay('stable', { force: true })`);
+  if (!repairedPreparation?.launchReady || repairedPreparation?.integrity?.counts?.corrupted !== 0) {
+    throw new Error(`Repaired files did not become launch-ready during explicit preparation: ${JSON.stringify(repairedPreparation)}`);
+  }
+  await fsp.writeFile(path.join(instanceDir, 'config', 'aht-integrity-test.cfg'), corruptContent, 'utf8');
+  await sleep(750);
+  const playerConfigMutationStatus = await evaluate(client, `window.aht.getStatus('stable', { preferCache: true })`);
+  if (!playerConfigMutationStatus.launchReady || playerConfigMutationStatus.launchPreparationState !== 'ready') {
+    throw new Error(`A normal player config write invalidated launch preparation: ${JSON.stringify(playerConfigMutationStatus)}`);
+  }
+  await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
+  await sleep(750);
+  const sameByteManagedRewriteStatus = await evaluate(client, `window.aht.getStatus('stable', { preferCache: true })`);
+  if (!sameByteManagedRewriteStatus.launchReady || sameByteManagedRewriteStatus.launchPreparationState !== 'ready') {
+    throw new Error(`A same-byte managed-file notification was treated as corruption: ${JSON.stringify(sameByteManagedRewriteStatus)}`);
+  }
+  await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), corruptContent, 'utf8');
+  const watchedMutationStatus = await waitFor(client, `
+    window.aht.getStatus('stable', { preferCache: true }).then((status) =>
+      !status.launchReady && /managed game file changed after startup/i.test(status.launchBlockedReason || '') ? status : false)
+  `, 'named managed-file watcher invalidation');
+  await fsp.writeFile(path.join(instanceDir, 'config', 'aht-integrity-test.cfg'), expectedContent, 'utf8');
+  await fsp.writeFile(path.join(instanceDir, 'mods', 'aht-integrity-test.jar'), expectedContent, 'utf8');
+  const watcherRecoveryPreparation = await evaluate(client, `window.aht.preparePlay('stable', { force: true })`);
+  if (!watcherRecoveryPreparation?.launchReady || watcherRecoveryPreparation?.integrity?.counts?.corrupted !== 0) {
+    throw new Error(`Watcher invalidation did not recover after an authoritative preparation: ${JSON.stringify({ watchedMutationStatus, watcherRecoveryPreparation })}`);
+  }
   const cleanPlayResult = await evaluate(client, `
     window.aht.play()
       .then((result) => ({ ok: true, result }))
@@ -650,6 +766,11 @@ try {
       throw new Error('Desktop fallback smoke requires a configured Minecraft root without a root-local minecraft.exe.');
     }
 
+    const desktopPreparation = await evaluate(client, `window.aht.preparePlay('stable', { force: true })`);
+    if (!desktopPreparation?.launchReady || desktopPreparation?.minecraftLauncherRoute !== 'desktop') {
+      throw new Error(`Desktop Minecraft Launcher route was not prepared before Play: ${JSON.stringify(desktopPreparation)}`);
+    }
+
     desktopFallbackPlayResult = await evaluate(client, `
       window.aht.play()
         .then((result) => ({ ok: true, result }))
@@ -678,6 +799,20 @@ try {
     desktopFallbackProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     if (!desktopFallbackProof.payload?.launchId || desktopFallbackProof.payload.launchId === proof.payload?.launchId) {
       throw new Error(`Desktop fallback Play reused the prior one-time launchId: ${JSON.stringify({ first: proof.payload?.launchId, desktop: desktopFallbackProof.payload?.launchId })}`);
+    }
+
+    await fsp.rm(desktopLauncherPath, { force: true });
+    await fsp.rm(curseForgeSpawnCapture, { force: true });
+    const missingPreparation = await evaluate(client, `window.aht.preparePlay('stable', { force: true })`);
+    if (missingPreparation?.launchReady || missingPreparation?.launchBlockedReason !== 'Minecraft not installed. Install Minecraft.') {
+      throw new Error(`Missing Minecraft did not fail immediately with the exact player message: ${JSON.stringify(missingPreparation)}`);
+    }
+    const missingPlayStartedAt = Date.now();
+    const missingPlay = await evaluate(client, `window.aht.play('stable')
+      .then((result) => ({ ok: true, result }))
+      .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))`);
+    if (missingPlay.ok || !missingPlay.message.endsWith('Minecraft not installed. Install Minecraft.') || Date.now() - missingPlayStartedAt >= 1000 || fs.existsSync(curseForgeSpawnCapture)) {
+      throw new Error(`Missing Minecraft Play was not an immediate no-spawn failure: ${JSON.stringify({ missingPlay, durationMs: Date.now() - missingPlayStartedAt })}`);
     }
 
     await writeJson(windowsProcessStatePath, initialWindowsProcessState);
@@ -715,6 +850,13 @@ try {
     await fsp.writeFile(path.join(instanceDir, 'crash-reports', 'crash-old-client.txt'), `---- Minecraft Crash Report ----\nCaused by: ${staleInstanceSignal}\n`, 'utf8');
     await fsp.rm(curseForgeSpawnCapture, { force: true });
 
+    const curseForgePreparation = await evaluate(client, `window.aht.preparePlay('stable', { force: true })`);
+    if (!curseForgePreparation?.launchReady || curseForgePreparation?.minecraftLauncherRoute !== 'curseforge') {
+      throw new Error(`CurseForge route was not fully prepared before Play: ${JSON.stringify(curseForgePreparation)}`);
+    }
+    const curseForgeProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
+    const proofRequestsBeforeInstantPlay = launcherProofRequests.length;
+
     const curseForgePlayStartedAt = Date.now();
     const immediatePlayUi = await evaluate(client, `(() => {
       const button = document.querySelector('#playButton');
@@ -728,12 +870,24 @@ try {
       };
     })()`);
     if (
-      immediatePlayUi.text !== 'Preparing...'
+      immediatePlayUi.text !== 'Opening...'
       || immediatePlayUi.ariaBusy !== 'true'
       || immediatePlayUi.ariaDisabled !== 'true'
-      || !/exact Minecraft Launcher profile/i.test(immediatePlayUi.title || '')
+      || !/Opening Minecraft Launcher/i.test(immediatePlayUi.title || '')
     ) {
-      throw new Error(`Play click did not enter the immediate single-flight Preparing state: ${JSON.stringify(immediatePlayUi)}`);
+      throw new Error(`Play click did not enter the immediate single-flight Opening state: ${JSON.stringify(immediatePlayUi)}`);
+    }
+    for (let attempt = 0; attempt < 80 && !fs.existsSync(curseForgeSpawnCapture); attempt += 1) await sleep(25);
+    if (!fs.existsSync(curseForgeSpawnCapture)) {
+      throw new Error('Prepared Play did not spawn the CurseForge Minecraft Launcher within 2 seconds.');
+    }
+    const immediateSpawnCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
+    const curseForgeSpawnLatencyMs = Number(immediateSpawnCapture.capturedAtMs) - curseForgePlayStartedAt;
+    if (!Number.isFinite(curseForgeSpawnLatencyMs) || curseForgeSpawnLatencyMs < 0 || curseForgeSpawnLatencyMs >= 500) {
+      throw new Error(`Prepared Play did not hand off to CurseForge within 500 ms: ${JSON.stringify({ curseForgeSpawnLatencyMs, immediateSpawnCapture })}`);
+    }
+    if (launcherProofRequests.length !== proofRequestsBeforeInstantPlay) {
+      throw new Error(`Prepared Play made a redundant Worker proof request before spawning CurseForge: ${JSON.stringify({ before: proofRequestsBeforeInstantPlay, after: launcherProofRequests.length })}`);
     }
     const completedPlayUi = await waitFor(client, `(() => {
       const button = document.querySelector('#playButton');
@@ -756,19 +910,24 @@ try {
         : false;
     })()`, 'completed Play click');
     const curseForgePlayDurationMs = Date.now() - curseForgePlayStartedAt;
-    if (curseForgePlayDurationMs >= 5000) {
+    if (curseForgePlayDurationMs >= 1000) {
       throw new Error(`Prepared CurseForge Play took too long (${curseForgePlayDurationMs}ms).`);
     }
-    const handoffReportsBeforeCopy = fs.readdirSync(launchLogsDir)
-      .filter((name) => /^AHT-Launch-.*-HANDOFF.*\.txt$/i.test(name))
+    const handoffReportsBeforeCopy = (await waitForReportFiles(launchLogsDir, /^AHT-Launch-.*-HANDOFF.*\.txt$/i, 3))
       .sort((left, right) => fs.statSync(path.join(launchLogsDir, left)).mtimeMs - fs.statSync(path.join(launchLogsDir, right)).mtimeMs);
     const latestHandoffReport = handoffReportsBeforeCopy.at(-1);
     if (!latestHandoffReport) {
       throw new Error(`Successful Play did not create a HANDOFF report: ${JSON.stringify(handoffReportsBeforeCopy)}`);
     }
     const initialHandoffText = fs.readFileSync(path.join(launchLogsDir, latestHandoffReport), 'utf8');
-    if (!initialHandoffText.includes('Copy latest launch report') || initialHandoffText.includes(stalePreLaunchSignal) || initialHandoffText.includes(staleInstanceSignal)) {
-      throw new Error(`Successful HANDOFF report did not explain the post-Minecraft copy action: ${initialHandoffText.slice(0, 1800)}`);
+    if (
+      !initialHandoffText.includes('completed its handoff to a verified Minecraft Launcher window')
+      || !initialHandoffText.includes('0 changed-metadata files rehashed.')
+      || !initialHandoffText.includes('no network refresh was needed.')
+      || initialHandoffText.includes(stalePreLaunchSignal)
+      || initialHandoffText.includes(staleInstanceSignal)
+    ) {
+      throw new Error(`Successful HANDOFF report lost its outcome boundary or included stale signals: ${initialHandoffText.slice(0, 1800)}`);
     }
     await fsp.appendFile(path.join(curseForgeRoot, 'launcher_log.txt'), '[Info] Minecraft Launcher window focused\n', 'utf8');
     await evaluate(client, `(() => {
@@ -778,10 +937,10 @@ try {
     })()`);
     await waitFor(client, `
       [...document.querySelectorAll('#toastStack .toast.success')]
-        .some((toast) => /Launch report copied/i.test(toast.textContent))
+        .some((toast) => toast.textContent.trim() === 'Copied to Clipboard' && toast.querySelectorAll('span, button').length === 0)
     `, 'stale-signal filtered report copy');
     const benignRefreshText = fs.readFileSync(path.join(launchLogsDir, latestHandoffReport), 'utf8');
-    if (benignRefreshText.includes(stalePreLaunchSignal) || benignRefreshText.includes(staleInstanceSignal) || !benignRefreshText.includes('Copy latest launch report')) {
+    if (benignRefreshText.includes(stalePreLaunchSignal) || benignRefreshText.includes(staleInstanceSignal) || !benignRefreshText.includes('completed its handoff to a verified Minecraft Launcher window')) {
       throw new Error(`An older launcher crash was attributed to the current handoff: ${benignRefreshText.slice(0, 1800)}`);
     }
     const postHandoffSignal = '[Error] Process crashed with exit code 1 after Minecraft Launcher Play';
@@ -795,7 +954,7 @@ try {
     })()`);
     await waitFor(client, `
       [...document.querySelectorAll('#toastStack .toast.success')]
-        .some((toast) => /Launch report copied/i.test(toast.textContent))
+        .some((toast) => toast.textContent.trim() === 'Copied to Clipboard' && toast.querySelectorAll('span, button').length === 0)
     `, 'post-handoff report copy');
     const handoffReportsAfterCopy = fs.readdirSync(launchLogsDir)
       .filter((name) => /^AHT-Launch-.*-HANDOFF.*\.txt$/i.test(name))
@@ -807,7 +966,6 @@ try {
     if (!refreshedHandoffText.includes(postHandoffSignal) || !refreshedHandoffText.includes(currentInstanceSignal) || refreshedHandoffText.includes(stalePreLaunchSignal) || refreshedHandoffText.includes(staleInstanceSignal)) {
       throw new Error(`Copy latest launch report did not refresh the HANDOFF report with the new exit signal: ${refreshedHandoffText.slice(-1800)}`);
     }
-    const curseForgeProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     if (
       !curseForgeProof.payload?.launchId
       || curseForgeProof.payload.launchId === proof.payload?.launchId
@@ -823,7 +981,7 @@ try {
         command: spawnCapture.command,
         kind: 'curseforge',
         activationConfirmed: true,
-        launcherHandoff: { restartedExisting: fs.existsSync(minecraftHandoffCapture) }
+        launcherHandoff: { restartedExisting: false }
       },
       ui: completedPlayUi
     };
@@ -873,30 +1031,34 @@ try {
     ) {
       throw new Error(`CurseForge migration backup did not preserve the prior launcher settings: ${JSON.stringify(migrationBackup)}`);
     }
-    if (
-      !fs.existsSync(minecraftHandoffCapture)
-    ) {
-      throw new Error(`Play did not close the existing launcher and confirm the cold handoff: ${JSON.stringify(curseForgePlayResult)}`);
+    if (fs.existsSync(minecraftHandoffCapture)) {
+      throw new Error(`Play unexpectedly created a process-termination handoff: ${fs.readFileSync(minecraftHandoffCapture, 'utf8')}`);
     }
     const profileKeys = Object.keys(curseForgeProfiles.profiles || {});
     if (
       profileKeys.at(-1) !== 'a-hard-time-dregora'
       || curseForgeProfiles.profiles['a-hard-time']
-      || curseForgeProfiles.selectedProfile !== 'a-hard-time-dregora'
+      || curseForgeProfiles.selectedProfile !== 'random-profile'
       || Date.parse(curseForgeProfile.lastUsed) <= Date.parse(curseForgeProfiles.profiles['random-profile'].lastUsed)
     ) {
-      throw new Error(`Play did not prepare the exact canonical profile over a competing selection: ${JSON.stringify(curseForgeProfiles)}`);
+      throw new Error(`Play did not prepare the exact canonical profile while preserving the foreign modern selection: ${JSON.stringify(curseForgeProfiles)}`);
     }
-    const handoff = JSON.parse(fs.readFileSync(minecraftHandoffCapture, 'utf8'));
     const processState = JSON.parse(fs.readFileSync(windowsProcessStatePath, 'utf8'));
+    const focusDeniedVisibleLauncher = processState.records.find((record) => (
+      record.image === 'minecraft.exe'
+      && record.mainWindowTitle === 'Minecraft Launcher'
+      && record.focusAllowed === false
+      && record.foreground === false
+      && record.windowVisible === true
+      && record.windowMinimized === false
+    ));
     if (
-      JSON.stringify(handoff.taskkillArgs) !== JSON.stringify([['/PID', '41001']])
-      || JSON.stringify(handoff.terminatedPids) !== JSON.stringify([41001])
-      || !processState.records.some((record) => record.pid === 41002 && record.image === 'javaw.exe')
-      || processState.records.some((record) => record.pid === 41001)
+      !processState.records.some((record) => record.pid === 41002 && record.image === 'javaw.exe')
+      || !processState.records.some((record) => record.pid === 41001 && record.image === 'minecraft.exe')
       || !processState.records.some((record) => record.image === 'minecraft.exe' && record.mainWindowHandle > 0)
+      || !focusDeniedVisibleLauncher
     ) {
-      throw new Error(`PID-scoped handoff did not preserve the active Java game and confirm a visible launcher: ${JSON.stringify({ handoff, processState })}`);
+      throw new Error(`Instant handoff did not preserve the running Minecraft processes and confirm a visible launcher: ${JSON.stringify({ processState })}`);
     }
     const launcherUiStateRaw = fs.readFileSync(path.join(curseForgeRoot, 'launcher_ui_state.json'), 'utf8');
     const launcherUiState = JSON.parse(launcherUiStateRaw.slice(launcherUiStateRaw.indexOf('{')));
@@ -906,14 +1068,15 @@ try {
     }
     const verifiedIntegrity = await evaluate(client, 'window.aht.getStatus().then((status) => status.integrity)');
     if (verifiedIntegrity?.checkMode !== 'full-hash' || verifiedIntegrity?.source !== 'play-check') {
-      throw new Error(`Prepared Play did not perform a fresh authoritative hash scan: ${JSON.stringify(verifiedIntegrity)}`);
+      throw new Error(`Prepared Play did not retain the authoritative initialization hash result: ${JSON.stringify(verifiedIntegrity)}`);
     }
+    const retryProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     const retryUi = await evaluate(client, `(() => {
       const button = document.querySelector('#playButton');
       button.click();
       return { text: button.textContent.trim(), ariaBusy: button.getAttribute('aria-busy') };
     })()`);
-    if (retryUi.text !== 'Preparing...' || retryUi.ariaBusy !== 'true') {
+    if (retryUi.text !== 'Opening...' || retryUi.ariaBusy !== 'true') {
       throw new Error(`A later legitimate Play click did not start after single-flight completion: ${JSON.stringify(retryUi)}`);
     }
     await waitFor(client, `(() => {
@@ -931,7 +1094,6 @@ try {
     if (retryMigrationBackups.length !== 1) {
       throw new Error(`CurseForge settings self-heal created duplicate backups: ${JSON.stringify(retryMigrationBackups)}`);
     }
-    const retryProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     const playLaunchIds = [
       proof.payload?.launchId,
       desktopFallbackProof.payload?.launchId,
@@ -952,8 +1114,139 @@ try {
       throw new Error(`Each explicit Play did not receive one distinct one-time launchId: ${JSON.stringify({ requestCount: launcherProofRequests.length, requestedLaunchIds, playLaunchIds, missingOrRepeatedPlayLaunchIds })}`);
     }
     curseForgePlayResult.durationMs = curseForgePlayDurationMs;
+    curseForgePlayResult.spawnLatencyMs = curseForgeSpawnLatencyMs;
     curseForgePlayResult.distinctLaunchIds = 4;
   }
+
+  const initializationMarkerPath = path.join(userData, 'startup-initialization.json');
+  const startupSnapshotPath = path.join(userData, 'startup-preparation-cache.json');
+  const startupNewsCachePath = path.join(userData, 'startup-news-cache.json');
+  if (!fs.existsSync(initializationMarkerPath) || !fs.existsSync(startupSnapshotPath) || !fs.existsSync(startupNewsCachePath)) {
+    throw new Error('Cached-startup regression proof requires the completed initialization marker, authenticated preparation snapshot, and durable News result.');
+  }
+  const startupNewsCache = JSON.parse(fs.readFileSync(startupNewsCachePath, 'utf8'));
+  const cachedNewsRecords = Object.values(startupNewsCache.entries || {});
+  if (startupNewsCache.schema !== 'aht-launcher-update-logs-cache/v1'
+      || cachedNewsRecords.length !== 1
+      || !Array.isArray(cachedNewsRecords[0]?.logs)
+      || cachedNewsRecords[0].logs.length !== 0) {
+    throw new Error(`A valid empty News response was not persisted for warm startup: ${JSON.stringify(startupNewsCache)}`);
+  }
+  await evaluate(client, 'window.aht?.windowClose?.(); true').catch(() => {});
+  client.close();
+  client = null;
+  if (!(await waitForChildExit(child))) {
+    child.kill();
+    if (!(await waitForChildExit(child))) {
+      throw new Error('The first launcher process remained alive after its bounded shutdown and contaminated the cached-startup timing boundary.');
+    }
+  }
+
+  const rewrittenManagedFile = path.join(instanceDir, 'mods', 'aht-integrity-test.jar');
+  const unchangedManagedBytes = await fsp.readFile(rewrittenManagedFile);
+  await fsp.writeFile(rewrittenManagedFile, unchangedManagedBytes);
+  await fsp.rm(curseForgeSpawnCapture, { force: true });
+  await fsp.rm(minecraftHandoffCapture, { force: true });
+  if (process.platform === 'win32') await writeJson(windowsProcessStatePath, initialWindowsProcessState);
+
+  launcherProofDelayMs = 8_000;
+  const proofRequestsBeforeCachedStartup = launcherProofRequests.length;
+  const proofResponsesBeforeCachedStartup = launcherProofResponses;
+  const cachedDebugPort = port + 2;
+  const cachedEndpoint = `http://127.0.0.1:${cachedDebugPort}`;
+  const cachedSpawnedAt = Date.now();
+  cachedStartupChild = spawnLauncher(cachedDebugPort, { stallImageDecode: true });
+  const cachedTarget = await waitForTarget(cachedEndpoint);
+  const cachedTargetReadyMs = Date.now() - cachedSpawnedAt;
+  client = await connect(cachedTarget.webSocketDebuggerUrl);
+  await client.call('Runtime.enable');
+  await client.call('Page.enable');
+  await waitFor(client, "document.readyState === 'complete' && window.aht", 'cached-startup player DOM');
+  const cachedDomReadyMs = Date.now() - cachedSpawnedAt;
+  const cachedDomProof = await evaluate(client, `(() => ({
+    bodyClass: document.body.className,
+    fontsStatus: document.fonts?.status || '',
+    images: [...document.images].map((image) => ({
+      src: image.getAttribute('src') || '',
+      currentSrc: image.currentSrc || '',
+      complete: image.complete,
+      naturalWidth: image.naturalWidth
+    }))
+  }))()`);
+  try {
+    await waitFor(client, "!document.body.classList.contains('is-booting')", 'cached-startup reveal without a proof request');
+  } catch (error) {
+    const diagnostic = await evaluate(client, `(() => ({
+      bodyClass: document.body.className,
+      readyState: document.readyState,
+      loaderHidden: document.querySelector('#startupLoader')?.hidden,
+      loaderLabel: document.querySelector('#startupLoaderLabel')?.textContent?.trim(),
+      loaderProgress: document.querySelector('#startupLoaderProgress')?.style?.width,
+      fontsStatus: document.fonts?.status || '',
+      statusBadge: document.querySelector('#statusBadge')?.textContent?.trim(),
+      playLabel: document.querySelector('#playButton')?.textContent?.trim(),
+      homeNewsCards: document.querySelectorAll('.home-news-card').length,
+      newsFeedCards: document.querySelectorAll('.news-feed-card').length,
+      images: [...document.images].map((image) => ({
+        src: image.getAttribute('src') || '',
+        currentSrc: image.currentSrc || '',
+        complete: image.complete,
+        naturalWidth: image.naturalWidth
+      })),
+      startupState: null
+    }))()`);
+    diagnostic.startupState = await evaluate(client, 'window.aht.getStartupPreparationState()').catch((stateError) => ({ error: String(stateError?.message || stateError) }));
+    diagnostic.updateLogsRequests = updateLogsRequests;
+    diagnostic.launcherProofRequests = launcherProofRequests.length;
+    throw new Error(`${error.message}: ${JSON.stringify(diagnostic)}`);
+  }
+  const cachedRevealMs = Date.now() - cachedSpawnedAt;
+  await waitFor(client, "document.querySelector('#startupLoader')?.hidden", 'cached-startup loader fade cleanup');
+  const cachedLoaderCleanupMs = Date.now() - cachedSpawnedAt;
+  const stalledDecodeTestActive = await evaluate(client, `new URLSearchParams(window.location.search).get('testStallImageDecode') === '1'`);
+  const cachedState = await evaluate(client, 'window.aht.getStartupPreparationState()');
+  const cachedStartupTaskTimings = await evaluate(client, 'window.__ahtStartupTaskTimings');
+  if (!stalledDecodeTestActive || cachedRevealMs >= 5_000 || cachedState.firstInitialization !== false || cachedState.phase !== 'Ready') {
+    throw new Error(`A metadata-only rewrite or stalled image decode made cached startup repeat or block initialization: ${JSON.stringify({ stalledDecodeTestActive, cachedTargetReadyMs, cachedDomReadyMs, cachedRevealMs, cachedState, cachedDomProof, cachedStartupTaskTimings })}`);
+  }
+  const proofRequestPendingAtReveal = launcherProofRequests.length > proofRequestsBeforeCachedStartup
+    && launcherProofResponses === proofResponsesBeforeCachedStartup;
+  if (launcherProofResponses !== proofResponsesBeforeCachedStartup) {
+    throw new Error(`Cached startup waited for a delayed proof response before reveal: ${JSON.stringify({ proofRequestsBeforeCachedStartup, proofRequests: launcherProofRequests.length, proofResponsesBeforeCachedStartup, proofResponses: launcherProofResponses })}`);
+  }
+
+  let cachedPlaySpawnLatencyMs = 0;
+  if (process.platform === 'win32') {
+    const cachedPlayStartedAt = Date.now();
+    await evaluate(client, "document.querySelector('#playButton').click(); true");
+    for (let attempt = 0; attempt < 80 && !fs.existsSync(curseForgeSpawnCapture); attempt += 1) await sleep(25);
+    if (!fs.existsSync(curseForgeSpawnCapture)) {
+      throw new Error('Cached Play did not open CurseForge while its one-time proof was still refreshing.');
+    }
+    const cachedSpawnCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
+    cachedPlaySpawnLatencyMs = Number(cachedSpawnCapture.capturedAtMs) - cachedPlayStartedAt;
+    if (!Number.isFinite(cachedPlaySpawnLatencyMs) || cachedPlaySpawnLatencyMs < 0 || cachedPlaySpawnLatencyMs >= 500) {
+      throw new Error(`Cached Play waited for the delayed Worker proof before opening CurseForge: ${JSON.stringify({ cachedPlaySpawnLatencyMs, cachedSpawnCapture })}`);
+    }
+    if (launcherProofRequests.length <= proofRequestsBeforeCachedStartup || launcherProofResponses !== proofResponsesBeforeCachedStartup) {
+      throw new Error(`Cached Play did not start exactly at the proof boundary while the delayed response remained pending: ${JSON.stringify({ proofRequestsBeforeCachedStartup, proofRequests: launcherProofRequests.length, proofResponsesBeforeCachedStartup, proofResponses: launcherProofResponses })}`);
+    }
+    await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'`, 'cached Play proof completion');
+  }
+  cachedStartupProof = {
+    targetReadyMs: cachedTargetReadyMs,
+    domReadyMs: cachedDomReadyMs,
+    domProof: cachedDomProof,
+    revealMs: cachedRevealMs,
+    loaderCleanupMs: cachedLoaderCleanupMs,
+    state: cachedState,
+    startupTaskTimings: cachedStartupTaskTimings,
+    metadataOnlyRewrite: true,
+    stalledImageDecode: stalledDecodeTestActive,
+    delayedProofMs: launcherProofDelayMs,
+    proofRequestPendingAtReveal,
+    playSpawnLatencyMs: cachedPlaySpawnLatencyMs
+  };
 
   console.log(JSON.stringify({
     ok: true,
@@ -968,13 +1261,16 @@ try {
     curseForgeLaunchCommand: curseForgePlayResult?.result?.command || '',
     curseForgeLaunchKind: curseForgePlayResult?.result?.kind || '',
     curseForgePlayDurationMs: curseForgePlayResult?.durationMs || 0,
+    curseForgeSpawnLatencyMs: curseForgePlayResult?.spawnLatencyMs || 0,
     launcherProofRequests: launcherProofRequests.length,
     distinctLaunchIds: curseForgePlayResult?.distinctLaunchIds || 1,
     proofSource: proof.source,
+    cachedStartup: cachedStartupProof,
+    sameByteManagedRewriteAllowed: true,
     integrity: {
-      source: persistedIntegrity.source,
-      corrupted: persistedIntegrity.counts.corrupted,
-      changedPath: persistedIntegrity.changed[0]?.path,
+      source: after.integrity.source,
+      corrupted: after.integrity.counts.corrupted,
+      changedPath: after.integrity.changed[0]?.path,
       cleanCorrupted: cleanStatus.integrity.counts.corrupted
     }
   }, null, 2));
@@ -983,6 +1279,9 @@ try {
     await client.call('Browser.close').catch(() => {});
     client.close();
   }
-  child.kill();
-  await new Promise((resolve) => server.close(resolve));
+  if (child && !child.killed) child.kill();
+  if (cachedStartupChild && !cachedStartupChild.killed) cachedStartupChild.kill();
+  const closePromise = new Promise((resolve) => server.close(resolve));
+  server.closeAllConnections?.();
+  await closePromise;
 }

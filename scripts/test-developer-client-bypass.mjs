@@ -188,7 +188,9 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'developer DOM');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting')", 'revealed developer DOM');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.developerMode && status.installed?.version === '2.8.51' ? status : false)
   `, 'developer status');

@@ -11,6 +11,7 @@ import {
   inspectMinecraftLauncherProfile,
   minecraftRootCandidates,
   loaderVersionId,
+  selectPreparedMinecraftLauncherProfile,
   setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
 import {
@@ -169,9 +170,9 @@ if (
   || selectedKeys.at(-1) !== 'a-hard-time-dregora'
   || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) <= Date.parse(selectedProfiles.profiles['random-profile'].lastUsed)
   || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) > Date.now() + (5 * 60 * 1000)
-  || selectedProfiles.selectedProfile !== 'a-hard-time-dregora'
+  || selectedProfiles.selectedProfile !== 'random-profile'
 ) {
-  throw new Error(`Stable Play did not outrank and reinsert the exact profile: ${JSON.stringify(selectedProfiles)}`);
+  throw new Error(`Stable Play did not outrank and reinsert the exact profile while preserving foreign modern selection state: ${JSON.stringify(selectedProfiles)}`);
 }
 const selectedQuickPlay = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_quick_play.json'), 'utf8'));
 const selectedQuickPlayEntries = selectedQuickPlay.quickPlayData['active-remote-account'];
@@ -181,6 +182,37 @@ if (
   || selectedQuickPlayEntries.some((entry, index) => index > 0 && entry?.javaInstance?.configId === 'a-hard-time-dregora')
 ) {
   throw new Error(`Minecraft Launcher quick-play selection did not move the exact AHT profile to the active account: ${JSON.stringify(selectedQuickPlay)}`);
+}
+const curseForgeForeignProfile = {
+  name: 'CurseForge Owned Instance',
+  type: 'custom',
+  gameDir: path.join(root, 'curseforge-owned-instance'),
+  lastVersionId: 'forge-14.23.5.2860',
+  lastUsed: recentCompetingLastUsed,
+  foreignSentinel: { preserved: true }
+};
+const curseForgeForeignSettings = {
+  crashAssistance: false,
+  enableAdvanced: true,
+  foreignSentinel: ['preserve', 'exactly']
+};
+await fs.writeFile(path.join(minecraftRoot, 'launcher_profiles.json'), `${JSON.stringify({
+  profiles: { 'curseforge-owned': curseForgeForeignProfile },
+  settings: curseForgeForeignSettings,
+  version: 6
+}, null, 2)}\n`, 'utf8');
+const repairedStableSelection = await selectPreparedMinecraftLauncherProfile(stableSelection);
+selectedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+selectedKeys = Object.keys(selectedProfiles.profiles);
+if (
+  !repairedStableSelection.selectionPrepared
+  || !selectedProfiles.profiles['a-hard-time-dregora']
+  || selectedKeys.at(-1) !== 'a-hard-time-dregora'
+  || Object.prototype.hasOwnProperty.call(selectedProfiles, 'selectedProfile')
+  || JSON.stringify(selectedProfiles.profiles['curseforge-owned']) !== JSON.stringify(curseForgeForeignProfile)
+  || JSON.stringify(selectedProfiles.settings) !== JSON.stringify(curseForgeForeignSettings)
+) {
+  throw new Error(`Prepared AHT profile repair damaged or malformed foreign CurseForge schema-6 metadata: ${JSON.stringify(selectedProfiles)}`);
 }
 const selectedStableLastUsed = selectedProfiles.profiles['a-hard-time-dregora'].lastUsed;
 await ensureMinecraftLauncherProfile({

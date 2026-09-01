@@ -5,6 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 9462);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -14,6 +15,9 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-r2-flow-'));
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
+const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
+const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
+const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const outDir = path.join(root, 'release');
 const fakeBin = path.join(root, 'bin');
 const fakeR2Root = path.join(root, 'r2');
@@ -129,6 +133,13 @@ async function waitFor(client, expression, label) {
 await fsp.mkdir(fakeBin, { recursive: true });
 await fsp.mkdir(path.join(fakeR2Root, bucket), { recursive: true });
 await fsp.mkdir(path.join(instanceDir, '.aht-launcher'), { recursive: true });
+await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
+await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
+await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(path.dirname(fakeJavaPath), 'javaw.exe'), 'fake windowless Java 8 executable\n', 'utf8');
+}
+await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
 
 const fakeWrangler = path.join(fakeBin, 'fake-wrangler.mjs');
 await fsp.writeFile(fakeWrangler, `
@@ -236,7 +247,8 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: workerEndpoint, playerLabel: 'SmokeUser' },
   developer: { adminBaseUrl: workerEndpoint, defaultOutDir: outDir, defaultCacheModsDir: '', r2Bucket: bucket },
-  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 },
+  launcherProof: { enabled: false, required: false, baseUrl: workerEndpoint },
+  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144, javaPath: fakeJavaPath },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'smoke-install', minecraftUsername: 'SmokeUser' });
@@ -285,6 +297,10 @@ const child = spawn(electronBin, electronArgs, {
     FAKE_WORKER_URL: workerEndpoint,
     AHT_DEVELOPER_USERNAME: 'admin',
     AHT_DEVELOPER_PASSWORD: 'test-dev-password',
+    AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: 'amd64',
+    AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
 
     ELECTRON_ENABLE_LOGGING: '0'
   },

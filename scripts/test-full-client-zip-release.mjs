@@ -154,9 +154,10 @@ await fs.writeFile(path.join(staleSiblingStaging, 'partial.tmp'), 'partial stagi
 await fs.mkdir(staleSiblingBackup, { recursive: true });
 await fs.writeFile(path.join(staleSiblingBackup, 'old.tmp'), 'old backup data', 'utf8');
 const dirtyScan = await scanManagedIntegrity(installDir);
-assert(dirtyScan.counts.added === 1, `only extra unmanaged mod files should be detected: ${JSON.stringify(dirtyScan)}`);
-assert(dirtyScan.counts.corrupted === 1, `only extra unmanaged mod files should lock launch as corrupted: ${JSON.stringify(dirtyScan)}`);
-assert(dirtyScan.added.some((item) => item.path === 'mods/extra-untracked.jar'), `extra jar should be the only added issue: ${JSON.stringify(dirtyScan.added)}`);
+assert(dirtyScan.counts.added === 2, `extra unmanaged launch-critical content should be detected: ${JSON.stringify(dirtyScan)}`);
+assert(dirtyScan.counts.corrupted === 2, `extra unmanaged launch-critical content should lock launch as corrupted: ${JSON.stringify(dirtyScan)}`);
+assert(dirtyScan.added.some((item) => item.path === 'mods/extra-untracked.jar'), `extra mod jar should be reported: ${JSON.stringify(dirtyScan.added)}`);
+assert(dirtyScan.added.some((item) => item.path === 'resourcepacks/stale-resourcepack.zip'), `extra launch-critical resource pack should be reported: ${JSON.stringify(dirtyScan.added)}`);
 assert(!dirtyScan.added.some((item) => /OpenTerrainGenerator/i.test(item.path)), `OpenTerrainGenerator runtime folder should not lock launch: ${JSON.stringify(dirtyScan.added)}`);
 const integrityProgress = [];
 const progressScan = await scanManagedIntegrity(installDir, { onProgress: (progress) => integrityProgress.push(progress) });
@@ -295,11 +296,12 @@ const wrappedRelease = await buildRelease({
 });
 assert(wrappedRelease.latest.installMode === 'full-client-zip', 'wrapped full-client ZIP was not recognized as a full-client release');
 assert(wrappedRelease.latest.serverLock?.injected === true, 'wrapped full-client ZIP should have the version lock injected during release build');
-assert(wrappedRelease.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.1.1.jar', `wrapped full-client ZIP did not record injected version lock: ${JSON.stringify(wrappedRelease.latest.serverLock)}`);
+const wrappedInjectedLockPath = String(wrappedRelease.latest.serverLock?.clientModPath || '');
+assert(/^mods\/aht-version-lock-[^/]+\.jar$/i.test(wrappedInjectedLockPath), `wrapped full-client ZIP did not record its selected injected version lock: ${JSON.stringify(wrappedRelease.latest.serverLock)}`);
 assert(wrappedRelease.latest.clientZip?.modFileCount === 2, `wrapped full-client ZIP mod count should include injected version lock: ${JSON.stringify(wrappedRelease.latest.clientZip)}`);
 const wrappedPublishedZip = new AdmZip(path.join(wrappedOutDir, wrappedRelease.latest.zip.path));
 const wrappedPublishedEntries = new Set(wrappedPublishedZip.getEntries().map((entry) => entry.entryName.replace(/\\/g, '/')));
-assert(wrappedPublishedEntries.has('A Hard Time Client/mods/aht-version-lock-1.1.1.jar'), 'published wrapped ZIP is missing injected version lock mod');
+assert(wrappedPublishedEntries.has(`A Hard Time Client/${wrappedInjectedLockPath}`), 'published wrapped ZIP is missing its selected injected version lock mod');
 const wrappedInstallDir = path.join(root, 'wrapped-install');
 await installPack({
   latestSource: path.join(wrappedOutDir, 'latest.json'),
@@ -307,7 +309,7 @@ await installPack({
   logger: { log() {} }
 });
 assert(await pathExists(path.join(wrappedInstallDir, 'mods', 'aht-wrapper.jar')), 'wrapped client ZIP installed under the wrapper folder instead of mods/');
-assert(await pathExists(path.join(wrappedInstallDir, 'mods', 'aht-version-lock-1.1.1.jar')), 'wrapped client ZIP did not install injected version lock mod');
+assert(await pathExists(path.join(wrappedInstallDir, wrappedInjectedLockPath)), 'wrapped client ZIP did not install its selected injected version lock mod');
 assert(!(await pathExists(path.join(wrappedInstallDir, 'A Hard Time Client', 'mods', 'aht-wrapper.jar'))), 'wrapped client ZIP left the wrapper folder inside the instance');
 assert(await pathExists(path.join(wrappedInstallDir, 'resourcepacks', 'aht-wrapper-resources.zip')), 'wrapped client ZIP did not normalize resourcepacks/');
 const wrappedScan = await scanManagedIntegrity(wrappedInstallDir);
