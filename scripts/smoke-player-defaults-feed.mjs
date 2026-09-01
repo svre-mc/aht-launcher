@@ -5,6 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createDeviceCredential } from '../src/deviceIdentity.js';
+import { defaultInstanceDirForPlatform } from '../src/platformProfile.js';
 
 const port = Number(process.argv[2] || 9700);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -23,6 +24,11 @@ const fakeAppData = process.platform === 'win32'
 const fakeLocalAppData = process.platform === 'win32'
   ? path.join(fakeHome, 'AppData', 'Local')
   : path.join(root, 'localappdata');
+const expectedInstanceDir = defaultInstanceDirForPlatform(process.platform, {
+  HOME: fakeHome,
+  USERPROFILE: fakeHome,
+  SystemDrive: process.env.SystemDrive || 'C:'
+});
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const minecraftRoot = path.join(root, '.minecraft');
@@ -267,8 +273,8 @@ try {
   if (!status.updateRequired) {
     throw new Error(`Fresh player did not detect required update: ${JSON.stringify(status)}`);
   }
-  if (!status.config.instanceDir.includes('AHT') || !status.config.instanceDir.includes('A Hard Time')) {
-    throw new Error(`Fresh player did not use managed AHT instance dir: ${JSON.stringify(status.config)}`);
+  if (path.resolve(status.config.instanceDir) !== path.resolve(expectedInstanceDir)) {
+    throw new Error(`Fresh player did not use its platform-managed instance dir: ${JSON.stringify({ expectedInstanceDir, config: status.config })}`);
   }
   const legacyInstanceFragments = ['curseforge', 'RLCraft Dregora', 'A Hard Time Dregora'];
   const leakedFreshInstanceFragments = legacyInstanceFragments.filter((item) => status.config.instanceDir.toLowerCase().includes(item.toLowerCase()));
