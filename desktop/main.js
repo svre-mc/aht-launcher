@@ -4978,17 +4978,26 @@ function minecraftLauncherHandoffForRenderer(handoff = {}) {
 }
 
 async function getStatus(configOverride = null, packValue = 'stable', options = {}) {
+  const statusProbeStartedAt = Date.now();
+  const statusProbe = (stage) => writeTestStartupProbe(`status-${stage}`, {
+    packValue: String(packValue || 'stable'),
+    elapsedMs: Date.now() - statusProbeStartedAt
+  });
+  statusProbe('get-start');
   const target = releaseTarget(packValue);
   const baseConfig = configOverride || await loadConfig();
+  statusProbe('config-ready');
   const config = configForPack(baseConfig, target.id);
   const prepared = launchPreparationCache.get(target.id);
   const usePreparedPrerequisites = prepared?.state === 'ready';
   const launcherConfig = usePreparedPrerequisites && prepared.launcherConfig
     ? prepared.launcherConfig
     : await minecraftLauncherRuntimeConfig(config);
+  statusProbe('runtime-config-ready');
   const identity = usePreparedPrerequisites && prepared.identity
     ? prepared.identity
     : await identityPayload(launcherConfig);
+  statusProbe('identity-ready');
   queueCurrentLauncherVersionReport(config, identity);
   let latest = null;
   let latestError = null;
@@ -5001,6 +5010,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   } catch (error) {
     latestError = error.message;
   }
+  statusProbe('latest-ready');
   if (!options.preferCache || options.includeUpdateLogs) {
     try {
       updateLogs = await readUpdateLogs(config, 12, { preferCache: options.preferCache });
@@ -5008,6 +5018,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
       updateLogsError = error.message;
     }
   }
+  statusProbe('update-logs-ready');
   const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
   let installed = null;
   if (await pathExists(installedPath)) {
@@ -5030,10 +5041,11 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
         ? [prepared?.minecraftProfile || null, prepared?.java8Runtime || null]
         : (!installed
           ? [uninstalledMinecraftProfileForStatus(launcherConfig), isDeveloperMode() ? null : await java8RuntimeStatus(launcherConfig)]
-          : await Promise.all([
-            inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
-            java8RuntimeStatus(launcherConfig)
-          ])));
+           : await Promise.all([
+             inspectMinecraftLauncherProfile({ config: launcherConfig, latest: launchLatest, installed }),
+             java8RuntimeStatus(launcherConfig)
+           ])));
+  statusProbe('prerequisites-ready');
   const launchIntegrity = developerClientBypass ? null : integrity;
   const updateBlockedReason = !developerClientBypass ? playerUpdateBlockedReason(latest) : '';
   const updateRequired = !updateBlockedReason && latest && latest.required !== false
@@ -5083,6 +5095,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   }
   const pendingLauncherUpdate = await hydratePendingLauncherUpdateState();
   let launcherUpdate = options.preferCache ? null : await readLauncherUpdate(config);
+  statusProbe('launcher-update-ready');
   if (pendingLauncherUpdate?.version && (
     compareVersions(pendingLauncherUpdate.version, app.getVersion()) > 0
     || (pendingLauncherUpdate.purpose === 'developer-reinstall' && isDeveloperMode() && isDeveloperAuthenticated())
@@ -5102,6 +5115,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
       error: ''
     };
   }
+  statusProbe('get-complete');
   return {
     activePack: target.sidebarKey,
     releaseTarget: target.id,
