@@ -69,6 +69,7 @@ function runCheck(args, smokeExe) {
       env: {
         ...process.env,
         AHT_SMOKE_EXE: smokeExe,
+        AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
         ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING || '0'
       }
     });

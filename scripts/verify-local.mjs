@@ -102,6 +102,7 @@ function runCheck(args) {
       shell: invocation.shell,
       env: {
         ...process.env,
+        AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
         ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING || '0'
       }
     });

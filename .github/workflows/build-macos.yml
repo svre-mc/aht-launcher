@@ -184,6 +184,7 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_KEYCHAIN: ${{ secrets.APPLE_KEYCHAIN }}
       APPLE_KEYCHAIN_PROFILE: ${{ secrets.APPLE_KEYCHAIN_PROFILE }}
+      AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: "1"
       AHT_VERIFY_PARALLEL: "3"
 
     steps:

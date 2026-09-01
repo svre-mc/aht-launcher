@@ -1618,6 +1618,21 @@ function decryptDeveloperSecret(record = {}) {
   return buffer.toString('utf8');
 }
 
+function useUnencryptedDeviceSecretTestFallback() {
+  return process.env.AHT_TEST_HOOKS === '1'
+    && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY === '1';
+}
+
+function protectDeviceSecret(value = '') {
+  if (useUnencryptedDeviceSecretTestFallback()) {
+    return {
+      value: Buffer.from(String(value || ''), 'utf8').toString('base64'),
+      encrypted: false
+    };
+  }
+  return encryptDeveloperSecret(value);
+}
+
 let deviceCredentialPromise = null;
 
 async function loadDeviceCredential() {
@@ -1642,11 +1657,11 @@ async function loadDeviceCredential() {
         privateKey
       });
     }
-    if (!safeStorageAvailable() && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+    if (process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1' && !safeStorageAvailable()) {
       throw new Error('OS-backed secret encryption is required before this launcher can create its device identity.');
     }
     const created = createDeviceCredential();
-    const protectedPrivateKey = encryptDeveloperSecret(created.privateKey);
+    const protectedPrivateKey = protectDeviceSecret(created.privateKey);
     if (!protectedPrivateKey.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
       throw new Error('OS-backed secret encryption is required before this launcher can save its device identity.');
     }
@@ -3529,7 +3544,7 @@ async function accountRecoverySecret(config = {}, username = '') {
       && normalizeMinecraftUsername(existing?.username).toLowerCase() === normalizedUsername
       && /^[A-Za-z0-9_-]{32,200}$/.test(existingSecret)
     ) {
-      if (!safeStorageAvailable() && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+      if (process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1' && !safeStorageAvailable()) {
         throw new Error('OS-backed secret encryption is required to protect launcher recovery credentials.');
       }
       if (samePath(candidate, file) && !existing.secret && existing.protectedSecret?.encrypted === true) {
@@ -3540,7 +3555,7 @@ async function accountRecoverySecret(config = {}, username = '') {
       }
       const protectedSecret = existing?.protectedSecret?.encrypted
         ? existing.protectedSecret
-        : encryptDeveloperSecret(existingSecret);
+        : protectDeviceSecret(existingSecret);
       if (!protectedSecret.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
         throw new Error('OS-backed secret encryption is required to migrate launcher recovery credentials.');
       }
@@ -3559,10 +3574,10 @@ async function accountRecoverySecret(config = {}, username = '') {
     }
   }
   const secret = crypto.randomBytes(32).toString('base64url');
-  if (!safeStorageAvailable() && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+  if (process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1' && !safeStorageAvailable()) {
     throw new Error('OS-backed secret encryption is required to create launcher recovery credentials.');
   }
-  const protectedSecret = encryptDeveloperSecret(secret);
+  const protectedSecret = protectDeviceSecret(secret);
   if (!protectedSecret.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
     throw new Error('OS-backed secret encryption is required to save launcher recovery credentials.');
   }

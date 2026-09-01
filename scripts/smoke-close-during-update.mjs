@@ -78,11 +78,15 @@ function makeClientZipBuffer() {
   return zip.toBuffer();
 }
 
-async function waitForTarget() {
+async function waitForTarget(timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
   let lastError;
-  for (let attempt = 0; attempt < 180; attempt += 1) {
+  while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2000) });
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const response = await fetch(`${endpoint}/json/list`, {
+        signal: AbortSignal.timeout(Math.min(2000, remainingMs))
+      });
       if (response.ok) {
         const targets = await response.json();
         const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -95,7 +99,7 @@ async function waitForTarget() {
     } catch (error) {
       lastError = error;
     }
-    await sleep(250);
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
   }
   throw new Error(`Timed out waiting for Electron debugger target: ${lastError?.message || 'no target'}`);
 }
@@ -167,32 +171,34 @@ function connect(wsUrl) {
   });
 }
 
-async function connectReadyLauncherPage() {
+async function connectReadyLauncherPage(timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
   let lastError;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const target = await waitForTarget();
-    const candidate = await connect(target.webSocketDebuggerUrl);
-    try {
-      await candidate.call('Runtime.enable', {}, 5000);
-      await candidate.call('Page.enable', {}, 5000);
-      let probe;
-      for (let readinessAttempt = 0; readinessAttempt < 20; readinessAttempt += 1) {
+  const target = await waitForTarget(Math.max(1, deadline - Date.now()));
+  checkpoint('debugger target found');
+  const candidate = await connect(target.webSocketDebuggerUrl);
+  try {
+    await candidate.call('Runtime.enable', {}, Math.min(5000, Math.max(1, deadline - Date.now())));
+    await candidate.call('Page.enable', {}, Math.min(5000, Math.max(1, deadline - Date.now())));
+    let probe;
+    while (Date.now() < deadline) {
+      try {
         probe = await candidate.call('Runtime.evaluate', {
           expression: "document.readyState === 'complete' && Boolean(window.aht) && document.body.classList.contains('is-launcher-ready') && !document.body.classList.contains('is-booting')",
           returnByValue: true
-        }, 5000);
+        }, Math.min(5000, Math.max(1, deadline - Date.now())));
         if (probe.result?.value === true) return { client: candidate, target };
-        await sleep(250);
+      } catch (error) {
+        lastError = error;
+        checkpoint(`debugger readiness pending: ${error.message || error}`);
       }
-      throw new Error(`Launcher DOM did not reach its ready state: ${JSON.stringify(probe)}`);
-    } catch (error) {
-      lastError = error;
-      candidate.close();
-      checkpoint(`debugger readiness retry ${attempt + 1}: ${error.message || error}`);
-      await sleep(250);
+      if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
     }
+    throw new Error(`Launcher DOM did not reach its ready state: ${lastError?.message || JSON.stringify(probe)}`);
+  } catch (error) {
+    candidate.close();
+    throw new Error(`Launcher debugger did not become responsive: ${error.message || error}`);
   }
-  throw new Error(`Launcher debugger did not become responsive: ${lastError?.message || 'no response'}`);
 }
 
 async function evaluate(client, expression, timeoutMs = 5000) {
@@ -396,6 +402,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
