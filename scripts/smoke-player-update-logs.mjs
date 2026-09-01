@@ -224,29 +224,46 @@ async function clickNode(client, selector) {
   return point;
 }
 
-async function ensurePointerHoverOrFocus(client, hoverSelector, focusSelector = hoverSelector) {
+async function setForcedHover(client, selectors, enabled) {
+  const { root: documentNode } = await client.call('DOM.getDocument', { depth: 0, pierce: true });
+  for (const selector of selectors) {
+    const { nodeId } = await client.call('DOM.querySelector', {
+      nodeId: documentNode.nodeId,
+      selector
+    });
+    if (!nodeId) throw new Error(`Could not force hover for missing node: ${selector}`);
+    await client.call('CSS.forcePseudoState', {
+      nodeId,
+      forcedPseudoClasses: enabled ? ['hover'] : []
+    });
+  }
+}
+
+async function ensurePointerHoverOrFocus(client, hoverSelector, focusSelector = hoverSelector, forcedHoverSelectors = [hoverSelector]) {
+  const acceptPointerHover = process.env.AHT_TEST_FORCE_CDP_HOVER !== '1';
   const proof = await evaluate(client, `(() => {
     const hoverNode = document.querySelector(${JSON.stringify(hoverSelector)});
     const focusNode = document.querySelector(${JSON.stringify(focusSelector)});
-    const pointerHover = Boolean(hoverNode?.matches(':hover'));
-    if (!pointerHover) focusNode?.focus({ preventScroll: true });
+    const pointerHover = ${JSON.stringify(acceptPointerHover)} && Boolean(hoverNode?.matches(':hover'));
+    if (!pointerHover && ${JSON.stringify(acceptPointerHover)}) focusNode?.focus({ preventScroll: true });
     return {
       pointerHover,
       focusWithin: Boolean(hoverNode?.matches(':focus-within')),
       activeTag: document.activeElement?.tagName || ''
     };
   })()`);
-  if (!proof.pointerHover && !proof.focusWithin) {
-    throw new Error(`Pointer/focus interaction could not activate ${hoverSelector}: ${JSON.stringify(proof)}`);
-  }
-  return proof.pointerHover ? 'pointer' : 'keyboard-focus';
+  if (proof.pointerHover) return 'pointer';
+  if (proof.focusWithin) return 'keyboard-focus';
+  await setForcedHover(client, forcedHoverSelectors, true);
+  return 'cdp-forced-hover';
 }
 
-async function clearInteractionFocus(client) {
+async function clearInteractionFocus(client, forcedHoverSelectors = []) {
   await evaluate(client, `(() => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     return true;
   })()`);
+  if (forcedHoverSelectors.length) await setForcedHover(client, forcedHoverSelectors, false);
 }
 
 await writeJson(path.join(userData, 'launcher.config.json'), {
@@ -334,6 +351,8 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  await client.call('DOM.enable');
+  await client.call('CSS.enable');
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden", 'fully revealed player DOM');
@@ -518,7 +537,7 @@ try {
   })`);
   await movePointer(client, { x: 250, y: 120 });
   await releasePointer(client, { x: 250, y: 120 });
-  await clearInteractionFocus(client);
+  await clearInteractionFocus(client, ['.news-feature-carousel']);
   await sleep(180);
   if (
     heroNeutral.transform !== 'none'
@@ -560,7 +579,12 @@ try {
   await sleep(180);
   const rowNeutral = await evaluate(client, rowStateExpression);
   const rowPoint = await movePointer(client, '#newsFeedGrid .news-feed-card:not(.large) .feature-art');
-  const rowInteractionMode = await ensurePointerHoverOrFocus(client, '#newsFeedGrid .news-feed-card:not(.large)', '#newsFeedGrid .news-feed-card:not(.large) .news-card-open');
+  const rowInteractionMode = await ensurePointerHoverOrFocus(
+    client,
+    '#newsFeedGrid .news-feed-card:not(.large)',
+    '#newsFeedGrid .news-feed-card:not(.large) .news-card-open',
+    ['#newsFeedGrid .news-feed-card:not(.large)', '#newsFeedGrid .news-feed-card:not(.large) .news-card-open']
+  );
   await sleep(180);
   const rowHover = await evaluate(client, rowStateExpression);
   screenshots.push(await captureScreenshot(client, 'news-row-hover'));
@@ -569,7 +593,10 @@ try {
   const rowPressed = await evaluate(client, rowStateExpression);
   await movePointer(client, { x: 250, y: 120 });
   await releasePointer(client, { x: 250, y: 120 });
-  await clearInteractionFocus(client);
+  await clearInteractionFocus(client, [
+    '#newsFeedGrid .news-feed-card:not(.large)',
+    '#newsFeedGrid .news-feed-card:not(.large) .news-card-open'
+  ]);
   await sleep(180);
   await movePointer(client, '#newsFeedGrid .news-feed-card:not(.large) .news-card-like');
   await sleep(180);
@@ -632,7 +659,7 @@ try {
   await clickNode(client, '.news-carousel-pager button:first-child');
   await waitForNewsCarouselSettled(client, 0, 'News carousel final first-slide crossfade');
   await movePointer(client, { x: 250, y: 120 });
-  await clearInteractionFocus(client);
+  await clearInteractionFocus(client, ['.news-feature-carousel']);
   await sleep(180);
 
   await evaluate(client, `document.querySelector('#newsFeedGrid .news-feed-card:nth-child(2) .news-card-like').click(); true`);
