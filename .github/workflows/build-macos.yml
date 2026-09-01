@@ -241,8 +241,8 @@ jobs:
           ARCHES="$(lipo -archs "$EXECUTABLE")"
           echo "architectures=$ARCHES" | tee "$REPORT_DIR/architectures.txt"
           case " $ARCHES " in
-            *" ${{ matrix.arch }} "*) ;;
-            *) echo "Expected ${{ matrix.arch }} in native executable architectures: $ARCHES" >&2; exit 1 ;;
+            *" ${{ matrix.machine }} "*) ;;
+            *) echo "Expected ${{ matrix.machine }} in native executable architectures: $ARCHES" >&2; exit 1 ;;
           esac
 
           ./node_modules/.bin/asar list "$ASAR" > "$REPORT_DIR/asar-files.txt"
@@ -266,7 +266,7 @@ jobs:
           test -f "$DMG"
           rm -rf "$MOUNT_POINT" "$INSTALL_ROOT"
           mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
-          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT" <<< "Y"
           SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 2 -type d -name 'A Hard Time Launcher macOS.app' -print -quit)"
           test -n "$SOURCE_APP"
           /usr/bin/ditto "$SOURCE_APP" "$INSTALLED_APP"
