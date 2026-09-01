@@ -1455,7 +1455,7 @@ try {
   if (
     externalLinkProof.store?.ok !== true
     || externalLinkProof.store?.captured !== true
-    || externalLinkProof.store?.target !== 'https://ahardtime.net/shop'
+    || externalLinkProof.store?.target !== 'https://ahardtime.net/store'
     || externalLinkProof.discord?.target !== launcherSocialLinks.discord
     || externalLinkProof.youtube?.target !== launcherSocialLinks.youtube
     || externalLinkProof.tiktok?.target !== launcherSocialLinks.tiktok

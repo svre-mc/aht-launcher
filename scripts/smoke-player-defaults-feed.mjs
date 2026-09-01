@@ -26,6 +26,9 @@ const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const minecraftRoot = path.join(root, '.minecraft');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
+const expectedLauncherRoot = process.platform === 'win32' ? curseForgeRoot : minecraftRoot;
+const java8FixtureHome = path.join(expectedLauncherRoot, '.aht-launcher', 'java', 'temurin8');
+const java8FixtureExecutable = path.join(java8FixtureHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const packagedDefaults = smokeExe ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
 const defaultsPath = packagedDefaults || tempDefaults;
@@ -160,6 +163,9 @@ if (process.platform === 'win32') {
     'minecraft-settings': JSON.stringify({ minecraftRoot: path.dirname(curseForgeRoot) })
   });
 }
+await fsp.mkdir(path.dirname(java8FixtureExecutable), { recursive: true });
+await fsp.writeFile(java8FixtureExecutable, 'AHT Java 8 executable fixture', 'utf8');
+await fsp.writeFile(path.join(java8FixtureHome, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
 
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
@@ -219,7 +225,9 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_HOOKS: '1',
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_USER_DATA: userData,
-    AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile
+    AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile,
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64'
   },
   stdio: 'ignore',
   windowsHide: true
@@ -260,7 +268,6 @@ try {
     throw new Error(`Fresh player honored an unsafe persisted Minecraft shell command: ${JSON.stringify(status.config.minecraftLauncher)}`);
   }
   const launcherRoot = String(status.config.minecraftLauncher?.rootDir || '');
-  const expectedLauncherRoot = process.platform === 'win32' ? curseForgeRoot : minecraftRoot;
   if (path.resolve(launcherRoot) !== path.resolve(expectedLauncherRoot)) {
     throw new Error(`Fresh player did not select the preferred isolated Minecraft Launcher root: ${JSON.stringify({ launcherRoot, expectedLauncherRoot, config: status.config.minecraftLauncher })}`);
   }

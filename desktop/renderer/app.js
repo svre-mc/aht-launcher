@@ -258,7 +258,7 @@ if (!window.aht) {
     },
     getSocialLinks: async () => ({ links: { ...DEFAULT_LAUNCHER_SOCIAL_LINKS }, source: "default", publishedAt: "", fetchedAt: "", error: "" }),
     openExternal: async (destination) => {
-      const target = destination === "store" ? "https://ahardtime.net/shop" : DEFAULT_LAUNCHER_SOCIAL_LINKS[destination];
+      const target = destination === "store" ? "https://ahardtime.net/store" : DEFAULT_LAUNCHER_SOCIAL_LINKS[destination];
       return { ok: Boolean(target), opened: Boolean(target), destination, target: target || "" };
     },
     socialList: async () => ({
@@ -2467,6 +2467,7 @@ function queueDeveloperSecretSave() {
 }
 
 function publishBlockReason(target = "stable") {
+  if (!currentStatus?.config) return "Launcher settings are still loading.";
   if (!developerAuthenticated) return "Developer login is required before publishing releases.";
   if (!selectedPackZip(target)) return target === "ptb" ? "Choose or create an exact PTB client ZIP first." : "Choose an exact AHT client ZIP from Modpack ZIP first.";
   if (!/^https?:\/\//i.test(releaseFeedUrl(target))) {
@@ -2476,6 +2477,7 @@ function publishBlockReason(target = "stable") {
 }
 
 function setupCloudBlockReason() {
+  if (!currentStatus?.config) return "Launcher settings are still loading.";
   if (!developerAuthenticated) return "Developer login is required before cloud setup.";
   if (!localLauncherProofSecret()) {
     return "Enter the Launcher Proof Secret before cloud setup. The server must use the same value.";
@@ -3903,6 +3905,9 @@ function activateDeveloperSection(targetId) {
 }
 
 function serializeSettings() {
+  if (!currentStatus?.config) {
+    throw new Error("Launcher settings are still loading. Wait for startup to finish before saving.");
+  }
   const existingDeveloper = currentStatus?.config?.developer || {};
   const existingSync = currentStatus?.config?.sync || {};
   const existingCurseForge = currentStatus?.config?.curseforge || {};

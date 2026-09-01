@@ -921,6 +921,20 @@ function windowsJavaInstallRoots(env = process.env) {
   return roots;
 }
 
+function macosJavaInstallRoots(env = process.env) {
+  if (process.platform !== 'darwin') return [];
+  return uniqueValues([
+    env.HOME ? path.join(env.HOME, 'Library', 'Java', 'JavaVirtualMachines') : '',
+    '/Library/Java/JavaVirtualMachines'
+  ]);
+}
+
+function defaultJavaInstallRoots(env = process.env) {
+  if (process.platform === 'win32') return windowsJavaInstallRoots(env);
+  if (process.platform === 'darwin') return macosJavaInstallRoots(env);
+  return [];
+}
+
 function javaSearchRoots(profile = {}, options = {}) {
   const roots = [];
   const rootDir = profile?.rootDir || '';
@@ -930,7 +944,7 @@ function javaSearchRoots(profile = {}, options = {}) {
   }
   pushJavaRoot(roots, rootDir ? path.join(rootDir, '.aht-launcher', 'java') : '');
   pushJavaRoot(roots, rootDir ? path.join(rootDir, 'java') : '');
-  for (const root of options.javaInstallRoots || (includeDefaultRoots ? windowsJavaInstallRoots() : [])) {
+  for (const root of options.javaInstallRoots || (includeDefaultRoots ? defaultJavaInstallRoots() : [])) {
     pushJavaRoot(roots, root);
   }
   pushJavaRoot(roots, rootDir ? path.join(rootDir, 'runtime') : '');
@@ -1018,7 +1032,10 @@ function pathJavaCandidates(env = process.env) {
   const executable = javaExecutableName();
   return uniqueValues(String(env.PATH || '').split(path.delimiter).map((dir) => (
     String(dir || '').trim() ? path.join(String(dir).trim(), executable) : ''
-  )));
+  ))).filter((candidate) => !(
+    process.platform === 'darwin'
+    && path.resolve(candidate) === '/usr/bin/java'
+  ));
 }
 
 async function collectJavaCandidates(profile = {}, options = {}) {
@@ -1104,6 +1121,8 @@ export async function detectJava8Runtime(profile = {}, options = {}) {
   const candidates = await collectJavaCandidates(profile, options);
   const rejected = [];
   for (const candidate of candidates) {
+    const releaseMajor = await javaMajorFromReleaseFile(candidate);
+    if (releaseMajor && releaseMajor !== 8) continue;
     const inspected = await inspectJavaRuntime(candidate, options);
     if (inspected.usable) {
       const value = {

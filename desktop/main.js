@@ -141,7 +141,7 @@ const LAUNCHER_WORKFLOW_DEFAULTS = {
   workflow: 'build-macos.yml'
 };
 const PLAYER_EXTERNAL_DESTINATIONS = Object.freeze({
-  store: 'https://ahardtime.net/shop'
+  store: 'https://ahardtime.net/store'
 });
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -12316,6 +12316,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
   const target = descriptor.target || releaseTarget(options.packValue || 'stable');
   const config = descriptor.config || configForPack(await loadConfig(), target.id);
   const installed = descriptor.installed || null;
+  const developerClientBypass = developerClientBypassAllowed();
   const attempt = options.attempt || createLaunchDiagnosticAttempt(target);
   const reportProgress = (phase, percent) => options.onProgress?.({ phase, percent });
   try {
@@ -12370,7 +12371,8 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
       cacheNeedsPersist = true;
     }
-    if (!minecraftProfile?.profileExists || !minecraftProfile?.profileId || !minecraftProfile?.versionId) {
+    if ((!developerClientBypass && !minecraftProfile?.profileExists)
+        || !minecraftProfile?.profileId || !minecraftProfile?.versionId) {
       throw new Error(`${target.name} needs one Repair to create its Minecraft Launcher profile.`);
     }
 
@@ -12387,7 +12389,14 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
     setLaunchRequirement(attempt, 'minecraftRuntime', 'NOT CHECKED', 'Startup reuses the installation prepared by Update or Repair.');
     setLaunchRequirement(attempt, 'minecraftLauncher', 'PASS', `${launcherRoute.kind || 'Minecraft Launcher'} at ${launcherRoute.executablePath || launcherRoute.appPath || launcherRoute.rootDir || launcherRoute.cwd || 'the saved launcher route'}.`);
     setLaunchRequirement(attempt, 'java8', 'PASS', `${java8Runtime.vendor || 'Java'} ${java8Runtime.version || '8'} at ${java8Runtime.path}.`);
-    setLaunchRequirement(attempt, 'minecraftProfile', 'PASS', `${minecraftProfile.profileName || target.name}; ${minecraftProfile.versionId}.`);
+    setLaunchRequirement(
+      attempt,
+      'minecraftProfile',
+      minecraftProfile.profileExists ? 'PASS' : 'WARN',
+      minecraftProfile.profileExists
+        ? `${minecraftProfile.profileName || target.name}; ${minecraftProfile.versionId}.`
+        : `${minecraftProfile.profileName || target.name}; ${minecraftProfile.versionId} will be selected for the developer client during loading.`
+    );
     setLaunchRequirement(attempt, 'launcherProof', 'NOT CHECKED', 'A fresh one-time launcher proof is requested only when Play is clicked.');
     attempt.instanceDir = config.instanceDir;
     attempt.minecraftRoot = launcherConfig.minecraftLauncher?.rootDir || '';

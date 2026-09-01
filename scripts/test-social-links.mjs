@@ -28,7 +28,7 @@ for (const invalid of [
   { discord: 'https://discord.com/channels/123/456' },
   { youtube: 'https://example.com/@AHardTime' },
   { tiktok: 'https://evil.example/@ahardtimefr' },
-  { forum: 'https://ahardtime.net/shop' },
+  { forum: 'https://ahardtime.net/store' },
   { forum: 'javascript:alert(1)' }
 ]) {
   const result = validateLauncherSocialLinks({ ...DEFAULT_LAUNCHER_SOCIAL_LINKS, ...invalid });
