@@ -242,6 +242,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile,
     AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
+    AHT_TEST_STARTUP_PREPARATION_SECRET: 'a'.repeat(64),
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64'
   },

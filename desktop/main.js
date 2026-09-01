@@ -11572,6 +11572,15 @@ function startupPreparationReleaseSignature(latest = null) {
 }
 
 async function startupPreparationSecret(options = {}) {
+  const testSecret = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_STARTUP_PREPARATION_SECRET || '').trim().toLowerCase()
+    : '';
+  if (testSecret) {
+    if (!/^[a-f0-9]{64}$/.test(testSecret)) {
+      throw new Error('The test quick startup key must be exactly 64 hexadecimal characters.');
+    }
+    return testSecret;
+  }
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('Windows protected storage is unavailable; the quick startup cache cannot be trusted.');
   }
