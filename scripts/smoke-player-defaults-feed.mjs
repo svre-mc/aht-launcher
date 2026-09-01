@@ -22,6 +22,7 @@ const fakeAppData = process.platform === 'win32'
 const fakeLocalAppData = process.platform === 'win32'
   ? path.join(fakeHome, 'AppData', 'Local')
   : path.join(root, 'localappdata');
+const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const minecraftRoot = path.join(root, '.minecraft');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
@@ -52,7 +53,11 @@ async function waitForTarget() {
       const response = await fetch(`${endpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const page = pages.find((target) => (
+          /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || ''))
+          && String(target.title || '').trim() === 'A Hard Time Launcher'
+        ));
         if (page) return page;
       }
     } catch (error) {
@@ -81,7 +86,7 @@ function connect(wsUrl) {
   return new Promise((resolve, reject) => {
     socket.addEventListener('open', () => {
       resolve({
-        call(method, params = {}) {
+        call(method, params = {}, label = method) {
           const id = nextId;
           nextId += 1;
           socket.send(JSON.stringify({ id, method, params }));
@@ -90,7 +95,7 @@ function connect(wsUrl) {
             setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
-              callReject(new Error(`CDP call timed out: ${method}`));
+              callReject(new Error(`CDP call timed out: ${label} (${method})`));
             }, 30000);
           });
         },
@@ -103,12 +108,12 @@ function connect(wsUrl) {
   });
 }
 
-async function evaluate(client, expression) {
+async function evaluate(client, expression, label = 'renderer expression') {
   const result = await client.call('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true
-  });
+  }, label);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
@@ -117,7 +122,7 @@ async function evaluate(client, expression) {
 
 async function waitFor(client, expression, label, attempts = 160) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const value = await evaluate(client, expression);
+    const value = await evaluate(client, expression, label);
     if (value) return value;
     await sleep(250);
   }
@@ -212,6 +217,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile
   },
@@ -222,10 +228,11 @@ const child = spawn(electronBin, electronArgs, {
 let client;
 try {
   const target = await waitForTarget();
+  console.log(JSON.stringify({ cdpTarget: { id: target.id, title: target.title, url: target.url } }));
   client = await connect(target.webSocketDebuggerUrl);
-  await client.call('Runtime.enable');
-  await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await client.call('Runtime.enable', {}, 'enable renderer runtime');
+  await client.call('Page.enable', {}, 'enable renderer page');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.9.9' ? status : false)
   `, 'default Worker feed');
@@ -287,7 +294,7 @@ try {
       playCwd: result.config?.playCommand?.cwd || '',
       setup: result.setup || {}
     }))
-  `);
+  `, 'apply recommended setup');
   const appliedPathText = `${appliedSetup.instanceDir}\n${appliedSetup.playCwd}`;
   const leakedAppliedInstanceFragments = legacyInstanceFragments.filter((item) => appliedPathText.toLowerCase().includes(item.toLowerCase()));
   if (leakedAppliedInstanceFragments.length || !appliedSetup.instanceDir.includes('AHT') || !appliedSetup.instanceDir.includes('A Hard Time')) {
@@ -306,6 +313,10 @@ try {
       memoryMb: status.config.minecraftLauncher?.memoryMb
     }
   }, null, 2));
+} catch (error) {
+  const startupProbe = await fsp.readFile(startupProbePath, 'utf8').catch(() => 'No startup probe was written.');
+  console.error(`AHT startup probe:\n${startupProbe.trim()}`);
+  throw error;
 } finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});
