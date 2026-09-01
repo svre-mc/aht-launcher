@@ -2198,6 +2198,7 @@ textarea {
 
 .news-view.is-transitioning:not(.is-transition-entering) .news-transition-loader {
   opacity: 0.92;
+  transition: none;
 }
 
 .news-loader-globe {
