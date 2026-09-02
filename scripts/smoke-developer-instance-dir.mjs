@@ -14,7 +14,9 @@ const expectedDeveloperDir = process.platform === 'win32'
   ? 'C:\\AHT\\A Hard Time Developer'
   : process.platform === 'darwin'
     ? path.join(os.homedir(), 'Library', 'Application Support', 'A Hard Time', 'Developer Instance')
-    : (() => { throw new Error(`Unsupported AHT launcher test platform: ${process.platform}`); })();
+    : process.platform === 'linux'
+      ? path.join(path.dirname(oldPlayerDir), 'Developer Instance')
+      : (() => { throw new Error(`Unsupported AHT launcher test platform: ${process.platform}`); })();
 const electronBin = process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron');
