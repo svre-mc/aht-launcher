@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 10240);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -378,6 +379,26 @@ await Promise.all([
   fsp.mkdir(fakeAppData, { recursive: true }),
   fsp.mkdir(fakeLocalAppData, { recursive: true }),
   fsp.mkdir(userData, { recursive: true })
+]);
+const fixtureDeviceCredential = createDeviceCredential();
+await Promise.all([
+  writeJson(path.join(userData, 'identity.json'), {
+    installId: crypto.randomUUID(),
+    createdAt: new Date().toISOString()
+  }),
+  writeJson(path.join(userData, 'device-identity.json'), {
+    schemaVersion: fixtureDeviceCredential.schemaVersion,
+    protocol: fixtureDeviceCredential.protocol,
+    algorithm: fixtureDeviceCredential.algorithm,
+    deviceId: fixtureDeviceCredential.deviceId,
+    publicKey: fixtureDeviceCredential.publicKey,
+    privateKey: {
+      value: Buffer.from(fixtureDeviceCredential.privateKey, 'utf8').toString('base64'),
+      encrypted: false
+    },
+    createdAt: fixtureDeviceCredential.createdAt,
+    protectedBy: 'explicit-test-fallback'
+  })
 ]);
 await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
 await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
