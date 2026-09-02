@@ -9,7 +9,22 @@ const renderer = fs.readFileSync('desktop/renderer/app.js', 'utf8').replace(/\r\
 const installer = fs.readFileSync('src/installer.js', 'utf8').replace(/\r\n/g, '\n');
 
 assert(main.includes('function createOperationState'), 'main process is missing operation state helper.');
-assert(main.includes("updateState = {\n    ...createOperationState(forceRepair ? 'repair' : 'install'") && main.indexOf('updateState = {\n    ...createOperationState') < main.indexOf('config = configForPack(await loadConfig(), target.id);'), 'runUpdate must mark target-aware updateState running before slow setup work.');
+const runUpdateStart = main.indexOf('async function runUpdate(forceRepair = false, options = {})');
+const runUpdateEnd = main.indexOf('\nfunction defaultLauncherInstallerArgs', runUpdateStart);
+const runUpdate = main.slice(runUpdateStart, runUpdateEnd);
+const runningStateIndex = runUpdate.indexOf('updateState = {');
+const configLoadIndex = runUpdate.indexOf('config = configForPack(await loadConfig(), target.id);');
+const runningStateSetup = runUpdate.slice(runningStateIndex, configLoadIndex);
+assert(
+  runUpdateStart >= 0
+    && runUpdateEnd > runUpdateStart
+    && runningStateIndex >= 0
+    && configLoadIndex > runningStateIndex
+    && runningStateSetup.includes("...createOperationState(forceRepair ? 'repair' : 'install'")
+    && runningStateSetup.includes('releaseTarget: target.id')
+    && runningStateSetup.includes('packKey: target.sidebarKey'),
+  'runUpdate must mark target-aware updateState running before slow setup work.'
+);
 assert(main.includes("updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };"), 'runUpdate must verify installed files before writing terminal success.');
 assert(main.includes('const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall, {') && main.includes('weightedOperationPercent(progress.percent, 98, 1)'), 'runUpdate must scan the repaired install with visible verification progress before saving integrity state.');
 assert(main.includes("await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');"), 'runUpdate must save the real post-install integrity result.');

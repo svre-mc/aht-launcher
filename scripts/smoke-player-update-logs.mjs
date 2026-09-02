@@ -262,6 +262,62 @@ async function waitForActualPointerRest(client, selector, restPoint, label, atte
   throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ restPoint, proof })}`);
 }
 
+async function featuredNewsInteractionProof(client) {
+  return evaluate(client, `(() => {
+    const card = document.querySelector('.news-feature-carousel');
+    const art = card?.querySelector('.news-carousel-slide.is-active');
+    const caption = card?.querySelector('.news-carousel-caption');
+    const arrow = card?.querySelector('.news-carousel-next');
+    const pager = card?.querySelector('.news-carousel-pager');
+    return {
+      hovered: card?.matches(':hover') || false,
+      transform: getComputedStyle(card).transform,
+      artFilter: getComputedStyle(art).filter,
+      captionOpacity: getComputedStyle(caption).opacity,
+      arrowOpacity: getComputedStyle(arrow).opacity,
+      pagerOpacity: getComputedStyle(pager).opacity
+    };
+  })()`);
+}
+
+async function waitForFeaturedNewsPointerHover(client, label, attempts = 40) {
+  let point = null;
+  let proof = null;
+  await client.call('Page.bringToFront');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    point = await movePointer(client, '.news-carousel-media');
+    proof = await featuredNewsInteractionProof(client);
+    if (
+      proof.hovered
+      && Number(proof.captionOpacity) >= 0.99
+      && Number(proof.arrowOpacity) >= 0.99
+      && Number(proof.pagerOpacity) >= 0.99
+    ) {
+      return { point, proof };
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ point, proof })}`);
+}
+
+async function waitForFeaturedNewsPointerRest(client, restPoint, label, attempts = 40) {
+  let proof = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await movePointer(client, restPoint);
+    proof = await featuredNewsInteractionProof(client);
+    if (
+      !proof.hovered
+      && proof.captionOpacity === '0'
+      && proof.arrowOpacity === '0'
+      && proof.pagerOpacity === '0'
+    ) {
+      return proof;
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ restPoint, proof })}`);
+}
+
 async function pressPointer(client, point) {
   await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', buttons: 1, clickCount: 1 });
 }
@@ -601,9 +657,13 @@ try {
   }
   await evaluate(client, `document.querySelector('#newsTab').click(); true`);
   await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && document.querySelectorAll('#newsFeedGrid .feature-card').length === 4", 'dedicated News view');
-  await movePointer(client, { x: 250, y: 120 });
   await clearInteractionFocus(client, ['#newsTab']);
   await waitFor(client, "getComputedStyle(document.querySelector('#newsTab')).color === 'rgb(255, 255, 255)'", 'settled active News navigation color');
+  const heroNeutral = await waitForFeaturedNewsPointerRest(
+    client,
+    { x: 250, y: 120 },
+    'completed featured News pointer-leave transition'
+  );
   const newsProof = await evaluate(client, `(() => {
     const grid = document.querySelector('#newsFeedGrid');
     const featuredBox = document.querySelector('#newsFeedGrid .news-feed-card.large');
@@ -698,47 +758,10 @@ try {
     throw new Error(`News typography and measured BSG column geometry regressed: ${JSON.stringify(newsProof)}`);
   }
 
-  await movePointer(client, { x: 250, y: 120 });
-  await sleep(180);
-  const heroNeutral = await evaluate(client, `(() => {
-    const card = document.querySelector('.news-feature-carousel');
-    const art = card?.querySelector('.news-carousel-slide.is-active');
-    const caption = card?.querySelector('.news-carousel-caption');
-    const arrow = card?.querySelector('.news-carousel-next');
-    const pager = card?.querySelector('.news-carousel-pager');
-    return {
-      transform: getComputedStyle(card).transform,
-      artFilter: getComputedStyle(art).filter,
-      captionOpacity: getComputedStyle(caption).opacity,
-      arrowOpacity: getComputedStyle(arrow).opacity,
-      pagerOpacity: getComputedStyle(pager).opacity
-    };
-  })()`);
-  const heroPoint = await movePointer(client, '.news-carousel-media');
-  const heroInteractionMode = await ensurePointerHoverOrFocus(client, '.news-feature-carousel', '.news-carousel-media');
-  await waitFor(client, `(() => {
-    const card = document.querySelector('.news-feature-carousel');
-    const caption = card?.querySelector('.news-carousel-caption');
-    const arrow = card?.querySelector('.news-carousel-next');
-    const pager = card?.querySelector('.news-carousel-pager');
-    return Number(getComputedStyle(caption).opacity) >= 0.99
-      && Number(getComputedStyle(arrow).opacity) >= 0.99
-      && Number(getComputedStyle(pager).opacity) >= 0.99;
-  })()`, 'completed featured News hover transition');
-  const heroHover = await evaluate(client, `(() => {
-    const card = document.querySelector('.news-feature-carousel');
-    const art = card?.querySelector('.news-carousel-slide.is-active');
-    const caption = card?.querySelector('.news-carousel-caption');
-    const arrow = card?.querySelector('.news-carousel-next');
-    const pager = card?.querySelector('.news-carousel-pager');
-    return {
-      transform: getComputedStyle(card).transform,
-      artFilter: getComputedStyle(art).filter,
-      captionOpacity: getComputedStyle(caption).opacity,
-      arrowOpacity: getComputedStyle(arrow).opacity,
-      pagerOpacity: getComputedStyle(pager).opacity
-    };
-  })()`);
+  const heroHoverResult = await waitForFeaturedNewsPointerHover(client, 'completed featured News hover transition');
+  const heroPoint = heroHoverResult.point;
+  const heroHover = heroHoverResult.proof;
+  const heroInteractionMode = 'pointer';
   screenshots.push(await captureScreenshot(client, 'news-hero-hover'));
   await pressPointer(client, heroPoint);
   await sleep(45);
