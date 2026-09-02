@@ -46,6 +46,7 @@ const sourceZip = path.join(root, exactArchiveName);
 const smokeExe = path.resolve(String(process.env.AHT_SMOKE_EXE || '').trim() || '.');
 const hasSmokeExe = Boolean(String(process.env.AHT_SMOKE_EXE || '').trim());
 const fullTransaction = process.env.AHT_DEVELOPER_REINSTALL_FULL_TRANSACTION !== '0';
+const preserveSmokeRoot = process.env.AHT_PRESERVE_FAILED_REINSTALL_SMOKE === '1';
 const defaultPackagedDir = path.resolve('release-builds', 'windows', 'win-unpacked');
 const installedSource = path.resolve(String(
   process.env.AHT_DEVELOPER_REINSTALL_INSTALLED_DIR
@@ -847,7 +848,11 @@ try {
   const staged = await waitFor(playerClient, `(async () => {
     const state = await window.aht.getLauncherUpdateState();
     if (state?.error) return { error: state.error, state };
-    return state?.lastResult?.restartRequired ? { state, title: document.querySelector('#launcherUpdateTitle')?.textContent || '', button: document.querySelector('#launcherUpdateNowButton')?.textContent || '' } : null;
+    const title = document.querySelector('#launcherUpdateTitle')?.textContent || '';
+    const button = document.querySelector('#launcherUpdateNowButton')?.textContent || '';
+    return state?.lastResult?.restartRequired && title.includes('Update finished') && button.includes('Restart Launcher')
+      ? { state, title, button }
+      : null;
   })()`, 'regular launcher same-version staging', 1200);
   if (staged.error) throw new Error(`Regular launcher staging failed: ${JSON.stringify(staged)}`);
   if (staged.state?.purpose !== 'local-reinstall-test'
@@ -1076,5 +1081,9 @@ try {
   await stopProcessesUnder(root);
   await closeServer(feedServer);
   await sleep(400);
-  await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
+  if (preserveSmokeRoot) {
+    console.error(`Preserved developer reinstall smoke root: ${root}`);
+  } else {
+    await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
+  }
 }

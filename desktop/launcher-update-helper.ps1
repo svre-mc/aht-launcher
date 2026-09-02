@@ -259,13 +259,32 @@ function Get-StagedTree([string] $StagingRoot) {
     return [pscustomobject] @{ Root = $root; Files = $files }
 }
 
+function Get-LauncherVersionIdentity([string] $Value) {
+    $text = ([string] $Value).Trim()
+    if ($text -notmatch '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$') { return '' }
+    $parts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($group in @($Matches[1], $Matches[2], $Matches[3], $Matches[4])) {
+        if ($null -eq $group -or [string] $group -eq '') { continue }
+        $normalized = ([string] $group).TrimStart([char] '0')
+        if (-not $normalized) { $normalized = '0' }
+        $parts.Add($normalized)
+    }
+    while ($parts.Count -gt 3 -and $parts[$parts.Count - 1] -eq '0') {
+        $parts.RemoveAt($parts.Count - 1)
+    }
+    return ($parts -join '.')
+}
+
 function Test-ExpectedVersion([string] $Target, [string] $Expected) {
     if (-not $Target -or -not (Test-Path -LiteralPath $Target -PathType Leaf)) { return $false }
     if (-not $Expected) { return $true }
     try {
         $null = Assert-RegularFile $Target 'Launcher executable'
         $actual = [string] (Get-Item -LiteralPath $Target -Force).VersionInfo.ProductVersion
-        return $actual -eq $Expected -or $actual.StartsWith($Expected + '.')
+        if ($actual -eq $Expected -or $actual.StartsWith($Expected + '.')) { return $true }
+        $actualIdentity = Get-LauncherVersionIdentity $actual
+        $expectedIdentity = Get-LauncherVersionIdentity $Expected
+        return $actualIdentity -and $expectedIdentity -and $actualIdentity -eq $expectedIdentity
     } catch {
         return $false
     }
