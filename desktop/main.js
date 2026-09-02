@@ -126,17 +126,6 @@ import {
   writeJsonFile
 } from '../src/utils.js';
 
-// Ubuntu CI runners can block Chromium's namespace sandbox before a test
-// window is created. Keep the escape hatch explicit, test-only, and disabled
-// for every production launch.
-if (
-  process.platform === 'linux'
-  && process.env.AHT_TEST_HOOKS === '1'
-  && process.env.AHT_TEST_DISABLE_CHROMIUM_SANDBOX === '1'
-) {
-  app.commandLine.appendSwitch('no-sandbox');
-}
-
 const DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS = ['mods', 'scripts', 'config', 'ForgeEssentials'];
 const DEFAULT_MINECRAFT_MEMORY_MB = 4096;
 const require = createRequire(import.meta.url);

@@ -405,8 +405,17 @@ if (originalSplitDevice.privateKey?.encrypted !== true) {
   throw new Error('Split-profile seed did not create an OS-protected device identity.');
 }
 
-const staleSecrets = await fsp.readFile(path.join(userData, 'developer.secrets.json'));
-await fsp.writeFile(path.join(splitUserData, 'developer.secrets.json'), staleSecrets);
+const sourceSecrets = JSON.parse(await fsp.readFile(path.join(userData, 'developer.secrets.json'), 'utf8'));
+const unreadableSecrets = {
+  ...sourceSecrets,
+  secrets: Object.fromEntries(Object.entries(sourceSecrets.secrets || {}).map(([key, record]) => [key, {
+    ...record,
+    encrypted: true,
+    value: Buffer.from(`intentionally-unreadable-${key}`, 'utf8').toString('base64')
+  }]))
+};
+await writeJson(path.join(splitUserData, 'developer.secrets.json'), unreadableSecrets);
+const staleSecrets = await fsp.readFile(path.join(splitUserData, 'developer.secrets.json'));
 const unreadableSplitDevice = {
   ...originalSplitDevice,
   privateKey: {

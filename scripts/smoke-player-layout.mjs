@@ -704,11 +704,19 @@ try {
     x: fixedWindowProof.minimizeRect.left + fixedWindowProof.minimizeRect.width / 2,
     y: fixedWindowProof.minimizeRect.top + fixedWindowProof.minimizeRect.height / 2
   }, 'minimize control hover state');
+  await waitFor(client, `(() => {
+    const node = document.querySelector('#windowMinimizeButton');
+    return node?.matches(':hover') && getComputedStyle(node).color === 'rgb(255, 255, 255)';
+  })()`, 'minimize control highlighted appearance');
   const minimizeHoverProof = await readControlAppearance('#windowMinimizeButton');
   await moveMouseUntilHovered(client, '#windowCloseButton', {
     x: fixedWindowProof.closeRect.left + fixedWindowProof.closeRect.width / 2,
     y: fixedWindowProof.closeRect.top + fixedWindowProof.closeRect.height / 2
   }, 'close control hover state');
+  await waitFor(client, `(() => {
+    const node = document.querySelector('#windowCloseButton');
+    return node?.matches(':hover') && getComputedStyle(node).color === 'rgb(255, 255, 255)';
+  })()`, 'close control highlighted appearance');
   const closeHoverProof = await readControlAppearance('#windowCloseButton');
   const transparent = 'rgba(0, 0, 0, 0)';
   if (

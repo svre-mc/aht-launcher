@@ -1090,11 +1090,12 @@ assert(releaseWorkflow.includes('dist:regular:ubuntu'), 'GitHub workflow must ca
 assert(releaseWorkflow.includes('aht-launcher-ubuntu'), 'GitHub workflow must upload Ubuntu launcher artifacts.');
 assert(releaseWorkflow.includes('validate-ubuntu-runtime:') && releaseWorkflow.includes('AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher'), 'GitHub validation must install and exercise the native Ubuntu package.');
 assert(
-  releaseWorkflow.includes('AHT_TEST_DISABLE_CHROMIUM_SANDBOX: "1"')
+  releaseWorkflow.includes('sudo chown root:root "$ELECTRON_SANDBOX"')
+  && releaseWorkflow.includes('sudo chmod 4755 "$ELECTRON_SANDBOX"')
+  && releaseWorkflow.includes('root:root 4755')
   && releaseWorkflow.includes('"$APPIMAGE" --no-sandbox --version')
-  && desktopMain.includes("process.env.AHT_TEST_DISABLE_CHROMIUM_SANDBOX === '1'")
-  && desktopMain.includes("app.commandLine.appendSwitch('no-sandbox')"),
-  'Ubuntu CI must use an explicit test-only Chromium sandbox escape hatch without weakening production launches.'
+  && !desktopMain.includes('AHT_TEST_DISABLE_CHROMIUM_SANDBOX'),
+  'Ubuntu CI must configure Electron\'s SUID test sandbox while limiting --no-sandbox to extracted AppImage version probing.'
 );
 assert(smokePlayerUpdateLogs.includes('Electron exited before exposing a debugger target') && smokePlayerUpdateLogs.includes("stdio: ['ignore', 'pipe', 'pipe']"), 'The first native Electron smoke must preserve early process diagnostics.');
 const platformProfileSource = readText(new URL('../src/platformProfile.js', import.meta.url));

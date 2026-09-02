@@ -389,7 +389,6 @@ jobs:
     timeout-minutes: 45
     env:
       AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: "1"
-      AHT_TEST_DISABLE_CHROMIUM_SANDBOX: "1"
       AHT_VERIFY_PARALLEL: "3"
 
     steps:
@@ -419,6 +418,16 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Configure Electron test sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELECTRON_SANDBOX="$GITHUB_WORKSPACE/node_modules/electron/dist/chrome-sandbox"
+          test -f "$ELECTRON_SANDBOX"
+          sudo chown root:root "$ELECTRON_SANDBOX"
+          sudo chmod 4755 "$ELECTRON_SANDBOX"
+          test "$(stat -c '%U:%G %a' "$ELECTRON_SANDBOX")" = "root:root 4755"
 
       - name: Audit dependency security
         run: npm run security:audit
