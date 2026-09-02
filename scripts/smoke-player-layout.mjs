@@ -160,20 +160,27 @@ for ($attempt = 0; $attempt -lt 100 -and $handle -eq [IntPtr]::Zero; $attempt +=
 if ($handle -eq [IntPtr]::Zero) { throw "No main window handle for launcher PID $targetPid" }
 $origin = New-Object AhtNativeWindowHitTest+POINT
 if (-not [AhtNativeWindowHitTest]::ClientToScreen($handle, [ref]$origin)) { throw 'ClientToScreen failed' }
-$result = foreach ($point in $points) {
-  $clientX = [int][Math]::Round([double]$point.x)
-  $clientY = [int][Math]::Round([double]$point.y)
-  $screenX = $origin.X + $clientX
-  $screenY = $origin.Y + $clientY
-  [pscustomobject]@{
-    windowPid = $windowPid
-    controlId = [string]$point.controlId
-    clientX = $clientX
-    clientY = $clientY
-    screenX = $screenX
-    screenY = $screenY
-    hit = [AhtNativeWindowHitTest]::Hit($handle, $screenX, $screenY)
+$result = @()
+for ($attempt = 0; $attempt -lt 100; $attempt += 1) {
+  $result = foreach ($point in $points) {
+    $clientX = [int][Math]::Round([double]$point.x)
+    $clientY = [int][Math]::Round([double]$point.y)
+    $screenX = $origin.X + $clientX
+    $screenY = $origin.Y + $clientY
+    [pscustomobject]@{
+      windowPid = $windowPid
+      controlId = [string]$point.controlId
+      clientX = $clientX
+      clientY = $clientY
+      screenX = $screenX
+      screenY = $screenY
+      expectedHit = [int]$point.expectedHit
+      hit = [AhtNativeWindowHitTest]::Hit($handle, $screenX, $screenY)
+    }
   }
+  $matched = @($result | Where-Object { [int]$_.hit -eq [int]$_.expectedHit }).Count
+  if ($matched -eq @($points).Count) { break }
+  if ($attempt -lt 99) { Start-Sleep -Milliseconds 50 }
 }
 @($result) | ConvertTo-Json -Compress
 `;
@@ -662,9 +669,9 @@ try {
     };
   })()`);
   const nativeWindowControlProof = queryWindowsNativeHitTest(child.pid, [
-    ...fixedWindowProof.minimizeHitMap.map(({ x, y }) => ({ controlId: 'windowMinimizeButton', x, y })),
-    ...fixedWindowProof.closeHitMap.map(({ x, y }) => ({ controlId: 'windowCloseButton', x, y })),
-    { controlId: 'windowDragRegion', x: 800, y: 14 }
+    ...fixedWindowProof.minimizeHitMap.map(({ x, y }) => ({ controlId: 'windowMinimizeButton', x, y, expectedHit: 1 })),
+    ...fixedWindowProof.closeHitMap.map(({ x, y }) => ({ controlId: 'windowCloseButton', x, y, expectedHit: 1 })),
+    { controlId: 'windowDragRegion', x: 800, y: 14, expectedHit: 2 }
   ]);
   if (
     nativeWindowControlProof.supported
