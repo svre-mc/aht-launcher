@@ -11852,8 +11852,10 @@ async function startupPreparationSecret(options = {}) {
     }
     return testSecret;
   }
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error('Windows protected storage is unavailable; the quick startup cache cannot be trusted.');
+  const encryptionAvailable = safeStorageAvailable();
+  const allowTestFallback = useUnencryptedDeviceSecretTestFallback();
+  if (!encryptionAvailable && !allowTestFallback) {
+    throw new Error('OS-backed protected storage is unavailable; the quick startup cache cannot be trusted.');
   }
   const file = startupPreparationKeyPath();
   if (await pathExists(file)) {
@@ -11861,15 +11863,25 @@ async function startupPreparationSecret(options = {}) {
     if (record?.schema !== STARTUP_PREPARATION_KEY_SCHEMA || !record.encryptedKey) {
       throw new Error('The protected quick startup key is damaged.');
     }
-    const secret = safeStorage.decryptString(Buffer.from(String(record.encryptedKey), 'base64'));
+    const encrypted = record.encrypted !== false;
+    if (!encrypted && !allowTestFallback) {
+      throw new Error('The quick startup key is not protected by OS-backed encryption.');
+    }
+    const keyBytes = Buffer.from(String(record.encryptedKey), 'base64');
+    const secret = encrypted ? safeStorage.decryptString(keyBytes) : keyBytes.toString('utf8');
     if (!/^[a-f0-9]{64}$/.test(secret)) throw new Error('The protected quick startup key is invalid.');
     return secret;
   }
   if (options.create !== true) return '';
   const secret = crypto.randomBytes(32).toString('hex');
+  const protectedKey = protectDeviceSecret(secret);
+  if (!protectedKey.encrypted && !allowTestFallback) {
+    throw new Error('OS-backed protected storage is required to save the quick startup key.');
+  }
   await writeJsonFile(file, {
     schema: STARTUP_PREPARATION_KEY_SCHEMA,
-    encryptedKey: safeStorage.encryptString(secret).toString('base64'),
+    encryptedKey: protectedKey.value,
+    encrypted: protectedKey.encrypted,
     createdAt: new Date().toISOString()
   });
   return secret;
