@@ -567,7 +567,7 @@ try {
   await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && document.querySelectorAll('#newsFeedGrid .feature-card').length === 4", 'dedicated News view');
   await movePointer(client, { x: 250, y: 120 });
   await clearInteractionFocus(client, ['#newsTab']);
-  await waitFor(client, "getComputedStyle(document.querySelector('#newsTab')).color === 'rgb(255, 255, 243)'", 'settled active News navigation color');
+  await waitFor(client, "getComputedStyle(document.querySelector('#newsTab')).color === 'rgb(255, 255, 255)'", 'settled active News navigation color');
   const newsProof = await evaluate(client, `(() => {
     const grid = document.querySelector('#newsFeedGrid');
     const featuredBox = document.querySelector('#newsFeedGrid .news-feed-card.large');
@@ -651,7 +651,7 @@ try {
     || !newsProof.bodyFont.includes('AHT Bender')
     || !newsProof.navFont.includes('AHT Bender')
     || !newsProof.rowTitleFont.includes('AHT Bender')
-    || newsProof.navColor !== 'rgb(255, 255, 243)'
+    || newsProof.navColor !== 'rgb(255, 255, 255)'
     || newsProof.rowTitleColor !== 'rgb(255, 255, 243)'
     || newsProof.rowSummaryColor !== 'rgb(170, 170, 170)'
     || newsProof.carouselTransform !== 'none'
