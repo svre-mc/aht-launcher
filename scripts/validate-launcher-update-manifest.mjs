@@ -5,18 +5,22 @@ import { fileURLToPath } from 'node:url';
 import {
   assertLauncherReleaseAdvance,
   compareLauncherReleaseVersions,
+  launcherPlatformKeys,
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,
   REQUIRED_STAGED_WINDOWS_KEYS,
+  selectLauncherArtifact,
   validateLauncherUpdateManifest
 } from '../src/launcherUpdateManifest.js';
 
 export {
   assertLauncherReleaseAdvance,
   compareLauncherReleaseVersions,
+  launcherPlatformKeys,
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,
   REQUIRED_STAGED_WINDOWS_KEYS,
+  selectLauncherArtifact,
   validateLauncherUpdateManifest
 };
 

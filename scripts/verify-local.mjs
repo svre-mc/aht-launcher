@@ -16,6 +16,7 @@ const pureChecks = [
   ['test:launch-diagnostics'],
   ['test:launch-preparation-snapshot'],
   ['test:launcher-update-manifest'],
+  ['test:launcher-version'],
   ['test:launcher-update-staging'],
   ['test:github-workflow'],
   ['test:release-targets'],

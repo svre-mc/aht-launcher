@@ -57,7 +57,9 @@ export async function checkLauncherReleaseImmutability({ candidatePath, latestUr
   const live = await response.json();
   const liveValidation = validateLauncherUpdateManifest(live, {
     latestUrl: publicLatestUrl,
-    requireStagedWindows: true
+    requireStagedWindows: true,
+    requireAllPlatforms: false,
+    requireDownloads: false
   });
   if (!liveValidation.ok) {
     throw new Error(`Live launcher manifest is invalid: ${liveValidation.errors.join('; ')}`);

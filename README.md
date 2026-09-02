@@ -8,6 +8,7 @@ Use the build made for your operating system:
 
 - Windows 10/11: NSIS installer
 - macOS: DMG package for Apple Silicon and Intel Macs
+- Ubuntu Linux x64: DEB package, with a portable AppImage fallback
 
 Players do not need Node.js, Git, Wrangler, or terminal commands to use a packaged build.
 
@@ -17,6 +18,7 @@ The launcher manages the modpack in its own folder:
 
 - Windows 10/11: `C:\AHT\A Hard Time`
 - macOS: `~/Library/Application Support/A Hard Time/Instance`
+- Ubuntu Linux: `${XDG_DATA_HOME:-~/.local/share}/A Hard Time/Instance`
 
 The app also writes a Minecraft Launcher profile that points at that managed folder as `gameDir`.
 
@@ -26,16 +28,19 @@ The launcher handles installation, updates, repair, and game startup through its
 
 ## Launcher Updates
 
-The launcher checks its own update feed on startup. When a launcher update is required, the app shows an update overlay, downloads the correct installer/package for Windows or macOS, applies the update, and restarts.
+The launcher checks its own update feed on startup. When a launcher update is required, the app shows an update overlay and downloads the correct Windows, macOS, or Ubuntu package. Ubuntu updates open through the desktop package installer so the operating system can request installation permission.
 
 ## Build Targets
 
-The repository builds player launchers for Windows and macOS only:
+The repository builds player launchers for Windows, macOS, and Ubuntu Linux:
 
 - Windows 10/11: `npm run dist:regular:windows`
 - macOS: `npm run dist:regular:macos`
+- Ubuntu Linux x64: `npm run dist:regular:ubuntu`
 
 GitHub Actions can build the platform packages and publish player launcher release assets.
+
+Release labels and artifact filenames use `package.json`'s `ahtLauncherVersion` (for example, `0.2.01`). The separate npm `version` stays valid SemVer for Electron's packaging tools and must not be used as the public launcher version.
 
 ## Verification
 

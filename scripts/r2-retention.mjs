@@ -208,11 +208,6 @@ export function planR2Retention({
   const launcherRetainedVersions = new Set([launcherVersion, launcherRollbackVersion].filter(Boolean));
   for (const object of launcherObjects) {
     if (protectedKeys.has(object.key)) continue;
-    if (object.key.startsWith('launcher/files/linux-x64/')
-        || object.key.startsWith('launcher/files/linux-x64-deb/')) {
-      deletions.set(object.key, { ...object, reason: 'unsupported-linux-launcher-artifact' });
-      continue;
-    }
     const version = versionFromKey(object.key);
     if (!version) throw new Error(`Refusing to classify versionless launcher object ${object.key}.`);
     if (!launcherRetainedVersions.has(version)) {

@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { launcherReleaseVersionFromPackage } from '../src/launcherVersion.js';
 import { fileURLToPath } from 'node:url';
 import { CLIENT_PACK_FORMAT } from '../src/clientPackFormat.js';
 import { workerServiceBaseUrl } from '../src/releaseTargets.js';
@@ -115,7 +116,7 @@ function nextRequiredStep(blockers = []) {
   const names = blockers.map((check) => check.name);
   const stalePackFeed = names.includes('live pack release is exact AHT client ZIP');
   const staleLauncherFeed = names.includes('live launcher update feed matches local version')
-    || names.includes('live launcher update feed has Windows and macOS downloads');
+    || names.includes('live launcher update feed has Windows, macOS, and Ubuntu downloads');
   if (stalePackFeed && staleLauncherFeed) {
     return 'publish an exact AHT client ZIP release and a launcher update for the current package version when ready, then re-run this check.';
   }
@@ -527,6 +528,7 @@ function checkRequiredFiles() {
     'build/icon.png',
     'build/electron-builder.windows.cjs',
     'build/electron-builder.macos.cjs',
+    'build/electron-builder.ubuntu.cjs',
     'pack-fixes/aht-item-fire-fix-fabric-26.1.2-1.0.0.jar',
     'pack-fixes/aht-item-fire-fix-forge-1.0.0.jar'
   ];
@@ -558,6 +560,7 @@ function checkPackageConfig() {
   addCheck('macOS package script exists', 'blocker', Boolean(packageJson.scripts?.['dist:mac']), 'npm run dist:mac');
   addCheck('Windows regular launcher script exists', 'blocker', Boolean(packageJson.scripts?.['dist:regular:windows']), 'npm run dist:regular:windows');
   addCheck('macOS regular launcher script exists', 'blocker', Boolean(packageJson.scripts?.['dist:regular:macos']), 'npm run dist:regular:macos');
+  addCheck('Ubuntu regular launcher script exists', 'blocker', Boolean(packageJson.scripts?.['dist:regular:ubuntu']), 'npm run dist:regular:ubuntu');
   addCheck('pack fix jars are packaged', 'blocker', packageJson.build?.files?.includes('pack-fixes/**/*'), 'pack-fixes/**/*');
 }
 
@@ -658,10 +661,10 @@ function checkLiveCloudflareState(authOk) {
     ? validateLauncherDownloads(launcherFeed.json, defaults?.launcherUpdate?.latestUrl || '')
     : ['launcher update feed unavailable'];
   addCheck(
-    'live launcher update feed has Windows and macOS downloads',
+    'live launcher update feed has Windows, macOS, and Ubuntu downloads',
     'blocker',
     Boolean(launcherFeed.ok && launcherDownloadProblems.length === 0),
-    launcherDownloadProblems.join(', ') || 'windows-x64, macos-arm64, macos-x64'
+    launcherDownloadProblems.join(', ') || 'windows-x64, macos-arm64, macos-x64, ubuntu-x64, ubuntu-x64-appimage'
   );
   const localWindowsArtifact = localWindowsLauncherArtifact(localLauncherVersion);
   const liveWindowsArtifact = launcherFeed.json?.downloads?.['windows-x64'] || null;
@@ -757,7 +760,7 @@ function checkPlayerDefaults() {
 
 function checkArtifacts() {
   const packageJson = readJson(path.join(rootDir, 'package.json')) || {};
-  const version = String(packageJson.version || '').trim();
+  const version = launcherReleaseVersionFromPackage(packageJson);
   addCheck('artifact version source', 'blocker', Boolean(version), version || 'missing package version');
   if (!version) {
     return;

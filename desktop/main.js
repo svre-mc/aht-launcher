@@ -45,6 +45,7 @@ import {
 } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
+import { launcherReleaseVersionFromPackage } from '../src/launcherVersion.js';
 import {
   LAUNCHER_ATTESTATION_KEY_ID,
   inspectLauncherProof,
@@ -128,6 +129,13 @@ import {
 const DEFAULT_SERVER_TRANSFER_INCLUDED_DIRS = ['mods', 'scripts', 'config', 'ForgeEssentials'];
 const DEFAULT_MINECRAFT_MEMORY_MB = 4096;
 const require = createRequire(import.meta.url);
+const launcherPackageMetadata = require('../package.json');
+const publicLauncherVersion = launcherReleaseVersionFromPackage(launcherPackageMetadata);
+
+function launcherVersion() {
+  return publicLauncherVersion || app.getVersion();
+}
+
 let physicalFsSync = fsSync;
 try {
   physicalFsSync = require('original-fs');
@@ -661,7 +669,7 @@ function createLaunchDiagnosticAttempt(target = releaseTarget('stable')) {
   const fallbackConfig = configForPack(defaultConfig(), target.id);
   return createLaunchAttempt({
       appName: app.getName(),
-      appVersion: app.getVersion(),
+      appVersion: launcherVersion(),
       mode: isDeveloperMode() ? 'developer' : 'player',
       packaged: app.isPackaged,
       packId: target.packId,
@@ -923,7 +931,7 @@ async function manualLaunchDiagnostic(payload = {}) {
   const config = await minecraftLauncherRuntimeConfig(configForPack(baseConfig, target.id));
   const attempt = createLaunchAttempt({
     appName: app.getName(),
-    appVersion: app.getVersion(),
+    appVersion: launcherVersion(),
     mode: isDeveloperMode() ? 'developer' : 'player',
     packaged: app.isPackaged,
     packId: target.packId,
@@ -1049,7 +1057,7 @@ async function buildErrorDiagnosticReport(payload = {}) {
     'A HARD TIME LAUNCHER ERROR REPORT',
     '================================================================',
     `Created: ${new Date().toISOString()}`,
-    `Launcher: ${app.getName()} ${app.getVersion()} (${isDeveloperMode() ? 'developer' : 'player'})`,
+    `Launcher: ${app.getName()} ${launcherVersion()} (${isDeveloperMode() ? 'developer' : 'player'})`,
     `Context: ${sanitizeDiagnosticText(payload.context || lastErrorDiagnostic?.channel || 'launcher', 120)}`,
     '',
     'ERROR',
@@ -1220,7 +1228,7 @@ function shouldExitForSameVersionLauncherUpdateBeforeLock() {
     const validSameVersionHandoff = pending?.product === 'aht-launcher'
       && ['swapping', 'installing'].includes(String(pending.status || ''))
       && ['developer-reinstall', LOCAL_REINSTALL_PURPOSE].includes(String(pending.purpose || ''))
-      && compareVersions(app.getVersion(), String(pending.version || '')) >= 0
+      && compareVersions(launcherVersion(), String(pending.version || '')) >= 0
       && prepared.strategy === 'windows-staged-helper'
       && /^[a-f0-9]{32}$/.test(expectedNonce)
       && String(prepared.payloadPath || '')
@@ -1492,7 +1500,7 @@ async function markInstallerJava8SelectionConsumed(pending = null) {
     await writeJsonFile(pending.file, {
       ...pending.selection,
       consumedAt: new Date().toISOString(),
-      consumedByLauncherVersion: app.getVersion()
+      consumedByLauncherVersion: launcherVersion()
     });
   } catch (error) {
     console.warn(`Unable to mark the installer Java 8 selection as consumed: ${error.message || error}`);
@@ -1647,7 +1655,8 @@ function decryptDeveloperSecret(record = {}) {
 
 function useUnencryptedDeviceSecretTestFallback() {
   return process.env.AHT_TEST_HOOKS === '1'
-    && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY === '1';
+    && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY === '1'
+    && !safeStorageAvailable();
 }
 
 function protectDeviceSecret(value = '') {
@@ -2136,6 +2145,9 @@ function defaultDeveloperInstanceDir() {
   if (process.platform === 'darwin') {
     return path.join(app.getPath('appData'), 'A Hard Time', 'Developer Instance');
   }
+  if (process.platform === 'linux') {
+    return path.join(path.dirname(defaultPlayerInstanceDir()), 'Developer Instance');
+  }
   platformKey(process.platform);
 }
 
@@ -2145,6 +2157,9 @@ function defaultPtbInstanceDir() {
   }
   if (process.platform === 'darwin') {
     return path.join(app.getPath('appData'), 'A Hard Time', 'PTB Instance');
+  }
+  if (process.platform === 'linux') {
+    return path.join(path.dirname(defaultPlayerInstanceDir()), 'PTB Instance');
   }
   platformKey(process.platform);
 }
@@ -2284,6 +2299,13 @@ function curseForgeStorageFileCandidates() {
       path.join(home, 'Library', 'Application Support', 'curseforge', 'storage.json')
     ]);
   }
+  if (process.platform === 'linux') {
+    const configHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    return uniqueCurrentPlatformPaths([
+      path.join(configHome, 'CurseForge', 'storage.json'),
+      path.join(configHome, 'curseforge', 'storage.json')
+    ]);
+  }
   if (process.platform !== 'win32') return [];
   return uniqueCurrentPlatformPaths([
     process.env.APPDATA ? path.join(process.env.APPDATA, 'CurseForge', 'storage.json') : '',
@@ -2340,7 +2362,7 @@ function localCurseForgeMinecraftRoots(config = {}) {
 }
 
 async function firstExistingCurseForgeMinecraftRoot(config = {}) {
-  if (!['win32', 'darwin'].includes(process.platform)) return '';
+  if (!['win32', 'darwin', 'linux'].includes(process.platform)) return '';
   for (const rootDir of localCurseForgeMinecraftRoots(config)) {
     try {
       const stat = await fs.stat(rootDir);
@@ -2348,7 +2370,7 @@ async function firstExistingCurseForgeMinecraftRoot(config = {}) {
       if (process.platform === 'win32' && await pathExists(path.join(rootDir, 'minecraft.exe'))) {
         return rootDir;
       }
-      if (process.platform === 'darwin') {
+      if (process.platform === 'darwin' || process.platform === 'linux') {
         for (const marker of ['launcher_profiles.json', 'versions', 'libraries']) {
           if (await pathExists(path.join(rootDir, marker))) return rootDir;
         }
@@ -3208,7 +3230,7 @@ async function writeLauncherProofWithDeveloperAuth({ config = {}, ...options } =
 function runtimeIdentity(identity = {}) {
   return {
     ...identity,
-    appVersion: app.getVersion(),
+    appVersion: launcherVersion(),
     platform: process.platform,
     arch: process.arch
   };
@@ -3378,7 +3400,7 @@ async function acceptLauncherLegal(payload = {}) {
     termsVersion: payload.termsVersion,
     privacyVersion: payload.privacyVersion,
     affirmed: payload.affirmed === true,
-    appVersion: app.getVersion(),
+    appVersion: launcherVersion(),
     platform: process.platform,
     arch: process.arch,
     identity: await loadIdentity()
@@ -3435,7 +3457,7 @@ async function identityPayload(config = null) {
   return {
     ...nextIdentity,
     ...device,
-    appVersion: app.getVersion(),
+    appVersion: launcherVersion(),
     platform: process.platform,
     arch: process.arch
   };
@@ -3730,7 +3752,7 @@ async function registerMinecraftUsername(username, options = {}) {
       installId: identity.installId,
       deviceId: deviceCredential.deviceId,
       devicePublicKey: deviceCredential.publicKey,
-      appVersion: app.getVersion(),
+      appVersion: launcherVersion(),
       platform: process.platform,
       arch: process.arch,
       packId: config.packId
@@ -3826,7 +3848,7 @@ function launcherVersionWasReported(identity = {}, version = '') {
 
 async function reportCurrentLauncherVersion(config = {}, identity = {}) {
   if (isDeveloperMode()) return { skipped: true, reason: 'developer launcher' };
-  const version = String(app.getVersion() || '').trim();
+  const version = String(launcherVersion() || '').trim();
   const installId = String(identity.installId || '').trim();
   const minecraftUsername = normalizeMinecraftUsername(identity.minecraftUsername);
   if (!version || !installId || !minecraftUsername || launcherVersionWasReported(identity, version)) {
@@ -3875,7 +3897,7 @@ async function reportCurrentLauncherVersion(config = {}, identity = {}) {
 
 function queueCurrentLauncherVersionReport(config = {}, identity = {}) {
   if (isDeveloperMode()) return null;
-  const version = String(app.getVersion() || '').trim();
+  const version = String(launcherVersion() || '').trim();
   const installId = String(identity.installId || '').trim();
   const minecraftUsername = normalizeMinecraftUsername(identity.minecraftUsername).toLowerCase();
   if (!version || !installId || !minecraftUsername || launcherVersionWasReported(identity, version)) return null;
@@ -4747,7 +4769,7 @@ async function testReleaseFeed(configPatch = null, packValue = 'stable') {
 async function readLauncherUpdate(config = {}) {
   const enabled = config.launcherUpdate?.enabled !== false;
   const latestUrl = launcherLatestUrlForConfig(config);
-  const currentVersion = app.getVersion();
+  const currentVersion = launcherVersion();
   const base = {
     enabled,
     latestUrl,
@@ -4852,8 +4874,8 @@ function launcherUpdateForRenderer(update = {}) {
   if (!update?.localReinstallTest) return update;
   return {
     enabled: update.enabled !== false,
-    currentVersion: String(update.currentVersion || app.getVersion()),
-    latestVersion: String(update.latestVersion || app.getVersion()),
+    currentVersion: String(update.currentVersion || launcherVersion()),
+    latestVersion: String(update.latestVersion || launcherVersion()),
     required: Boolean(update.required),
     updateRequired: Boolean(update.updateRequired),
     localReinstallTest: true,
@@ -4861,7 +4883,7 @@ function launcherUpdateForRenderer(update = {}) {
     artifact: update.artifact ? {
       label: 'Local launcher reinstall test',
       kind: 'zip',
-      fileName: expectedLocalReinstallArchiveName(update.latestVersion || app.getVersion())
+      fileName: expectedLocalReinstallArchiveName(update.latestVersion || launcherVersion())
     } : null,
     error: update.error ? 'The local launcher reinstall test could not be prepared.' : ''
   };
@@ -4884,7 +4906,7 @@ function launcherUpdateStateForRenderer(state = {}) {
   } : null;
   const result = state.lastResult ? {
     ok: Boolean(state.lastResult.ok),
-    version: String(state.lastResult.version || app.getVersion()),
+    version: String(state.lastResult.version || launcherVersion()),
     purpose: LOCAL_REINSTALL_PURPOSE,
     localReinstallTest: true,
     restartRequired: Boolean(state.lastResult.restartRequired),
@@ -5196,7 +5218,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   let launcherUpdate = options.preferCache ? null : await readLauncherUpdate(config);
   statusProbe('launcher-update-ready');
   if (pendingLauncherUpdate?.version && (
-    compareVersions(pendingLauncherUpdate.version, app.getVersion()) > 0
+    compareVersions(pendingLauncherUpdate.version, launcherVersion()) > 0
     || (pendingLauncherUpdate.purpose === 'developer-reinstall' && isDeveloperMode() && isDeveloperAuthenticated())
     || (pendingLauncherUpdate.purpose === LOCAL_REINSTALL_PURPOSE
       && !isDeveloperMode()
@@ -5225,7 +5247,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
     releaseName: target.name,
     developerMode: isDeveloperMode(),
     developerClientBypass,
-    appVersion: app.getVersion(),
+    appVersion: launcherVersion(),
     platformProfile: platformProfileForRenderer(platformProfile(process.platform, {
       ...process.env,
       HOME: process.env.HOME || app.getPath('home'),
@@ -5518,7 +5540,7 @@ async function ensureNormalLocalReinstallDirectory(directoryPath) {
   return assertNormalPhysicalPath(resolved, 'directory');
 }
 
-function expectedLocalReinstallArchiveName(version = app.getVersion()) {
+function expectedLocalReinstallArchiveName(version = launcherVersion()) {
   return `AHT-Launcher-Windows-10-11-${String(version || '').trim()}.zip`;
 }
 
@@ -5537,8 +5559,8 @@ async function validateInstalledLocalReinstallTarget(targetExe, options = {}) {
     assertNormalPhysicalPath(installedUninstaller, 'file')
   ]);
   const installedVersion = String(await readWindowsLauncherProductVersion(resolvedTarget) || '').trim();
-  if (!versionMatches(installedVersion, app.getVersion())) {
-    throw new Error(`Installed launcher version ${installedVersion || 'unknown'} does not match ${app.getVersion()}.`);
+  if (!versionMatches(installedVersion, launcherVersion())) {
+    throw new Error(`Installed launcher version ${installedVersion || 'unknown'} does not match ${launcherVersion()}.`);
   }
   return { targetExe: resolvedTarget, installedVersion, installedAsar, installedUninstaller };
 }
@@ -5570,7 +5592,7 @@ async function validateLocalReinstallRequestRecord(requestDir, request = {}) {
       || !sameLauncherUpdatePath(app.getPath('userData'), regularLauncherUserDataPath())) {
     throw new Error('Only the regular launcher at its fixed user-data location may consume a local reinstall request.');
   }
-  if (String(request.version || '') !== app.getVersion()) {
+  if (String(request.version || '') !== launcherVersion()) {
     throw new Error('Local reinstall requests must target the exact current launcher version.');
   }
   const createdAt = Date.parse(String(request.createdAt || ''));
@@ -5823,13 +5845,13 @@ async function resolveDeveloperLauncherReinstallTarget() {
   const installedUninstaller = path.join(path.dirname(targetExe), 'Uninstall A Hard Time Launcher Windows.exe');
   const uninstallerStat = await physicalFs.lstat(installedUninstaller).catch(() => null);
   if (!targetStat?.isFile() || targetStat.isSymbolicLink()) {
-    throw new Error(`The installed packaged launcher was not found at ${targetExe}. Install AHT Launcher ${app.getVersion()} before testing reinstall from source Developer Mode.`);
+    throw new Error(`The installed packaged launcher was not found at ${targetExe}. Install AHT Launcher ${launcherVersion()} before testing reinstall from source Developer Mode.`);
   }
   if (!asarStat?.isFile() || asarStat.isSymbolicLink()) {
-    throw new Error(`The installed packaged launcher is incomplete because ${installedAsar} is missing or unsafe. Reinstall AHT Launcher ${app.getVersion()} before testing reinstall.`);
+    throw new Error(`The installed packaged launcher is incomplete because ${installedAsar} is missing or unsafe. Reinstall AHT Launcher ${launcherVersion()} before testing reinstall.`);
   }
   if (!uninstallerStat?.isFile() || uninstallerStat.isSymbolicLink()) {
-    throw new Error(`The installed packaged launcher is incomplete because ${installedUninstaller} is missing or unsafe. Reinstall AHT Launcher ${app.getVersion()} before testing reinstall.`);
+    throw new Error(`The installed packaged launcher is incomplete because ${installedUninstaller} is missing or unsafe. Reinstall AHT Launcher ${launcherVersion()} before testing reinstall.`);
   }
   await Promise.all([
     assertNormalPhysicalPath(targetExe, 'file'),
@@ -5837,8 +5859,8 @@ async function resolveDeveloperLauncherReinstallTarget() {
     assertNormalPhysicalPath(installedUninstaller, 'file')
   ]);
   const installedVersion = String(await readWindowsLauncherProductVersion(targetExe) || '').trim();
-  if (!versionMatches(installedVersion, app.getVersion())) {
-    throw new Error(`Installed launcher version ${installedVersion || 'unknown'} does not match Developer Launcher ${app.getVersion()}. Install the matching launcher before testing a same-version reinstall.`);
+  if (!versionMatches(installedVersion, launcherVersion())) {
+    throw new Error(`Installed launcher version ${installedVersion || 'unknown'} does not match Developer Launcher ${launcherVersion()}. Install the matching launcher before testing a same-version reinstall.`);
   }
   return {
     targetExe,
@@ -6067,7 +6089,7 @@ async function hydratePendingLauncherUpdateState() {
   const activeLocalReinstall = pending.purpose === LOCAL_REINSTALL_PURPOSE
     && !isDeveloperMode()
     && !['swapping', 'installing'].includes(pending.status);
-  if (compareVersions(app.getVersion(), pending.version) >= 0 && !activeDeveloperReinstall && !activeLocalReinstall) {
+  if (compareVersions(launcherVersion(), pending.version) >= 0 && !activeDeveloperReinstall && !activeLocalReinstall) {
     if (!['swapping', 'installing'].includes(pending.status)) {
       await clearPendingLauncherUpdate();
     }
@@ -6087,7 +6109,7 @@ async function hydratePendingLauncherUpdateState() {
       lines: [
         localReinstallTest
           ? `Local launcher reinstall test ${pending.version}`
-          : `Launcher update ${app.getVersion()} -> ${pending.version}`,
+          : `Launcher update ${launcherVersion()} -> ${pending.version}`,
         localReinstallTest
           ? 'The prepared local reinstall test could not be validated and was discarded.'
           : `Prepared update was discarded: ${error.message || String(error)}`,
@@ -6113,7 +6135,7 @@ async function hydratePendingLauncherUpdateState() {
             ? `Developer launcher reinstall ${pending.version}`
             : activeLocalReinstall
               ? `Local launcher reinstall test ${pending.version}`
-            : `Launcher update ${app.getVersion()} -> ${pending.version}`,
+            : `Launcher update ${launcherVersion()} -> ${pending.version}`,
           ['swapping', 'installing'].includes(pending.status)
             ? 'Launcher restart handoff is already in progress.'
             : lastResult.instantRestartReady
@@ -6140,7 +6162,7 @@ async function hydratePendingLauncherUpdateState() {
 async function shouldExitForPendingLauncherInstall() {
   const pending = await readPendingLauncherUpdate();
   if (!['swapping', 'installing'].includes(pending?.status) || !pending.version) return false;
-  const sameVersionReinstall = compareVersions(app.getVersion(), pending.version) >= 0
+  const sameVersionReinstall = compareVersions(launcherVersion(), pending.version) >= 0
     && ['developer-reinstall', LOCAL_REINSTALL_PURPOSE].includes(String(pending.purpose || ''));
   if (sameVersionReinstall) {
     const prepared = pending.preparedRestart || {};
@@ -6170,7 +6192,7 @@ async function shouldExitForPendingLauncherInstall() {
     }
   }
   if (pending.purpose === 'developer-reinstall' && !isDeveloperMode()) return true;
-  if (compareVersions(app.getVersion(), pending.version) >= 0) {
+  if (compareVersions(launcherVersion(), pending.version) >= 0) {
     return false;
   }
   const started = Date.parse(pending.installingStartedAt || pending.updatedAt || '');
@@ -6185,7 +6207,7 @@ async function shouldExitForPendingLauncherInstall() {
       status: pending.preparedRestart?.strategy === 'windows-staged-helper' ? 'ready-to-relaunch' : 'staged',
       installingStartedAt: '',
       lines: [
-        `Launcher update ${app.getVersion()} -> ${pending.version}`,
+        `Launcher update ${launcherVersion()} -> ${pending.version}`,
         retryLine
       ]
     });
@@ -6384,13 +6406,13 @@ async function validateCompletedLauncherUpdateCandidate(pending = {}) {
 async function acknowledgeCompletedLauncherUpdate() {
   const pending = await readPendingLauncherUpdate();
   if (pending?.status !== 'swapping' || !pending.version) return false;
-  if (compareVersions(app.getVersion(), pending.version) < 0) return false;
+  if (compareVersions(launcherVersion(), pending.version) < 0) return false;
   const { prepared, payload } = await validateCompletedLauncherUpdateCandidate(pending);
   const acknowledgement = {
     schemaVersion: 1,
     product: 'aht-launcher',
     handoffNonce: prepared.handoffNonce,
-    version: app.getVersion(),
+    version: launcherVersion(),
     developerMode: isDeveloperMode(),
     processId: process.pid,
     executablePath: process.execPath,
@@ -6582,7 +6604,7 @@ async function prepareWindowsStagedLauncherUpdate(filePath, artifact = {}, optio
   const nonce = newLauncherUpdateNonce();
   const stagingDir = path.join(parentDir, `.aht-launcher-update-${versionSlug}-${nonce}`);
   const extractRoot = path.join(parentDir, `.aht-launcher-extract-${versionSlug}-${nonce}`);
-  const backupDir = path.join(parentDir, `.aht-launcher-backup-${normalizedVersion(app.getVersion())}-${nonce}`);
+  const backupDir = path.join(parentDir, `.aht-launcher-backup-${normalizedVersion(launcherVersion())}-${nonce}`);
   const failedCandidateDir = path.join(parentDir, `.aht-launcher-failed-${versionSlug}-${nonce}`);
   launcherUpdateState.progress = { phase: 'Extracting verified launcher', completed: 2, total: 4, percent: 82 };
   const staged = await stageWindowsLauncherUpdate({
@@ -6830,6 +6852,18 @@ async function launchDownloadedLauncherUpdate(filePath, artifact = {}, options =
   return launchPreparedLauncherUpdate(prepared);
 }
 
+function linuxPackageInstallerHandoff(filePath) {
+  const xdgOpen = commandOnPath('xdg-open');
+  if (xdgOpen) {
+    return { command: xdgOpen, args: [filePath] };
+  }
+  const gio = commandOnPath('gio');
+  if (gio) {
+    return { command: gio, args: ['open', filePath] };
+  }
+  throw new Error('Ubuntu package installer could not be opened. Install xdg-utils, then retry the launcher update.');
+}
+
 async function prepareDownloadedLauncherUpdate(filePath, artifact = {}, options = {}) {
   const fileName = String(artifact.fileName || artifact.path || artifact.url || filePath).toLowerCase();
   if (process.platform === 'win32' && fileName.endsWith('.zip')) {
@@ -6840,6 +6874,19 @@ async function prepareDownloadedLauncherUpdate(filePath, artifact = {}, options 
   }
   if (process.platform === 'darwin' && fileName.endsWith('.zip')) {
     return prepareMacLauncherUpdateHelper(filePath, artifact, options);
+  }
+  if (process.platform === 'linux' && fileName.endsWith('.deb')) {
+    const handoff = linuxPackageInstallerHandoff(filePath);
+    return {
+      ok: true,
+      prepared: true,
+      strategy: 'linux-package-installer',
+      ...handoff,
+      cwd: path.dirname(filePath),
+      downloadedPath: filePath,
+      artifact,
+      expectedVersion: options.latestVersion || ''
+    };
   }
 
   const cwd = path.dirname(filePath);
@@ -6856,7 +6903,7 @@ async function defaultDeveloperLauncherReinstallZip() {
   for (const root of [...developerSourceRoots(), appRoot]) {
     roots.push(path.join(root, 'release-builds', 'windows'), path.join(root, 'release-builds'));
   }
-  const exactName = expectedLocalReinstallArchiveName(app.getVersion());
+  const exactName = expectedLocalReinstallArchiveName(launcherVersion());
   const exactPattern = new RegExp(`^${exactName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
   return findNewestFile([...new Set(roots)], exactPattern);
 }
@@ -6868,7 +6915,7 @@ async function selectDeveloperLauncherReinstallZip() {
   if (testPath) return path.resolve(testPath);
   const defaultPath = await defaultDeveloperLauncherReinstallZip();
   if (!defaultPath) {
-    throw new Error(`The exact same-version launcher ZIP ${expectedLocalReinstallArchiveName(app.getVersion())} was not found in release-builds.`);
+    throw new Error(`The exact same-version launcher ZIP ${expectedLocalReinstallArchiveName(launcherVersion())} was not found in release-builds.`);
   }
   return defaultPath;
 }
@@ -6882,7 +6929,7 @@ async function prepareDeveloperLauncherReinstallBridge() {
   }
   const reinstallTarget = await resolveDeveloperLauncherReinstallTarget();
   const selectedPath = await selectDeveloperLauncherReinstallZip();
-  const version = app.getVersion();
+  const version = launcherVersion();
   const expectedArchiveName = expectedLocalReinstallArchiveName(version);
   if (path.basename(selectedPath).toLowerCase() !== expectedArchiveName.toLowerCase()) {
     throw new Error(`The local reinstall test requires the exact same-version archive ${expectedArchiveName}.`);
@@ -7168,7 +7215,7 @@ async function runLauncherUpdate() {
     lines: [
       localReinstallTest
         ? `Local launcher reinstall test ${update.latestVersion}`
-        : `Launcher update ${app.getVersion()} -> ${update.latestVersion}`,
+        : `Launcher update ${launcherVersion()} -> ${update.latestVersion}`,
       `Downloading ${fileName}`
     ],
     lastResult: null,
@@ -7205,6 +7252,7 @@ async function runLauncherUpdate() {
     launcherUpdateState.progress = { phase: 'Preparing complete launcher payload', completed: 2, total: 4, percent: 80 };
     const preparedRestart = await prepareDownloadedLauncherUpdate(target, update.artifact, { latestVersion: update.latestVersion, downloadDir });
     const instantRestartReady = preparedRestart.strategy === 'windows-staged-helper';
+    const externalPackageInstall = preparedRestart.strategy === 'linux-package-installer';
     const stagedAt = new Date().toISOString();
     const result = {
       ok: true,
@@ -7214,6 +7262,7 @@ async function runLauncherUpdate() {
       artifact: update.artifact,
       restartRequired: true,
       instantRestartReady,
+      externalPackageInstall,
       stagedAt,
       preparedRestart
     };
@@ -7232,13 +7281,15 @@ async function runLauncherUpdate() {
       lines: [
         localReinstallTest
           ? `Local launcher reinstall test ${update.latestVersion}`
-          : `Launcher update ${app.getVersion()} -> ${update.latestVersion}`,
+          : `Launcher update ${launcherVersion()} -> ${update.latestVersion}`,
         instantRestartReady
           ? 'Launcher update downloaded, extracted, and verified.'
           : 'Launcher update installer downloaded and verified.',
         instantRestartReady
           ? 'Update finished. Click Restart Launcher to switch to the prepared version immediately.'
-          : 'Ready to install. Click Install and Restart to apply the legacy installer.'
+          : externalPackageInstall
+            ? 'Ready to install. Open the Ubuntu package installer, finish the DEB installation, then reopen AHT Launcher.'
+            : 'Ready to install. Click Install and Restart to apply the legacy installer.'
       ]
     };
     await writePendingLauncherUpdate(pendingRecord);
@@ -7252,10 +7303,14 @@ async function runLauncherUpdate() {
     };
     appendOperationLine(launcherUpdateState, instantRestartReady
       ? 'Update finished. The complete launcher is staged and verified.'
-      : 'Legacy installer is ready.');
+      : externalPackageInstall
+        ? 'Ubuntu DEB package is ready.'
+        : 'Legacy installer is ready.');
     appendOperationLine(launcherUpdateState, instantRestartReady
       ? 'Click Restart Launcher to close this copy and open the prepared update immediately.'
-      : 'Click Install and Restart to apply the legacy installer.');
+      : externalPackageInstall
+        ? 'Open the package installer, finish installation, then reopen AHT Launcher.'
+        : 'Click Install and Restart to apply the legacy installer.');
     return result;
   } catch (error) {
     launcherUpdateState.error = error.message || String(error);
@@ -7277,6 +7332,7 @@ async function restartLauncherUpdate() {
   if (staged.developerReinstall) {
     assertDeveloperAuthenticated();
   }
+  const externalPackageInstall = staged.preparedRestart.strategy === 'linux-package-installer';
   const pendingMetadata = await readPendingLauncherUpdate();
   const stagedPurpose = staged.developerReinstall
     ? 'developer-reinstall'
@@ -7292,7 +7348,9 @@ async function restartLauncherUpdate() {
   launcherUpdateState.progress = { phase: 'Restarting launcher', completed: 4, total: 4, percent: 100 };
   appendOperationLine(launcherUpdateState, staged.instantRestartReady
     ? 'Restart requested. Starting the prepared launcher handoff.'
-    : 'Install and restart requested. Starting the legacy launcher update helper.');
+    : externalPackageInstall
+      ? 'Opening the Ubuntu package installer.'
+      : 'Install and restart requested. Starting the legacy launcher update helper.');
   let preparedRestart = staged.preparedRestart;
   try {
     if (staged.preparedRestart.strategy === 'windows-staged-helper') {
@@ -7305,7 +7363,7 @@ async function restartLauncherUpdate() {
       });
     }
     preparedRestart = await armPreparedLauncherUpdate(preparedRestart);
-    await writePendingLauncherUpdate({
+    const pendingRestartRecord = {
       schemaVersion: 2,
       status: staged.instantRestartReady ? 'swapping' : 'installing',
       version: staged.version,
@@ -7321,18 +7379,32 @@ async function restartLauncherUpdate() {
           ? `Developer launcher reinstall ${staged.version}`
           : staged.localReinstallTest
             ? `Local launcher reinstall test ${staged.version}`
-          : `Launcher update ${app.getVersion()} -> ${staged.version}`,
+          : `Launcher update ${launcherVersion()} -> ${staged.version}`,
         staged.instantRestartReady
           ? 'Restarting into the fully prepared launcher update.'
-          : 'Installing launcher update. If this copy opens before installation finishes, it will close so the helper can complete.'
+          : externalPackageInstall
+            ? 'Opening the Ubuntu package installer. Finish the DEB installation, then reopen AHT Launcher.'
+            : 'Installing launcher update. If this copy opens before installation finishes, it will close so the helper can complete.'
       ]
-    });
+    };
+    await writePendingLauncherUpdate(pendingRestartRecord);
     const launched = await launchPreparedLauncherUpdate(preparedRestart, { armed: true });
+    if (externalPackageInstall) {
+      await writePendingLauncherUpdate({
+        ...pendingRestartRecord,
+        status: 'staged',
+        installingStartedAt: '',
+        lines: [
+          `Launcher update ${launcherVersion()} -> ${staged.version}`,
+          'Ubuntu package installer opened. Finish the DEB installation, then reopen AHT Launcher.'
+        ]
+      });
+    }
     const result = {
       ...staged,
       preparedRestart,
       restartRequired: false,
-      pendingStatus: staged.instantRestartReady ? 'swapping' : 'installing',
+      pendingStatus: staged.instantRestartReady ? 'swapping' : externalPackageInstall ? 'staged' : 'installing',
       restartStartedAt: new Date().toISOString(),
       launched
     };
@@ -7342,7 +7414,9 @@ async function restartLauncherUpdate() {
       ? 'Test mode verified the restart helper without closing the launcher.'
       : staged.instantRestartReady
         ? 'Prepared update handoff is running. Closing this launcher now.'
-        : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
+        : externalPackageInstall
+          ? 'Ubuntu package installer opened. Closing this launcher; reopen it after installation finishes.'
+          : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
     if (!launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')) {
       setTimeout(() => app.quit(), 0);
     } else {
@@ -7366,7 +7440,7 @@ async function restartLauncherUpdate() {
           ? `Developer launcher reinstall ${staged.version}`
           : staged.localReinstallTest
             ? `Local launcher reinstall test ${staged.version}`
-          : `Launcher update ${app.getVersion()} -> ${staged.version}`,
+          : `Launcher update ${launcherVersion()} -> ${staged.version}`,
         `Restart helper failed to start: ${error.message || String(error)}`,
         staged.instantRestartReady
           ? 'The fully prepared update is still ready and can be retried.'
@@ -8715,6 +8789,24 @@ function launcherArtifactDescriptors(payload = {}) {
       downloadKey: 'macos-x64',
       platform: false,
       file: payload.macosX64DmgPath || payload.darwinX64DmgPath || payload.macosPath || payload.darwinPath || ''
+    },
+    {
+      key: 'linux-x64',
+      aliases: ['linux', 'ubuntu-x64', 'ubuntu'],
+      label: 'Ubuntu Linux x64 DEB',
+      kind: 'deb',
+      installArgs: [],
+      downloadKey: 'ubuntu-x64',
+      file: payload.ubuntuDebPath || payload.linuxDebPath || ''
+    },
+    {
+      key: 'linux-x64',
+      label: 'Ubuntu Linux x64 portable AppImage',
+      kind: 'appimage',
+      installArgs: [],
+      downloadKey: 'ubuntu-x64-appimage',
+      platform: false,
+      file: payload.ubuntuAppImagePath || payload.linuxAppImagePath || ''
     }
   ].filter((item) => String(item.file || '').trim());
 }
@@ -8722,7 +8814,7 @@ function launcherArtifactDescriptors(payload = {}) {
 async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', artifacts = [] }) {
   const config = await loadConfig();
   const rootUrl = launcherUpdateRootUrl(publicLatestUrl, config);
-  const cleanVersion = String(version || '').trim() || app.getVersion();
+  const cleanVersion = String(version || '').trim() || launcherVersion();
   if (!cleanVersion) {
     throw new Error('Launcher update version is required.');
   }
@@ -8784,7 +8876,7 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     version: cleanVersion,
     required: true,
     createdAt: new Date().toISOString(),
-    currentVersion: app.getVersion(),
+    currentVersion: launcherVersion(),
     platforms,
     stagedPlatforms,
     downloads
@@ -8820,8 +8912,11 @@ async function findLauncherBuilds() {
   const macosRoots = [
     path.join(appRoot, 'release-builds', 'macos')
   ];
+  const ubuntuRoots = [
+    path.join(appRoot, 'release-builds', 'ubuntu')
+  ];
   return {
-    version: app.getVersion(),
+    version: launcherVersion(),
     windowsPath: await findNewestFile([
       path.join(appRoot, 'release-builds', 'windows'),
       path.join(appRoot, 'release-builds')
@@ -8834,7 +8929,9 @@ async function findLauncherBuilds() {
     macosX64ZipPath: await findNewestFile(macosRoots, /(?:x64|x86_64|intel).*\.zip$/i),
     macosArmDmgPath: await findNewestFile(macosRoots, /(?:arm64|aarch64).*\.dmg$/i),
     macosX64DmgPath: await findNewestFile(macosRoots, /(?:x64|x86_64|intel).*\.dmg$/i),
-    macosPath: await findNewestFile(macosRoots, /\.dmg$/i)
+    macosPath: await findNewestFile(macosRoots, /\.dmg$/i),
+    ubuntuDebPath: await findNewestFile(ubuntuRoots, /AHT-Launcher-Ubuntu-x64-.*\.deb$/i),
+    ubuntuAppImagePath: await findNewestFile(ubuntuRoots, /AHT-Launcher-Ubuntu-x64-.*\.AppImage$/i)
   };
 }
 
@@ -8894,6 +8991,8 @@ async function assertLauncherPublishAdvance(latestUrl, candidateManifest) {
   const validation = validateLauncherUpdateManifest(liveManifest, {
     latestUrl,
     requireStagedWindows: true,
+    requireAllPlatforms: false,
+    requireDownloads: false,
     allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
   });
   if (!validation.ok) {
@@ -9080,7 +9179,7 @@ async function runLauncherDeploy(payload = {}) {
       run: completedRun,
       releaseUrl: `https://github.com/${workflow.repo}/releases/tag/launcher-v${version}`,
       latestUrl: verification.latestUrl,
-      publicArtifacts: ['Windows 10/11 installer', 'macOS Apple Silicon DMG', 'macOS Intel DMG'],
+      publicArtifacts: ['Windows 10/11 installer', 'macOS Apple Silicon DMG', 'macOS Intel DMG', 'Ubuntu x64 DEB', 'Ubuntu x64 AppImage'],
       developerArtifactsUploaded: false
     };
     appendOperationLine(launcherDeployState, `Verified launcher/latest.json at ${version}.`);
@@ -10531,6 +10630,16 @@ function windowsDesktopMinecraftLauncherCandidates() {
   ].filter(Boolean).map((candidate) => path.resolve(candidate));
 }
 
+function linuxMinecraftLauncherCandidates() {
+  return uniqueCurrentPlatformPaths([
+    commandOnPath('minecraft-launcher'),
+    '/usr/bin/minecraft-launcher',
+    '/usr/local/bin/minecraft-launcher',
+    '/opt/minecraft-launcher/minecraft-launcher',
+    '/snap/bin/minecraft-launcher'
+  ]);
+}
+
 function minecraftNotInstalledError() {
   const error = new Error('Minecraft not installed. Install Minecraft.');
   error.code = 'AHT_MINECRAFT_NOT_INSTALLED';
@@ -10613,8 +10722,23 @@ async function resolveMinecraftLauncherRoute(config = {}) {
     }
     throw minecraftNotInstalledError();
   }
+  if (process.platform === 'linux') {
+    for (const executablePath of linuxMinecraftLauncherCandidates()) {
+      if (await pathExists(executablePath)) {
+        return {
+          kind: 'linux',
+          targetKind: 'desktop',
+          executablePath,
+          args: ['--workDir', cwd],
+          cwd,
+          rootDir: cwd
+        };
+      }
+    }
+    throw minecraftNotInstalledError();
+  }
 
-  return { kind: 'linux', command: 'minecraft-launcher', args: [], cwd, rootDir: cwd };
+  platformKey(process.platform);
 }
 
 function launcherRecordLabel(record = {}) {
@@ -10921,7 +11045,15 @@ async function openPreparedMinecraftLauncherRoute(route = {}, env = minecraftLau
       rootDir: route.rootDir || cwd
     };
   }
-  return spawnDetached(route.command || 'minecraft-launcher', route.args || [], cwd, env);
+  if (process.platform === 'linux') {
+    if (!route.executablePath) throw minecraftNotInstalledError();
+    return {
+      ...(await spawnDetachedGui(route.executablePath, route.args || ['--workDir', cwd], cwd, env)),
+      kind: 'linux',
+      rootDir: route.rootDir || cwd
+    };
+  }
+  platformKey(process.platform);
 }
 
 async function openMinecraftLauncher(config, options = {}) {
@@ -11010,8 +11142,10 @@ async function openMinecraftLauncher(config, options = {}) {
   if (process.platform === 'darwin') {
     return openMacMinecraftLauncher(cwd, env);
   }
-
-  return spawnDetached('minecraft-launcher', [], cwd, env);
+  if (process.platform === 'linux') {
+    return openPreparedMinecraftLauncherRoute(await resolveMinecraftLauncherRoute(launcherConfig), env);
+  }
+  platformKey(process.platform);
 }
 
 function createWindow() {
@@ -11302,7 +11436,7 @@ async function performLaunchPreparation(payload = {}, attempt, options = {}) {
     async () => readLauncherUpdate(config),
     (value) => value?.updateRequired
       ? { status: 'FAIL', detail: `Launcher ${value.latestVersion || 'update'} must be installed before Play.` }
-      : { status: value?.error ? 'WARN' : 'PASS', detail: value?.error || `Launcher ${app.getVersion()} is current.` }
+      : { status: value?.error ? 'WARN' : 'PASS', detail: value?.error || `Launcher ${launcherVersion()} is current.` }
   );
   const launcherVersionReady = !launcherUpdate?.updateRequired;
   setLaunchRequirement(
@@ -11310,7 +11444,7 @@ async function performLaunchPreparation(payload = {}, attempt, options = {}) {
     'launcherVersion',
     launcherVersionReady ? (launcherUpdate?.error ? 'WARN' : 'PASS') : 'FAIL',
     launcherVersionReady
-      ? (launcherUpdate?.error || `Launcher ${app.getVersion()} is current.`)
+      ? (launcherUpdate?.error || `Launcher ${launcherVersion()} is current.`)
       : `Install launcher ${launcherUpdate.latestVersion || 'update'}, then restart AHT Launcher.`
   );
   if (!launcherVersionReady) {
@@ -11629,7 +11763,7 @@ async function markStartupInitializationComplete(summary = {}) {
   const state = {
     schema: STARTUP_INITIALIZATION_SCHEMA,
     completedAt: new Date().toISOString(),
-    launcherVersionAtInitialization: app.getVersion(),
+    launcherVersionAtInitialization: launcherVersion(),
     preparedPacks: Array.isArray(summary.preparedPacks) ? summary.preparedPacks : [],
     blockedPacks: Array.isArray(summary.blockedPacks) ? summary.blockedPacks : []
   };
@@ -13434,7 +13568,7 @@ if (!singleInstanceLock) {
   app.whenReady().then(async () => {
     writeTestStartupProbe('app-ready', { userData: app.getPath('userData') });
     if (await shouldExitForPendingLauncherInstall()) {
-      writeTestStartupProbe('launcher-update-install-pending-exit', { version: app.getVersion() });
+      writeTestStartupProbe('launcher-update-install-pending-exit', { version: launcherVersion() });
       app.exit(0);
       return;
     }

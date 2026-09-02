@@ -21,6 +21,8 @@ const macosArmZip = path.join(root, 'AHT-Launcher-macOS-arm64-9.9.10.zip');
 const macosX64Zip = path.join(root, 'AHT-Launcher-macOS-x64-9.9.10.zip');
 const macosArmDmg = path.join(root, 'AHT-Launcher-macOS-arm64-9.9.10.dmg');
 const macosX64Dmg = path.join(root, 'AHT-Launcher-macOS-x64-9.9.10.dmg');
+const ubuntuDeb = path.join(root, 'AHT-Launcher-Ubuntu-x64-9.9.10.deb');
+const ubuntuAppImage = path.join(root, 'AHT-Launcher-Ubuntu-x64-9.9.10.AppImage');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -134,6 +136,8 @@ await fsp.writeFile(macosArmZip, 'fake macos arm64 update zip\n', 'utf8');
 await fsp.writeFile(macosX64Zip, 'fake macos x64 update zip\n', 'utf8');
 await fsp.writeFile(macosArmDmg, 'fake macos arm64 dmg\n', 'utf8');
 await fsp.writeFile(macosX64Dmg, 'fake macos x64 dmg\n', 'utf8');
+await fsp.writeFile(ubuntuDeb, 'fake ubuntu deb\n', 'utf8');
+await fsp.writeFile(ubuntuAppImage, 'fake ubuntu appimage\n', 'utf8');
 
 const fakeWrangler = path.join(fakeBin, 'fake-wrangler.mjs');
 await fsp.writeFile(fakeWrangler, `
@@ -263,6 +267,8 @@ try {
     macosX64ZipPath: ${JSON.stringify(macosX64Zip)},
     macosArmDmgPath: ${JSON.stringify(macosArmDmg)},
     macosX64DmgPath: ${JSON.stringify(macosX64Dmg)},
+    ubuntuDebPath: ${JSON.stringify(ubuntuDeb)},
+    ubuntuAppImagePath: ${JSON.stringify(ubuntuAppImage)},
     bucket: ${JSON.stringify(bucket)},
     publicLatestUrl: ${JSON.stringify(`${workerEndpoint}/latest.json`)}
   })`);
@@ -286,7 +292,13 @@ try {
   if (manifest.downloads?.['macos-arm64']?.kind !== 'dmg' || manifest.downloads?.['macos-x64']?.kind !== 'dmg') {
     throw new Error(`Published launcher manifest must use macOS DMG artifacts for manual downloads: ${JSON.stringify(manifest.downloads)}`);
   }
-  if (!manifest.downloads?.['windows-x64'] || !manifest.downloads?.['macos-arm64'] || !manifest.downloads?.['macos-x64']) {
+  if (manifest.platforms?.['linux-x64']?.kind !== 'deb' || manifest.platforms?.['ubuntu-x64']?.kind !== 'deb') {
+    throw new Error(`Published launcher manifest must use the Ubuntu DEB for self-update: ${JSON.stringify(manifest.platforms)}`);
+  }
+  if (manifest.downloads?.['ubuntu-x64']?.kind !== 'deb' || manifest.downloads?.['ubuntu-x64-appimage']?.kind !== 'appimage') {
+    throw new Error(`Published launcher manifest must include Ubuntu DEB and AppImage manual downloads: ${JSON.stringify(manifest.downloads)}`);
+  }
+  if (!manifest.downloads?.['windows-x64'] || !manifest.downloads?.['macos-arm64'] || !manifest.downloads?.['macos-x64'] || !manifest.downloads?.['ubuntu-x64'] || !manifest.downloads?.['ubuntu-x64-appimage']) {
     throw new Error(`Published launcher manifest missing website download entries: ${JSON.stringify(manifest.downloads)}`);
   }
   const uploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);

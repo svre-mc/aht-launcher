@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       validation_only:
-        description: "Run the non-publishing macOS Intel and Apple Silicon validation matrix"
+        description: "Run the non-publishing macOS and Ubuntu validation matrix"
         required: true
         type: boolean
         default: false
@@ -62,20 +62,28 @@ jobs:
             artifact_path: |
               release-builds/macos/*.dmg
               release-builds/macos/*.zip
+          - id: ubuntu
+            label: Ubuntu Linux x64
+            runner: ubuntu-latest
+            build_script: dist:regular:ubuntu
+            artifact_name: aht-launcher-ubuntu
+            artifact_path: |
+              release-builds/ubuntu/*.deb
+              release-builds/ubuntu/*.AppImage
 
     env:
-      CSC_LINK: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
-      CSC_KEY_PASSWORD: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD }}
-      CSC_NAME: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_NAME || secrets.APPLE_DEVELOPER_IDENTITY }}
-      APPLE_DEVELOPER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_KEYCHAIN: ${{ secrets.APPLE_KEYCHAIN }}
-      APPLE_KEYCHAIN_PROFILE: ${{ secrets.APPLE_KEYCHAIN_PROFILE }}
+      CSC_LINK: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_BASE64 || matrix.id == 'macos' && secrets.APPLE_CERTIFICATE_BASE64 || '' }}
+      CSC_KEY_PASSWORD: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || matrix.id == 'macos' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+      CSC_NAME: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_NAME || matrix.id == 'macos' && secrets.APPLE_DEVELOPER_IDENTITY || '' }}
+      APPLE_DEVELOPER_IDENTITY: ${{ matrix.id == 'macos' && secrets.APPLE_DEVELOPER_IDENTITY || '' }}
+      APPLE_API_KEY: ${{ matrix.id == 'macos' && secrets.APPLE_API_KEY || '' }}
+      APPLE_API_KEY_ID: ${{ matrix.id == 'macos' && secrets.APPLE_API_KEY_ID || '' }}
+      APPLE_API_ISSUER: ${{ matrix.id == 'macos' && secrets.APPLE_API_ISSUER || '' }}
+      APPLE_ID: ${{ matrix.id == 'macos' && secrets.APPLE_ID || '' }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.id == 'macos' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+      APPLE_TEAM_ID: ${{ matrix.id == 'macos' && secrets.APPLE_TEAM_ID || '' }}
+      APPLE_KEYCHAIN: ${{ matrix.id == 'macos' && secrets.APPLE_KEYCHAIN || '' }}
+      APPLE_KEYCHAIN_PROFILE: ${{ matrix.id == 'macos' && secrets.APPLE_KEYCHAIN_PROFILE || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -143,6 +151,33 @@ jobs:
           } else {
             throw 'Refusing to publish invalid, untrusted, or inconsistently signed Windows artifacts.'
           }
+
+      - name: Verify Ubuntu package structure and player boundary
+        if: matrix.id == 'ubuntu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version")"
+          DEB="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.deb"
+          APPIMAGE="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.AppImage"
+          EXTRACTED="$RUNNER_TEMP/aht-ubuntu-package"
+
+          test -s "$DEB"
+          test -s "$APPIMAGE"
+          test -x "$APPIMAGE"
+          test "$(dpkg-deb -f "$DEB" Architecture)" = "amd64"
+          rm -rf "$EXTRACTED"
+          mkdir -p "$EXTRACTED"
+          dpkg-deb -x "$DEB" "$EXTRACTED"
+          ASAR="$(find "$EXTRACTED" -type f -path '*/resources/app.asar' -print -quit)"
+          test -n "$ASAR"
+          ./node_modules/.bin/asar list "$ASAR" > "$RUNNER_TEMP/aht-ubuntu-asar-files.txt"
+          if grep -Eiq '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' "$RUNNER_TEMP/aht-ubuntu-asar-files.txt"; then
+            echo "Ubuntu player package contains a forbidden developer, operator, or secret-bearing path." >&2
+            exit 1
+          fi
+          file "$APPIMAGE"
+          sha256sum "$DEB" "$APPIMAGE"
 
       - name: Upload ${{ matrix.label }} launcher artifact
         uses: actions/upload-artifact@v4
@@ -261,7 +296,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DMG="release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').version").dmg"
+          DMG="release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version").dmg"
           MOUNT_POINT="$RUNNER_TEMP/aht-dmg-${{ matrix.arch }}"
           INSTALL_ROOT="$RUNNER_TEMP/aht-installed-${{ matrix.arch }}"
           INSTALLED_APP="$INSTALL_ROOT/A Hard Time Launcher macOS.app"
@@ -280,13 +315,13 @@ jobs:
 
           test -x "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS"
           lipo -archs "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS" | tee "validation/${{ matrix.arch }}/installed-architectures.txt"
-          shasum -a 256 "$DMG" "release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').version").zip" | tee "validation/${{ matrix.arch }}/artifacts-sha256.txt"
+          shasum -a 256 "$DMG" "release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version").zip" | tee "validation/${{ matrix.arch }}/artifacts-sha256.txt"
 
       - name: Inspect signing, notarization, and Gatekeeper state
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(node -p "require('./package.json').version")"
+          VERSION="$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version")"
           DMG="release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$VERSION.dmg"
           APP="$RUNNER_TEMP/aht-installed-${{ matrix.arch }}/A Hard Time Launcher macOS.app"
           REPORT="validation/${{ matrix.arch }}/apple-trust.txt"
@@ -347,6 +382,105 @@ jobs:
             release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-*.zip
           if-no-files-found: warn
 
+  validate-ubuntu-runtime:
+    name: Validate Ubuntu Linux x64
+    if: github.event_name == 'workflow_dispatch' && inputs.validation_only == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: "1"
+      AHT_VERIFY_PARALLEL: "3"
+
+    steps:
+      - name: Checkout validation source
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Record runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p validation/ubuntu
+          {
+            echo "runner=ubuntu-latest"
+            echo "expected_arch=x64"
+            echo "uname_machine=$(uname -m)"
+            echo "uname=$(uname -a)"
+            lsb_release -a 2>/dev/null || true
+            echo "node=$(node --version)"
+          } | tee validation/ubuntu/runner.txt
+          test "$(uname -m)" = "x86_64"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependency security
+        run: npm run security:audit
+
+      - name: Run Ubuntu source and Electron regression suite
+        run: xvfb-run -a npm run verify:local
+        env:
+          AHT_TEST_EVIDENCE_DIR: validation/ubuntu
+
+      - name: Build native Ubuntu packages
+        run: npm run dist:regular:ubuntu
+
+      - name: Verify and install native Ubuntu package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version")"
+          DEB="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.deb"
+          APPIMAGE="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.AppImage"
+          EXTRACTED="$RUNNER_TEMP/aht-ubuntu-validation-package"
+
+          test -s "$DEB"
+          test -s "$APPIMAGE"
+          test -x "$APPIMAGE"
+          test "$(dpkg-deb -f "$DEB" Architecture)" = "amd64"
+          rm -rf "$EXTRACTED"
+          mkdir -p "$EXTRACTED"
+          dpkg-deb -x "$DEB" "$EXTRACTED"
+          ASAR="$(find "$EXTRACTED" -type f -path '*/resources/app.asar' -print -quit)"
+          test -n "$ASAR"
+          ./node_modules/.bin/asar list "$ASAR" > validation/ubuntu/asar-files.txt
+          if grep -Eiq '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' validation/ubuntu/asar-files.txt; then
+            echo "Ubuntu player package contains a forbidden developer, operator, or secret-bearing path." >&2
+            exit 1
+          fi
+
+          APPIMAGE_EXTRACT_AND_RUN=1 timeout 30s xvfb-run -a "$APPIMAGE" --version | tee validation/ubuntu/appimage-version.txt
+          sudo apt-get install -y "$DEB"
+          test "$(command -v a-hard-time-launcher)" = "/usr/bin/a-hard-time-launcher"
+          file /usr/bin/a-hard-time-launcher | tee validation/ubuntu/installed-executable.txt
+          sha256sum "$DEB" "$APPIMAGE" | tee validation/ubuntu/artifacts-sha256.txt
+
+      - name: Run installed Ubuntu player interaction suite
+        env:
+          AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher
+        run: xvfb-run -a npm run verify:installed-player
+
+      - name: Recheck startup transition against installed Ubuntu package
+        env:
+          AHT_SMOKE_EXE: /usr/bin/a-hard-time-launcher
+        run: xvfb-run -a npm run test:startup-transition
+
+      - name: Upload native Ubuntu validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aht-ubuntu-validation-x64
+          path: |
+            validation/ubuntu/**
+            release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-*.deb
+            release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-*.AppImage
+          if-no-files-found: warn
+
   publish-launcher-update:
     name: Publish Launcher Update
     runs-on: windows-latest
@@ -384,7 +518,7 @@ jobs:
       - name: Resolve launcher version
         id: launcher
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
+          VERSION="$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=launcher-v$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -408,7 +542,7 @@ jobs:
           {
             echo "Automated AHT Launcher release $VERSION."
             echo
-            echo "Includes Windows 10/11, macOS Apple Silicon, and macOS Intel builds."
+            echo "Includes Windows 10/11, macOS Apple Silicon, macOS Intel, and Ubuntu Linux x64 builds."
             echo
             echo "Launcher update feed: $AHT_LAUNCHER_UPDATE_URL"
             echo "Source commit: $GITHUB_SHA"
@@ -421,14 +555,14 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
 
           shopt -s nullglob
-          release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-launcher-update/launcher-latest.json)
+          release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-artifacts/*.deb ci-artifacts/*.AppImage ci-launcher-update/launcher-latest.json)
           if [ "${#release_assets[@]}" -eq 0 ]; then
             echo "No public release assets found."
             exit 1
           fi
           echo "Public GitHub release assets:"
           printf ' - %s\n' "${release_assets[@]}"
-          echo "Windows and macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only."
+          echo "Windows and macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only. Ubuntu DEB and AppImage packages remain public release assets."
 
           for asset in "${release_assets[@]}"; do
             name="$(basename "$asset")"

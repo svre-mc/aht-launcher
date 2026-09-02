@@ -7,6 +7,7 @@ import {
   assertLauncherReleaseAdvance,
   compareLauncherReleaseVersions,
   REQUIRED_DOWNLOAD_KEYS,
+  selectLauncherArtifact,
   validateLauncherUpdateManifest
 } from './validate-launcher-update-manifest.mjs';
 
@@ -27,6 +28,8 @@ await writeArtifact('AHT-Launcher-macOS-arm64-7.8.9.zip', 'mac-arm-update');
 await writeArtifact('AHT-Launcher-macOS-x64-7.8.9.zip', 'mac-x64-update');
 await writeArtifact('AHT-Launcher-macOS-arm64-7.8.9.dmg', 'mac-arm-installer');
 await writeArtifact('AHT-Launcher-macOS-x64-7.8.9.dmg', 'mac-x64-installer');
+await writeArtifact('AHT-Launcher-Ubuntu-x64-7.8.9.deb', 'ubuntu-deb');
+await writeArtifact('AHT-Launcher-Ubuntu-x64-7.8.9.AppImage', 'ubuntu-appimage');
 
 const result = await prepareLauncherUpdate({
   artifactsDir: artifacts,
@@ -71,6 +74,12 @@ assert(manifest.platforms['darwin-x64']?.path?.includes('/darwin-x64/'), 'Intel 
 assert(manifest.platforms['darwin-arm64']?.kind === 'zip', 'Apple Silicon launcher updates must use ZIP, not DMG');
 assert(manifest.platforms['darwin-x64']?.fileName?.endsWith('.zip'), 'Intel macOS launcher updates must use ZIP artifacts');
 assert(manifest.downloads?.['macos-arm64']?.kind === 'dmg', 'Apple Silicon manual download must keep DMG installer');
+assert(manifest.platforms['linux-x64']?.kind === 'deb', 'Ubuntu in-app updates must use the DEB package');
+assert(manifest.platforms['ubuntu-x64']?.fileName?.endsWith('.deb'), 'Ubuntu update alias must point at the DEB package');
+assert(manifest.downloads?.['ubuntu-x64']?.kind === 'deb', 'Ubuntu manual download must provide the DEB package');
+assert(manifest.downloads?.['ubuntu-x64-appimage']?.kind === 'appimage', 'Ubuntu manual downloads must provide the portable AppImage fallback');
+assert(selectLauncherArtifact(manifest, 'linux', 'x64')?.key === 'linux-x64', 'Ubuntu x64 runtime must select its native DEB update artifact');
+assert(selectLauncherArtifact(manifest, 'linux', 'arm64') === null, 'Unsupported Ubuntu architectures must not receive the x64 DEB update artifact');
 for (const key of requiredDownloadKeys) {
   const entry = manifest.downloads?.[key];
   assert(entry, `manual download entry missing: ${key}`);
@@ -93,9 +102,11 @@ assert(legacyRuntimeErrors.length === 0, `generated feed breaks launcher 0.1.75 
 assert(manifest.downloads['windows-x64'].kind === 'nsis', 'Windows manual download must use the NSIS installer');
 assert(manifest.downloads['windows-x64'].installArgs?.[0] === '/S', 'Windows manual download must preserve silent install args');
 assert(manifest.downloads['macos-x64'].kind === 'dmg', 'Intel manual download must keep DMG installer');
-assert(!Object.keys(manifest.downloads).some((key) => /^darwin|^win32|linux|ubuntu/i.test(key)), 'manual downloads must use website-facing Windows/macOS keys only');
+assert(!Object.keys(manifest.downloads).some((key) => /^(?:darwin|win32|linux)/i.test(key)), 'manual downloads must use website-facing Windows, macOS, and Ubuntu keys only');
 assert(result.plan.uploads.some((item) => item.rel.endsWith('.dmg')), 'DMG installers must still be uploaded for website/manual downloads');
-assert(!Object.keys(manifest.platforms).some((key) => /linux|ubuntu/i.test(key)), 'manifest must not publish Linux artifacts');
+assert(result.plan.uploads.some((item) => item.rel.endsWith('.deb')), 'Ubuntu DEB packages must be uploaded');
+assert(result.plan.uploads.some((item) => item.rel.endsWith('.AppImage')), 'Ubuntu AppImages must be uploaded');
+assert(['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'].every((key) => manifest.platforms[key]?.kind === 'deb'), 'manifest must publish every Ubuntu runtime alias');
 assert(result.plan.uploads.at(-1)?.rel === 'launcher/latest.json', 'launcher/latest.json must upload last');
 assert(result.plan.uploads.at(-1)?.contentType === 'application/json', 'launcher/latest.json content type must be shell-safe');
 assert(result.plan.uploads.every((item) => path.isAbsolute(item.file)), 'upload plan must use absolute files');
@@ -115,6 +126,7 @@ badManifest.platforms['win32-x64'].url = badManifest.platforms['win32-x64'].url.
 badManifest.platforms['windows-x64'].installArgs = [];
 badManifest.stagedPlatforms['win32-x64'].kind = 'nsis';
 badManifest.platforms['darwin-arm64'].kind = 'dmg';
+badManifest.platforms['linux-x64'].kind = 'appimage';
 const badValidation = validateLauncherUpdateManifest(badManifest, {
   latestUrl: 'https://example.test/launcher/latest.json',
   requireTrackedDownloads: true
@@ -126,6 +138,7 @@ assert(badValidation.errors.some((error) => error.includes('platforms.win32-x64 
 assert(badValidation.errors.some((error) => error.includes('platforms.windows-x64 must include /S silent install args')), 'manifest validator must reject Windows platform artifacts without silent install args');
 assert(badValidation.errors.some((error) => error.includes('stagedPlatforms.win32-x64 kind must be zip')), 'manifest validator must reject a Windows staged update that is not a ZIP');
 assert(badValidation.errors.some((error) => error.includes('platforms.darwin-arm64 kind must be zip')), 'manifest validator must reject macOS self-update platform artifacts that are not ZIPs');
+assert(badValidation.errors.some((error) => error.includes('platforms.linux-x64 kind must be deb')), 'manifest validator must reject Ubuntu self-update platform artifacts that are not DEBs');
 
 const staleArtifacts = path.join(root, 'stale-artifacts');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-Windows-10-11-7.8.8.exe'), 'stale-windows');
@@ -134,6 +147,8 @@ await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-macOS-x64-7.8.8.zip'), 'stale-mac-x64-update');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-macOS-arm64-7.8.8.dmg'), 'stale-mac-arm-installer');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-macOS-x64-7.8.8.dmg'), 'stale-mac-x64-installer');
+await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-Ubuntu-x64-7.8.8.deb'), 'stale-ubuntu-deb');
+await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-Ubuntu-x64-7.8.8.AppImage'), 'stale-ubuntu-appimage');
 let staleRejected = false;
 try {
   await prepareLauncherUpdate({

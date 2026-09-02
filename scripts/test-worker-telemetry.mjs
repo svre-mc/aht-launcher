@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import worker, { LauncherStateHub } from '../cloudflare/curseforge-proxy-worker.js';
-import { sendLauncherEvent } from '../src/syncClient.js';
+import { launcherTelemetryPlatform, sendLauncherEvent } from '../src/syncClient.js';
 import {
   TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
   TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI
@@ -31,6 +31,9 @@ if (
   || sentLauncherPayload?.platform !== 'Windows'
 ) {
   throw new Error(`Sync client did not send canonical UUID/platform fields: ${JSON.stringify(sentLauncherPayload)}`);
+}
+if (launcherTelemetryPlatform('linux') !== 'Linux' || launcherTelemetryPlatform('Ubuntu 24.04') !== 'Linux') {
+  throw new Error('Sync client did not normalize Ubuntu/Linux telemetry.');
 }
 
 const objects = new Map();
@@ -119,12 +122,16 @@ objects.set('launcher/latest.json', JSON.stringify({
   downloads: {
     'windows-x64': { label: 'Windows 10/11', fileName: 'AHT-Windows.exe', path: 'launcher/files/win32-x64/AHT-Windows.exe' },
     'macos-arm64': { label: 'macOS Apple Silicon', fileName: 'AHT-arm64.dmg', path: 'launcher/files/darwin-arm64/AHT-arm64.dmg' },
-    'macos-x64': { label: 'macOS Intel', fileName: 'AHT-x64.dmg', path: 'launcher/files/darwin-x64/AHT-x64.dmg' }
+    'macos-x64': { label: 'macOS Intel', fileName: 'AHT-x64.dmg', path: 'launcher/files/darwin-x64/AHT-x64.dmg' },
+    'ubuntu-x64': { label: 'Ubuntu Linux x64', fileName: 'AHT-Ubuntu.deb', path: 'launcher/files/linux-x64/AHT-Ubuntu.deb' },
+    'ubuntu-x64-appimage': { label: 'Ubuntu Linux x64 AppImage', fileName: 'AHT-Ubuntu.AppImage', path: 'launcher/files/linux-x64/AHT-Ubuntu.AppImage' }
   }
 }));
 objects.set('launcher/files/win32-x64/AHT-Windows.exe', 'windows installer');
 objects.set('launcher/files/darwin-arm64/AHT-arm64.dmg', 'mac arm installer');
 objects.set('launcher/files/darwin-x64/AHT-x64.dmg', 'mac intel installer');
+objects.set('launcher/files/linux-x64/AHT-Ubuntu.deb', 'ubuntu deb');
+objects.set('launcher/files/linux-x64/AHT-Ubuntu.AppImage', 'ubuntu appimage');
 
 async function jsonRequest(path, options = {}) {
   const response = await worker.fetch(new Request(`https://worker.test${path}`, options), env, {
@@ -158,8 +165,19 @@ await trackedDownload('/launcher/download/macos-x64', {
   'CF-Connecting-IP': '2001:db8::20',
   'User-Agent': 'AHT website test'
 });
+const ubuntuDownload = await trackedDownload('/launcher/download/ubuntu-x64', {
+  'CF-Connecting-IP': '203.0.113.44',
+  'User-Agent': 'AHT website Ubuntu test'
+});
+const ubuntuAppImageDownload = await trackedDownload('/launcher/download/ubuntu-x64-appimage', {
+  'CF-Connecting-IP': '203.0.113.45',
+  'User-Agent': 'AHT website Ubuntu portable test'
+});
 if (!windowsDownload.endsWith('/launcher/files/win32-x64/AHT-Windows.exe')) {
   throw new Error(`Tracked Windows download redirected to the wrong file: ${windowsDownload}`);
+}
+if (!ubuntuDownload.endsWith('/launcher/files/linux-x64/AHT-Ubuntu.deb') || !ubuntuAppImageDownload.endsWith('/launcher/files/linux-x64/AHT-Ubuntu.AppImage')) {
+  throw new Error(`Tracked Ubuntu downloads redirected to the wrong files: ${ubuntuDownload}, ${ubuntuAppImageDownload}`);
 }
 const downloadCountBeforeDirectUpdate = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
 const directUpdate = await worker.fetch(new Request('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe'), env, {});
@@ -833,10 +851,10 @@ while (downloadCursor) {
   downloadCursor = page.hasMore ? page.cursor : '';
 }
 if (
-  allDownloadRecords.length !== 4
+  allDownloadRecords.length !== 6
   || allDownloadRecords.some((item) => String(item.ipv4 || '').includes(':'))
   || allDownloadRecords.some((item) => item.minecraftUsername && item.minecraftUsername !== 'DownloadUser')
-  || allDownloadRecords.some((item) => !['Windows', 'Mac'].includes(item.platform))
+  || allDownloadRecords.some((item) => !['Windows', 'Mac', 'Linux'].includes(item.platform))
 ) {
   throw new Error(`Launcher download history must preserve explicit player identity without inventing it: ${JSON.stringify(allDownloadRecords)}`);
 }

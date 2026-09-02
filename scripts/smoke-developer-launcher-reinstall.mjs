@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { loadLegalDocuments } from '../src/legalConsent.js';
+import { launcherVersionsReferToSameRelease } from '../src/launcherVersion.js';
 
 if (process.platform !== 'win32') {
   console.log(JSON.stringify({ ok: true, skipped: true, reason: 'Windows-only developer-to-player reinstall test' }, null, 2));
@@ -14,7 +15,7 @@ if (process.platform !== 'win32') {
 }
 
 const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-const version = String(packageJson.version || '');
+const version = String(packageJson.ahtLauncherVersion || packageJson.version || '');
 const developerPort = Number(process.argv[2] || 10570);
 const playerPort = developerPort + 1;
 if (!Number.isInteger(developerPort) || developerPort < 1024 || playerPort > 65535) {
@@ -918,7 +919,7 @@ try {
   const productVersion = String(receipt.productVersion || '');
   if (receiptSha256 !== String(prepared.receiptSha256 || '').toLowerCase()
       || receipt.expectedVersion !== version
-      || !(productVersion === version || productVersion.startsWith(`${version}.`))
+      || !launcherVersionsReferToSameRelease(productVersion, version)
       || receipt.targetExeRelativePath !== path.basename(targetExe)
       || String(receipt.archiveSha256 || '').toLowerCase() !== updateArchiveSha256
       || String(receipt.treeSha256 || '').toLowerCase() !== String(prepared.treeSha256 || '').toLowerCase()

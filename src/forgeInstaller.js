@@ -929,9 +929,23 @@ function macosJavaInstallRoots(env = process.env) {
   ]);
 }
 
+function linuxJavaInstallRoots(env = process.env) {
+  if (process.platform !== 'linux') return [];
+  const home = env.HOME || '';
+  return uniqueValues([
+    '/usr/lib/jvm',
+    '/usr/java',
+    '/opt/java',
+    '/opt/jdk',
+    home ? path.join(home, '.jdks') : '',
+    home ? path.join(home, '.sdkman', 'candidates', 'java') : ''
+  ]);
+}
+
 function defaultJavaInstallRoots(env = process.env) {
   if (process.platform === 'win32') return windowsJavaInstallRoots(env);
   if (process.platform === 'darwin') return macosJavaInstallRoots(env);
+  if (process.platform === 'linux') return linuxJavaInstallRoots(env);
   return [];
 }
 

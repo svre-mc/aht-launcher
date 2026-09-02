@@ -21,9 +21,11 @@ const artifactName = process.platform === 'win32'
   ? 'AHT-Launcher-Windows-10-11-9.9.9.zip'
   : process.platform === 'darwin'
     ? 'AHT-Launcher-macOS-x64-9.9.9.zip'
-    : '';
+    : process.platform === 'linux'
+      ? 'AHT-Launcher-Ubuntu-x64-9.9.9.deb'
+      : '';
 if (!artifactName) {
-  throw new Error(`Launcher self-update smoke only supports Windows and macOS artifacts, got ${process.platform}.`);
+  throw new Error(`Launcher self-update smoke only supports Windows, macOS, and Ubuntu artifacts, got ${process.platform}.`);
 }
 const windowsTargetExe = path.join(root, 'A Hard Time Launcher Windows', 'A Hard Time Launcher Windows.exe');
 if (process.platform === 'win32') {
@@ -85,6 +87,7 @@ function contentTypeFor(key) {
   if (key.endsWith('.json')) return 'application/json; charset=utf-8';
   if (key.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
   if (key.endsWith('.dmg')) return 'application/x-apple-diskimage';
+  if (key.endsWith('.deb')) return 'application/vnd.debian.binary-package';
   if (key.endsWith('.zip')) return 'application/zip';
   return 'application/octet-stream';
 }
@@ -209,7 +212,7 @@ const server = http.createServer((request, response) => {
     const legacyArtifactPath = `launcher/files/${process.platform}-${process.arch}/${legacyWindowsArtifactName}`;
     const selectedEntry = {
       label: 'Smoke platform',
-      kind: process.platform === 'win32' ? 'zip' : 'zip',
+      kind: process.platform === 'linux' ? 'deb' : 'zip',
       fileName: artifactName,
       path: artifactPath,
       url: `${workerEndpoint}/${artifactPath}`,
@@ -454,6 +457,19 @@ try {
       if (!scriptText.includes(required)) {
         throw new Error(`macOS helper script is missing ${required}: ${scriptText}`);
       }
+    }
+  }
+  if (process.platform === 'linux') {
+    const launched = proof.state.lastResult.launched || {};
+    const prepared = proof.state.lastResult.preparedRestart || {};
+    if (launched.strategy !== 'linux-package-installer' || prepared.strategy !== 'linux-package-installer') {
+      throw new Error(`Ubuntu launcher update did not use the desktop DEB installer handoff: ${JSON.stringify({ prepared, launched })}`);
+    }
+    if (!/^(?:xdg-open|gio)$/i.test(path.basename(String(prepared.command || '')))) {
+      throw new Error(`Ubuntu launcher update did not resolve a supported desktop package opener: ${JSON.stringify(prepared)}`);
+    }
+    if (!prepared.args?.includes(proof.state.lastResult.downloadedPath)) {
+      throw new Error(`Ubuntu package opener was not bound to the verified downloaded DEB: ${JSON.stringify(prepared)}`);
     }
   }
   await client.call('Browser.close').catch(() => {});

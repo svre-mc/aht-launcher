@@ -3008,13 +3008,13 @@ function launcherUpdatePercent(state) {
   return state?.running ? 25 : 0;
 }
 
-function setLauncherUpdateButton(restartReady = false, instantRestartReady = false) {
+function setLauncherUpdateButton(restartReady = false, instantRestartReady = false, externalPackageInstall = false) {
   if (!els.launcherUpdateNowButton) return;
   const icon = document.createElement("span");
   icon.className = `button-icon ${restartReady ? "icon-sync" : "icon-download"}`;
   icon.setAttribute("aria-hidden", "true");
   const label = restartReady
-    ? instantRestartReady ? "Restart Launcher" : "Install and Restart"
+    ? instantRestartReady ? "Restart Launcher" : externalPackageInstall ? "Open Package Installer" : "Install and Restart"
     : "Update Launcher";
   els.launcherUpdateNowButton.replaceChildren(icon, document.createTextNode(label));
 }
@@ -3034,6 +3034,7 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   if (!required) return;
   const restartReady = Boolean(state?.lastResult?.restartRequired && !state?.error);
   const instantRestartReady = Boolean(restartReady && state?.lastResult?.instantRestartReady);
+  const externalPackageInstall = Boolean(restartReady && state?.lastResult?.preparedRestart?.strategy === "linux-package-installer");
   const current = update.currentVersion || status?.appVersion || "-";
   const latest = update.latestVersion || "-";
   els.launcherUpdateTitle.textContent = restartReady
@@ -3044,7 +3045,9 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
       ? developerReinstall
         ? `AHT Launcher ${latest} is fully copied, extracted, and verified for a same-version reinstall. Click Restart Launcher to swap to the prepared copy immediately.`
         : `AHT Launcher ${latest} is fully downloaded, extracted, and verified. Click Restart Launcher to close this version and open the prepared update immediately.`
-      : `AHT Launcher ${latest} uses the legacy installer. Click Install and Restart to apply it and reopen when finished.`
+      : externalPackageInstall
+        ? `AHT Launcher ${latest} is ready as a verified Ubuntu DEB. Open the package installer, finish installation, then reopen AHT Launcher.`
+        : `AHT Launcher ${latest} uses the legacy installer. Click Install and Restart to apply it and reopen when finished.`
     : developerReinstall
       ? `AHT Launcher ${latest} is preparing a developer-only same-version reinstall. Installed launcher version: ${current}.`
       : `AHT Launcher ${latest} is required. Installed launcher version: ${current}.`;
@@ -3057,7 +3060,7 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   if (state?.error) lines.push(`ERROR: ${state.error}`);
   if (!lines.length) lines.push("Waiting to start launcher update.");
   setTextContentBounded(els.launcherUpdateLog, lines.join("\n"), LOG_TEXT_LIMIT);
-  setLauncherUpdateButton(restartReady, instantRestartReady);
+  setLauncherUpdateButton(restartReady, instantRestartReady, externalPackageInstall);
   setUnavailable(els.launcherUpdateNowButton, Boolean(state?.running));
   if (developerReinstall && developerAuthenticated && !state && !launcherUpdatePoll) {
     launcherUpdatePoll = setInterval(pollLauncherUpdate, 800);
@@ -3136,8 +3139,20 @@ async function restartLauncherSelfUpdate() {
   lastLauncherUpdateState = {
     ...lastLauncherUpdateState,
     running: true,
-    lines: [...(lastLauncherUpdateState.lines || []), "Installing launcher update."],
-    progress: { phase: lastLauncherUpdateState?.lastResult?.instantRestartReady ? "Restarting launcher" : "Starting install helper", percent: 100 },
+    lines: [
+      ...(lastLauncherUpdateState.lines || []),
+      lastLauncherUpdateState?.lastResult?.preparedRestart?.strategy === "linux-package-installer"
+        ? "Opening the Ubuntu package installer."
+        : "Installing launcher update."
+    ],
+    progress: {
+      phase: lastLauncherUpdateState?.lastResult?.instantRestartReady
+        ? "Restarting launcher"
+        : lastLauncherUpdateState?.lastResult?.preparedRestart?.strategy === "linux-package-installer"
+          ? "Opening package installer"
+          : "Starting install helper",
+      percent: 100
+    },
     error: null
   };
   renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
@@ -3240,6 +3255,7 @@ function normalizePlayerPlatform(value = "") {
   const platform = String(value || "").trim().toLowerCase();
   if (platform.includes("win")) return "Windows";
   if (platform.includes("mac") || platform.includes("darwin") || platform.includes("osx")) return "Mac";
+  if (platform.includes("linux") || platform.includes("ubuntu")) return "Linux";
   return "—";
 }
 
@@ -3741,7 +3757,7 @@ function renderLauncherDeployState(state) {
   setLauncherDeployProgress(state.progress, false);
   if (Array.isArray(state.lines) && state.lines.length) setDevLog(state.lines.join("\n"));
   if (state.running) {
-    setLauncherUpdateStatus("warn", "Deploying public launcher", state.progress?.phase || "GitHub Actions running", "Windows and macOS player builds are publishing to GitHub Releases and R2. The developer launcher is never uploaded.");
+    setLauncherUpdateStatus("warn", "Deploying public launcher", state.progress?.phase || "GitHub Actions running", "Windows, macOS, and Ubuntu player builds are publishing to GitHub Releases and R2. The developer launcher is never uploaded.");
     return;
   }
   if (state.error) {
@@ -3778,7 +3794,7 @@ async function publishLauncherUpdate() {
       githubToken: inputValue(els.githubTokenInput, ""),
       publishToR2: true
     };
-    setLauncherUpdateStatus("warn", "Preparing deploy", "Reading latest GitHub launcher version", "Only public Windows and macOS player-launcher artifacts will be released.");
+    setLauncherUpdateStatus("warn", "Preparing deploy", "Reading latest GitHub launcher version", "Only public Windows, macOS, and Ubuntu player-launcher artifacts will be released.");
     setLauncherDeployProgress({ phase: "Preparing public deploy", percent: 0 });
     const state = await window.aht.devDeployLauncher(payload);
     renderLauncherDeployState(state);

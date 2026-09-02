@@ -24,7 +24,8 @@ function manifests() {
     'launcher/latest.json': {
       version: '0.1.87',
       downloads: {
-        windows: { path: 'launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.87.exe' }
+        windows: { path: 'launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.87.exe' },
+        ubuntu: { path: 'launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.87.deb' }
       }
     }
   };
@@ -47,7 +48,9 @@ function inventory() {
     object('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.86.exe', 100 * MiB, '2026-08-19T00:00:00Z'),
     object('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.85.exe', 100 * MiB, '2026-08-18T00:00:00Z'),
     object('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-9.9.9.exe', 100 * MiB, '2026-08-28T00:00:00Z'),
-    object('launcher/files/linux-x64/AHT-Launcher-Ubuntu-0.1.18-x64.AppImage', 100 * MiB, '2026-07-01T00:00:00Z'),
+    object('launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.87.deb', 100 * MiB, '2026-08-20T00:00:00Z'),
+    object('launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.86.deb', 100 * MiB, '2026-08-19T00:00:00Z'),
+    object('launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.18.AppImage', 100 * MiB, '2026-07-01T00:00:00Z'),
     object('client-zips/a-hard-time-2.8.534.zip', 700 * MiB),
     object('cache/files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jar', 4 * MiB)
   ];
@@ -62,11 +65,13 @@ const plan = planR2Retention({ inventory: inventory(), manifests: manifests(), b
 const deleted = new Set(plan.deleteObjects.map((item) => item.key));
 assert(deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.85.exe'));
 assert(deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-9.9.9.exe'));
-assert(deleted.has('launcher/files/linux-x64/AHT-Launcher-Ubuntu-0.1.18-x64.AppImage'));
+assert(deleted.has('launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.18.AppImage'));
 assert(deleted.has('client-zips/a-hard-time-2.8.534.zip'));
 assert(deleted.has('packs/a-hard-time-dregora-2.8.532.zip'));
 assert(!deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.87.exe'));
 assert(!deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.86.exe'));
+assert(!deleted.has('launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.87.deb'));
+assert(!deleted.has('launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.86.deb'));
 assert(!deleted.has('packs/a-hard-time-dregora-2.8.533.zip'));
 assert(!deleted.has('ptb/packs/a-hard-time-ptb-2.8.61.zip'));
 assert(!deleted.has('cache/files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jar'));

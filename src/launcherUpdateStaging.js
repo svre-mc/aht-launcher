@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import yauzl from 'yauzl';
+import { launcherVersionsReferToSameRelease } from './launcherVersion.js';
 
 const require = createRequire(import.meta.url);
 let fsSync = nodeFsSync;
@@ -171,9 +172,7 @@ async function sha256File(filePath) {
 }
 
 function versionMatches(actual = '', expected = '') {
-  const cleanActual = String(actual || '').trim();
-  const cleanExpected = String(expected || '').trim();
-  return Boolean(cleanActual && cleanExpected && (cleanActual === cleanExpected || cleanActual.startsWith(`${cleanExpected}.`)));
+  return launcherVersionsReferToSameRelease(actual, expected);
 }
 
 async function copyInstallerOwnedFiles(installDir, payloadRoot) {

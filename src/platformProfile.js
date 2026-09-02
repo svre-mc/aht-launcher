@@ -4,13 +4,15 @@ import path from 'node:path';
 export function platformKey(platform = process.platform) {
   if (platform === 'win32') return 'windows';
   if (platform === 'darwin') return 'macos';
-  throw new Error(`Unsupported AHT launcher platform: ${platform}. Supported platforms are Windows 10/11 and macOS.`);
+  if (platform === 'linux') return 'ubuntu';
+  throw new Error(`Unsupported AHT launcher platform: ${platform}. Supported platforms are Windows 10/11, macOS, and Ubuntu Linux.`);
 }
 
 export function platformDisplayName(platform = process.platform) {
   const key = platformKey(platform);
   if (key === 'windows') return 'Windows 10/11';
-  return 'macOS';
+  if (key === 'macos') return 'macOS';
+  return 'Ubuntu Linux';
 }
 
 export function defaultInstanceDirForPlatform(platform = process.platform, env = process.env) {
@@ -26,6 +28,12 @@ export function defaultInstanceDirForPlatform(platform = process.platform, env =
     return path.posix.join(home, 'Library', 'Application Support', 'A Hard Time', 'Instance');
   }
 
+  if (platform === 'linux') {
+    const home = env.HOME || os.homedir();
+    const dataHome = env.XDG_DATA_HOME || path.posix.join(home, '.local', 'share');
+    return path.posix.join(dataHome, 'A Hard Time', 'Instance');
+  }
+
   platformKey(platform);
 }
 
@@ -36,7 +44,15 @@ export function platformProfile(platform = process.platform, env = process.env) 
     key,
     displayName: platformDisplayName(platform),
     instanceDir,
-    launcherName: key === 'windows' ? 'A Hard Time Launcher Windows' : 'A Hard Time Launcher macOS',
-    packageTarget: key === 'windows' ? 'NSIS installer for Windows 10/11' : 'DMG app for macOS'
+    launcherName: key === 'windows'
+      ? 'A Hard Time Launcher Windows'
+      : key === 'macos'
+        ? 'A Hard Time Launcher macOS'
+        : 'A Hard Time Launcher Ubuntu',
+    packageTarget: key === 'windows'
+      ? 'NSIS installer for Windows 10/11'
+      : key === 'macos'
+        ? 'DMG app for macOS'
+        : 'DEB package and AppImage for Ubuntu Linux'
   };
 }

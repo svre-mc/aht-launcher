@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile);
 const PACKAGED_PRODUCTION_UPDATE_SMOKE = true;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageJson = JSON.parse(await fs.readFile(path.join(repoRoot, 'package.json'), 'utf8'));
-const expectedVersion = String(packageJson.version || '').trim();
+const expectedVersion = String(packageJson.ahtLauncherVersion || packageJson.version || '').trim();
 const transactionMode = String(process.env.AHT_TRANSACTION_MODE || 'version-upgrade').trim().toLowerCase();
 const sameVersionDeveloperReinstall = transactionMode === 'same-version-developer-reinstall';
 const targetExeName = 'A Hard Time Launcher Windows.exe';

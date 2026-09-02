@@ -1,3 +1,8 @@
+import {
+  cleanLauncherReleaseVersion,
+  launcherReleaseVersionFromPackage
+} from './launcherVersion.js';
+
 const GITHUB_API = 'https://api.github.com';
 const DEFAULT_REPO = 'svre-mc/aht-launcher';
 const DEFAULT_BRANCH = 'main';
@@ -31,12 +36,7 @@ export function cleanRef(value = DEFAULT_BRANCH) {
 }
 
 export function cleanLauncherVersion(value = '') {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(raw)) {
-    throw new Error('Launcher version must look like 0.1.3.');
-  }
-  return raw;
+  return cleanLauncherReleaseVersion(value);
 }
 
 function githubHeaders(token) {
@@ -100,7 +100,7 @@ export async function readGithubPackageVersion({
     throw new Error('GitHub package.json lookup failed: package.json content was empty.');
   }
   const packageJson = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
-  const version = cleanLauncherVersion(packageJson.version);
+  const version = launcherReleaseVersionFromPackage(packageJson);
   if (!version) {
     throw new Error('GitHub package.json lookup failed: package.json version is missing.');
   }

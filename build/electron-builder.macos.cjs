@@ -1,4 +1,4 @@
-const { regularPlayerConfig } = require('./electron-builder.common.cjs');
+const { launcherReleaseVersion, regularPlayerConfig } = require('./electron-builder.common.cjs');
 
 const hasMacSigningCert = Boolean(process.env.CSC_LINK || process.env.CSC_NAME || process.env.APPLE_DEVELOPER_IDENTITY);
 const macSigningIdentity = process.env.APPLE_DEVELOPER_IDENTITY || process.env.CSC_NAME;
@@ -38,7 +38,7 @@ module.exports = {
           identity: null,
           notarize: false
         }),
-    artifactName: 'AHT-Launcher-macOS-${arch}-${version}.${ext}'
+    artifactName: `AHT-Launcher-macOS-\${arch}-${launcherReleaseVersion}.\${ext}`
   },
   dmg: {
     title: 'A Hard Time Launcher',

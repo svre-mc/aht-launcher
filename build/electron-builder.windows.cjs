@@ -1,4 +1,4 @@
-const { regularPlayerConfig } = require('./electron-builder.common.cjs');
+const { launcherReleaseVersion, regularPlayerConfig } = require('./electron-builder.common.cjs');
 
 module.exports = {
   ...regularPlayerConfig({
@@ -17,7 +17,7 @@ module.exports = {
         arch: ['x64']
       }
     ],
-    artifactName: 'AHT-Launcher-Windows-10-11-${version}.${ext}'
+    artifactName: `AHT-Launcher-Windows-10-11-${launcherReleaseVersion}.\${ext}`
   },
   nsis: {
     oneClick: false,

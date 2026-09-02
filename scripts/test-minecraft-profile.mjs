@@ -42,13 +42,17 @@ const platformRoots = {
     APPDATA: 'C:\\Users\\Player\\AppData\\Roaming',
     USERPROFILE: 'C:\\Users\\Player'
   }),
-  darwin: defaultMinecraftRoot('darwin', { HOME: '/Users/player' })
+  darwin: defaultMinecraftRoot('darwin', { HOME: '/Users/player' }),
+  linux: defaultMinecraftRoot('linux', { HOME: '/home/player' })
 };
 if (platformRoots.win32 !== 'C:\\Users\\Player\\AppData\\Roaming\\.minecraft') {
   throw new Error(`Unexpected Windows Minecraft root: ${platformRoots.win32}`);
 }
 if (platformRoots.darwin !== '/Users/player/Library/Application Support/minecraft') {
   throw new Error(`Unexpected macOS Minecraft root: ${platformRoots.darwin}`);
+}
+if (platformRoots.linux !== '/home/player/.minecraft') {
+  throw new Error(`Unexpected Ubuntu Minecraft root: ${platformRoots.linux}`);
 }
 
 const macRootCandidates = minecraftRootCandidates('darwin', { HOME: '/Users/player' });
@@ -67,6 +71,10 @@ const winRootCandidates = minecraftRootCandidates('win32', {
 const winStoreRoot = 'C:\\Users\\Player\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Roaming\\.minecraft';
 if (winRootCandidates[0] !== platformRoots.win32 || !winRootCandidates.includes(winStoreRoot)) {
   throw new Error(`Unexpected Windows Minecraft root candidates: ${JSON.stringify(winRootCandidates)}`);
+}
+const linuxRootCandidates = minecraftRootCandidates('linux', { HOME: '/home/player' });
+if (linuxRootCandidates.length !== 1 || linuxRootCandidates[0] !== platformRoots.linux) {
+  throw new Error(`Unexpected Ubuntu Minecraft root candidates: ${JSON.stringify(linuxRootCandidates)}`);
 }
 
 const latest = {

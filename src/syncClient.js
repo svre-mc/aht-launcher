@@ -2,6 +2,7 @@ export function launcherTelemetryPlatform(value = '') {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'win32' || platform === 'win64' || platform.includes('windows')) return 'Windows';
   if (platform === 'darwin' || platform === 'mac' || platform.startsWith('macos') || platform.includes('mac os')) return 'Mac';
+  if (platform === 'linux' || platform === 'ubuntu' || platform.includes('ubuntu')) return 'Linux';
   return '';
 }
 

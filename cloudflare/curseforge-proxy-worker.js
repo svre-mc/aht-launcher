@@ -26,7 +26,7 @@ const LAUNCHER_SOCIAL_ACTIONS = new Set([
 ]);
 const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
-const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64']);
+const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64', 'ubuntu-x64', 'ubuntu-x64-appimage']);
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;
 const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH = '/launcher-installer-download-limit';
@@ -118,6 +118,7 @@ function normalizePlatform(value = '') {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'win32' || platform === 'win64' || platform.includes('windows')) return 'Windows';
   if (platform === 'darwin' || platform === 'mac' || platform.startsWith('macos') || platform.includes('mac os')) return 'Mac';
+  if (platform === 'linux' || platform === 'ubuntu' || platform.includes('ubuntu')) return 'Linux';
   return '';
 }
 
@@ -3637,7 +3638,7 @@ export default {
           '/server/{serverArtifact}',
           '/launcher/latest.json',
           '/launcher/files/{launcherArtifact}',
-          '/launcher/download/{windows-x64|macos-arm64|macos-x64}',
+          '/launcher/download/{windows-x64|macos-arm64|macos-x64|ubuntu-x64|ubuntu-x64-appimage}',
           '/cf/mods/{projectId}/files/{fileId}',
           '/cf/mods/{projectId}/files/{fileId}/download-url',
           '/api/events',

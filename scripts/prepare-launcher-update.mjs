@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launcherReleaseVersionFromPackage } from '../src/launcherVersion.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -56,6 +57,8 @@ function contentType(file) {
   if (lower.endsWith('.json')) return 'application/json';
   if (lower.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
   if (lower.endsWith('.dmg')) return 'application/x-apple-diskimage';
+  if (lower.endsWith('.deb')) return 'application/vnd.debian.binary-package';
+  if (lower.endsWith('.appimage')) return 'application/vnd.appimage';
   if (lower.endsWith('.zip')) return 'application/zip';
   return 'application/octet-stream';
 }
@@ -151,7 +154,7 @@ export async function prepareLauncherUpdate(options = {}) {
   const config = await readJson(path.join(repoRoot, 'config', 'app.defaults.json'), {});
   const artifactsDir = path.resolve(options.artifactsDir || 'ci-artifacts');
   const outDir = path.resolve(options.outDir || 'ci-launcher-update');
-  const version = String(options.version || process.env.AHT_LAUNCHER_VERSION || packageJson.version || '').trim();
+  const version = String(options.version || process.env.AHT_LAUNCHER_VERSION || launcherReleaseVersionFromPackage(packageJson)).trim();
   const latestUrl = requireHttpsLatestUrl(String(options.latestUrl || defaultLatestUrl(config)).trim());
 
   if (!version) throw new Error('Launcher version is required.');
@@ -167,6 +170,8 @@ export async function prepareLauncherUpdate(options = {}) {
   const macX64UpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.zip$`, 'i'), 'macOS Intel update ZIP');
   const macArmInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-arm64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Apple Silicon DMG');
   const macX64InstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Intel DMG');
+  const ubuntuDebFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Ubuntu-x64-${artifactVersion}\\.deb$`, 'i'), 'Ubuntu x64 DEB');
+  const ubuntuAppImageFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Ubuntu-x64-${artifactVersion}\\.AppImage$`, 'i'), 'Ubuntu x64 AppImage');
 
   const platforms = {};
   const stagedPlatforms = {};
@@ -231,10 +236,31 @@ export async function prepareLauncherUpdate(options = {}) {
   });
   uploads.push(macX64Installer.upload);
 
+  const ubuntuDeb = await artifactEntry({
+    file: ubuntuDebFile,
+    key: 'linux-x64',
+    label: 'Ubuntu Linux x64 package',
+    kind: 'deb',
+    rootUrl
+  });
+  uploads.push(ubuntuDeb.upload);
+  addAliases(platforms, ['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'], ubuntuDeb.entry);
+
+  const ubuntuAppImage = await artifactEntry({
+    file: ubuntuAppImageFile,
+    key: 'linux-x64',
+    label: 'Ubuntu Linux x64 portable AppImage',
+    kind: 'appimage',
+    rootUrl
+  });
+  uploads.push(ubuntuAppImage.upload);
+
   const downloads = {
     'windows-x64': { ...windowsInstaller.entry, url: trackedInstallerUrl(windowsInstaller.entry.url, 'windows-x64') },
     'macos-arm64': { ...macArmInstaller.entry, url: trackedInstallerUrl(macArmInstaller.entry.url, 'macos-arm64') },
-    'macos-x64': { ...macX64Installer.entry, url: trackedInstallerUrl(macX64Installer.entry.url, 'macos-x64') }
+    'macos-x64': { ...macX64Installer.entry, url: trackedInstallerUrl(macX64Installer.entry.url, 'macos-x64') },
+    'ubuntu-x64': { ...ubuntuDeb.entry, url: trackedInstallerUrl(ubuntuDeb.entry.url, 'ubuntu-x64') },
+    'ubuntu-x64-appimage': { ...ubuntuAppImage.entry, url: trackedInstallerUrl(ubuntuAppImage.entry.url, 'ubuntu-x64-appimage') }
   };
 
   const manifest = {

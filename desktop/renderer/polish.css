@@ -2436,11 +2436,11 @@ body.dev-mode .developer-window-drag-region {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 120ms linear, visibility 0s linear 120ms;
+  transition: none;
 }
 
 #player #updateLogGrid > .home-news-card.large:hover .feature-copy {
   opacity: 1;
   visibility: visible;
-  transition-delay: 0s;
+  transition: opacity 120ms linear;
 }

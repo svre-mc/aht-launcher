@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-export const REQUIRED_DOWNLOAD_KEYS = ['windows-x64', 'macos-arm64', 'macos-x64'];
+export const REQUIRED_DOWNLOAD_KEYS = ['windows-x64', 'macos-arm64', 'macos-x64', 'ubuntu-x64', 'ubuntu-x64-appimage'];
 export const REQUIRED_STAGED_WINDOWS_KEYS = ['win32-x64', 'win32', 'windows', 'windows-x64'];
 export const REQUIRED_PLATFORM_KEYS = [
   'win32-x64',
@@ -12,7 +12,11 @@ export const REQUIRED_PLATFORM_KEYS = [
   'darwin-x64',
   'macos-x64',
   'darwin',
-  'macos'
+  'macos',
+  'linux-x64',
+  'linux',
+  'ubuntu-x64',
+  'ubuntu'
 ];
 
 function isObject(value) {
@@ -172,9 +176,17 @@ function validateKnownEntryShape(errors, entry, key) {
     const isManualDownload = key.startsWith('downloads.macos-');
     validateKindAndExtension(errors, entry, key, isManualDownload ? 'dmg' : 'zip', isManualDownload ? '.dmg' : '.zip');
   }
+  if (/^(?:linux|ubuntu)/i.test(entryKey)) {
+    const isPortableDownload = key === 'downloads.ubuntu-x64-appimage';
+    validateKindAndExtension(errors, entry, key, isPortableDownload ? 'appimage' : 'deb', isPortableDownload ? '.appimage' : '.deb');
+  }
 }
 
 export function launcherPlatformKeys(platform = process.platform, arch = process.arch) {
+  if (platform === 'linux') {
+    if (arch !== 'x64') return [`linux-${arch}`, `ubuntu-${arch}`];
+    return ['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'];
+  }
   const keys = [`${platform}-${arch}`, platform];
   if (platform === 'win32') keys.push('windows', 'windows-x64');
   if (platform === 'darwin') keys.push(arch === 'arm64' ? 'macos-arm64' : 'macos-x64', 'macos');
@@ -238,19 +250,10 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
     }
   }
 
-  const forbiddenDownloadKeys = Object.keys(downloads).filter((key) => /^darwin|^win32|linux|ubuntu/i.test(key));
+  const forbiddenDownloadKeys = Object.keys(downloads).filter((key) => /^(?:darwin|win32|linux)/i.test(key));
   if (forbiddenDownloadKeys.length) {
     errors.push(`manual downloads must use website-facing keys only: ${forbiddenDownloadKeys.join(', ')}`);
   }
-  const forbiddenPlatformKeys = Object.keys(platforms).filter((key) => /linux|ubuntu/i.test(key));
-  if (forbiddenPlatformKeys.length) {
-    errors.push(`platforms must not publish Linux artifacts: ${forbiddenPlatformKeys.join(', ')}`);
-  }
-  const forbiddenStagedPlatformKeys = Object.keys(stagedPlatforms).filter((key) => /linux|ubuntu/i.test(key));
-  if (forbiddenStagedPlatformKeys.length) {
-    errors.push(`stagedPlatforms must not publish Linux artifacts: ${forbiddenStagedPlatformKeys.join(', ')}`);
-  }
-
   for (const [key, entry] of Object.entries(downloads)) {
     validateCommonEntry(errors, entry, `downloads.${key}`, expectedRootUrl, manifestVersion, options);
     validateKnownEntryShape(errors, entry, `downloads.${key}`);
