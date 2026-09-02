@@ -1090,9 +1090,11 @@ assert(releaseWorkflow.includes('dist:regular:ubuntu'), 'GitHub workflow must ca
 assert(releaseWorkflow.includes('aht-launcher-ubuntu'), 'GitHub workflow must upload Ubuntu launcher artifacts.');
 assert(releaseWorkflow.includes('validate-ubuntu-runtime:') && releaseWorkflow.includes('AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher'), 'GitHub validation must install and exercise the native Ubuntu package.');
 assert(
-  releaseWorkflow.includes('sudo chown root:root "$ELECTRON_SANDBOX"')
+  releaseWorkflow.includes('node node_modules/electron/install.js')
+  && releaseWorkflow.includes('sudo chown root:root "$ELECTRON_SANDBOX"')
   && releaseWorkflow.includes('sudo chmod 4755 "$ELECTRON_SANDBOX"')
-  && releaseWorkflow.includes('root:root 4755')
+  && releaseWorkflow.includes('electron_sandbox=$ELECTRON_SANDBOX_IDENTITY')
+  && releaseWorkflow.includes('test "$ELECTRON_SANDBOX_IDENTITY" = "root:root 4755"')
   && releaseWorkflow.includes('"$APPIMAGE" --no-sandbox --version')
   && !desktopMain.includes('AHT_TEST_DISABLE_CHROMIUM_SANDBOX'),
   'Ubuntu CI must configure Electron\'s SUID test sandbox while limiting --no-sandbox to extracted AppImage version probing.'

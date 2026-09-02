@@ -565,6 +565,9 @@ try {
   }
   await evaluate(client, `document.querySelector('#newsTab').click(); true`);
   await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && document.querySelectorAll('#newsFeedGrid .feature-card').length === 4", 'dedicated News view');
+  await movePointer(client, { x: 250, y: 120 });
+  await clearInteractionFocus(client, ['#newsTab']);
+  await waitFor(client, "getComputedStyle(document.querySelector('#newsTab')).color === 'rgb(255, 255, 243)'", 'settled active News navigation color');
   const newsProof = await evaluate(client, `(() => {
     const grid = document.querySelector('#newsFeedGrid');
     const featuredBox = document.querySelector('#newsFeedGrid .news-feed-card.large');

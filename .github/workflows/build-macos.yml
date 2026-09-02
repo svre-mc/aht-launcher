@@ -423,11 +423,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node node_modules/electron/install.js
           ELECTRON_SANDBOX="$GITHUB_WORKSPACE/node_modules/electron/dist/chrome-sandbox"
           test -f "$ELECTRON_SANDBOX"
           sudo chown root:root "$ELECTRON_SANDBOX"
           sudo chmod 4755 "$ELECTRON_SANDBOX"
-          test "$(stat -c '%U:%G %a' "$ELECTRON_SANDBOX")" = "root:root 4755"
+          ELECTRON_SANDBOX_IDENTITY="$(stat -c '%U:%G %a' "$ELECTRON_SANDBOX")"
+          echo "electron_sandbox=$ELECTRON_SANDBOX_IDENTITY"
+          test "$ELECTRON_SANDBOX_IDENTITY" = "root:root 4755"
 
       - name: Audit dependency security
         run: npm run security:audit
