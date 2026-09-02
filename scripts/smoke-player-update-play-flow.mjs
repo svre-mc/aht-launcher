@@ -493,7 +493,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting')", 'revealed player DOM');
   checkpoint('player DOM ready');
   const usernameSurfaceAbsent = await evaluate(client, `
     !document.querySelector('#accountOverlay')

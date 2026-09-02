@@ -5296,6 +5296,36 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   };
 }
 
+async function refreshNewsStatus(packValue = 'stable') {
+  const target = releaseTarget(packValue);
+  const config = configForPack(await loadConfig(), target.id);
+  const installedPath = path.join(config.instanceDir, '.aht-launcher', 'installed.json');
+  const [latestResult, updateLogsResult, installedResult] = await Promise.allSettled([
+    readLatest(config),
+    readUpdateLogs(config, 12),
+    pathExists(installedPath).then((exists) => exists ? readJsonFile(installedPath) : null)
+  ]);
+  const latest = latestResult.status === 'fulfilled' ? latestResult.value : null;
+  const installed = installedResult.status === 'fulfilled' ? installedResult.value : null;
+  const updateBlockedReason = latest && !developerClientBypassAllowed() ? playerUpdateBlockedReason(latest) : '';
+  return {
+    activePack: target.sidebarKey,
+    latestRefreshed: latestResult.status === 'fulfilled',
+    updateLogsRefreshed: updateLogsResult.status === 'fulfilled',
+    latest,
+    latestError: latestResult.status === 'rejected' ? latestResult.reason?.message || String(latestResult.reason || '') : null,
+    updateLogs: updateLogsResult.status === 'fulfilled' ? updateLogsResult.value : [],
+    updateLogsError: updateLogsResult.status === 'rejected' ? updateLogsResult.reason?.message || String(updateLogsResult.reason || '') : null,
+    updateBlockedReason,
+    updateRequired: Boolean(
+      !updateBlockedReason
+      && latest
+      && latest.required !== false
+      && installed?.version !== latest.version
+    )
+  };
+}
+
 async function runUpdate(forceRepair = false, options = {}) {
   if (updateState.running) {
     appendOperationLine(updateState, `${forceRepair ? 'Repair' : 'Update'} request ignored because an install is already running.`);
@@ -11228,6 +11258,7 @@ ipcMain.handle('status:get', async (_event, payload = {}) => {
     includeUpdateLogs: Boolean(payload?.includeUpdateLogs)
   });
 });
+ipcMain.handle('news:refresh', async (_event, payload = {}) => refreshNewsStatus(payload?.packKey || payload || 'stable'));
 ipcMain.handle('settings:save', async (_event, payload = {}) => {
   if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'config')) {
     return saveSettings(payload.config || {}, payload.packKey || 'stable');

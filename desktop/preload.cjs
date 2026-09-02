@@ -14,6 +14,7 @@ const playerApi = {
     preferCache: Boolean(options.preferCache),
     includeUpdateLogs: Boolean(options.includeUpdateLogs)
   }),
+  refreshNews: (packKey = 'aht') => ipcRenderer.invoke('news:refresh', { packKey }),
   copyErrorReport: (payload) => ipcRenderer.invoke('diagnostics:copyErrorReport', payload || {}),
   saveSettings: (config, packKey = 'aht') => ipcRenderer.invoke('settings:save', { config, packKey }),
   testFeed: (config, packKey = 'aht') => ipcRenderer.invoke('settings:testFeed', { config, packKey }),

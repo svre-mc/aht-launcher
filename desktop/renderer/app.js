@@ -186,6 +186,17 @@ if (!window.aht) {
   const mockUpdateLogs = [];
   window.aht = {
     getStatus: async () => mockStatus,
+    refreshNews: async (packKey = "aht") => ({
+      activePack: packKey === "ptb" ? "ptb" : "aht",
+      latestRefreshed: true,
+      updateLogsRefreshed: true,
+      latest: mockStatus.latest,
+      latestError: null,
+      updateLogs: mockUpdateLogs.slice(0, 3),
+      updateLogsError: null,
+      updateBlockedReason: "",
+      updateRequired: false
+    }),
     copyErrorReport: async () => ({ ok: true, copied: true, chars: 0 }),
     saveSettings: async (settings = {}) => {
       mockStatus.config = {
@@ -4241,10 +4252,15 @@ async function refresh(packKey = activeSidebarPack, options = {}) {
   return status;
 }
 
-function mergeLaunchPreparation(status, preparation) {
+function mergeLaunchPreparation(status, preparation, options = {}) {
   const merged = { ...(status || {}), ...(preparation || {}) };
   for (const key of ['latest', 'installed', 'integrity', 'minecraftProfile', 'java8Runtime']) {
     if (preparation?.[key] === undefined) merged[key] = status?.[key];
+  }
+  if (options.preserveStatusPackageState) {
+    for (const key of ['latest', 'installed', 'integrity', 'updateBlockedReason', 'updateRequired']) {
+      if (Object.prototype.hasOwnProperty.call(status || {}, key)) merged[key] = status[key];
+    }
   }
   return merged;
 }
@@ -4286,6 +4302,43 @@ async function refreshPackQuietly(packKey = activeSidebarPack) {
     }
   } catch (error) {
     console.warn(`Status refresh failed for ${packKey}`, error);
+  }
+}
+
+async function refreshStartupNewsQuietly(packKey = activeSidebarPack) {
+  if (typeof window.aht?.refreshNews !== "function") return null;
+  try {
+    const news = await window.aht.refreshNews(packKey);
+    const statusPack = news?.activePack || packKey;
+    const cached = packStatusCache.get(statusPack);
+    if (!cached) return news;
+    const status = { ...cached };
+    if (news.latestRefreshed) {
+      status.latest = news.latest;
+      status.latestError = news.latestError || null;
+      status.updateBlockedReason = news.updateBlockedReason || "";
+      status.updateRequired = Boolean(news.updateRequired);
+    } else if (news.latestError) {
+      status.latestError = news.latestError;
+    }
+    if (news.updateLogsRefreshed) {
+      status.updateLogs = Array.isArray(news.updateLogs) ? news.updateLogs : [];
+      status.updateLogsError = news.updateLogsError || null;
+    } else if (news.updateLogsError) {
+      status.updateLogsError = news.updateLogsError;
+    }
+    const [hydrated] = await preloadStartupNewsArtwork([{ status: "fulfilled", value: status }]);
+    const readyStatus = hydrated?.status === "fulfilled" ? hydrated.value : status;
+    packStatusCache.set(statusPack, readyStatus);
+    if (statusPack === activeSidebarPack && !sidebarSwitching) {
+      statusRefreshGeneration += 1;
+      renderStatus(readyStatus);
+      lastStatusRefreshAt = Date.now();
+    }
+    return readyStatus;
+  } catch (error) {
+    console.warn(`News refresh failed for ${packKey}`, error);
+    return null;
   }
 }
 
@@ -4535,9 +4588,9 @@ async function renderPreparedStartupStatuses(preparation = {}, results = null, o
   const mergedResults = hydratedResults.map((result, index) => {
     if (result.status !== "fulfilled") return result;
     const packKey = packKeys[index];
-    const prepared = mergeLaunchPreparation(result.value, preparation?.packs?.[packKey]);
+    const prepared = mergeLaunchPreparation(result.value, preparation?.packs?.[packKey], { preserveStatusPackageState: true });
     const merged = packKey === activeSidebarPack
-      ? mergeLaunchPreparation(prepared, activeSelection)
+      ? mergeLaunchPreparation(prepared, activeSelection, { preserveStatusPackageState: true })
       : prepared;
     packStatusCache.set(merged.activePack || packKey, merged);
     return { status: "fulfilled", value: merged };
@@ -4559,18 +4612,18 @@ async function prepareStartupAndRender(options = {}) {
   });
   try {
     const packKeys = ["aht", "ptb"];
-    const loadNewsStatusResults = () => Promise.allSettled(packKeys.map((packKey) => (
-      window.aht.getStatus(packKey, { preferCache: true, includeUpdateLogs: true })
+    const loadNewsStatusResults = (preferCache) => Promise.allSettled(packKeys.map((packKey) => (
+      window.aht.getStatus(packKey, { preferCache, includeUpdateLogs: true })
     ))).then((results) => preloadStartupNewsArtwork(results));
     let preparation;
     let newsStatusResults;
     if (initialState.initialized && !initialState.firstInitialization) {
       preparation = await window.aht.prepareStartup();
-      newsStatusResults = await loadNewsStatusResults();
+      newsStatusResults = await loadNewsStatusResults(true);
     } else {
       [preparation, newsStatusResults] = await Promise.all([
         window.aht.prepareStartup(),
-        loadNewsStatusResults()
+        loadNewsStatusResults(false)
       ]);
     }
     renderStartupPreparationState({ ...preparation, firstInitialization: Boolean(preparation.firstInitialization), percent: 100 });
@@ -4743,8 +4796,10 @@ async function bootstrapLauncher() {
   await waitForNextPaint();
   revealLauncher();
   window.setTimeout(() => {
-    void refreshPackQuietly("aht");
-    void refreshPackQuietly("ptb");
+    if (!startupFirstInitialization) {
+      void refreshStartupNewsQuietly("aht");
+      void refreshStartupNewsQuietly("ptb");
+    }
     void loadLauncherSocialLinks({ forceRefresh: true }).catch(() => {});
   }, 0);
 }
