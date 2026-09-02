@@ -37,6 +37,10 @@ const pureChecks = [
   ['test:item-fire-fix-release']
 ];
 
+const linuxExcludedElectronChecks = process.platform === 'linux'
+  ? new Set(['test:developer-secret', 'test:developer-update-log-auth'])
+  : new Set();
+
 const electronChecks = [
   // Run the least-recently validated cross-platform flows first so native CI
   // surfaces a new platform assumption without replaying every proven smoke.
@@ -66,7 +70,7 @@ const electronChecks = [
   ['test:player-update-play'],
   ['test:account-duplicate'],
   ['test:account-switch'],
-];
+].filter(([name]) => !linuxExcludedElectronChecks.has(name));
 
 const verbose = process.argv.includes('--verbose') || process.env.AHT_VERIFY_VERBOSE === '1';
 const parallel = Math.max(1, Number(process.env.AHT_VERIFY_PARALLEL || 4));
@@ -159,6 +163,9 @@ const started = Date.now();
 try {
   console.log(`Running ${pureChecks.length} pure checks with concurrency ${parallel}...`);
   const pureResults = await runParallel(pureChecks, parallel);
+  if (linuxExcludedElectronChecks.size) {
+    console.log(`Skipping ${[...linuxExcludedElectronChecks].join(', ')} on Linux: the Ubuntu artifact is player-only, while these smokes require an interactive desktop OS secret service for developer credentials.`);
+  }
   console.log(`Running ${electronChecks.length} Electron checks serially...`);
   const electronResults = await runSerial(electronChecks);
   const results = [...pureResults, ...electronResults];

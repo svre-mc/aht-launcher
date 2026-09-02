@@ -8,6 +8,7 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 import { launcherProofPath, launcherProofStorageDir } from '../src/launcherProof.js';
 
 const port = Number(process.argv[2] || 10130);
@@ -47,10 +48,15 @@ const electronArgs = smokeExe
   ? [`--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+const smokeStartedAt = Date.now();
 await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkpoint(label) {
+  console.log(`[player-update-play +${Date.now() - smokeStartedAt}ms] ${label}`);
 }
 
 async function writeJson(file, value) {
@@ -348,6 +354,20 @@ await writeJson(path.join(userData, 'identity.json'), {
   usernameRegisteredAt: new Date().toISOString(),
   usernameRegistrationMode: 'minecraft-launcher'
 });
+const fixtureDeviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: fixtureDeviceCredential.schemaVersion,
+  protocol: fixtureDeviceCredential.protocol,
+  algorithm: fixtureDeviceCredential.algorithm,
+  deviceId: fixtureDeviceCredential.deviceId,
+  publicKey: fixtureDeviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(fixtureDeviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: fixtureDeviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), {});
 await writeJson(path.join(syncedMcRoot, 'versions', versionId, `${versionId}.json`), {});
 
@@ -439,6 +459,7 @@ function spawnPlayerLauncher() {
       AHT_APP_DEFAULTS: defaultsPath,
       AHT_TEST_HOOKS: '1',
       AHT_TEST_USER_DATA: userData,
+      AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
       AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
       AHT_TEST_REMOTE_DEBUG_PORT: String(port),
       AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
@@ -468,10 +489,12 @@ try {
     }
     throw error;
   });
+  checkpoint('debugger target found');
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  checkpoint('player DOM ready');
   const usernameSurfaceAbsent = await evaluate(client, `
     !document.querySelector('#accountOverlay')
       && !document.querySelector('#minecraftUsernameInput')
@@ -484,6 +507,7 @@ try {
   const blocked = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '7.7.7' ? status : false)
   `, 'legacy feed blocked status');
+  checkpoint('legacy feed block verified');
   if (!blocked.updateBlockedReason || blocked.updateRequired || blocked.launchReady || !/Update package is not ready/i.test(blocked.launchBlockedReason || '')) {
     throw new Error(`Legacy feed should be blocked before player install: ${JSON.stringify(blocked)}`);
   }
@@ -558,6 +582,7 @@ try {
           ? ({ ok: true, result: update.lastResult })
           : false))
   `, 'fresh player UI update transaction without settings prompt', 480);
+  checkpoint('fresh player update completed');
   if (!updateResult.ok || updateResult.result?.installed?.version !== '7.7.7') {
     throw new Error(`Fresh player update failed: ${JSON.stringify(updateResult)}`);
   }
@@ -641,6 +666,7 @@ try {
 
   await evaluate(client, `document.querySelector('#scanButton')?.click(); true`);
   const cleanScanUi = await waitForCleanScanUiReset(client, 60);
+  checkpoint('clean scan UI reset');
 
   const stableProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
     sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
@@ -653,6 +679,7 @@ try {
   if (!playResult.ok || !playResult.result?.ok) {
     throw new Error(`Clean player Play failed: ${JSON.stringify(playResult)}`);
   }
+  checkpoint('stable Play handoff returned');
   for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
     await sleep(250);
   }
@@ -714,6 +741,7 @@ try {
   if (!seededPtbPreparation?.launchReady || seededPtbPreparation?.launchPreparationState !== 'ready') {
     throw new Error(`The dynamically seeded PTB fixture could not be prepared before its sidebar click: ${JSON.stringify(seededPtbPreparation)}`);
   }
+  checkpoint('PTB preparation seeded');
   await fsp.rm(fakeLauncherMarker, { force: true });
   await evaluate(client, `document.querySelector('#ptbTileButton')?.click(); true`);
   await waitFor(client, `window.aht.getStatus('ptb').then((status) =>
@@ -744,6 +772,7 @@ try {
   }
   await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'
     && document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'`, 'installed PTB Play completion');
+  checkpoint('first PTB Play completed');
   const ptbProfilesAfterPlay = [mcRoot, syncedMcRoot].map((rootDir) => (
     sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
   ));
@@ -804,6 +833,7 @@ try {
       return saved && status.launchReady && status.launchPreparationState === 'ready' ? status : false;
     })
   `, 'PTB non-preparation settings save');
+  checkpoint('PTB settings save preserved preparation');
   if (
     !ptbPreparationBeforeSettings.launchPreparedAt
     || ptbPreparationAfterSettings.launchPreparedAt !== ptbPreparationBeforeSettings.launchPreparedAt
@@ -826,6 +856,7 @@ try {
     throw new Error(`Second PTB Play after Game Settings did not open the prepared Minecraft Launcher route within one second: ${secondPtbPlayHandoffMs}ms.`);
   }
   await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'`, 'second PTB Play completion');
+  checkpoint('second PTB Play completed');
   const ptbPreparationAfterSecondPlay = await evaluate(client, `window.aht.getStatus('ptb', { preferCache: true })`);
   if (!ptbPreparationAfterSecondPlay.launchReady || ptbPreparationAfterSecondPlay.launchPreparedAt !== ptbPreparationBeforeSettings.launchPreparedAt) {
     throw new Error(`Second PTB Play did not reuse the startup-prepared snapshot: ${JSON.stringify(ptbPreparationAfterSecondPlay)}`);
@@ -918,6 +949,7 @@ try {
   if (!closeResult) {
     throw new Error('A fresh modpack game-start signal did not close AHT Launcher when the saved preference was enabled.');
   }
+  checkpoint('close-on-game-start verified');
 
   client.close();
   client = null;
@@ -943,11 +975,13 @@ try {
   const warmSpawnedAt = Date.now();
   warmChild = spawnPlayerLauncher();
   const warmTarget = await waitForTarget();
+  checkpoint('warm debugger target found');
   client = await connect(warmTarget.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "!document.body.classList.contains('is-booting')", '31-minute warm startup', 200);
   const warmStartupMs = Date.now() - warmSpawnedAt;
+  checkpoint('warm startup ready');
   const warmStatus = await evaluate(client, `window.aht.getStatus('stable', { preferCache: true })`);
   if (warmStartupMs >= 5_000 || !warmStatus.launchReady || warmStatus.launchPreparationState !== 'ready') {
     throw new Error(`A 31-minute warm startup re-evaluated the modpack instead of reusing saved prerequisites: ${JSON.stringify({ warmStartupMs, warmStatus })}`);
@@ -965,6 +999,7 @@ try {
     throw new Error(`Warm Play did not immediately open the saved launcher route: ${warmPlayHandoffMs}ms.`);
   }
   const warmPlayResult = await evaluate(client, 'window.__ahtWarmPlay');
+  checkpoint('warm Play result returned');
   if (!warmPlayResult?.ok || !warmPlayResult.result?.ok) {
     throw new Error(`Warm Play failed after its immediate handoff: ${JSON.stringify(warmPlayResult)}`);
   }
