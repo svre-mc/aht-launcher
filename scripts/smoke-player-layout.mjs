@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -85,6 +85,121 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function queryWindowsNativeHitTest(processId, points) {
+  if (process.platform !== 'win32') {
+    return { supported: false, samples: [] };
+  }
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AhtNativeWindowHitTest {
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+  public static IntPtr FindLauncherWindow(int[] processIds) {
+    var wanted = new System.Collections.Generic.HashSet<uint>();
+    foreach (int processId in processIds) wanted.Add((uint)processId);
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((hWnd, lParam) => {
+      uint processId;
+      GetWindowThreadProcessId(hWnd, out processId);
+      RECT rect;
+      if (wanted.Contains(processId) && GetWindowRect(hWnd, out rect) && rect.Right - rect.Left >= 1000 && rect.Bottom - rect.Top >= 500) {
+        found = hWnd;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  public static int Hit(IntPtr hWnd, int x, int y) {
+    uint packed = ((uint)(ushort)y << 16) | (uint)(ushort)x;
+    return SendMessage(hWnd, 0x84, IntPtr.Zero, new IntPtr(unchecked((int)packed))).ToInt32();
+  }
+}
+'@
+$targetPid = [int]$env:AHT_NATIVE_HIT_PID
+$pointJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AHT_NATIVE_HIT_POINTS))
+$points = $pointJson | ConvertFrom-Json
+$handle = [IntPtr]::Zero
+$windowPid = 0
+$userDataNeedle = [string]$env:AHT_NATIVE_HIT_USER_DATA
+for ($attempt = 0; $attempt -lt 100 -and $handle -eq [IntPtr]::Zero; $attempt += 1) {
+  $processRows = @(Get-CimInstance Win32_Process)
+  $candidatePids = @($targetPid)
+  if (-not [string]::IsNullOrWhiteSpace($userDataNeedle)) {
+    $candidatePids += @($processRows | Where-Object {
+      -not [string]::IsNullOrWhiteSpace([string]$_.CommandLine) -and
+      ([string]$_.CommandLine).IndexOf($userDataNeedle, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    } | ForEach-Object { [int]$_.ProcessId })
+  }
+  for ($depth = 0; $depth -lt 4; $depth += 1) {
+    $parents = @($candidatePids | Select-Object -Unique)
+    $candidatePids += @($processRows | Where-Object { $parents -contains [int]$_.ParentProcessId } | ForEach-Object { [int]$_.ProcessId })
+  }
+  $candidatePids = @($candidatePids | Select-Object -Unique)
+  $handle = [AhtNativeWindowHitTest]::FindLauncherWindow([int[]]$candidatePids)
+  if ($handle -ne [IntPtr]::Zero) {
+    foreach ($candidatePid in $candidatePids) {
+      $candidateHandle = [AhtNativeWindowHitTest]::FindLauncherWindow([int[]]@($candidatePid))
+      if ($candidateHandle -eq $handle) {
+        $windowPid = $candidatePid
+        break
+      }
+    }
+  }
+  if ($handle -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+}
+if ($handle -eq [IntPtr]::Zero) { throw "No main window handle for launcher PID $targetPid" }
+$origin = New-Object AhtNativeWindowHitTest+POINT
+if (-not [AhtNativeWindowHitTest]::ClientToScreen($handle, [ref]$origin)) { throw 'ClientToScreen failed' }
+$result = foreach ($point in $points) {
+  $clientX = [int][Math]::Round([double]$point.x)
+  $clientY = [int][Math]::Round([double]$point.y)
+  $screenX = $origin.X + $clientX
+  $screenY = $origin.Y + $clientY
+  [pscustomobject]@{
+    windowPid = $windowPid
+    controlId = [string]$point.controlId
+    clientX = $clientX
+    clientY = $clientY
+    screenX = $screenX
+    screenY = $screenY
+    hit = [AhtNativeWindowHitTest]::Hit($handle, $screenX, $screenY)
+  }
+}
+@($result) | ConvertTo-Json -Compress
+`;
+  const encodedPoints = Buffer.from(JSON.stringify(points), 'utf8').toString('base64');
+  const output = execFileSync('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      AHT_NATIVE_HIT_PID: String(processId),
+      AHT_NATIVE_HIT_POINTS: encodedPoints,
+      AHT_NATIVE_HIT_USER_DATA: userData
+    },
+    timeout: 15000,
+    windowsHide: true
+  }).trim();
+  const decoded = output ? JSON.parse(output) : [];
+  return { supported: true, samples: Array.isArray(decoded) ? decoded : [decoded] };
+}
+
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -163,6 +278,21 @@ async function waitFor(client, expression, label, attempts = 160) {
     await sleep(250);
   }
   throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function moveMouseUntilHovered(client, selector, point, label, attempts = 8) {
+  await client.call('Page.bringToFront');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+    await sleep(80);
+    const hovered = await evaluate(client, `document.querySelector(${JSON.stringify(selector)})?.matches(':hover') || false`);
+    if (hovered) return true;
+  }
+  const pointTarget = await evaluate(client, `(() => {
+    const target = document.elementFromPoint(${Number(point.x)}, ${Number(point.y)});
+    return { id: target?.id || '', className: typeof target?.className === 'string' ? target.className : '', tag: target?.tagName || '' };
+  })()`);
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ selector, point, pointTarget })}`);
 }
 
 async function setWindowSize(client, _targetId, width, height) {
@@ -448,17 +578,162 @@ try {
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
-  const fixedWindowProof = await evaluate(client, `({
-    innerWidth: window.innerWidth,
-    innerHeight: window.innerHeight,
-    documentWidth: document.documentElement.clientWidth,
-    documentHeight: document.documentElement.clientHeight,
-    controls: document.querySelectorAll('.window-controls .window-control').length,
-    minimizeLabel: document.querySelector('#windowMinimizeButton')?.getAttribute('aria-label') || '',
-    closeLabel: document.querySelector('#windowCloseButton')?.getAttribute('aria-label') || ''
-  })`);
-  if (fixedWindowProof.innerWidth !== 1432 || fixedWindowProof.innerHeight !== 760 || fixedWindowProof.documentWidth !== 1432 || fixedWindowProof.documentHeight !== 760 || fixedWindowProof.controls !== 2 || fixedWindowProof.minimizeLabel !== 'Minimize launcher' || fixedWindowProof.closeLabel !== 'Close launcher') {
-    throw new Error(`Launcher must use the fixed 1432x760 frameless shell with its own controls: ${JSON.stringify(fixedWindowProof)}`);
+  await waitFor(client, "document.body.classList.contains('is-launcher-ready') && !document.querySelector('#profileFriendsButton')?.hidden", 'interactive player window chrome');
+  const fixedWindowProof = await evaluate(client, `(() => {
+    const rectOf = (node) => {
+      const rect = node?.getBoundingClientRect();
+      return rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
+    };
+    const controls = document.querySelector('.window-controls');
+    const dragRegion = document.querySelector('#developerWindowDragRegion');
+    const minimize = document.querySelector('#windowMinimizeButton');
+    const close = document.querySelector('#windowCloseButton');
+    const topbar = document.querySelector('.topbar');
+    const social = document.querySelector('#launcherSocialMenu');
+    const profile = document.querySelector('#profileFriendsButton');
+    const controlsStyle = controls ? getComputedStyle(controls) : null;
+    const dragRegionStyle = dragRegion ? getComputedStyle(dragRegion) : null;
+    const topbarStyle = topbar ? getComputedStyle(topbar) : null;
+    const hitMap = (node) => {
+      const rect = node?.getBoundingClientRect();
+      if (!rect) return [];
+      const xs = [rect.left + 3, rect.left + rect.width / 2, rect.right - 3];
+      const ys = [rect.top + 3, rect.top + rect.height / 2, rect.bottom - 3];
+      return ys.flatMap((y) => xs.map((x) => {
+        const target = document.elementFromPoint(x, y);
+        return {
+          x,
+          y,
+          directId: target?.id || '',
+          directTag: target?.tagName || '',
+          controlId: target?.closest?.('.window-control')?.id || ''
+        };
+      }));
+    };
+    const closeRect = close?.getBoundingClientRect();
+    const closeHit = closeRect
+      ? document.elementFromPoint(closeRect.left + closeRect.width / 2, closeRect.top + closeRect.height / 2)?.closest?.('.window-control')?.id || ''
+      : '';
+    return {
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      documentWidth: document.documentElement.clientWidth,
+      documentHeight: document.documentElement.clientHeight,
+      controls: document.querySelectorAll('.window-controls .window-control').length,
+      controlsDisplay: controlsStyle?.display || '',
+      controlsVisibility: controlsStyle?.visibility || '',
+      controlsOpacity: Number(controlsStyle?.opacity || 0),
+      controlsZIndex: Number(controlsStyle?.zIndex || 0),
+      topbarZIndex: Number(topbarStyle?.zIndex || 0),
+      controlsRect: rectOf(controls),
+      dragRegionRect: rectOf(dragRegion),
+      dragRegionDisplay: dragRegionStyle?.display || '',
+      dragRegionPointerEvents: dragRegionStyle?.pointerEvents || '',
+      dragRegionAppRegion: dragRegionStyle?.getPropertyValue('-webkit-app-region')?.trim() || '',
+      dragPointTarget: (() => {
+        const target = document.elementFromPoint(800, 14);
+        return { id: target?.id || '', className: typeof target?.className === 'string' ? target.className : '', tag: target?.tagName || '' };
+      })(),
+      minimizeRect: rectOf(minimize),
+      closeRect: rectOf(close),
+      socialRect: rectOf(social),
+      profileRect: rectOf(profile),
+      closeHit,
+      minimizeHitMap: hitMap(minimize),
+      closeHitMap: hitMap(close),
+      minimizeSpanPointerEvents: minimize?.querySelector('span') ? getComputedStyle(minimize.querySelector('span')).pointerEvents : '',
+      closeSpanPointerEvents: close?.querySelector('span') ? getComputedStyle(close.querySelector('span')).pointerEvents : '',
+      minimizeLabel: minimize?.getAttribute('aria-label') || '',
+      closeLabel: close?.getAttribute('aria-label') || ''
+    };
+  })()`);
+  const nativeWindowControlProof = queryWindowsNativeHitTest(child.pid, [
+    ...fixedWindowProof.minimizeHitMap.map(({ x, y }) => ({ controlId: 'windowMinimizeButton', x, y })),
+    ...fixedWindowProof.closeHitMap.map(({ x, y }) => ({ controlId: 'windowCloseButton', x, y })),
+    { controlId: 'windowDragRegion', x: 800, y: 14 }
+  ]);
+  if (
+    nativeWindowControlProof.supported
+    && (
+      nativeWindowControlProof.samples.length !== 19
+      || nativeWindowControlProof.samples.some((sample) => (
+        sample.controlId === 'windowDragRegion' ? sample.hit !== 2 : sample.hit !== 1
+      ))
+    )
+  ) {
+    throw new Error(`Windows must route the complete minimize/close hitboxes to HTCLIENT and only the dedicated strip to HTCAPTION: ${JSON.stringify({ nativeWindowControlProof, dragRegion: {
+      rect: fixedWindowProof.dragRegionRect,
+      display: fixedWindowProof.dragRegionDisplay,
+      pointerEvents: fixedWindowProof.dragRegionPointerEvents,
+      appRegion: fixedWindowProof.dragRegionAppRegion,
+      pointTarget: fixedWindowProof.dragPointTarget
+    } })}`);
+  }
+  const readControlAppearance = (id) => evaluate(client, `(() => {
+    const node = document.querySelector(${JSON.stringify(id)});
+    const style = node ? getComputedStyle(node) : null;
+    return {
+      hovered: Boolean(node?.matches(':hover')),
+      color: style?.color || '',
+      backgroundColor: style?.backgroundColor || '',
+      pointerEvents: style?.pointerEvents || '',
+      appRegion: style?.getPropertyValue('-webkit-app-region')?.trim() || ''
+    };
+  })()`);
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 600, y: 300 });
+  await sleep(80);
+  const controlRestProof = {
+    minimize: await readControlAppearance('#windowMinimizeButton'),
+    close: await readControlAppearance('#windowCloseButton')
+  };
+  await moveMouseUntilHovered(client, '#windowMinimizeButton', {
+    x: fixedWindowProof.minimizeRect.left + fixedWindowProof.minimizeRect.width / 2,
+    y: fixedWindowProof.minimizeRect.top + fixedWindowProof.minimizeRect.height / 2
+  }, 'minimize control hover state');
+  const minimizeHoverProof = await readControlAppearance('#windowMinimizeButton');
+  await moveMouseUntilHovered(client, '#windowCloseButton', {
+    x: fixedWindowProof.closeRect.left + fixedWindowProof.closeRect.width / 2,
+    y: fixedWindowProof.closeRect.top + fixedWindowProof.closeRect.height / 2
+  }, 'close control hover state');
+  const closeHoverProof = await readControlAppearance('#windowCloseButton');
+  const transparent = 'rgba(0, 0, 0, 0)';
+  if (
+    fixedWindowProof.innerWidth !== 1432
+    || fixedWindowProof.innerHeight !== 760
+    || fixedWindowProof.documentWidth !== 1432
+    || fixedWindowProof.documentHeight !== 760
+    || fixedWindowProof.controls !== 2
+    || fixedWindowProof.controlsDisplay !== 'flex'
+    || fixedWindowProof.controlsVisibility !== 'visible'
+    || fixedWindowProof.controlsOpacity !== 1
+    || fixedWindowProof.controlsZIndex <= fixedWindowProof.topbarZIndex
+    || Math.abs(fixedWindowProof.controlsRect?.top || 0) > 0.5
+    || Math.abs((fixedWindowProof.controlsRect?.right || 0) - fixedWindowProof.innerWidth) > 0.5
+    || (fixedWindowProof.controlsRect?.width || 0) < 55
+    || (fixedWindowProof.controlsRect?.height || 0) < 27
+    || (fixedWindowProof.minimizeRect?.width || 0) < 27
+    || (fixedWindowProof.closeRect?.width || 0) < 27
+    || fixedWindowProof.closeHit !== 'windowCloseButton'
+    || fixedWindowProof.minimizeHitMap.length !== 9
+    || fixedWindowProof.minimizeHitMap.some((hit) => hit.directId !== 'windowMinimizeButton')
+    || fixedWindowProof.closeHitMap.length !== 9
+    || fixedWindowProof.closeHitMap.some((hit) => hit.directId !== 'windowCloseButton')
+    || fixedWindowProof.minimizeSpanPointerEvents !== 'none'
+    || fixedWindowProof.closeSpanPointerEvents !== 'none'
+    || controlRestProof.minimize.backgroundColor !== transparent
+    || controlRestProof.close.backgroundColor !== transparent
+    || !minimizeHoverProof.hovered
+    || minimizeHoverProof.color !== 'rgb(255, 255, 255)'
+    || minimizeHoverProof.backgroundColor !== transparent
+    || !closeHoverProof.hovered
+    || closeHoverProof.color !== 'rgb(255, 255, 255)'
+    || closeHoverProof.backgroundColor !== transparent
+    || Math.abs(fixedWindowProof.innerWidth - (fixedWindowProof.profileRect?.right || 0) - 12) > 0.5
+    || (fixedWindowProof.socialRect?.right || 0) > (fixedWindowProof.profileRect?.left || 0)
+    || fixedWindowProof.minimizeLabel !== 'Minimize launcher'
+    || fixedWindowProof.closeLabel !== 'Close launcher'
+  ) {
+    throw new Error(`Launcher must use the fixed 1432x760 frameless shell with unobstructed BSG-style controls: ${JSON.stringify({ fixedWindowProof, controlRestProof, minimizeHoverProof, closeHoverProof })}`);
   }
   const status = await waitFor(client, "window.aht.getStatus().then((status) => status.latest?.version === '9.9.9' ? status : false)", 'layout latest feed');
   const minecraftProfileProof = await waitFor(client, `
@@ -1022,11 +1297,16 @@ try {
   await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
   await sleep(120);
   const selectedNeutralLightingPixels = await captureSelectedLightingPng(client);
-  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: selectedHoverPoint.x, y: selectedHoverPoint.y });
+  const selectedHoverObserved = await moveMouseUntilHovered(
+    client,
+    '#gameTileButton',
+    selectedHoverPoint,
+    'selected sidebar hover state'
+  );
   await sleep(120);
   const selectedHoverLightingPixels = await captureSelectedLightingPng(client);
   const selectedHoverProof = {
-    hovered: await evaluate(client, `document.querySelector('#gameTileButton')?.matches(':hover') || false`),
+    hovered: Boolean(selectedHoverObserved),
     neutralSha256: sha256(selectedNeutralPixels),
     immediateHoverSha256: sha256(selectedHoverPixels),
     settledHoverSha256: sha256(selectedHoverSettledPixels),
@@ -1753,6 +2033,13 @@ try {
     ok: true,
     root,
     screenshots,
+    windowControls: {
+      nativeHitTestSupported: nativeWindowControlProof.supported,
+      clientSamples: nativeWindowControlProof.samples.filter((sample) => sample.controlId !== 'windowDragRegion').length,
+      clientHitCodes: [...new Set(nativeWindowControlProof.samples.filter((sample) => sample.controlId !== 'windowDragRegion').map((sample) => sample.hit))],
+      dragSamples: nativeWindowControlProof.samples.filter((sample) => sample.controlId === 'windowDragRegion').length,
+      dragHitCodes: [...new Set(nativeWindowControlProof.samples.filter((sample) => sample.controlId === 'windowDragRegion').map((sample) => sample.hit))]
+    },
     socialMenu: {
       rest: socialMenuRestProof,
       expanded: socialMenuExpandedProof,

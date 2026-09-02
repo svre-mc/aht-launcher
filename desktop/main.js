@@ -1317,6 +1317,18 @@ function storedDeveloperSecretCount(file = {}) {
   return DEVELOPER_SECRET_KEYS.filter((key) => hasStoredSecret(file?.secrets?.[key])).length;
 }
 
+function storedDeveloperSecretsDecryptable(file = {}) {
+  try {
+    for (const key of DEVELOPER_SECRET_KEYS) {
+      const record = file?.secrets?.[key];
+      if (hasStoredSecret(record)) decryptDeveloperSecret(record);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function developerSecretVaultEnabled() {
   return launchMode === 'developer' && (!explicitUserDataDir || Boolean(process.env.AHT_DEVELOPER_VAULT_DIR));
 }
@@ -1330,6 +1342,18 @@ function developerSecretVaultDir() {
 
 function developerSecretVaultSnapshotsDir() {
   return path.join(developerSecretVaultDir(), 'snapshots');
+}
+
+function localStateEncryptionFingerprintSync(file = '') {
+  const localState = readJsonSync(file);
+  const encryptedKey = String(localState?.os_crypt?.encrypted_key || '');
+  return encryptedKey
+    ? crypto.createHash('sha256').update(encryptedKey, 'utf8').digest('hex')
+    : '';
+}
+
+function sameStoredDeveloperSecrets(left = {}, right = {}) {
+  return JSON.stringify(left?.secrets || {}) === JSON.stringify(right?.secrets || {});
 }
 
 function developerSecretVaultRecordsSync() {
@@ -1348,7 +1372,8 @@ function developerSecretVaultRecordsSync() {
           secrets,
           localState,
           count: storedDeveloperSecretCount(secrets),
-          hasLocalState: fsSync.existsSync(localState)
+          hasLocalState: fsSync.existsSync(localState),
+          localStateFingerprint: localStateEncryptionFingerprintSync(localState)
         };
       })
       .filter((entry) => entry.secrets?.secrets && entry.count > 0)
@@ -1358,16 +1383,6 @@ function developerSecretVaultRecordsSync() {
   }
 }
 
-function developerSecretsUseLegacyKey(currentSecrets, legacySecrets) {
-  if (!currentSecrets?.secrets || !legacySecrets?.secrets) {
-    return true;
-  }
-  return DEVELOPER_SECRET_KEYS.some((key) => (
-    hasEncryptedStoredSecret(currentSecrets, key)
-    && storedSecretValue(currentSecrets, key) === storedSecretValue(legacySecrets, key)
-  ));
-}
-
 function migrateDeveloperEncryptionProfile() {
   if (!developerSecretVaultEnabled()) {
     return;
@@ -1375,6 +1390,10 @@ function migrateDeveloperEncryptionProfile() {
   const currentDir = app.getPath('userData');
   const legacyDir = path.join(app.getPath('appData'), 'aht-launcher');
   const currentLocalState = path.join(currentDir, 'Local State');
+  // An existing Local State may already protect credentials and the device
+  // identity even when an older secret snapshot contains more fields. Never
+  // replace that live encryption profile based only on ciphertext counts.
+  if (fsSync.existsSync(currentLocalState)) return;
   const currentSecrets = readJsonSync(path.join(currentDir, 'developer.secrets.json'));
   const sources = developerSecretVaultRecordsSync();
   if (path.normalize(currentDir).toLowerCase() !== path.normalize(legacyDir).toLowerCase()) {
@@ -1387,24 +1406,28 @@ function migrateDeveloperEncryptionProfile() {
         secrets: legacySecrets,
         localState: legacyLocalState,
         count: storedDeveloperSecretCount(legacySecrets),
-        hasLocalState: true
+        hasLocalState: true,
+        localStateFingerprint: localStateEncryptionFingerprintSync(legacyLocalState)
       });
     }
   }
 
-  const best = sources
-    .filter((entry) => entry.hasLocalState && entry.count > 0)
-    .sort((left, right) => right.count - left.count || right.name.localeCompare(left.name))[0];
+  const candidates = sources
+    .filter((entry) => entry.hasLocalState && entry.localStateFingerprint && entry.count > 0)
+    .sort((left, right) => right.count - left.count || right.name.localeCompare(left.name));
+  const currentCount = storedDeveloperSecretCount(currentSecrets);
+  const best = currentCount > 0
+    ? candidates.find((entry) => sameStoredDeveloperSecrets(currentSecrets, entry.secrets))
+    : candidates[0];
   if (!best) {
     return;
   }
-  const currentCount = storedDeveloperSecretCount(currentSecrets);
-  const shouldRestore = !fsSync.existsSync(currentLocalState)
-    || currentCount === 0
-    || (currentCount <= best.count && developerSecretsUseLegacyKey(currentSecrets, best.secrets));
-  if (!shouldRestore) return;
   fsSync.mkdirSync(currentDir, { recursive: true });
-  fsSync.copyFileSync(best.localState, currentLocalState);
+  try {
+    fsSync.copyFileSync(best.localState, currentLocalState, fsSync.constants.COPYFILE_EXCL);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
 }
 
 function configPath() {
@@ -1527,6 +1550,10 @@ async function saveProtectedDeveloperCredentials(username = '', password = '', o
     ...(options.recoveredFrom ? { recoveredAt: now, recoveredFrom: String(options.recoveredFrom) } : {}),
     protectedBy: protectedPassword.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
   });
+  const storedSecrets = readJsonSync(developerSecretsPath());
+  if (storedDeveloperSecretCount(storedSecrets) > 0) {
+    await writeDeveloperSecretVaultSnapshot(storedSecrets, { forceNew: true });
+  }
   return { username: cleanUsername, password: cleanPassword };
 }
 
@@ -1635,47 +1662,73 @@ function protectDeviceSecret(value = '') {
 
 let deviceCredentialPromise = null;
 
+async function persistDeviceCredential(file, created, recovery = {}) {
+  const protectedPrivateKey = protectDeviceSecret(created.privateKey);
+  if (!protectedPrivateKey.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+    throw new Error('OS-backed secret encryption is required before this launcher can save its device identity.');
+  }
+  const now = new Date().toISOString();
+  await writeJsonFile(file, {
+    schemaVersion: created.schemaVersion,
+    protocol: created.protocol,
+    algorithm: created.algorithm,
+    deviceId: created.deviceId,
+    publicKey: created.publicKey,
+    privateKey: protectedPrivateKey,
+    createdAt: created.createdAt,
+    ...(recovery.recoveredFrom ? {
+      recoveredAt: now,
+      recoveredFrom: recovery.recoveredFrom,
+      previousIdentityBackup: recovery.previousIdentityBackup || ''
+    } : {}),
+    protectedBy: protectedPrivateKey.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
+  });
+  return created;
+}
+
+async function recoverDeveloperDeviceCredential(file, cause) {
+  if (!isDeveloperMode() || !safeStorageAvailable()) throw cause;
+  const recoveryDir = path.join(app.getPath('userData'), 'recovery-backups');
+  await ensureDir(recoveryDir);
+  const backupName = `device-identity-unreadable-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`;
+  const backupFile = path.join(recoveryDir, backupName);
+  await fs.copyFile(file, backupFile, fsSync.constants.COPYFILE_EXCL);
+  const created = createDeviceCredential();
+  await persistDeviceCredential(file, created, {
+    recoveredFrom: 'unreadable-developer-device-identity',
+    previousIdentityBackup: backupFile
+  });
+  console.warn('Developer device identity was unreadable and was securely recreated after preserving the original file.');
+  return created;
+}
+
 async function loadDeviceCredential() {
   if (deviceCredentialPromise) return deviceCredentialPromise;
   deviceCredentialPromise = (async () => {
     const file = deviceIdentityPath();
     if (await pathExists(file)) {
-      const stored = await readJsonFile(file).catch((error) => {
-        throw new Error(`Device identity could not be read: ${error.message || error}`);
-      });
-      if (stored.privateKey?.encrypted !== true && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
-        throw new Error('Device identity is not protected by OS-backed encryption. Remove it and restart the launcher to create a protected identity.');
-      }
-      let privateKey = '';
       try {
-        privateKey = decryptDeveloperSecret(stored.privateKey || {});
+        const stored = await readJsonFile(file).catch((error) => {
+          throw new Error(`Device identity could not be read: ${error.message || error}`);
+        });
+        if (stored.privateKey?.encrypted !== true && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
+          throw new Error('Device identity is not protected by OS-backed encryption.');
+        }
+        const privateKey = decryptDeveloperSecret(stored.privateKey || {});
+        return validateDeviceCredential({
+          ...stored,
+          privateKey
+        });
       } catch (error) {
-        throw new Error(`Device identity could not be decrypted: ${error.message || error}`);
+        const wrapped = new Error(`Device identity could not be decrypted: ${error.message || error}`);
+        return recoverDeveloperDeviceCredential(file, wrapped);
       }
-      return validateDeviceCredential({
-        ...stored,
-        privateKey
-      });
     }
     if (process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1' && !safeStorageAvailable()) {
       throw new Error('OS-backed secret encryption is required before this launcher can create its device identity.');
     }
     const created = createDeviceCredential();
-    const protectedPrivateKey = protectDeviceSecret(created.privateKey);
-    if (!protectedPrivateKey.encrypted && process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1') {
-      throw new Error('OS-backed secret encryption is required before this launcher can save its device identity.');
-    }
-    await writeJsonFile(file, {
-      schemaVersion: created.schemaVersion,
-      protocol: created.protocol,
-      algorithm: created.algorithm,
-      deviceId: created.deviceId,
-      publicKey: created.publicKey,
-      privateKey: protectedPrivateKey,
-      createdAt: created.createdAt,
-      protectedBy: protectedPrivateKey.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
-    });
-    return created;
+    return persistDeviceCredential(file, created);
   })().catch((error) => {
     deviceCredentialPromise = null;
     throw error;
@@ -1861,15 +1914,35 @@ async function attachDeveloperVaultEncryptionProfile(snapshotDir, currentLocalSt
   return false;
 }
 
-async function writeDeveloperSecretVaultSnapshot(file = {}) {
-  if (!developerSecretVaultEnabled() || storedDeveloperSecretCount(file) === 0) return null;
-  const currentLocalState = path.join(app.getPath('userData'), 'Local State');
+async function copyDeveloperVaultCompanionFiles(snapshotDir) {
+  for (const fileName of ['developer.credentials.json', 'device-identity.json']) {
+    const source = path.join(app.getPath('userData'), fileName);
+    const destination = path.join(snapshotDir, fileName);
+    if (await pathExists(source) && !(await pathExists(destination))) {
+      await fs.copyFile(source, destination, fsSync.constants.COPYFILE_EXCL).catch((error) => {
+        if (error?.code !== 'EEXIST') throw error;
+      });
+    }
+  }
+}
 
-  const existing = developerSecretVaultRecordsSync()[0];
-  if (existing && JSON.stringify(existing.secrets?.secrets || {}) === JSON.stringify(file.secrets || {})) {
+async function writeDeveloperSecretVaultSnapshot(file = {}, options = {}) {
+  if (!developerSecretVaultEnabled()
+      || storedDeveloperSecretCount(file) === 0
+      || !storedDeveloperSecretsDecryptable(file)) return null;
+  const currentLocalState = path.join(app.getPath('userData'), 'Local State');
+  const currentLocalStateFingerprint = localStateEncryptionFingerprintSync(currentLocalState);
+
+  const existing = options.forceNew ? null : developerSecretVaultRecordsSync().find((entry) => (
+    sameStoredDeveloperSecrets(entry.secrets, file)
+    && currentLocalStateFingerprint
+    && entry.localStateFingerprint === currentLocalStateFingerprint
+  ));
+  if (existing) {
     if (!existing.hasLocalState) {
       void attachDeveloperVaultEncryptionProfile(existing.dir, currentLocalState).catch(() => {});
     }
+    await copyDeveloperVaultCompanionFiles(existing.dir);
     return existing.dir;
   }
 
@@ -1883,6 +1956,7 @@ async function writeDeveloperSecretVaultSnapshot(file = {}) {
     if (await pathExists(currentLocalState)) {
       await fs.copyFile(currentLocalState, path.join(temporaryDir, 'Local State'));
     }
+    await copyDeveloperVaultCompanionFiles(temporaryDir);
     await writeJsonFile(path.join(temporaryDir, 'developer.secrets.json'), file);
     await fs.rename(temporaryDir, snapshotDir);
   } catch (error) {
@@ -10956,6 +11030,7 @@ function createWindow() {
     maximizable: false,
     fullscreenable: false,
     frame: false,
+    thickFrame: false,
     backgroundColor: '#f5f5f7',
     title: 'A Hard Time Launcher',
     icon: path.join(appRoot, 'build', 'icon.png'),

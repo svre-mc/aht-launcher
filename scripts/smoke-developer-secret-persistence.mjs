@@ -8,6 +8,8 @@ const basePort = Number(process.argv[2] || (12000 + Math.floor(Math.random() * 2
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-dev-secret-'));
 const userData = path.join(root, 'userData');
 const vaultDir = path.join(root, 'developer-secret-vault');
+const splitUserData = path.join(root, 'split-userData');
+const splitVaultDir = path.join(root, 'split-developer-secret-vault');
 const secretValue = 'fake-cf-key-persisted';
 const proofSecretValue = 'proof-secret-persisted';
 const socialSecretValue = 'social-server-secret-persisted-at-least-32-bytes';
@@ -18,9 +20,9 @@ const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
-const electronArgsFor = (port) => smokeExe
-  ? ['--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
-  : ['.', '--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+const electronArgsFor = (port, targetUserData = userData) => smokeExe
+  ? ['--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${targetUserData}`]
+  : ['.', '--developer', `--remote-debugging-port=${port}`, `--user-data-dir=${targetUserData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 
 function sleep(ms) {
@@ -130,17 +132,85 @@ async function waitForVaultSnapshotProfile(timeoutMs = 15000) {
   throw new Error('Timed out waiting for a decryptable developer secret vault snapshot');
 }
 
-async function runDeveloperApp(port, task) {
+async function readDeveloperWindowChrome(client, contentSelector) {
+  return evaluate(client, `(() => {
+    const rectOf = (node) => {
+      const rect = node?.getBoundingClientRect();
+      return rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
+    };
+    const frame = document.querySelector('.app-frame');
+    const drag = document.querySelector('#developerWindowDragRegion');
+    const controls = document.querySelector('.window-controls');
+    const minimize = document.querySelector('#windowMinimizeButton');
+    const close = document.querySelector('#windowCloseButton');
+    const content = document.querySelector(${JSON.stringify(contentSelector)});
+    const dragStyle = drag ? getComputedStyle(drag) : null;
+    const controlsStyle = controls ? getComputedStyle(controls) : null;
+    const hitMap = (node) => {
+      const rect = node?.getBoundingClientRect();
+      if (!rect) return [];
+      const xs = [rect.left + 3, rect.left + rect.width / 2, rect.right - 3];
+      const ys = [rect.top + 3, rect.top + rect.height / 2, rect.bottom - 3];
+      return ys.flatMap((y) => xs.map((x) => {
+        const target = document.elementFromPoint(x, y);
+        return { directId: target?.id || '', directTag: target?.tagName || '' };
+      }));
+    };
+    return {
+      controlsDirectlyOwnedByFrame: controls?.parentElement === frame,
+      dragDisplay: dragStyle?.display || '',
+      dragAppRegion: dragStyle?.getPropertyValue('-webkit-app-region') || '',
+      controlsDisplay: controlsStyle?.display || '',
+      controlsPointerEvents: controlsStyle?.pointerEvents || '',
+      drag: rectOf(drag),
+      controls: rectOf(controls),
+      minimize: rectOf(minimize),
+      close: rectOf(close),
+      minimizeHitMap: hitMap(minimize),
+      closeHitMap: hitMap(close),
+      minimizeSpanPointerEvents: minimize?.querySelector('span') ? getComputedStyle(minimize.querySelector('span')).pointerEvents : '',
+      closeSpanPointerEvents: close?.querySelector('span') ? getComputedStyle(close.querySelector('span')).pointerEvents : '',
+      content: rectOf(content)
+    };
+  })()`);
+}
+
+function assertDeveloperWindowChrome(proof, phase) {
+  if (
+    !proof?.controlsDirectlyOwnedByFrame
+    || proof.dragDisplay === 'none'
+    || proof.dragAppRegion.trim() !== 'drag'
+    || proof.controlsDisplay === 'none'
+    || proof.controlsPointerEvents === 'none'
+    || proof.drag?.height < 33
+    || proof.minimize?.width < 33
+    || proof.minimize?.height < 33
+    || proof.close?.width < 33
+    || proof.close?.height < 33
+    || proof.minimizeHitMap?.length !== 9
+    || proof.minimizeHitMap.some((hit) => hit.directId !== 'windowMinimizeButton')
+    || proof.closeHitMap?.length !== 9
+    || proof.closeHitMap.some((hit) => hit.directId !== 'windowCloseButton')
+    || proof.minimizeSpanPointerEvents !== 'none'
+    || proof.closeSpanPointerEvents !== 'none'
+    || proof.drag.right > proof.controls.left + 0.5
+    || proof.content?.top < proof.drag.bottom
+  ) {
+    throw new Error(`Developer window chrome failed during ${phase}: ${JSON.stringify(proof)}`);
+  }
+}
+
+async function runDeveloperApp(port, task, targetUserData = userData, targetVaultDir = vaultDir) {
   const endpoint = `http://127.0.0.1:${port}`;
-  const child = spawn(electronBin, electronArgsFor(port), {
+  const child = spawn(electronBin, electronArgsFor(port, targetUserData), {
     cwd: electronCwd,
     env: {
       ...process.env,
       AHT_ALLOW_DEVELOPER: '1',
       AHT_LAUNCHER_SOURCE_ROOT: process.cwd(),
       AHT_TEST_HOOKS: '1',
-      AHT_TEST_USER_DATA: userData,
-      AHT_DEVELOPER_VAULT_DIR: vaultDir,
+      AHT_TEST_USER_DATA: targetUserData,
+      AHT_DEVELOPER_VAULT_DIR: targetVaultDir,
       AHT_DEVELOPER_USERNAME: '',
       AHT_DEVELOPER_PASSWORD: '',
       AHT_SKIP_REMOTE_DEVELOPER_LOGIN: '1',
@@ -156,9 +226,9 @@ async function runDeveloperApp(port, task) {
     client = await connect(target.webSocketDebuggerUrl);
     await client.call('Runtime.enable');
     await client.call('Page.enable');
-    // This service-level test intentionally initializes Electron safeStorage before
-    // the normal UI gate; real user-action tests wait for is-launcher-ready.
-    await waitFor(client, "document.readyState === 'complete' && document.querySelector('#developerLoginForm')", 'developer login DOM');
+    await waitFor(client, "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm')", 'interactive developer login DOM');
+    await waitFor(client, "document.body.classList.contains('dev-mode') && document.body.classList.contains('dev-locked')", 'locked developer shell');
+    assertDeveloperWindowChrome(await readDeveloperWindowChrome(client, '#developerLoginScreen .dev-login-box'), 'locked login');
     await evaluate(client, `
       (() => {
         document.querySelector('#adminPasswordInput').value = 'test-dev-password';
@@ -166,6 +236,8 @@ async function runDeveloperApp(port, task) {
       })()
     `);
     await waitFor(client, "document.body.classList.contains('dev-locked') === false", 'developer unlock');
+    await waitFor(client, "document.querySelector('#developerConsole:not([hidden])')", 'developer console');
+    assertDeveloperWindowChrome(await readDeveloperWindowChrome(client, '#developerConsole .dev-header'), 'unlocked console');
     return await task(client);
   } finally {
     if (client) {
@@ -297,6 +369,87 @@ if (status.config?.developer?.curseforgeApiKey || status.config?.developer?.laun
   throw new Error(`Developer secrets leaked into launcher config: ${JSON.stringify(status.config.developer)}`);
 }
 
+await fsp.mkdir(splitUserData, { recursive: true });
+await fsp.copyFile(path.join(userData, 'launcher.config.json'), path.join(splitUserData, 'launcher.config.json'));
+await fsp.copyFile(path.join(userData, 'identity.json'), path.join(splitUserData, 'identity.json'));
+await writeJson(path.join(splitUserData, 'developer.credentials.json'), {
+  schemaVersion: 1,
+  username: 'admin',
+  password: 'test-dev-password'
+});
+
+await runDeveloperApp(basePort + 2, async (client) => {
+  const initialStatus = await evaluate(client, `window.aht.getStatus().then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
+  if (!initialStatus.ok) throw new Error(`Split-profile seed status failed: ${JSON.stringify(initialStatus)}`);
+}, splitUserData, splitVaultDir);
+
+const splitLocalStateBefore = await fsp.readFile(path.join(splitUserData, 'Local State'));
+const splitCredentialsBefore = await fsp.readFile(path.join(splitUserData, 'developer.credentials.json'));
+const originalSplitDevice = JSON.parse(await fsp.readFile(path.join(splitUserData, 'device-identity.json'), 'utf8'));
+if (originalSplitDevice.privateKey?.encrypted !== true) {
+  throw new Error('Split-profile seed did not create an OS-protected device identity.');
+}
+
+const staleSecrets = await fsp.readFile(path.join(userData, 'developer.secrets.json'));
+await fsp.writeFile(path.join(splitUserData, 'developer.secrets.json'), staleSecrets);
+const unreadableSplitDevice = {
+  ...originalSplitDevice,
+  privateKey: {
+    encrypted: true,
+    value: Buffer.from('intentionally-unreadable-safe-storage-record', 'utf8').toString('base64')
+  }
+};
+await writeJson(path.join(splitUserData, 'device-identity.json'), unreadableSplitDevice);
+const unreadableSplitDeviceBytes = await fsp.readFile(path.join(splitUserData, 'device-identity.json'));
+
+const splitRecovery = await runDeveloperApp(basePort + 3, async (client) => {
+  const recoveredStatus = await evaluate(client, `window.aht.getStatus().then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
+  if (!recoveredStatus.ok) throw new Error(`Split-profile recovered status failed: ${JSON.stringify(recoveredStatus)}`);
+  const staleSecretRead = await evaluate(client, `window.aht.devGetSecrets().then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
+  return {
+    configPackId: recoveredStatus.value?.config?.packId || '',
+    configBucket: recoveredStatus.value?.config?.developer?.r2Bucket || '',
+    staleSecretRead
+  };
+}, splitUserData, vaultDir);
+
+const splitLocalStateAfter = await fsp.readFile(path.join(splitUserData, 'Local State'));
+const splitCredentialsAfter = await fsp.readFile(path.join(splitUserData, 'developer.credentials.json'));
+const staleSecretsAfter = await fsp.readFile(path.join(splitUserData, 'developer.secrets.json'));
+const recoveredSplitDevice = JSON.parse(await fsp.readFile(path.join(splitUserData, 'device-identity.json'), 'utf8'));
+const recoveryBackup = String(recoveredSplitDevice.previousIdentityBackup || '');
+if (!splitLocalStateAfter.equals(splitLocalStateBefore)) {
+  throw new Error('A live developer Local State was replaced by an older vault encryption profile.');
+}
+if (!splitCredentialsAfter.equals(splitCredentialsBefore)) {
+  throw new Error('Protected developer credentials changed during split-profile recovery.');
+}
+if (!staleSecretsAfter.equals(staleSecrets)) {
+  throw new Error('Unreadable encrypted developer secret records were modified or wiped during recovery.');
+}
+if (
+  recoveredSplitDevice.recoveredFrom !== 'unreadable-developer-device-identity'
+  || recoveredSplitDevice.privateKey?.encrypted !== true
+  || !recoveryBackup
+  || !fs.existsSync(recoveryBackup)
+  || !(await fsp.readFile(recoveryBackup)).equals(unreadableSplitDeviceBytes)
+) {
+  throw new Error(`Unreadable developer device identity was not preserved and securely recreated: ${JSON.stringify(recoveredSplitDevice)}`);
+}
+if (
+  splitRecovery.configPackId !== 'a-hard-time-dregora'
+  || splitRecovery.configBucket !== 'ahtlauncher'
+  || splitRecovery.staleSecretRead?.ok !== true
+  || !splitRecovery.staleSecretRead?.value?.warning
+  || splitRecovery.staleSecretRead.value.curseforgeApiKey
+  || splitRecovery.staleSecretRead.value.launcherProofSecret
+  || splitRecovery.staleSecretRead.value.socialServerSecret
+  || splitRecovery.staleSecretRead.value.r2AccessKeyId
+  || splitRecovery.staleSecretRead.value.r2SecretAccessKey
+) {
+  throw new Error(`Developer config hydration or stale-secret isolation failed: ${JSON.stringify(splitRecovery)}`);
+}
+
 console.log(JSON.stringify({
   ok: true,
   root,
@@ -307,6 +460,10 @@ console.log(JSON.stringify({
   vaultRestoredAfterUserDataReset: restored.afterBlankSave?.curseforgeApiKey === secretValue,
   blankSavePreservedSecrets: restored.afterBlankSave?.r2SecretAccessKey === r2SecretKeyValue,
   plaintextDeveloperPasswordMigrated: !migratedCredentials.password && migratedCredentials.protectedPassword?.encrypted === true,
+  liveEncryptionProfilePreserved: splitLocalStateAfter.equals(splitLocalStateBefore),
+  unreadableDeviceIdentityRecovered: recoveredSplitDevice.recoveredFrom === 'unreadable-developer-device-identity',
+  unreadableSecretRecordsPreserved: staleSecretsAfter.equals(staleSecrets),
+  developerWindowChromeVerified: true,
   secretStoredOutsideConfig: !status.config?.developer?.curseforgeApiKey && !status.config?.developer?.launcherProofSecret && !status.config?.developer?.socialServerSecret && !status.config?.developer?.r2AccessKeyId && !status.config?.developer?.r2SecretAccessKey,
   encrypted: Boolean(status.developerSecrets?.encrypted),
   encryptionAvailable: Boolean(status.developerSecrets?.encryptionAvailable)

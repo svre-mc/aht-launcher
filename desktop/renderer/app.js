@@ -1034,8 +1034,36 @@ function updateLogText(log) {
 }
 
 function updateLogImageUrl(log) {
-  const value = String(log?.image?.url || log?.imageUrl || log?.bannerUrl || "").trim();
-  return isRemoteUrl(value) ? value : "";
+  const assetUrl = (value) => {
+    if (typeof value === "string") return value.trim();
+    if (!value || typeof value !== "object") return "";
+    return String(value.url || value.href || value.src || "").trim();
+  };
+  const candidates = [
+    assetUrl(log?.image),
+    log?.imageUrl,
+    log?.image_url,
+    assetUrl(log?.banner),
+    log?.bannerUrl,
+    log?.banner_url,
+    assetUrl(log?.thumbnail),
+    log?.thumbnailUrl,
+    log?.thumbnail_url,
+    assetUrl(log?.coverImage),
+    log?.coverImageUrl,
+    assetUrl(log?.metadata?.image),
+    log?.metadata?.imageUrl,
+    log?.metadata?.image_url,
+    assetUrl(log?.metadata?.banner),
+    log?.metadata?.bannerUrl,
+    assetUrl(log?.metadata?.thumbnail),
+    log?.metadata?.thumbnailUrl
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || "").trim();
+    if (isRemoteUrl(value)) return value;
+  }
+  return "";
 }
 
 function isRemoteUrl(value) {
@@ -4430,12 +4458,6 @@ function preloadImageAsset(source, timeoutMs = STARTUP_NEWS_ART_TIMEOUT_MS) {
   });
 }
 
-function withoutUnavailableNewsArtwork(log) {
-  const copy = { ...(log || {}), imageUrl: "", bannerUrl: "" };
-  if (copy.image && typeof copy.image === "object") copy.image = { ...copy.image, url: "" };
-  return copy;
-}
-
 async function preloadStartupNewsArtwork(statusResults = []) {
   const urls = new Set(["assets/aht-cover.png"]);
   for (const result of statusResults) {
@@ -4445,26 +4467,16 @@ async function preloadStartupNewsArtwork(statusResults = []) {
       if (url) urls.add(url);
     }
   }
-  const outcomes = await Promise.all([...urls].map(async (url) => ({
+  await Promise.all([...urls].map(async (url) => ({
     url,
     loaded: await preloadImageAsset(url, startupFirstInitialization
       ? STARTUP_NEWS_ART_TIMEOUT_MS
       : STARTUP_WARM_NEWS_ART_TIMEOUT_MS)
   })));
-  const unavailable = new Set(outcomes.filter((outcome) => !outcome.loaded).map((outcome) => outcome.url));
-  if (!unavailable.size) return statusResults;
-  return statusResults.map((result) => {
-    if (result?.status !== "fulfilled") return result;
-    return {
-      ...result,
-      value: {
-        ...result.value,
-        updateLogs: (result.value?.updateLogs || []).map((log) => (
-          unavailable.has(updateLogImageUrl(log)) ? withoutUnavailableNewsArtwork(log) : log
-        ))
-      }
-    };
-  });
+  // A preload miss is only a timing result. Keep the published metadata so the
+  // card can finish loading the same image after reveal (or use its CSS fallback
+  // if the URL is genuinely unavailable) instead of permanently becoming filler.
+  return statusResults;
 }
 
 function renderInitialStatusError(error) {

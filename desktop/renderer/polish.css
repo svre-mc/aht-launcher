@@ -415,9 +415,6 @@ body {
   border-bottom-color: rgba(228, 245, 255, 0.29);
 }
 
-.brand,
-.topbar { -webkit-app-region: drag; }
-
 .nav,
 .nav-item,
 .topbar-social,
@@ -433,7 +430,7 @@ body {
   flex: 0 0 106px;
   min-height: 106px;
   max-height: 106px;
-  padding: 0 44px 0 0;
+  padding: 0;
   overflow: visible;
   background:
     linear-gradient(90deg, rgba(13, 16, 17, 0.99), rgba(19, 25, 26, 0.96) 62%, rgba(8, 11, 12, 0.995)),
@@ -911,13 +908,33 @@ textarea {
   color: var(--bsg-primary);
 }
 
+.developer-window-drag-region {
+  position: fixed;
+  top: 0;
+  right: 56px;
+  left: 0;
+  z-index: 1000;
+  display: block;
+  height: 28px;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+body.dev-mode .developer-window-drag-region {
+  right: 68px;
+  height: 34px;
+}
+
 .window-controls {
-  position: absolute;
+  position: fixed;
   top: 0;
   right: 0;
-  z-index: 10;
+  z-index: 1001;
   display: flex;
   height: 28px;
+  isolation: isolate;
+  pointer-events: auto;
+  -webkit-app-region: no-drag !important;
 }
 
 .window-control {
@@ -929,17 +946,32 @@ textarea {
   background: transparent;
   color: rgba(221, 224, 223, 0.66);
   cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag !important;
+}
+
+.window-control > span {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  -webkit-app-region: no-drag !important;
+}
+
+.window-control > span::before,
+.window-control > span::after {
+  pointer-events: none;
 }
 
 .window-control:hover,
 .window-control:focus-visible {
   outline: none;
+  background: transparent;
   color: #fff;
-  text-shadow: 0 0 7px rgba(255, 255, 255, 0.52);
+  text-shadow: none;
 }
 
 .window-close:hover,
-.window-close:focus-visible { background: rgba(176, 37, 37, 0.72); }
+.window-close:focus-visible { background: transparent; }
 
 .window-minimize span::before {
   content: "";
@@ -2295,4 +2327,120 @@ textarea {
 
 .update-log-article-footer {
   display: none;
+}
+
+/* Game view only: one full-art lead story plus two identically sized side
+   stories. Keep this separate from #newsFeedGrid so the dedicated News page
+   retains its accepted single-column 0.1.97 layout. */
+#player #updateLogGrid.update-log-grid {
+  width: 1094px;
+  max-width: calc(100% - 46px);
+  grid-template-columns: 482px 284px 284px;
+  grid-template-rows: 270px;
+  gap: 22px;
+  align-items: stretch;
+}
+
+#player #updateLogGrid > .home-news-card {
+  display: grid;
+  grid-template-rows: 158px 110px;
+  align-self: stretch;
+  width: 100%;
+  height: 270px;
+  min-height: 270px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(218, 230, 232, 0.27);
+  border-radius: 0;
+  background: #16191a;
+  box-shadow: 0 7px 24px rgba(0, 0, 0, 0.46);
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-art {
+  width: 100%;
+  height: 158px;
+  min-height: 158px;
+  aspect-ratio: auto;
+  border-bottom: 1px solid rgba(218, 230, 232, 0.2);
+  background-position: center;
+  background-size: cover;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-copy {
+  display: grid;
+  grid-template-rows: 16px 40px 32px;
+  gap: 2px;
+  height: 110px;
+  min-height: 110px;
+  padding: 6px 13px;
+  align-content: start;
+  background: #16191a;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-copy .feature-meta {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-copy > strong {
+  display: -webkit-box;
+  height: 40px;
+  overflow: hidden;
+  font-size: 16px;
+  line-height: 20px;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-summary {
+  display: -webkit-box;
+  height: 32px;
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 16px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+#player #updateLogGrid > .home-news-card.large {
+  position: relative;
+  display: block;
+  grid-template-rows: none;
+}
+
+#player #updateLogGrid > .home-news-card.large .feature-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+  background-position: center;
+  background-size: cover;
+}
+
+#player #updateLogGrid > .home-news-card.large .feature-copy {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  display: grid;
+  gap: 4px;
+  padding: 54px 16px 13px;
+  background: linear-gradient(180deg, transparent, rgba(3, 5, 6, 0.94) 70%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms linear, visibility 0s linear 120ms;
+}
+
+#player #updateLogGrid > .home-news-card.large:hover .feature-copy {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
 }

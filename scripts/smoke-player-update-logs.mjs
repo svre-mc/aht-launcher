@@ -42,14 +42,16 @@ const logs = [
   },
   {
     id: '00000000-0000-4000-8000-000000000003',
-    title: 'Third newest',
+    title: 'Third newest launcher stability update',
     subtitle: 'A written-only update log.',
     text: '# Written Notes\nSecond visible update log.\n- Non-playable logs should open the full article from the card art or title.\n![Patch comparison](https://packs.example.com/update-media/body-shot.webp)',
     version: '2.8.3',
     publishedAt: '2026-06-24T12:03:00.000Z',
     author: 'admin',
     likes: 16,
-    image: { type: 'image', url: `${workerEndpoint}/update-media/log-3.webp`, path: 'update-media/log-3.webp' }
+    metadata: {
+      image: { type: 'image', url: `${workerEndpoint}/update-media/log-3.webp`, path: 'update-media/log-3.webp' }
+    }
   },
   {
     id: '00000000-0000-4000-8000-000000000002',
@@ -60,6 +62,7 @@ const logs = [
     publishedAt: '2026-06-24T12:02:00.000Z',
     author: 'admin',
     likes: 2,
+    image_url: `${workerEndpoint}/update-media/log-2.webp`,
     media: { type: 'video', url: `${workerEndpoint}/update-media/patch.mp4`, title: 'Direct MP4' }
   },
   {
@@ -311,7 +314,7 @@ const server = http.createServer((request, response) => {
     response.end(JSON.stringify({ logs: logs.slice(0, limit) }));
     return;
   }
-  if (/^\/update-media\/log-[34]\.webp$/.test(url.pathname)) {
+  if (/^\/update-media\/log-[234]\.webp$/.test(url.pathname)) {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'image/png');
     response.end(updateLogArtwork);
@@ -357,22 +360,76 @@ try {
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden", 'fully revealed player DOM');
   await waitFor(client, "document.querySelectorAll('#updateLogGrid .feature-card').length === 3", 'three update-log cards');
+  await movePointer(client, { x: 1080, y: 74 });
+  await clearInteractionFocus(client, ['#updateLogGrid .home-news-card']);
+  await sleep(180);
+  const unavailableArtworkUrl = `${workerEndpoint}/update-media/intentionally-unavailable.webp`;
+  const artworkMetadataProof = await evaluate(client, `(async () => {
+    startupFirstInitialization = false;
+    const published = {
+      image: { type: 'image', url: ${JSON.stringify(unavailableArtworkUrl)} },
+      metadata: { image: { url: ${JSON.stringify(`${workerEndpoint}/update-media/nested.webp`)} } }
+    };
+    const [result] = await preloadStartupNewsArtwork([{ status: 'fulfilled', value: { updateLogs: [published] } }]);
+    return {
+      retainedImageUrl: result?.value?.updateLogs?.[0]?.image?.url || '',
+      resolvedNestedUrl: updateLogImageUrl({ metadata: published.metadata }),
+      resolvedSnakeUrl: updateLogImageUrl({ image_url: ${JSON.stringify(`${workerEndpoint}/update-media/snake.webp`)} }),
+      resolvedStringUrl: updateLogImageUrl({ image: ${JSON.stringify(`${workerEndpoint}/update-media/string.webp`)} })
+    };
+  })()`);
+  if (
+    artworkMetadataProof.retainedImageUrl !== unavailableArtworkUrl
+    || !artworkMetadataProof.resolvedNestedUrl.endsWith('/update-media/nested.webp')
+    || !artworkMetadataProof.resolvedSnakeUrl.endsWith('/update-media/snake.webp')
+    || !artworkMetadataProof.resolvedStringUrl.endsWith('/update-media/string.webp')
+  ) {
+    throw new Error(`News artwork metadata was discarded or not normalized: ${JSON.stringify(artworkMetadataProof)}`);
+  }
   const proof = await evaluate(client, `
     (() => {
-      const cards = [...document.querySelectorAll('#updateLogGrid .feature-card')].map((card) => ({
-        title: card.querySelector('strong')?.textContent || '',
-        meta: card.querySelector('.feature-copy span')?.textContent || '',
-        body: card.querySelector('.feature-summary')?.textContent || '',
-        large: card.classList.contains('large'),
-        playable: Boolean(card.querySelector('.play-glyph')),
-        tag: card.tagName,
-        nestedButtons: card.querySelectorAll('button').length,
-        hasRedundantCta: Boolean(card.querySelector('.feature-cta'))
-      }));
+      const rect = (node) => {
+        const value = node?.getBoundingClientRect();
+        return value ? {
+          left: Math.round(value.left),
+          top: Math.round(value.top),
+          right: Math.round(value.right),
+          bottom: Math.round(value.bottom),
+          width: Math.round(value.width),
+          height: Math.round(value.height)
+        } : null;
+      };
+      const cards = [...document.querySelectorAll('#updateLogGrid .feature-card')].map((card) => {
+        const art = card.querySelector('.feature-art');
+        const copy = card.querySelector('.feature-copy');
+        const title = copy?.querySelector('strong');
+        const summary = card.querySelector('.feature-summary');
+        const copyStyle = getComputedStyle(copy);
+        return {
+          title: title?.textContent || '',
+          meta: card.querySelector('.feature-copy span')?.textContent || '',
+          body: summary?.textContent || '',
+          large: card.classList.contains('large'),
+          playable: Boolean(card.querySelector('.play-glyph')),
+          tag: card.tagName,
+          nestedButtons: card.querySelectorAll('button').length,
+          hasRedundantCta: Boolean(card.querySelector('.feature-cta')),
+          cardRect: rect(card),
+          artRect: rect(art),
+          copyRect: rect(copy),
+          titleRect: rect(title),
+          summaryRect: rect(summary),
+          copyOpacity: copyStyle.opacity,
+          copyVisibility: copyStyle.visibility,
+          hasImage: art?.classList.contains('has-image') || false,
+          backgroundImage: getComputedStyle(art).backgroundImage
+        };
+      });
       return {
         hidden: document.querySelector('#updateLogGrid').hidden,
         count: cards.length,
         cards,
+        gridRect: rect(document.querySelector('#updateLogGrid')),
         fullText: document.querySelector('#updateLogGrid').textContent
       };
     })()
@@ -381,7 +438,7 @@ try {
   if (proof.hidden || proof.count !== 3) {
     throw new Error(`Expected exactly three visible update-log cards: ${JSON.stringify(proof)}`);
   }
-  if (titles.join('|') !== 'Launcher Stability Patch|Third newest|Second newest') {
+  if (titles.join('|') !== 'Launcher Stability Patch|Third newest launcher stability update|Second newest') {
     throw new Error(`Player update logs are not the latest three in order: ${JSON.stringify(proof)}`);
   }
   if (proof.fullText.includes('Old hidden') || proof.fullText.includes('This older log must not render')) {
@@ -398,6 +455,103 @@ try {
   }
   if (JSON.stringify(proof.cards.map((card) => card.playable)) !== JSON.stringify([true, false, true])) {
     throw new Error(`Play buttons should only render for logs with media: ${JSON.stringify(proof)}`);
+  }
+  const [leadHomeCard, firstHomeSideCard, secondHomeSideCard] = proof.cards;
+  if (
+    proof.gridRect?.width !== 1094
+    || leadHomeCard?.cardRect?.width !== 482
+    || firstHomeSideCard?.cardRect?.width !== 284
+    || secondHomeSideCard?.cardRect?.width !== 284
+    || !proof.cards.every((card) => card.cardRect?.height === 270)
+    || firstHomeSideCard?.artRect?.height !== 158
+    || secondHomeSideCard?.artRect?.height !== 158
+    || firstHomeSideCard?.artRect?.width !== secondHomeSideCard?.artRect?.width
+    || firstHomeSideCard?.copyRect?.height !== secondHomeSideCard?.copyRect?.height
+    || firstHomeSideCard?.copyRect?.top !== secondHomeSideCard?.copyRect?.top
+    || firstHomeSideCard?.titleRect?.height !== secondHomeSideCard?.titleRect?.height
+    || firstHomeSideCard?.summaryRect?.top !== secondHomeSideCard?.summaryRect?.top
+    || firstHomeSideCard?.cardRect?.left - leadHomeCard?.cardRect?.right !== 22
+    || secondHomeSideCard?.cardRect?.left - firstHomeSideCard?.cardRect?.right !== 22
+    || leadHomeCard?.artRect?.width !== leadHomeCard?.cardRect?.width - 2
+    || leadHomeCard?.artRect?.height !== leadHomeCard?.cardRect?.height - 2
+    || leadHomeCard?.copyOpacity !== '0'
+    || leadHomeCard?.copyVisibility !== 'hidden'
+    || !firstHomeSideCard?.hasImage
+    || !secondHomeSideCard?.hasImage
+    || !firstHomeSideCard?.backgroundImage.includes('log-3.webp')
+    || !secondHomeSideCard?.backgroundImage.includes('log-2.webp')
+  ) {
+    throw new Error(`Game News lead/side-card geometry or idle visibility regressed: ${JSON.stringify(proof)}`);
+  }
+
+  const fillerGeometryProof = await evaluate(client, `(() => {
+    const card = document.querySelectorAll('#updateLogGrid .home-news-card:not(.large)')[1];
+    const art = card?.querySelector('.feature-art');
+    const before = art?.getBoundingClientRect();
+    if (!art || !before) return null;
+    const originalClass = art.className;
+    const originalBackground = art.style.backgroundImage;
+    art.className = 'feature-art patch-art';
+    art.style.backgroundImage = '';
+    const after = art.getBoundingClientRect();
+    const fallbackBackground = getComputedStyle(art).backgroundImage;
+    art.className = originalClass;
+    art.style.backgroundImage = originalBackground;
+    return {
+      before: { width: Math.round(before.width), height: Math.round(before.height) },
+      after: { width: Math.round(after.width), height: Math.round(after.height) },
+      fallbackBackground
+    };
+  })()`);
+  if (
+    !fillerGeometryProof
+    || fillerGeometryProof.before.width !== fillerGeometryProof.after.width
+    || fillerGeometryProof.before.height !== fillerGeometryProof.after.height
+    || fillerGeometryProof.after.height !== 158
+    || !fillerGeometryProof.fallbackBackground
+    || fillerGeometryProof.fallbackBackground === 'none'
+  ) {
+    throw new Error(`Game News filler artwork must retain the exact side-image box: ${JSON.stringify(fillerGeometryProof)}`);
+  }
+
+  screenshots.push(await captureScreenshot(client, 'game-news-idle'));
+  const leadHomePoint = await movePointer(client, '#updateLogGrid .home-news-card.large .feature-art');
+  await waitFor(client, `(() => {
+    const copy = document.querySelector('#updateLogGrid .home-news-card.large .feature-copy');
+    return Number(getComputedStyle(copy).opacity) >= 0.99 && getComputedStyle(copy).visibility === 'visible';
+  })()`, 'Game News lead copy hover reveal');
+  const leadHomeHover = await evaluate(client, `(() => {
+    const card = document.querySelector('#updateLogGrid .home-news-card.large');
+    const copy = card?.querySelector('.feature-copy');
+    return {
+      hovered: card?.matches(':hover') || false,
+      opacity: getComputedStyle(copy).opacity,
+      visibility: getComputedStyle(copy).visibility
+    };
+  })()`);
+  screenshots.push(await captureScreenshot(client, 'game-news-lead-hover'));
+  await movePointer(client, { x: 1080, y: 74 });
+  await releasePointer(client, { x: 1080, y: 74 });
+  await clearInteractionFocus(client, ['#updateLogGrid .home-news-card.large']);
+  await sleep(180);
+  const leadHomeRestored = await evaluate(client, `(() => {
+    const card = document.querySelector('#updateLogGrid .home-news-card.large');
+    const copy = card?.querySelector('.feature-copy');
+    return {
+      hovered: card?.matches(':hover') || false,
+      opacity: getComputedStyle(copy).opacity,
+      visibility: getComputedStyle(copy).visibility
+    };
+  })()`);
+  if (
+    !leadHomeHover.hovered
+    || Number(leadHomeHover.opacity) < 0.99
+    || leadHomeHover.visibility !== 'visible'
+    || leadHomeRestored.hovered
+    || leadHomeRestored.opacity !== '0'
+    || leadHomeRestored.visibility !== 'hidden'
+  ) {
+    throw new Error(`Game News lead copy must exist only during actual pointer hover: ${JSON.stringify({ leadHomePoint, leadHomeHover, leadHomeRestored })}`);
   }
   await evaluate(client, `document.querySelector('#newsTab').click(); true`);
   await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && document.querySelectorAll('#newsFeedGrid .feature-card').length === 4", 'dedicated News view');
@@ -418,7 +572,14 @@ try {
     const nav = document.querySelector('#newsTab');
     const rect = (node) => {
       const value = node?.getBoundingClientRect();
-      return value ? { width: Math.round(value.width), height: Math.round(value.height) } : null;
+      return value ? {
+        left: Math.round(value.left),
+        top: Math.round(value.top),
+        right: Math.round(value.right),
+        bottom: Math.round(value.bottom),
+        width: Math.round(value.width),
+        height: Math.round(value.height)
+      } : null;
     };
     return {
       activeView: document.querySelector('.view.active')?.id || '',
@@ -448,6 +609,7 @@ try {
       grid: rect(grid),
       featuredBox: rect(featuredBox),
       featured: rect(featured),
+      featuredArt: rect(featuredArt),
       rowArt: rect(rowArt),
       bodyFont: getComputedStyle(document.body).fontFamily,
       navFont: getComputedStyle(nav).fontFamily,
@@ -457,7 +619,7 @@ try {
       rowSummaryColor: getComputedStyle(rowSummary).color
     };
   })()`);
-  if (newsProof.activeView !== 'news' || !newsProof.activeTab || !newsProof.activePack || newsProof.count !== 4 || newsProof.titles[0] !== 'Launcher Stability Patch' || !newsProof.titles.includes('Old hidden') || newsProof.carouselSlides !== 1 || newsProof.carouselPagerButtons !== 3 || newsProof.carouselIndex !== '0' || newsProof.carouselTitle !== 'Launcher Stability Patch' || newsProof.redundantHeader || newsProof.redundantCtas !== 0 || newsProof.featuredLike || newsProof.rowOpenButtons !== 3 || newsProof.rowLikeButtons !== 3 || newsProof.rowArrows !== 3 || newsProof.rowArrowText !== '»' || newsProof.rowArrowSeparator !== '1px' || newsProof.firstRowLikes !== '16') {
+  if (newsProof.activeView !== 'news' || !newsProof.activeTab || !newsProof.activePack || newsProof.count !== 4 || newsProof.titles[0] !== 'Launcher Stability Patch' || !newsProof.titles.includes('Old hidden') || newsProof.carouselSlides !== 1 || newsProof.carouselPagerButtons !== 3 || newsProof.carouselIndex !== '0' || newsProof.carouselTitle !== 'Launcher Stability Patch' || newsProof.redundantHeader || newsProof.redundantCtas !== 0 || newsProof.featuredLike || newsProof.rowOpenButtons !== 3 || newsProof.rowLikeButtons !== 3 || newsProof.rowArrows !== 3 || newsProof.rowArrowText !== '\u00BB' || newsProof.rowArrowSeparator !== '1px' || newsProof.firstRowLikes !== '16') {
     throw new Error(`Dedicated News view did not render the full ordered player-safe feed: ${JSON.stringify(newsProof)}`);
   }
   if (!newsProof.rowArrowInline) {
@@ -622,7 +784,7 @@ try {
   await clickNode(client, '.news-carousel-next');
   const carouselNextProof = await waitForNewsCarouselSettled(client, 1, 'News carousel next-slide crossfade');
   screenshots.push(await captureScreenshot(client, 'news-carousel-slide'));
-  if (carouselNextProof.index !== '1' || carouselNextProof.title !== 'Third newest' || carouselNextProof.layers !== 1 || carouselNextProof.transform !== 'none') {
+  if (carouselNextProof.index !== '1' || carouselNextProof.title !== 'Third newest launcher stability update' || carouselNextProof.layers !== 1 || carouselNextProof.transform !== 'none') {
     throw new Error(`News carousel arrow did not complete one fixed-geometry crossfade: ${JSON.stringify(carouselNextProof)}`);
   }
   await clickNode(client, '.news-carousel-pager button:first-child');
@@ -686,7 +848,7 @@ try {
   if (!articleExitTransition.switching || !articleExitTransition.leaving || Number(articleExitTransition.loaderOpacity) <= 0) {
     throw new Error(`News article click skipped the measured dim/loader transition: ${JSON.stringify(articleExitTransition)}`);
   }
-  await waitFor(client, "!document.querySelector('#updateLogOverlay').hidden && !document.querySelector('#news').classList.contains('is-transitioning') && document.querySelector('#updateLogModalTitle')?.textContent === 'Third newest'", 'liked article view');
+  await waitFor(client, "!document.querySelector('#updateLogOverlay').hidden && !document.querySelector('#news').classList.contains('is-transitioning') && document.querySelector('#updateLogModalTitle')?.textContent === 'Third newest launcher stability update'", 'liked article view');
   const syncedLikeProof = await evaluate(client, `(() => {
     const header = document.querySelector('.update-log-article-header');
     const hero = document.querySelector('#updateLogHero');
@@ -849,7 +1011,7 @@ try {
     articleImage: document.querySelector('#updateLogArticleBody figure img')?.src || '',
     articleCaption: document.querySelector('#updateLogArticleBody figcaption')?.textContent || ''
   })`);
-  if (articleProof.title !== 'Third newest' || articleProof.subtitleHidden || !articleProof.body.includes('Second visible update log') || !articleProof.articleImage.includes('/update-media/body-shot.webp') || articleProof.articleCaption !== 'Patch comparison') {
+  if (articleProof.title !== 'Third newest launcher stability update' || articleProof.subtitleHidden || !articleProof.body.includes('Second visible update log') || !articleProof.articleImage.includes('/update-media/body-shot.webp') || articleProof.articleCaption !== 'Patch comparison') {
     throw new Error(`Full update-log article did not render expected content: ${JSON.stringify(articleProof)}`);
   }
   screenshots.push(await captureScreenshot(client, 'news-article'));
@@ -874,8 +1036,23 @@ try {
     root,
     screenshots,
     requestQueries: updateLogRequests,
+    artworkMetadataProof,
     titles,
     cardCount: proof.count,
+    gameNewsGeometry: {
+      grid: proof.gridRect,
+      cards: proof.cards.map((card) => ({
+        title: card.title,
+        card: card.cardRect,
+        art: card.artRect,
+        copy: card.copyRect,
+        titleRect: card.titleRect,
+        summary: card.summaryRect
+      }))
+    },
+    fillerGeometryProof,
+    leadHomeHover,
+    leadHomeRestored,
     newsCardCount: newsProof.count,
     likeRequests,
     heroNeutral,

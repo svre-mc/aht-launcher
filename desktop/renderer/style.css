@@ -75,6 +75,10 @@ body {
   background: #050607;
 }
 
+.developer-window-drag-region {
+  display: none;
+}
+
 .sidebar {
   position: relative;
   display: grid;
@@ -2253,6 +2257,52 @@ body.dev-mode .workspace {
   background: #090b0c;
 }
 
+body.dev-mode .developer-window-drag-region {
+  position: fixed;
+  top: 0;
+  right: 68px;
+  left: 0;
+  z-index: 1000;
+  display: block;
+  height: 34px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+body.dev-mode .window-controls {
+  position: fixed;
+  z-index: 1001;
+  height: 34px;
+  -webkit-app-region: no-drag;
+}
+
+body.dev-mode .window-control {
+  width: 34px;
+  height: 34px;
+}
+
+body.dev-mode .window-minimize span::before {
+  top: 16px;
+  left: 11px;
+  width: 12px;
+}
+
+body.dev-mode .window-close span::before,
+body.dev-mode .window-close span::after {
+  top: 16px;
+  left: 10px;
+  width: 14px;
+}
+
+body.dev-mode:not(.dev-locked) .sidebar {
+  padding-top: 46px;
+}
+
+body.dev-mode .dev-login-screen,
+body.dev-mode .dev-console {
+  padding-top: 48px;
+}
+
 body.dev-mode.dev-locked .app-frame {
   display: block;
 }
@@ -3655,11 +3705,6 @@ body {
 .workspace {
   height: 760px;
   min-height: 760px;
-}
-
-.brand,
-.topbar {
-  -webkit-app-region: drag;
 }
 
 .nav,
