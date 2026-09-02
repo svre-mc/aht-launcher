@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 10190);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -137,6 +138,20 @@ await writeJson(path.join(userData, 'identity.json'), {
   usernameRegistrationMode: 'worker',
   usernameRegisteredAt: '2026-06-24T00:00:00.000Z'
 });
+const fixtureDeviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: fixtureDeviceCredential.schemaVersion,
+  protocol: fixtureDeviceCredential.protocol,
+  algorithm: fixtureDeviceCredential.algorithm,
+  deviceId: fixtureDeviceCredential.deviceId,
+  publicKey: fixtureDeviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(fixtureDeviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: fixtureDeviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, workerEndpoint);
@@ -189,6 +204,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
