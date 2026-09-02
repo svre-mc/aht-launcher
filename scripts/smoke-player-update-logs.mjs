@@ -218,6 +218,50 @@ async function movePointer(client, selectorOrPoint) {
   return point;
 }
 
+async function waitForActualPointerHover(client, selector, label, attempts = 40) {
+  let point = null;
+  let proof = null;
+  await client.call('Page.bringToFront');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    point = await movePointer(client, selector);
+    proof = await evaluate(client, `(() => {
+      const card = document.querySelector(${JSON.stringify(selector)})?.closest('.home-news-card');
+      const copy = card?.querySelector('.feature-copy');
+      const style = copy ? getComputedStyle(copy) : null;
+      return {
+        hovered: card?.matches(':hover') || false,
+        opacity: style?.opacity || '',
+        visibility: style?.visibility || ''
+      };
+    })()`);
+    if (proof.hovered && Number(proof.opacity) >= 0.99 && proof.visibility === 'visible') {
+      return { point, proof };
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ point, proof })}`);
+}
+
+async function waitForActualPointerRest(client, selector, restPoint, label, attempts = 40) {
+  let proof = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await movePointer(client, restPoint);
+    proof = await evaluate(client, `(() => {
+      const card = document.querySelector(${JSON.stringify(selector)})?.closest('.home-news-card');
+      const copy = card?.querySelector('.feature-copy');
+      const style = copy ? getComputedStyle(copy) : null;
+      return {
+        hovered: card?.matches(':hover') || false,
+        opacity: style?.opacity || '',
+        visibility: style?.visibility || ''
+      };
+    })()`);
+    if (!proof.hovered && proof.opacity === '0' && proof.visibility === 'hidden') return proof;
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ restPoint, proof })}`);
+}
+
 async function pressPointer(client, point) {
   await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', buttons: 1, clickCount: 1 });
 }
@@ -370,9 +414,13 @@ try {
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden", 'fully revealed player DOM');
   await waitFor(client, "document.querySelectorAll('#updateLogGrid .feature-card').length === 3", 'three update-log cards');
-  await movePointer(client, { x: 1080, y: 74 });
   await clearInteractionFocus(client, ['#updateLogGrid .home-news-card']);
-  await sleep(180);
+  await waitForActualPointerRest(
+    client,
+    '#updateLogGrid .home-news-card.large .feature-art',
+    { x: 1080, y: 74 },
+    'Game News lead copy idle state'
+  );
   const unavailableArtworkUrl = `${workerEndpoint}/update-media/intentionally-unavailable.webp`;
   const artworkMetadataProof = await evaluate(client, `(async () => {
     startupFirstInitialization = false;
@@ -525,34 +573,22 @@ try {
   }
 
   screenshots.push(await captureScreenshot(client, 'game-news-idle'));
-  const leadHomePoint = await movePointer(client, '#updateLogGrid .home-news-card.large .feature-art');
-  await waitFor(client, `(() => {
-    const copy = document.querySelector('#updateLogGrid .home-news-card.large .feature-copy');
-    return Number(getComputedStyle(copy).opacity) >= 0.99 && getComputedStyle(copy).visibility === 'visible';
-  })()`, 'Game News lead copy hover reveal');
-  const leadHomeHover = await evaluate(client, `(() => {
-    const card = document.querySelector('#updateLogGrid .home-news-card.large');
-    const copy = card?.querySelector('.feature-copy');
-    return {
-      hovered: card?.matches(':hover') || false,
-      opacity: getComputedStyle(copy).opacity,
-      visibility: getComputedStyle(copy).visibility
-    };
-  })()`);
+  const leadHomeHoverResult = await waitForActualPointerHover(
+    client,
+    '#updateLogGrid .home-news-card.large .feature-art',
+    'Game News lead copy actual pointer-hover reveal'
+  );
+  const leadHomePoint = leadHomeHoverResult.point;
+  const leadHomeHover = leadHomeHoverResult.proof;
   screenshots.push(await captureScreenshot(client, 'game-news-lead-hover'));
-  await movePointer(client, { x: 1080, y: 74 });
   await releasePointer(client, { x: 1080, y: 74 });
   await clearInteractionFocus(client, ['#updateLogGrid .home-news-card.large']);
-  await sleep(180);
-  const leadHomeRestored = await evaluate(client, `(() => {
-    const card = document.querySelector('#updateLogGrid .home-news-card.large');
-    const copy = card?.querySelector('.feature-copy');
-    return {
-      hovered: card?.matches(':hover') || false,
-      opacity: getComputedStyle(copy).opacity,
-      visibility: getComputedStyle(copy).visibility
-    };
-  })()`);
+  const leadHomeRestored = await waitForActualPointerRest(
+    client,
+    '#updateLogGrid .home-news-card.large .feature-art',
+    { x: 1080, y: 74 },
+    'Game News lead copy pointer-leave state'
+  );
   if (
     !leadHomeHover.hovered
     || Number(leadHomeHover.opacity) < 0.99
