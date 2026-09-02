@@ -4822,6 +4822,9 @@ async function readLauncherUpdate(config = {}) {
       };
     }
   }
+  if (!isDeveloperMode() && launcherUpdateTestHook('AHT_TEST_LOCAL_REINSTALL_BRIDGE')) {
+    return { ...base, latestUrl: '' };
+  }
   if (!enabled || !latestUrl) {
     return base;
   }
@@ -5773,6 +5776,7 @@ function sanitizedRegularLauncherEnvironment() {
   const env = sanitizedLauncherEnvironment(process.env);
   if (launcherUpdateTestHook('AHT_TEST_LOCAL_REINSTALL_BRIDGE')) {
     env.AHT_TEST_HOOKS = '1';
+    env.AHT_TEST_LOCAL_REINSTALL_BRIDGE = '1';
     const playerPort = String(process.env.AHT_TEST_LOCAL_REINSTALL_PLAYER_PORT || '').trim();
     if (/^\d{2,5}$/.test(playerPort)) env.AHT_TEST_REMOTE_DEBUG_PORT = playerPort;
     const playerDefaults = String(process.env.AHT_TEST_LOCAL_REINSTALL_PLAYER_DEFAULTS || '').trim();
