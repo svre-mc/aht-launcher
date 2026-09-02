@@ -225,8 +225,8 @@ jobs:
         env:
           AHT_TEST_EVIDENCE_DIR: validation/${{ matrix.arch }}
 
-      - name: Build Intel and Apple Silicon packages
-        run: npm run dist:regular:macos
+      - name: Build native macOS package
+        run: npm run dist:regular:macos -- --${{ matrix.arch }}
 
       - name: Verify native package structure and player boundary
         shell: bash
@@ -244,8 +244,8 @@ jobs:
           ARCHES="$(lipo -archs "$EXECUTABLE")"
           echo "architectures=$ARCHES" | tee "$REPORT_DIR/architectures.txt"
           case " $ARCHES " in
-            *" ${{ matrix.arch }} "*) ;;
-            *) echo "Expected ${{ matrix.arch }} in native executable architectures: $ARCHES" >&2; exit 1 ;;
+            *" ${{ matrix.machine }} "*) ;;
+            *) echo "Expected ${{ matrix.machine }} in native executable architectures: $ARCHES" >&2; exit 1 ;;
           esac
 
           ./node_modules/.bin/asar list "$ASAR" > "$REPORT_DIR/asar-files.txt"
