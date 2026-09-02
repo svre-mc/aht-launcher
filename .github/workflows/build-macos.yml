@@ -389,6 +389,7 @@ jobs:
     timeout-minutes: 45
     env:
       AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: "1"
+      AHT_TEST_DISABLE_CHROMIUM_SANDBOX: "1"
       AHT_VERIFY_PARALLEL: "3"
 
     steps:
@@ -454,7 +455,7 @@ jobs:
             exit 1
           fi
 
-          APPIMAGE_EXTRACT_AND_RUN=1 timeout 30s xvfb-run -a "$APPIMAGE" --version | tee validation/ubuntu/appimage-version.txt
+          APPIMAGE_EXTRACT_AND_RUN=1 timeout 30s xvfb-run -a "$APPIMAGE" --no-sandbox --version | tee validation/ubuntu/appimage-version.txt
           sudo apt-get install -y "$DEB"
           test "$(command -v a-hard-time-launcher)" = "/usr/bin/a-hard-time-launcher"
           file /usr/bin/a-hard-time-launcher | tee validation/ubuntu/installed-executable.txt

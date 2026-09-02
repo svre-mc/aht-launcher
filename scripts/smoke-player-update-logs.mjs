@@ -18,6 +18,8 @@ const screenshotDir = path.join(root, 'screenshots');
 const updateLogArtwork = fs.readFileSync(path.resolve('desktop', 'renderer', 'assets', 'aht-cover.png'));
 const updateLogRequests = [];
 const likeRequests = [];
+let electronExit = null;
+let electronOutput = '';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -88,6 +90,10 @@ async function writeJson(file, value) {
 async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
+    if (electronExit) {
+      const detail = electronOutput.trim().slice(-4000);
+      throw new Error(`Electron exited before exposing a debugger target (${electronExit}).${detail ? `\n${detail}` : ''}`);
+    }
     try {
       const response = await fetch(`${endpoint}/json/list`);
       if (response.ok) {
@@ -343,9 +349,13 @@ const child = spawn(electronBin, electronArgs, {
     AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     ELECTRON_ENABLE_LOGGING: '0'
   },
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true
 });
+child.stdout.on('data', (chunk) => { electronOutput = `${electronOutput}${String(chunk)}`.slice(-8000); });
+child.stderr.on('data', (chunk) => { electronOutput = `${electronOutput}${String(chunk)}`.slice(-8000); });
+child.on('error', (error) => { electronExit = `spawn error: ${error.message || error}`; });
+child.on('exit', (code, signal) => { electronExit = signal || `exit code ${code}`; });
 
 let client;
 try {

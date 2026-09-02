@@ -226,7 +226,22 @@ async function runDeveloperApp(port, task, targetUserData = userData, targetVaul
     client = await connect(target.webSocketDebuggerUrl);
     await client.call('Runtime.enable');
     await client.call('Page.enable');
-    await waitFor(client, "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm')", 'interactive developer login DOM');
+    await waitFor(client, `
+      (() => {
+        const frame = document.querySelector('.app-frame');
+        const controls = document.querySelector('.window-controls');
+        return document.readyState === 'complete'
+          && document.body.classList.contains('is-launcher-ready')
+          && !document.body.classList.contains('is-booting')
+          && frame
+          && !frame.hasAttribute('inert')
+          && frame.getAttribute('aria-hidden') !== 'true'
+          && controls
+          && getComputedStyle(controls).visibility === 'visible'
+          && getComputedStyle(controls).pointerEvents !== 'none'
+          && document.querySelector('#developerLoginForm');
+      })()
+    `, 'interactive developer login DOM');
     await waitFor(client, "document.body.classList.contains('dev-mode') && document.body.classList.contains('dev-locked')", 'locked developer shell');
     assertDeveloperWindowChrome(await readDeveloperWindowChrome(client, '#developerLoginScreen .dev-login-box'), 'locked login');
     await evaluate(client, `

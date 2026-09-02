@@ -578,7 +578,21 @@ try {
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
-  await waitFor(client, "document.body.classList.contains('is-launcher-ready') && !document.querySelector('#profileFriendsButton')?.hidden", 'interactive player window chrome');
+  await waitFor(client, `
+    (() => {
+      const frame = document.querySelector('.app-frame');
+      const controls = document.querySelector('.window-controls');
+      return document.body.classList.contains('is-launcher-ready')
+        && !document.body.classList.contains('is-booting')
+        && frame
+        && !frame.hasAttribute('inert')
+        && frame.getAttribute('aria-hidden') !== 'true'
+        && controls
+        && getComputedStyle(controls).visibility === 'visible'
+        && getComputedStyle(controls).pointerEvents !== 'none'
+        && !document.querySelector('#profileFriendsButton')?.hidden;
+    })()
+  `, 'interactive player window chrome');
   const fixedWindowProof = await evaluate(client, `(() => {
     const rectOf = (node) => {
       const rect = node?.getBoundingClientRect();

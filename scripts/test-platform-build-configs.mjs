@@ -1089,6 +1089,14 @@ assert(releaseWorkflow.includes('id: ubuntu') && releaseWorkflow.includes('runne
 assert(releaseWorkflow.includes('dist:regular:ubuntu'), 'GitHub workflow must call the Ubuntu build script.');
 assert(releaseWorkflow.includes('aht-launcher-ubuntu'), 'GitHub workflow must upload Ubuntu launcher artifacts.');
 assert(releaseWorkflow.includes('validate-ubuntu-runtime:') && releaseWorkflow.includes('AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher'), 'GitHub validation must install and exercise the native Ubuntu package.');
+assert(
+  releaseWorkflow.includes('AHT_TEST_DISABLE_CHROMIUM_SANDBOX: "1"')
+  && releaseWorkflow.includes('"$APPIMAGE" --no-sandbox --version')
+  && desktopMain.includes("process.env.AHT_TEST_DISABLE_CHROMIUM_SANDBOX === '1'")
+  && desktopMain.includes("app.commandLine.appendSwitch('no-sandbox')"),
+  'Ubuntu CI must use an explicit test-only Chromium sandbox escape hatch without weakening production launches.'
+);
+assert(smokePlayerUpdateLogs.includes('Electron exited before exposing a debugger target') && smokePlayerUpdateLogs.includes("stdio: ['ignore', 'pipe', 'pipe']"), 'The first native Electron smoke must preserve early process diagnostics.');
 const platformProfileSource = readText(new URL('../src/platformProfile.js', import.meta.url));
 assert(platformProfileSource.includes('Unsupported AHT launcher platform'), 'Platform profile must reject unsupported platforms instead of keeping a generic Linux/Desktop fallback.');
 assert(desktopMain.includes("import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';"), 'Main process must use the shared platform policy for platform-specific paths.');
