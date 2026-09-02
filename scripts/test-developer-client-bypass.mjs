@@ -13,6 +13,7 @@ const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
 const java8Path = path.join(root, 'java8', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const macMinecraftApp = path.join(root, 'Minecraft Launcher.app');
+const linuxMinecraftLauncher = path.join(root, 'bin', 'minecraft-launcher');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -176,6 +177,9 @@ if (process.platform === 'win32') {
   await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
 } else if (process.platform === 'darwin') {
   await fsp.mkdir(macMinecraftApp, { recursive: true });
+} else if (process.platform === 'linux') {
+  await fsp.mkdir(path.dirname(linuxMinecraftLauncher), { recursive: true });
+  await fsp.writeFile(linuxMinecraftLauncher, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 }
 
 const child = spawn(electronBin, electronArgs, {
@@ -187,6 +191,9 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
     AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
+    PATH: process.platform === 'linux'
+      ? `${path.dirname(linuxMinecraftLauncher)}${path.delimiter}${process.env.PATH || ''}`
+      : process.env.PATH,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd()
