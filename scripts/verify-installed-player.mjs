@@ -114,15 +114,23 @@ function createIsolatedCheckEnvironment() {
   fs.writeFileSync(javaExecutable, 'AHT installed-player Java 8 fixture', 'utf8');
   if (process.platform !== 'win32') fs.chmodSync(javaExecutable, 0o755);
   fs.writeFileSync(path.join(javaHome, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
+  // Keep the native macOS login home intact. Cocoa, Keychain, and Chromium's
+  // renderer lifecycle are tied to that login context; launcher state remains
+  // disposable through each smoke's explicit user-data and defaults paths.
+  const isolatedHomeEnv = process.platform === 'darwin'
+    ? {}
+    : {
+        HOME: fakeHome,
+        USERPROFILE: fakeHome,
+        APPDATA: fakeAppData,
+        LOCALAPPDATA: fakeLocalAppData,
+        XDG_CONFIG_HOME: path.join(root, 'xdg-config'),
+        XDG_CACHE_HOME: path.join(root, 'xdg-cache')
+      };
   return {
     root,
     env: {
-      HOME: fakeHome,
-      USERPROFILE: fakeHome,
-      APPDATA: fakeAppData,
-      LOCALAPPDATA: fakeLocalAppData,
-      XDG_CONFIG_HOME: path.join(root, 'xdg-config'),
-      XDG_CACHE_HOME: path.join(root, 'xdg-cache'),
+      ...isolatedHomeEnv,
       AHT_JAVA_HOME: javaHome,
       JAVA8_HOME: javaHome,
       JAVA_HOME: javaHome,

@@ -20,6 +20,18 @@ const userData = path.join(root, 'userData');
 const fakeHome = path.join(root, 'home');
 const fakeAppData = path.join(root, 'appdata');
 const fakeLocalAppData = path.join(root, 'localappdata');
+// Native macOS GUI/security services are bound to the runner's login home.
+// Replacing HOME with a /var/folders fixture leaves Electron's page target
+// alive while its renderer stops servicing DevTools after startup. The
+// explicit user-data-dir and AHT paths below still isolate all launcher state.
+const isolatedHostEnv = process.platform === 'darwin'
+  ? {}
+  : {
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+      APPDATA: fakeAppData,
+      LOCALAPPDATA: fakeLocalAppData
+    };
 const minecraftRoot = path.join(root, '.minecraft');
 const java8Home = path.join(minecraftRoot, '.aht-launcher', 'java', 'temurin8');
 const java8Executable = path.join(java8Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
@@ -672,10 +684,7 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
-    HOME: fakeHome,
-    USERPROFILE: fakeHome,
-    APPDATA: fakeAppData,
-    LOCALAPPDATA: fakeLocalAppData,
+    ...isolatedHostEnv,
     AHT_APP_DEFAULTS: tempDefaults,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_OPEN_EXTERNAL_ECHO: '1',

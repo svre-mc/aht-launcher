@@ -1133,7 +1133,8 @@ assert(
   'The first packaged smokes must wait for their owned Electron process to exit, while privacy startup isolates host launcher prerequisites and hard-bounds DevTools discovery and hydration.'
 );
 assert(
-  smokePlayerLayout.includes('HOME: fakeHome')
+  smokePlayerLayout.includes("const isolatedHostEnv = process.platform === 'darwin'")
+  && smokePlayerLayout.includes('...isolatedHostEnv')
   && smokePlayerLayout.includes('autoImportAccount: false')
   && smokePlayerLayout.includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
   && smokePlayerLayout.includes("AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1'")
@@ -1156,9 +1157,10 @@ assert(
   && verifyInstalledPlayerScript.includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
   && verifyInstalledPlayerScript.includes("AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1'")
   && verifyLocalScript.includes("AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1'")
-  && verifyInstalledPlayerScript.includes('HOME: fakeHome')
+  && verifyInstalledPlayerScript.includes("const isolatedHomeEnv = process.platform === 'darwin'")
+  && verifyInstalledPlayerScript.includes('...isolatedHomeEnv')
   && verifyInstalledPlayerScript.includes("fs.rmSync(isolatedHost.root, { recursive: true, force: true })"),
-  'Every source and packaged native check must quit its macOS application after closing the test window; packaged checks must also use and clean a disposable host profile with deterministic Java discovery.'
+  'Every source and packaged native check must quit its macOS application after closing the test window; packaged checks must preserve the native macOS login home while using and cleaning disposable launcher state with deterministic Java discovery.'
 );
 assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')
