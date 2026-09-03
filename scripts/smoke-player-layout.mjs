@@ -84,9 +84,14 @@ for (const asset of footerGlowAssets) {
 const reducedMotionArgs = process.env.AHT_TEST_FORCE_REDUCED_MOTION === '1'
   ? ['--force-prefers-reduced-motion=reduce']
   : [];
+const visualAutomationArgs = [
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding'
+];
 const electronArgs = smokeExe
-  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...reducedMotionArgs]
-  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...reducedMotionArgs];
+  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...visualAutomationArgs, ...reducedMotionArgs]
+  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...visualAutomationArgs, ...reducedMotionArgs];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 
 function sleep(ms) {
@@ -698,8 +703,6 @@ try {
   console.log('[player-layout] debugger connected; enabling Runtime and Page');
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await client.call('Page.bringToFront');
-  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
   console.log('[player-layout] debugger ready; waiting for hydrated UI');
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
@@ -718,6 +721,10 @@ try {
         && !document.querySelector('#profileFriendsButton')?.hidden;
     })()
   `, 'interactive player window chrome');
+  console.log('[player-layout] hydrated UI ready; enabling foreground input');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await sleep(250);
   const fixedWindowProof = await evaluate(client, `(() => {
     const rectOf = (node) => {
       const rect = node?.getBoundingClientRect();
@@ -2205,7 +2212,7 @@ try {
   throw error;
 } finally {
   if (client) {
-    await client.call('Browser.close').catch(() => {});
+    await client.call('Browser.close', {}, 5_000).catch(() => {});
     client.close();
   }
   await stopElectronChild(child);
