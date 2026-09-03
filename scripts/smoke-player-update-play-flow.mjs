@@ -1014,8 +1014,11 @@ try {
   const warmStartupMs = Date.now() - warmSpawnedAt;
   const warmPostTargetRevealMs = warmStartupMs - warmTargetReadyMs;
   checkpoint('warm startup ready');
-  const warmStatus = await evaluate(client, `window.aht.getStatus('stable', { preferCache: true })`);
   const warmStartupTaskTimings = await evaluate(client, 'window.__ahtStartupTaskTimings');
+  const warmStatus = {
+    ...(warmStartupTaskTimings?.readiness || {}),
+    playEnabled: await evaluate(client, `document.querySelector('#playButton')?.getAttribute('aria-disabled') === 'false'`)
+  };
   const warmTaskElapsedMs = Math.max(0, ...Object.values(warmStartupTaskTimings?.settled || {})
     .map((entry) => Number(entry?.elapsedMs) || 0));
   const warmPreparationCacheAfter = {
@@ -1044,7 +1047,7 @@ try {
   if (!warmPreparationCacheReused) {
     throw new Error(`A 31-minute warm startup rewrote the saved prerequisite cache instead of reusing it: ${JSON.stringify(warmStartupProof)}`);
   }
-  if (!warmStatus.launchReady || warmStatus.launchPreparationState !== 'ready') {
+  if (!warmStatus.launchReady || warmStatus.launchPreparationState !== 'ready' || warmStatus.actionMode !== 'play' || !warmStatus.playEnabled) {
     throw new Error(`A 31-minute warm startup did not restore ready-to-play state: ${JSON.stringify(warmStartupProof)}`);
   }
   if (warmTaskElapsedMs >= 5_000 || warmPostTargetRevealMs >= 5_000 || warmStartupMs >= 5_000) {
@@ -1120,6 +1123,12 @@ try {
       packLocalProofAbsent: true
     }
   }, null, 2));
+} catch (error) {
+  if (fs.existsSync(startupProbePath)) {
+    const recentProbe = fs.readFileSync(startupProbePath, 'utf8').trim().split(/\r?\n/).slice(-30).join('\n');
+    error.message = `${error.message}; recent startup probe:\n${recentProbe}`;
+  }
+  throw error;
 } finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});

@@ -26,6 +26,7 @@ const screenshotDir = process.env.AHT_SMOKE_OUTPUT_DIR
 const reducedMotionArgs = process.env.AHT_TEST_FORCE_REDUCED_MOTION === '1'
   ? ['--force-prefers-reduced-motion=reduce']
   : [];
+const freezeCssTimeline = process.env.AHT_TEST_FREEZE_CSS_TIMELINE === '1';
 const visualAutomationArgs = [
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
@@ -305,6 +306,10 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  if (freezeCssTimeline) {
+    await client.call('Animation.enable');
+    await client.call('Animation.setPlaybackRate', { playbackRate: 0 });
+  }
   await client.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
@@ -515,6 +520,10 @@ try {
   client = await connect(quickTarget.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  if (freezeCssTimeline) {
+    await client.call('Animation.enable');
+    await client.call('Animation.setPlaybackRate', { playbackRate: 0 });
+  }
   await client.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
@@ -546,7 +555,7 @@ try {
     startup: startupProof,
     quickRelaunch: { elapsedMs: quickStartupElapsedMs, rendererElapsedMs: quickRendererElapsedMs, agedNewsCacheMinutes: 31, state: quickStartupState, finalState: quickFinalState, loading: quickLoadingProof },
     ready: readyProof,
-    transition: { immediate: immediateProof, exit: exitProof, commit: commitProof, enter: enterProof, final: finalProof },
+    transition: { cssTimelineFrozen: freezeCssTimeline, immediate: immediateProof, exit: exitProof, commit: commitProof, enter: enterProof, final: finalProof },
     screenshots
   }, null, 2));
 } finally {

@@ -4387,6 +4387,30 @@ function waitForNextPaint() {
   });
 }
 
+function animateSidebarOpacity(view, from, to, durationMs, easing = "ease-out") {
+  if (!view) return Promise.resolve();
+  const startedAt = performance.now();
+  const duration = Math.max(1, Number(durationMs) || 1);
+  const start = Number(from);
+  const distance = Number(to) - start;
+  view.style.opacity = String(start);
+  return new Promise((resolve) => {
+    let timer = null;
+    const tick = () => {
+      const progress = Math.min(1, Math.max(0, (performance.now() - startedAt) / duration));
+      const eased = easing === "ease-in"
+        ? progress * progress
+        : 1 - ((1 - progress) ** 3);
+      view.style.opacity = String(start + (distance * eased));
+      if (progress < 1) return;
+      if (timer !== null) window.clearInterval(timer);
+      resolve();
+    };
+    timer = window.setInterval(tick, 16);
+    tick();
+  });
+}
+
 function setSidebarSwitchLoader(visible, packKey = activeSidebarPack) {
   if (!els.sidebarSwitchLoader) return;
   els.sidebarSwitchLoader.hidden = !visible;
@@ -4421,12 +4445,11 @@ async function transitionSidebarSelection(tile) {
   els.workspace?.setAttribute("aria-busy", "true");
   setSidebarSwitchLoader(true, nextPack);
   sourceView?.classList.add("sidebar-view-leaving-ready");
-  if (sourceView) void getComputedStyle(sourceView).opacity;
 
   const exitGate = (async () => {
     await waitForUiDelay(SIDEBAR_SWITCH_EXIT_DELAY_MS);
     sourceView?.classList.add("sidebar-view-leaving");
-    await waitForUiDelay(SIDEBAR_SWITCH_EXIT_MS);
+    await animateSidebarOpacity(sourceView, 1, 0, SIDEBAR_SWITCH_EXIT_MS, "ease-in");
   })();
   const statusResultPromise = (async () => {
     const cachedStatus = packStatusCache.get(nextPack)
@@ -4464,10 +4487,11 @@ async function transitionSidebarSelection(tile) {
     await waitForNextPaint();
     els.workspace?.classList.add("is-sidebar-switch-entering");
     incomingView?.classList.add("sidebar-view-entering-active");
-    await waitForUiDelay(SIDEBAR_SWITCH_ENTER_MS);
+    await animateSidebarOpacity(incomingView, 0, 1, SIDEBAR_SWITCH_ENTER_MS, "ease-out");
   } finally {
     for (const view of els.views) {
       view.classList.remove("sidebar-view-leaving-ready", "sidebar-view-leaving", "sidebar-view-entering", "sidebar-view-entering-active");
+      view.style.removeProperty("opacity");
     }
     els.workspace?.classList.remove("is-sidebar-switching", "is-sidebar-switch-entering");
     els.workspace?.removeAttribute("aria-busy");
@@ -4797,6 +4821,12 @@ async function bootstrapLauncher() {
     socialLinksReady
   ]);
   await startupTasks;
+  startupTaskTimings.readiness = {
+    activePack: String(currentStatus?.activePack || ""),
+    launchReady: Boolean(currentStatus?.launchReady),
+    launchPreparationState: String(currentStatus?.launchPreparationState || "missing"),
+    actionMode: String(els.playButton?.dataset.actionMode || "")
+  };
   const remaining = Math.max(0, STARTUP_MIN_VISIBLE_MS - (performance.now() - startedAt));
   if (remaining) await waitForUiDelay(remaining);
   await waitForNextPaint();

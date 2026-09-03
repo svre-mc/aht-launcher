@@ -1007,7 +1007,8 @@ body.dev-mode .developer-window-drag-region {
 }
 
 .workspace > .view.sidebar-view-leaving-ready {
-  transition: opacity 180ms ease-in;
+  will-change: opacity;
+  transition: none;
 }
 
 .workspace > .view.sidebar-view-leaving {
@@ -1016,12 +1017,13 @@ body.dev-mode .developer-window-drag-region {
 
 .workspace > .view.sidebar-view-entering {
   opacity: 0;
+  will-change: opacity;
   transition: none;
 }
 
 .workspace > .view.sidebar-view-entering.sidebar-view-entering-active {
   opacity: 1;
-  transition: opacity 330ms ease-out;
+  transition: none;
 }
 
 .workspace.is-sidebar-switching > .view {
