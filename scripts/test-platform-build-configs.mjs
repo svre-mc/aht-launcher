@@ -1159,8 +1159,15 @@ assert(
 assert(
   desktopMain.includes("const keepTestRendererActive = process.env.AHT_TEST_HOOKS === '1'")
   && desktopMain.includes("process.env.AHT_TEST_KEEP_RENDERER_ACTIVE === '1'")
-  && desktopMain.includes('backgroundThrottling: !keepTestRendererActive'),
-  'Native visual automation must disable BrowserWindow background throttling only behind explicit launcher test hooks.'
+  && desktopMain.includes('backgroundThrottling: !keepTestRendererActive')
+  && desktopMain.includes("powerSaveBlocker.start('prevent-app-suspension')")
+  && desktopMain.includes("app.focus({ steal: true })")
+  && desktopMain.includes("createdWindow.once('ready-to-show'")
+  && desktopMain.includes("createdWindow.webContents.once('did-finish-load'")
+  && desktopMain.includes("createdWindow.on('unresponsive'")
+  && desktopMain.includes("createdWindow.webContents.on('render-process-gone'")
+  && desktopMain.includes('powerSaveBlocker.stop(testRendererActivityBlockerId)'),
+  'Native visual automation must disable BrowserWindow throttling, activate direct-launched macOS applications, prevent app suspension, record renderer failures, and release its power assertion only behind explicit launcher test hooks.'
 );
 assert(
   verifyInstalledPlayerScript.includes('function createIsolatedCheckEnvironment()')

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeStorage, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
@@ -278,6 +278,7 @@ function loadR2DirectUploadModule() {
   return r2DirectUploadModulePromise;
 }
 let mainWindow = null;
+let testRendererActivityBlockerId = null;
 let closeOnGameStartWatchGeneration = 0;
 let updateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
@@ -11380,6 +11381,38 @@ function createWindow() {
       webviewTag: false
     }
   });
+  const createdWindow = mainWindow;
+  if (keepTestRendererActive) {
+    const activateTestWindow = (stage) => {
+      if (createdWindow.isDestroyed()) return;
+      const appWasActive = process.platform === 'darwin' ? app.isActive() : null;
+      if (process.platform === 'darwin') app.focus({ steal: true });
+      createdWindow.show();
+      createdWindow.focus();
+      writeTestStartupProbe('test-renderer-activity', {
+        activityStage: stage,
+        appWasActive,
+        appActive: process.platform === 'darwin' ? app.isActive() : null,
+        blockerId: testRendererActivityBlockerId,
+        blockerStarted: Number.isInteger(testRendererActivityBlockerId)
+          && powerSaveBlocker.isStarted(testRendererActivityBlockerId),
+        windowVisible: createdWindow.isVisible(),
+        windowFocused: createdWindow.isFocused()
+      });
+    };
+    if (!Number.isInteger(testRendererActivityBlockerId)) {
+      testRendererActivityBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+    }
+    createdWindow.on('unresponsive', () => {
+      writeTestStartupProbe('test-renderer-unresponsive');
+    });
+    createdWindow.webContents.on('render-process-gone', (_event, details) => {
+      writeTestStartupProbe('test-renderer-process-gone', { details });
+    });
+    activateTestWindow('window-created');
+    createdWindow.once('ready-to-show', () => activateTestWindow('ready-to-show'));
+    createdWindow.webContents.once('did-finish-load', () => activateTestWindow('did-finish-load'));
+  }
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
   mainWindow.loadFile(path.join(appRoot, 'desktop', 'renderer', 'index.html'), {
@@ -13808,6 +13841,15 @@ if (!singleInstanceLock) {
   });
   app.on('before-quit', () => {
     invalidateAllLaunchPreparations();
+    if (Number.isInteger(testRendererActivityBlockerId)) {
+      const blockerStarted = powerSaveBlocker.isStarted(testRendererActivityBlockerId);
+      writeTestStartupProbe('test-renderer-activity-stop', {
+        blockerId: testRendererActivityBlockerId,
+        blockerStarted
+      });
+      if (blockerStarted) powerSaveBlocker.stop(testRendererActivityBlockerId);
+      testRendererActivityBlockerId = null;
+    }
   });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
