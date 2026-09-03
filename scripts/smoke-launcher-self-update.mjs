@@ -34,7 +34,11 @@ if (process.platform === 'win32') {
   fs.writeFileSync(path.join(path.dirname(windowsTargetExe), 'Uninstall A Hard Time Launcher Windows.exe'), 'uninstaller fixture\n');
 }
 const readyTitle = process.platform === 'win32' ? 'Update finished' : 'Ready to Install';
-const readyButton = process.platform === 'win32' ? 'Restart Launcher' : 'Install and Restart';
+const readyButton = process.platform === 'win32'
+  ? 'Restart Launcher'
+  : process.platform === 'linux'
+    ? 'Open Package Installer'
+    : 'Install and Restart';
 const fixtureAsarPath = smokeExe
   ? path.join(path.dirname(smokeExe), 'resources', 'app.asar')
   : path.resolve('node_modules', 'electron', 'dist', 'resources', 'default_app.asar');
@@ -92,11 +96,12 @@ function contentTypeFor(key) {
   return 'application/octet-stream';
 }
 
-async function waitForTarget() {
+async function waitForTarget(targetPort = port) {
+  const targetEndpoint = `http://127.0.0.1:${targetPort}`;
   let lastError;
   for (let attempt = 0; attempt < 160; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${targetEndpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
         const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -314,7 +319,7 @@ try {
     const failedState = await evaluate(client, '(async () => ({ title: document.querySelector("#launcherUpdateTitle")?.textContent, log: document.querySelector("#launcherUpdateLog")?.textContent, state: await window.aht.getLauncherUpdateState() }))()').catch(() => null);
     throw new Error(`${error.message}: ${JSON.stringify(failedState)}`);
   }
-  await waitFor(client, `document.querySelector('#launcherUpdateNowButton').textContent.includes(${JSON.stringify(readyButton)})`, 'restart launcher button');
+  await waitFor(client, `document.querySelector('#launcherUpdateNowButton').textContent.includes(${JSON.stringify(readyButton)})`, 'launcher update action button');
   const stagedProof = await evaluate(client, `(async () => ({
     hidden: document.querySelector('#launcherUpdateOverlay').hidden,
     title: document.querySelector('#launcherUpdateTitle').textContent,
@@ -351,11 +356,20 @@ try {
     state: await window.aht.getLauncherUpdateState(),
     hasRestartApi: typeof window.aht.restartLauncherUpdate === 'function'
   }))()`);
-  if (!clickProof.log.includes('Restart requested.') && !clickProof.log.includes('Test mode verified the restart helper')) {
-    throw new Error(`Restart Launcher button click did not start the prepared handoff: ${JSON.stringify(clickProof)}`);
+  const expectedHandoffLine = process.platform === 'win32'
+    ? 'Restart requested.'
+    : process.platform === 'linux'
+      ? 'Opening the Ubuntu package installer.'
+      : 'Install and restart requested.';
+  if (!clickProof.log.includes(expectedHandoffLine) && !clickProof.log.includes('Test mode verified the restart helper')) {
+    throw new Error(`Launcher update action did not start the prepared handoff: ${JSON.stringify(clickProof)}`);
   }
   const installingPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
-  if ((process.platform === 'win32' ? installingPending.status !== 'swapping' : installingPending.status !== 'installing') || installingPending.version !== '9.9.9' || !installingPending.installingStartedAt) {
+  const expectedPendingStatus = process.platform === 'win32' ? 'swapping' : process.platform === 'linux' ? 'staged' : 'installing';
+  const installingTimestampValid = process.platform === 'linux'
+    ? !installingPending.installingStartedAt
+    : Boolean(installingPending.installingStartedAt);
+  if (installingPending.status !== expectedPendingStatus || installingPending.version !== '9.9.9' || !installingTimestampValid) {
     throw new Error(`Pending launcher update was not marked as an active restart handoff before quit: ${JSON.stringify(installingPending)}`);
   }
   try {
@@ -497,18 +511,43 @@ try {
     stdio: 'ignore',
     windowsHide: true
   });
-  const guardExit = await waitForExit(guardChild, 10000).catch((error) => {
-    guardChild.kill();
-    throw new Error(`reopened old launcher did not exit during pending install: ${error.message}`);
-  });
-  if (guardExit.code !== 0) {
-    throw new Error(`reopened old launcher exited with unexpected status during pending install: ${JSON.stringify(guardExit)}`);
-  }
-  const probeLines = fs.existsSync(startupProbePath)
-    ? fs.readFileSync(startupProbePath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
-    : [];
-  if (!probeLines.some((line) => line.stage === 'launcher-update-install-pending-exit')) {
-    throw new Error(`reopened old launcher did not use pending install exit guard: ${JSON.stringify(probeLines)}`);
+  let guardExit = null;
+  let ubuntuPackageInstallerRetryReady = false;
+  if (process.platform === 'linux') {
+    let guardClient = null;
+    try {
+      const guardTarget = await waitForTarget(guardPort);
+      guardClient = await connect(guardTarget.webSocketDebuggerUrl);
+      await guardClient.call('Runtime.enable');
+      await waitFor(guardClient, `document.readyState === 'complete'
+        && document.querySelector('#launcherUpdateOverlay')?.hidden === false
+        && document.querySelector('#launcherUpdateNowButton')?.textContent.includes('Open Package Installer')`, 'retryable Ubuntu package installer prompt');
+      ubuntuPackageInstallerRetryReady = true;
+      await guardClient.call('Browser.close').catch(() => {});
+      guardClient.close();
+      guardClient = null;
+    } finally {
+      if (guardClient) {
+        await guardClient.call('Browser.close').catch(() => {});
+        guardClient.close();
+      }
+      guardChild.kill();
+      guardExit = await waitForExit(guardChild, 10000).catch(() => ({ code: guardChild.exitCode, signal: guardChild.signalCode }));
+    }
+  } else {
+    guardExit = await waitForExit(guardChild, 10000).catch((error) => {
+      guardChild.kill();
+      throw new Error(`reopened old launcher did not exit during pending install: ${error.message}`);
+    });
+    if (guardExit.code !== 0) {
+      throw new Error(`reopened old launcher exited with unexpected status during pending install: ${JSON.stringify(guardExit)}`);
+    }
+    const probeLines = fs.existsSync(startupProbePath)
+      ? fs.readFileSync(startupProbePath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+      : [];
+    if (!probeLines.some((line) => line.stage === 'launcher-update-install-pending-exit')) {
+      throw new Error(`reopened old launcher did not use pending install exit guard: ${JSON.stringify(probeLines)}`);
+    }
   }
 
   console.log(JSON.stringify({
@@ -522,7 +561,8 @@ try {
       downloadedPath: proof.state.lastResult.downloadedPath,
       latestVersion: proof.status.launcherUpdate.latestVersion,
       launcherStrategy: proof.state.lastResult.launched?.strategy || 'direct',
-      pendingInstallReopenExit: guardExit
+      pendingInstallReopenExit: guardExit,
+      ubuntuPackageInstallerRetryReady
     }
   }, null, 2));
 } finally {
