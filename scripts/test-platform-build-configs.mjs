@@ -1136,17 +1136,23 @@ assert(
   smokePlayerLayout.includes('HOME: fakeHome')
   && smokePlayerLayout.includes('autoImportAccount: false')
   && smokePlayerLayout.includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
+  && smokePlayerLayout.includes("AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1'")
   && smokePlayerLayout.includes('AbortSignal.timeout(2_000)')
+  && smokePlayerLayout.includes('Math.min(5_000, remainingMs)')
+  && smokePlayerLayout.includes("reject(new Error('CDP socket closed'))")
+  && smokePlayerLayout.includes('await stopElectronChild(child);')
   && smokePlayerLayout.includes("console.log('[player-layout] debugger ready; waiting for hydrated UI')"),
-  'Packaged player layout validation must isolate host launcher prerequisites, bound debugger discovery, and identify its exact startup phase.'
+  'Packaged player layout validation must isolate host launcher prerequisites, retry bounded debugger hydration, expose socket closure, and fully stop its owned native process.'
 );
 assert(
   verifyInstalledPlayerScript.includes('function createIsolatedCheckEnvironment()')
   && verifyInstalledPlayerScript.includes('...isolatedHost.env')
   && verifyInstalledPlayerScript.includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
+  && verifyInstalledPlayerScript.includes("AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1'")
+  && verifyLocalScript.includes("AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1'")
   && verifyInstalledPlayerScript.includes('HOME: fakeHome')
   && verifyInstalledPlayerScript.includes("fs.rmSync(isolatedHost.root, { recursive: true, force: true })"),
-  'Every packaged-player check must run under a disposable host profile with deterministic Java discovery and remove that profile after success.'
+  'Every source and packaged native check must quit its macOS application after closing the test window; packaged checks must also use and clean a disposable host profile with deterministic Java discovery.'
 );
 assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')

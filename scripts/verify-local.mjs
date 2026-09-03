@@ -108,6 +108,7 @@ function runCheck(args) {
       env: {
         ...process.env,
         AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
+        AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
         ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING || '0'
       }
     });

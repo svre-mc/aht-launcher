@@ -93,6 +93,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer) clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function stopElectronChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill();
+  if (await waitForChildExit(child, 5_000)) return;
+  child.kill('SIGKILL');
+  if (!await waitForChildExit(child, 5_000)) {
+    throw new Error(`Owned Electron child ${child.pid} did not exit after SIGKILL.`);
+  }
+}
+
 function queryWindowsNativeHitTest(processId, points) {
   if (process.platform !== 'win32') {
     return { supported: false, samples: [] };
@@ -245,28 +270,60 @@ function connect(wsUrl) {
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
     pending.delete(message.id);
+    clearTimeout(timer);
     if (message.error) {
       reject(new Error(`${message.error.message}: ${message.error.data || ''}`.trim()));
     } else {
       resolve(message.result || {});
     }
   });
+  socket.addEventListener('close', () => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(new Error('CDP socket closed'));
+    }
+    pending.clear();
+  });
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const rejectBeforeOpen = (message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
+      try {
+        socket.close();
+      } catch {
+        // The socket may still be connecting. The open timeout remains authoritative.
+      }
+      reject(new Error(message));
+    };
+    const openTimer = setTimeout(() => {
+      rejectBeforeOpen(`CDP socket open timed out: ${wsUrl}`);
+    }, 5_000);
     socket.addEventListener('open', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
       resolve({
-        call(method, params = {}) {
+        call(method, params = {}, timeoutMs = 30_000) {
           const id = nextId;
           nextId += 1;
-          socket.send(JSON.stringify({ id, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(id, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
-            }, 30000);
+            }, timeoutMs);
+            pending.set(id, { resolve: callResolve, reject: callReject, timer });
+            try {
+              socket.send(JSON.stringify({ id, method, params }));
+            } catch (error) {
+              clearTimeout(timer);
+              pending.delete(id);
+              callReject(error);
+            }
           });
         },
         close() {
@@ -274,25 +331,33 @@ function connect(wsUrl) {
         }
       });
     }, { once: true });
-    socket.addEventListener('error', () => reject(new Error(`Failed to connect to ${wsUrl}`)), { once: true });
+    socket.addEventListener('error', () => rejectBeforeOpen(`Failed to connect to ${wsUrl}`), { once: true });
+    socket.addEventListener('close', () => rejectBeforeOpen(`CDP socket closed before opening: ${wsUrl}`), { once: true });
   });
 }
 
-async function evaluate(client, expression) {
-  const result = await client.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+async function evaluate(client, expression, timeoutMs = 30_000) {
+  const result = await client.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
   return result.result?.value;
 }
 
-async function waitFor(client, expression, label, attempts = 160) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const value = await evaluate(client, expression);
-    if (value) return value;
-    await sleep(250);
+async function waitFor(client, expression, label, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const value = await evaluate(client, expression, Math.min(5_000, remainingMs));
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
   }
-  throw new Error(`Timed out waiting for ${label}`);
+  throw new Error(`Timed out waiting for ${label}: ${lastError?.message || 'condition stayed false'}`);
 }
 
 async function moveMouseUntilHovered(client, selector, point, label, attempts = 8) {
@@ -502,6 +567,7 @@ await Promise.all([
   fsp.mkdir(macMinecraftApp, { recursive: true })
 ]);
 await fsp.writeFile(java8Executable, 'AHT Java 8 executable fixture', 'utf8');
+if (process.platform !== 'win32') await fsp.chmod(java8Executable, 0o755);
 await fsp.writeFile(path.join(java8Home, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
 const deviceCredential = createDeviceCredential();
 await writeJson(path.join(userData, 'device-identity.json'), {
@@ -608,6 +674,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_STARTUP_PREPARATION_SECRET: 'b'.repeat(64),
+    AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
     AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
@@ -2128,12 +2195,16 @@ try {
     },
     reports: reports.map(({ label, viewport, activeView }) => ({ label, viewport, activeView }))
   }, null, 2));
+} catch (error) {
+  const startupProbe = await fsp.readFile(startupProbePath, 'utf8').catch(() => 'No startup probe was written.');
+  console.error(`AHT layout startup probe:\n${startupProbe.trim()}`);
+  throw error;
 } finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});
     client.close();
   }
-  child.kill();
+  await stopElectronChild(child);
   const closePromise = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections?.();
   await closePromise;
