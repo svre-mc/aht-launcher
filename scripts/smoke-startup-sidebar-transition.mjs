@@ -459,12 +459,14 @@ try {
     const button = document.querySelector('#playButton');
     const activeView = document.querySelector('.view.active');
     if (workspace.classList.contains('is-sidebar-switching') || button?.dataset.actionMode !== 'install') return false;
+    const viewOpacity = Number(getComputedStyle(activeView).opacity);
+    if (viewOpacity !== 1) return false;
     const sidebar = document.querySelector('.sidebar').getBoundingClientRect();
     const topbar = document.querySelector('.topbar').getBoundingClientRect();
     return {
       activePack: document.querySelector('.game-tile.active')?.dataset.pack || '',
       activeView: activeView?.id || '',
-      viewOpacity: Number(getComputedStyle(activeView).opacity),
+      viewOpacity,
       sidebarLoaderHidden: Boolean(document.querySelector('#sidebarSwitchLoader')?.hidden),
       label: button.textContent.trim(),
       background: getComputedStyle(button).backgroundImage,

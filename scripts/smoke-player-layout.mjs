@@ -713,8 +713,14 @@ try {
   console.log('[player-layout] debugger connected; enabling Runtime and Page');
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  // A packaged macOS executable launched directly from a CI shell is not
+  // guaranteed to become the foreground application. Activate it before
+  // waiting on renderer hydration so App Nap cannot strand the CDP client
+  // behind the very readiness condition needed to issue this command.
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
-  console.log('[player-layout] debugger ready; waiting for hydrated UI');
+  console.log('[player-layout] debugger foregrounded; waiting for hydrated UI');
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
   await waitFor(client, `
     (() => {
