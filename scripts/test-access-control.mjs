@@ -65,6 +65,7 @@ const username = 'DeviceRig';
 const minecraftUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const installId = 'device-install-test';
 const device = createDeviceCredential();
+const sameMinecraftUsername = (left, right) => String(left || '').toLowerCase() === String(right || '').toLowerCase();
 const registration = {
   username,
   minecraftUuid,
@@ -117,10 +118,13 @@ if (!login.response.ok || !login.body.token) throw new Error(`Admin login failed
 const auth = { Authorization: `Bearer ${login.body.token}` };
 
 const players = await workerJson('/admin/player-records', { headers: auth });
-const player = players.body.players?.find((item) => item.minecraftUsername === username);
+if (!players.response.ok || !Array.isArray(players.body.players)) {
+  throw new Error(`Player records lookup failed: ${players.response.status} ${JSON.stringify(players.body)}`);
+}
+const player = players.body.players.find((item) => sameMinecraftUsername(item.minecraftUsername, username));
 if (!player || player.ipv4 !== '203.0.113.77' || player.deviceId !== device.deviceId
     || player.network?.status !== 'likely' || player.network?.asn !== 64512) {
-  throw new Error(`Player network/device data was incomplete: ${JSON.stringify(player)}`);
+  throw new Error(`Player network/device data was incomplete: ${JSON.stringify({ player, players: players.body.players })}`);
 }
 
 const ipv6Device = createDeviceCredential();
@@ -155,7 +159,10 @@ const ipv6Registered = await workerJson('/api/users/register', {
 });
 if (!ipv6Registered.response.ok) throw new Error(`IPv6 registration failed: ${JSON.stringify(ipv6Registered.body)}`);
 const playersWithIpv6 = await workerJson('/admin/player-records', { headers: auth });
-const ipv6Player = playersWithIpv6.body.players?.find((item) => item.minecraftUsername === 'Ipv6Rig');
+if (!playersWithIpv6.response.ok || !Array.isArray(playersWithIpv6.body.players)) {
+  throw new Error(`IPv6 player records lookup failed: ${playersWithIpv6.response.status} ${JSON.stringify(playersWithIpv6.body)}`);
+}
+const ipv6Player = playersWithIpv6.body.players.find((item) => sameMinecraftUsername(item.minecraftUsername, 'Ipv6Rig'));
 if (ipv6Player?.ip !== '2001:db8::77' || ipv6Player.ipVersion !== 6 || ipv6Player.ipv4) {
   throw new Error(`Native IPv6 was not preserved: ${JSON.stringify(ipv6Player)}`);
 }

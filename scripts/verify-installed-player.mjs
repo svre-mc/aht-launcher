@@ -89,6 +89,35 @@ function installedPlayerExe() {
   return String(process.env.AHT_INSTALLED_PLAYER_EXE || process.env.AHT_SMOKE_EXE || defaultInstalledPlayerExe()).trim();
 }
 
+function processGroupExists(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function terminateOwnedProcessTree(child, initialSignal = 'SIGTERM') {
+  if (process.platform === 'win32' || !Number.isInteger(child.pid) || child.pid <= 0) {
+    child.kill(initialSignal);
+    return;
+  }
+  if (!processGroupExists(child.pid)) return;
+  process.kill(-child.pid, initialSignal);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!processGroupExists(child.pid)) return;
+  }
+  process.kill(-child.pid, 'SIGKILL');
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!processGroupExists(child.pid)) return;
+  }
+  throw new Error(`Owned installed-player process group ${child.pid} did not exit.`);
+}
+
 async function runCheck(check, smokeExe) {
   // Installed checks run after the source suite on the same native runner.
   // Probe a fresh consecutive range so runner-local services or slow-closing
@@ -103,6 +132,7 @@ async function runCheck(check, smokeExe) {
     const child = spawn(invocation.command, invocation.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: invocation.shell,
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         AHT_SMOKE_EXE: smokeExe,
@@ -112,10 +142,10 @@ async function runCheck(check, smokeExe) {
     });
 
     let settled = false;
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       if (settled) return;
       settled = true;
-      child.kill('SIGTERM');
+      await terminateOwnedProcessTree(child).catch(() => {});
       const error = new Error(`${label} exceeded the ${formatMs(checkTimeoutMs)} per-check limit`);
       error.output = output;
       error.label = label;
@@ -135,11 +165,20 @@ async function runCheck(check, smokeExe) {
       error.label = label;
       reject(error);
     });
-    child.on('exit', (code, signal) => {
+    child.on('exit', async (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       const elapsed = Date.now() - started;
+      try {
+        await terminateOwnedProcessTree(child);
+      } catch (cleanupError) {
+        cleanupError.output = output;
+        cleanupError.label = `${label} process cleanup`;
+        cleanupError.elapsed = elapsed;
+        reject(cleanupError);
+        return;
+      }
       if (code === 0) {
         console.log(`[PASS] ${label} with installed player app (${formatMs(elapsed)})`);
         resolve({ label, elapsed, output });
