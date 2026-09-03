@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 10720);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -15,6 +16,14 @@ const electronBin = smokeExe || (process.platform === 'win32'
   : path.resolve('node_modules', '.bin', 'electron'));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-privacy-'));
 const userData = path.join(root, 'userData');
+const fakeHome = path.join(root, 'home');
+const fakeAppData = path.join(root, 'appdata');
+const fakeLocalAppData = path.join(root, 'localappdata');
+const minecraftRoot = path.join(root, '.minecraft');
+const java8Home = path.join(minecraftRoot, '.aht-launcher', 'java', 'temurin8');
+const java8Executable = path.join(java8Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft.app');
+const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const appDefaults = path.join(root, 'app.defaults.json');
 const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
@@ -101,7 +110,7 @@ function connect(wsUrl) {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
-            }, 30000);
+            }, 10000);
           });
         },
         close() {
@@ -121,9 +130,10 @@ async function evaluate(client, expression) {
   return result.result?.value;
 }
 
-async function waitFor(client, expression, label) {
+async function waitFor(client, expression, label, timeoutMs = 60_000) {
   let last;
-  for (let attempt = 0; attempt < 160; attempt += 1) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     try {
       last = await evaluate(client, expression);
       if (last) return last;
@@ -168,10 +178,40 @@ const dirtyPrivateConfig = {
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
   minecraftLauncher: { enabled: true, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 }
 };
+dirtyPrivateConfig.minecraftLauncher.rootDir = minecraftRoot;
+dirtyPrivateConfig.minecraftLauncher.javaPath = java8Executable;
+dirtyPrivateConfig.minecraftLauncher.autoImportAccount = false;
 const stalePlayerConfig = {
   ...dirtyPrivateConfig,
   launcherProof: { ...dirtyPrivateConfig.launcherProof, required: false, baseUrl: 'http://stale-player-proof.invalid/' }
 };
+await Promise.all([
+  fsp.mkdir(fakeHome, { recursive: true }),
+  fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true }),
+  fsp.mkdir(path.join(fakeHome, 'Downloads'), { recursive: true }),
+  fsp.mkdir(fakeAppData, { recursive: true }),
+  fsp.mkdir(fakeLocalAppData, { recursive: true }),
+  fsp.mkdir(userData, { recursive: true }),
+  fsp.mkdir(minecraftRoot, { recursive: true }),
+  fsp.mkdir(path.dirname(java8Executable), { recursive: true }),
+  fsp.mkdir(macMinecraftApp, { recursive: true })
+]);
+await fsp.writeFile(java8Executable, 'AHT Java 8 executable fixture', 'utf8');
+await fsp.writeFile(path.join(java8Home, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
+const deviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: deviceCredential.schemaVersion,
+  protocol: deviceCredential.protocol,
+  algorithm: deviceCredential.algorithm,
+  deviceId: deviceCredential.deviceId,
+  publicKey: deviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(deviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: deviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 await writeJson(appDefaults, dirtyPrivateConfig);
 await writeJson(path.join(userData, 'launcher.config.json'), stalePlayerConfig);
 
@@ -179,8 +219,19 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    HOME: fakeHome,
+    USERPROFILE: fakeHome,
+    APPDATA: fakeAppData,
+    LOCALAPPDATA: fakeLocalAppData,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_TEST_REMOTE_DEBUG_PORT: String(port),
+    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+    AHT_TEST_STARTUP_PREPARATION_SECRET: 'a'.repeat(64),
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     AHT_APP_DEFAULTS: appDefaults,
     ELECTRON_ENABLE_LOGGING: '0'
   },
@@ -191,13 +242,17 @@ let client = null;
 try {
   console.log('[player-privacy] waiting for packaged Electron debugger target');
   const target = await waitForTarget();
-  console.log('[player-privacy] debugger target ready; connecting');
+  console.log(`[player-privacy] debugger target ready; connecting (${JSON.stringify({ title: target.title || '', url: target.url || '' })})`);
   client = await connect(target.webSocketDebuggerUrl);
-  console.log('[player-privacy] debugger connected; waiting for hydrated UI');
+  console.log('[player-privacy] debugger connected; enabling Runtime');
   await client.call('Runtime.enable');
+  console.log('[player-privacy] Runtime enabled; enabling Page');
   await client.call('Page.enable');
+  console.log('[player-privacy] Page enabled; bringing launcher forward');
   await client.call('Page.bringToFront');
+  console.log('[player-privacy] launcher foregrounded; enabling focus emulation');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  console.log('[player-privacy] debugger ready; waiting for hydrated UI');
   await waitFor(client, 'document.readyState === "complete" && window.aht && !document.body.classList.contains("is-booting") && document.querySelector("#startupLoader")?.hidden', 'fully revealed player DOM');
   console.log('[player-privacy] hydrated UI ready');
   const proof = await evaluate(client, `

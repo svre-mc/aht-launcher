@@ -1125,8 +1125,12 @@ assert(
 assert(
   [smokePlayerDefaults, readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url))]
     .every((source) => source.includes('await stopElectronChild(child);') && source.includes("child.kill('SIGKILL')"))
-  && readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url)).includes('AbortSignal.timeout(2_000)'),
-  'The first packaged smokes must wait for their owned Electron process to exit, and privacy startup must bound every DevTools discovery request.'
+  && readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url)).includes('AbortSignal.timeout(2_000)')
+  && readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url)).includes('HOME: fakeHome')
+  && readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url)).includes('autoImportAccount = false')
+  && readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url)).includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
+  && readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url)).includes('timeoutMs = 60_000'),
+  'The first packaged smokes must wait for their owned Electron process to exit, while privacy startup isolates host launcher prerequisites and hard-bounds DevTools discovery and hydration.'
 );
 assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')
