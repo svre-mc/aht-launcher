@@ -954,6 +954,10 @@ assert(
   'Quick startup must tolerate foreign launcher profile rewrites, and modern CurseForge schema must not receive the legacy selectedProfile field.'
 );
 assert(
+  minecraftLauncherProfileSource.includes('const selected = await Promise.all(candidates.map((candidate) => ('),
+  'Prepared pack selection must update independent Minecraft launcher roots in parallel so sidebar switching is not multiplied by root count.'
+);
+assert(
   desktopMain.includes('function armCloseLauncherWhenGameStarts')
   && desktopMain.includes('minecraftLauncherSignalStartsConfiguredModpack')
   && desktopMain.includes('minecraftInstanceLogAdvancedAfterBaseline')
@@ -1112,10 +1116,10 @@ assert(
   releaseWorkflow.includes('AHT_SMOKE_USE_TEMP_DEFAULTS: "1"')
   && [smokePlayerDefaults, smokeSettingsProfile].every((source) => (
     source.includes("const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';")
-    && source.includes('const packagedDefaults = smokeExe && !useTempDefaults')
+    && source.includes("const packagedDefaults = smokeExe && process.platform === 'win32' && !useTempDefaults")
     && source.includes("AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults")
   )),
-  'Installed Linux smokes must keep mutable defaults fixtures out of the packaged application directory.'
+  'Installed macOS and Linux smokes must keep mutable defaults fixtures out of the packaged application directory.'
 );
 assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')

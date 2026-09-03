@@ -22,7 +22,10 @@ const versionId = '1.12.2-forge-14.23.5.2860';
 const latestPath = path.join(root, 'latest.json');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';
-const packagedDefaults = smokeExe && !useTempDefaults ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
+// Keep mutable test data outside signed macOS app bundles and Linux packages.
+const packagedDefaults = smokeExe && process.platform === 'win32' && !useTempDefaults
+  ? path.join(path.dirname(smokeExe), 'app.defaults.json')
+  : '';
 const defaultsPath = packagedDefaults || tempDefaults;
 const originalDefaults = packagedDefaults && fs.existsSync(packagedDefaults)
   ? await fsp.readFile(packagedDefaults)

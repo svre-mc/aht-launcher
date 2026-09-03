@@ -38,7 +38,11 @@ const java8FixtureHome = path.join(expectedLauncherRoot, '.aht-launcher', 'java'
 const java8FixtureExecutable = path.join(java8FixtureHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';
-const packagedDefaults = smokeExe && !useTempDefaults ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
+// A macOS .app is a signed bundle. Mutating a fixture inside it can make the
+// next packaged launch fail verification even after the file is restored.
+const packagedDefaults = smokeExe && process.platform === 'win32' && !useTempDefaults
+  ? path.join(path.dirname(smokeExe), 'app.defaults.json')
+  : '';
 const defaultsPath = packagedDefaults || tempDefaults;
 const originalDefaults = packagedDefaults && fs.existsSync(packagedDefaults)
   ? await fsp.readFile(packagedDefaults)

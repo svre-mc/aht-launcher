@@ -1194,13 +1194,14 @@ export async function selectPreparedMinecraftLauncherProfile(profile = null) {
   if (!candidates.length) {
     throw new Error('The prepared Minecraft Launcher profile is missing. Restart A Hard Time Launcher.');
   }
-  const selected = [];
   for (const candidate of candidates) {
     if (!candidate?.rootDir || !candidate?.profilesPath || !candidate?.profileId || !candidate?.versionId) {
       throw new Error('The prepared Minecraft Launcher profile is incomplete. Restart A Hard Time Launcher.');
     }
-    selected.push(await writeMinecraftLauncherProfile(candidate, { selectForPlay: true }));
   }
+  const selected = await Promise.all(candidates.map((candidate) => (
+    writeMinecraftLauncherProfile(candidate, { selectForPlay: true })
+  )));
   const primaryRoot = launcherRootKey(profile?.rootDir || '');
   const primary = selected.find((candidate) => launcherRootKey(candidate.rootDir) === primaryRoot) || selected[0];
   return {
