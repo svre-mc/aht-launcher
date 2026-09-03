@@ -146,6 +146,10 @@ if (process.platform === 'win32') {
   await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
 } else if (process.platform === 'darwin') {
   await fsp.mkdir(macMinecraftApp, { recursive: true });
+} else if (process.platform === 'linux') {
+  const linuxMinecraftLauncher = path.join(fakeBin, 'minecraft-launcher');
+  await fsp.writeFile(linuxMinecraftLauncher, '#!/usr/bin/env sh\nexit 0\n', 'utf8');
+  await fsp.chmod(linuxMinecraftLauncher, 0o755);
 }
 
 const fakeWrangler = path.join(fakeBin, 'fake-wrangler.mjs');
