@@ -37,7 +37,8 @@ const expectedLauncherRoot = process.platform === 'win32' ? curseForgeRoot : min
 const java8FixtureHome = path.join(expectedLauncherRoot, '.aht-launcher', 'java', 'temurin8');
 const java8FixtureExecutable = path.join(java8FixtureHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const tempDefaults = path.join(root, 'app.defaults.json');
-const packagedDefaults = smokeExe ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
+const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';
+const packagedDefaults = smokeExe && !useTempDefaults ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
 const defaultsPath = packagedDefaults || tempDefaults;
 const originalDefaults = packagedDefaults && fs.existsSync(packagedDefaults)
   ? await fsp.readFile(packagedDefaults)
@@ -241,7 +242,7 @@ const child = spawn(electronBin, electronArgs, {
     LOCALAPPDATA: fakeLocalAppData,
     HOME: fakeHome,
     USERPROFILE: fakeHome,
-    AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
+    AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,

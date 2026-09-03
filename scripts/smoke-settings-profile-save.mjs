@@ -21,7 +21,8 @@ const javaPath = path.join(javaHome, 'bin', 'java.exe');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const latestPath = path.join(root, 'latest.json');
 const tempDefaults = path.join(root, 'app.defaults.json');
-const packagedDefaults = smokeExe ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
+const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';
+const packagedDefaults = smokeExe && !useTempDefaults ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
 const defaultsPath = packagedDefaults || tempDefaults;
 const originalDefaults = packagedDefaults && fs.existsSync(packagedDefaults)
   ? await fsp.readFile(packagedDefaults)
@@ -170,7 +171,7 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
-    AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
+    AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,

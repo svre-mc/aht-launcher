@@ -476,6 +476,7 @@ jobs:
       - name: Run installed Ubuntu player interaction suite
         env:
           AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher
+          AHT_SMOKE_USE_TEMP_DEFAULTS: "1"
         run: xvfb-run -a npm run verify:installed-player
 
       - name: Recheck startup transition against installed Ubuntu package

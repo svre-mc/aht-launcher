@@ -33,6 +33,7 @@ const releaseWorkflow = readText(new URL('../.github/workflows/build-macos.yml',
 const verifyLocalScript = readText(new URL('../scripts/verify-local.mjs', import.meta.url));
 const verifyInstalledPlayerScript = readText(new URL('../scripts/verify-installed-player.mjs', import.meta.url));
 const smokePlayerDefaults = readText(new URL('../scripts/smoke-player-defaults-feed.mjs', import.meta.url));
+const smokeSettingsProfile = readText(new URL('../scripts/smoke-settings-profile-save.mjs', import.meta.url));
 const smokePlayerLayout = readText(new URL('../scripts/smoke-player-layout.mjs', import.meta.url));
 const smokeDeveloperAuthRefresh = readText(new URL('../scripts/smoke-developer-update-log-auth-refresh.mjs', import.meta.url));
 const smokeStartupTransition = readText(new URL('../scripts/smoke-startup-sidebar-transition.mjs', import.meta.url));
@@ -1092,6 +1093,15 @@ assert(releaseWorkflow.includes('id: ubuntu') && releaseWorkflow.includes('runne
 assert(releaseWorkflow.includes('dist:regular:ubuntu'), 'GitHub workflow must call the Ubuntu build script.');
 assert(releaseWorkflow.includes('aht-launcher-ubuntu'), 'GitHub workflow must upload Ubuntu launcher artifacts.');
 assert(releaseWorkflow.includes('validate-ubuntu-runtime:') && releaseWorkflow.includes('AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher'), 'GitHub validation must install and exercise the native Ubuntu package.');
+assert(
+  releaseWorkflow.includes('AHT_SMOKE_USE_TEMP_DEFAULTS: "1"')
+  && [smokePlayerDefaults, smokeSettingsProfile].every((source) => (
+    source.includes("const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';")
+    && source.includes('const packagedDefaults = smokeExe && !useTempDefaults')
+    && source.includes("AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults")
+  )),
+  'Installed Ubuntu smokes must keep mutable defaults fixtures out of the root-owned application and /usr/bin directories.'
+);
 assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')
   && releaseWorkflow.includes('sudo chown root:root "$ELECTRON_SANDBOX"')
