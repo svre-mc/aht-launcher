@@ -3046,6 +3046,7 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   const restartReady = Boolean(state?.lastResult?.restartRequired && !state?.error);
   const instantRestartReady = Boolean(restartReady && state?.lastResult?.instantRestartReady);
   const externalPackageInstall = Boolean(restartReady && state?.lastResult?.preparedRestart?.strategy === "linux-package-installer");
+  const portableLinuxUpdate = Boolean(restartReady && state?.lastResult?.preparedRestart?.strategy === "linux-appimage-helper");
   const current = update.currentVersion || status?.appVersion || "-";
   const latest = update.latestVersion || "-";
   els.launcherUpdateTitle.textContent = restartReady
@@ -3057,7 +3058,9 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
         ? `AHT Launcher ${latest} is fully copied, extracted, and verified for a same-version reinstall. Click Restart Launcher to swap to the prepared copy immediately.`
         : `AHT Launcher ${latest} is fully downloaded, extracted, and verified. Click Restart Launcher to close this version and open the prepared update immediately.`
       : externalPackageInstall
-        ? `AHT Launcher ${latest} is ready as a verified Ubuntu DEB. Open the package installer, finish installation, then reopen AHT Launcher.`
+        ? `AHT Launcher ${latest} is ready as a verified external Linux package. Open the package installer, finish installation, then reopen AHT Launcher.`
+        : portableLinuxUpdate
+          ? `AHT Launcher ${latest} is ready as a verified portable AppImage. Click Install and Restart to replace this AppImage and reopen it automatically.`
         : `AHT Launcher ${latest} uses the legacy installer. Click Install and Restart to apply it and reopen when finished.`
     : developerReinstall
       ? `AHT Launcher ${latest} is preparing a developer-only same-version reinstall. Installed launcher version: ${current}.`
@@ -3153,7 +3156,9 @@ async function restartLauncherSelfUpdate() {
     lines: [
       ...(lastLauncherUpdateState.lines || []),
       lastLauncherUpdateState?.lastResult?.preparedRestart?.strategy === "linux-package-installer"
-        ? "Opening the Ubuntu package installer."
+        ? "Opening the Linux package installer."
+        : lastLauncherUpdateState?.lastResult?.preparedRestart?.strategy === "linux-appimage-helper"
+          ? "Installing the portable Linux AppImage update."
         : "Installing launcher update."
     ],
     progress: {
@@ -3768,7 +3773,7 @@ function renderLauncherDeployState(state) {
   setLauncherDeployProgress(state.progress, false);
   if (Array.isArray(state.lines) && state.lines.length) setDevLog(state.lines.join("\n"));
   if (state.running) {
-    setLauncherUpdateStatus("warn", "Deploying public launcher", state.progress?.phase || "GitHub Actions running", "Windows, macOS, and Ubuntu player builds are publishing to GitHub Releases and R2. The developer launcher is never uploaded.");
+    setLauncherUpdateStatus("warn", "Deploying public launcher", state.progress?.phase || "GitHub Actions running", "Windows, universal macOS, and portable Linux player builds are publishing to GitHub Releases and R2. The developer launcher is never uploaded.");
     return;
   }
   if (state.error) {
@@ -3805,7 +3810,7 @@ async function publishLauncherUpdate() {
       githubToken: inputValue(els.githubTokenInput, ""),
       publishToR2: true
     };
-    setLauncherUpdateStatus("warn", "Preparing deploy", "Reading latest GitHub launcher version", "Only public Windows, macOS, and Ubuntu player-launcher artifacts will be released.");
+    setLauncherUpdateStatus("warn", "Preparing deploy", "Reading latest GitHub launcher version", "Only the public Windows, universal macOS, and portable Linux player-launcher artifacts will be released.");
     setLauncherDeployProgress({ phase: "Preparing public deploy", percent: 0 });
     const state = await window.aht.devDeployLauncher(payload);
     renderLauncherDeployState(state);

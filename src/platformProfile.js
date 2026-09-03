@@ -4,15 +4,15 @@ import path from 'node:path';
 export function platformKey(platform = process.platform) {
   if (platform === 'win32') return 'windows';
   if (platform === 'darwin') return 'macos';
-  if (platform === 'linux') return 'ubuntu';
-  throw new Error(`Unsupported AHT launcher platform: ${platform}. Supported platforms are Windows 10/11, macOS, and Ubuntu Linux.`);
+  if (platform === 'linux') return 'linux';
+  throw new Error(`Unsupported AHT launcher platform: ${platform}. Supported platforms are Windows 10/11, macOS, and Linux x64.`);
 }
 
 export function platformDisplayName(platform = process.platform) {
   const key = platformKey(platform);
   if (key === 'windows') return 'Windows 10/11';
   if (key === 'macos') return 'macOS';
-  return 'Ubuntu Linux';
+  return 'Linux x64';
 }
 
 export function defaultInstanceDirForPlatform(platform = process.platform, env = process.env) {
@@ -48,11 +48,11 @@ export function platformProfile(platform = process.platform, env = process.env) 
       ? 'A Hard Time Launcher Windows'
       : key === 'macos'
         ? 'A Hard Time Launcher macOS'
-        : 'A Hard Time Launcher Ubuntu',
+        : 'A Hard Time Launcher Linux',
     packageTarget: key === 'windows'
       ? 'NSIS installer for Windows 10/11'
       : key === 'macos'
         ? 'DMG app for macOS'
-        : 'DEB package and AppImage for Ubuntu Linux'
+        : 'portable AppImage for Linux x64 distributions'
   };
 }

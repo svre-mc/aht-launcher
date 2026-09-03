@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       validation_only:
-        description: "Run the non-publishing macOS and Ubuntu validation matrix"
+        description: "Run the non-publishing universal macOS and portable Linux validation matrix"
         required: true
         type: boolean
         default: false
@@ -19,6 +19,8 @@ on:
     paths:
       - ".github/workflows/build-macos.yml"
       - "build/**"
+      - "cloudflare/curseforge-proxy-worker.js"
+      - "cloudflare/wrangler.toml"
       - "config/**"
       - "desktop/**"
       - "pack-fixes/**"
@@ -62,14 +64,14 @@ jobs:
             artifact_path: |
               release-builds/macos/*.dmg
               release-builds/macos/*.zip
-          - id: ubuntu
-            label: Ubuntu Linux x64
+          - id: linux
+            label: portable Linux x64
             runner: ubuntu-latest
-            build_script: dist:regular:ubuntu
-            artifact_name: aht-launcher-ubuntu
+            build_script: dist:regular:linux
+            artifact_name: aht-launcher-linux
             artifact_path: |
-              release-builds/ubuntu/*.deb
-              release-builds/ubuntu/*.AppImage
+              release-builds/linux/*.deb
+              release-builds/linux/*.AppImage
 
     env:
       CSC_LINK: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_BASE64 || matrix.id == 'macos' && secrets.APPLE_CERTIFICATE_BASE64 || '' }}
@@ -152,15 +154,15 @@ jobs:
             throw 'Refusing to publish invalid, untrusted, or inconsistently signed Windows artifacts.'
           }
 
-      - name: Verify Ubuntu package structure and player boundary
-        if: matrix.id == 'ubuntu'
+      - name: Verify Linux AppImage structure and compatibility bridge
+        if: matrix.id == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version")"
-          DEB="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.deb"
-          APPIMAGE="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.AppImage"
-          EXTRACTED="$RUNNER_TEMP/aht-ubuntu-package"
+          DEB="release-builds/linux/AHT-Launcher-Linux-x64-$VERSION.deb"
+          APPIMAGE="release-builds/linux/AHT-Launcher-Linux-x64-$VERSION.AppImage"
+          EXTRACTED="$RUNNER_TEMP/aht-linux-appimage"
 
           test -s "$DEB"
           test -s "$APPIMAGE"
@@ -168,12 +170,12 @@ jobs:
           test "$(dpkg-deb -f "$DEB" Architecture)" = "amd64"
           rm -rf "$EXTRACTED"
           mkdir -p "$EXTRACTED"
-          dpkg-deb -x "$DEB" "$EXTRACTED"
-          ASAR="$(find "$EXTRACTED" -type f -path '*/resources/app.asar' -print -quit)"
+          (cd "$EXTRACTED" && "$GITHUB_WORKSPACE/$APPIMAGE" --appimage-extract >/dev/null)
+          ASAR="$(find "$EXTRACTED/squashfs-root" -type f -path '*/resources/app.asar' -print -quit)"
           test -n "$ASAR"
-          ./node_modules/.bin/asar list "$ASAR" > "$RUNNER_TEMP/aht-ubuntu-asar-files.txt"
-          if grep -Eiq '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' "$RUNNER_TEMP/aht-ubuntu-asar-files.txt"; then
-            echo "Ubuntu player package contains a forbidden developer, operator, or secret-bearing path." >&2
+          ./node_modules/.bin/asar list "$ASAR" > "$RUNNER_TEMP/aht-linux-asar-files.txt"
+          if grep -Eiq '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' "$RUNNER_TEMP/aht-linux-asar-files.txt"; then
+            echo "Linux AppImage contains a forbidden developer, operator, or secret-bearing path." >&2
             exit 1
           fi
           file "$APPIMAGE"
@@ -199,12 +201,10 @@ jobs:
             runner: macos-15
             arch: arm64
             machine: arm64
-            app_dir: mac-arm64
           - label: Intel
             runner: macos-15-intel
             arch: x64
             machine: x86_64
-            app_dir: mac
 
     env:
       CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -260,14 +260,14 @@ jobs:
         env:
           AHT_TEST_EVIDENCE_DIR: validation/${{ matrix.arch }}
 
-      - name: Build native macOS package
-        run: npm run dist:regular:macos -- --${{ matrix.arch }}
+      - name: Build universal macOS package
+        run: npm run dist:regular:macos
 
-      - name: Verify native package structure and player boundary
+      - name: Verify universal package structure and player boundary
         shell: bash
         run: |
           set -euo pipefail
-          APP="release-builds/macos/${{ matrix.app_dir }}/A Hard Time Launcher macOS.app"
+          APP="release-builds/macos/mac-universal/A Hard Time Launcher macOS.app"
           EXECUTABLE="$APP/Contents/MacOS/A Hard Time Launcher macOS"
           ASAR="$APP/Contents/Resources/app.asar"
           REPORT_DIR="validation/${{ matrix.arch }}"
@@ -278,9 +278,13 @@ jobs:
           file "$EXECUTABLE" | tee "$REPORT_DIR/executable-file.txt"
           ARCHES="$(lipo -archs "$EXECUTABLE")"
           echo "architectures=$ARCHES" | tee "$REPORT_DIR/architectures.txt"
+          if [[ "$ARCHES" != *x86_64* || "$ARCHES" != *arm64* ]]; then
+            echo "Universal launcher must contain both x86_64 and arm64 executable slices: $ARCHES" >&2
+            exit 1
+          fi
           case " $ARCHES " in
             *" ${{ matrix.machine }} "*) ;;
-            *) echo "Expected ${{ matrix.machine }} in native executable architectures: $ARCHES" >&2; exit 1 ;;
+            *) echo "Expected this runner's ${{ matrix.machine }} architecture in universal executable: $ARCHES" >&2; exit 1 ;;
           esac
 
           ./node_modules/.bin/asar list "$ASAR" > "$REPORT_DIR/asar-files.txt"
@@ -292,11 +296,11 @@ jobs:
 
           shasum -a 256 "$EXECUTABLE" "$ASAR" | tee "$REPORT_DIR/native-package-sha256.txt"
 
-      - name: Mount native DMG and copy installed app
+      - name: Mount universal DMG and copy installed app
         shell: bash
         run: |
           set -euo pipefail
-          DMG="release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version").dmg"
+          DMG="release-builds/macos/AHT-Launcher-macOS-universal-$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version").dmg"
           MOUNT_POINT="$RUNNER_TEMP/aht-dmg-${{ matrix.arch }}"
           INSTALL_ROOT="$RUNNER_TEMP/aht-installed-${{ matrix.arch }}"
           INSTALLED_APP="$INSTALL_ROOT/A Hard Time Launcher macOS.app"
@@ -314,15 +318,20 @@ jobs:
           trap - EXIT
 
           test -x "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS"
-          lipo -archs "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS" | tee "validation/${{ matrix.arch }}/installed-architectures.txt"
-          shasum -a 256 "$DMG" "release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version").zip" | tee "validation/${{ matrix.arch }}/artifacts-sha256.txt"
+          INSTALLED_ARCHES="$(lipo -archs "$INSTALLED_APP/Contents/MacOS/A Hard Time Launcher macOS")"
+          echo "$INSTALLED_ARCHES" | tee "validation/${{ matrix.arch }}/installed-architectures.txt"
+          if [[ "$INSTALLED_ARCHES" != *x86_64* || "$INSTALLED_ARCHES" != *arm64* ]]; then
+            echo "Installed universal app is missing an architecture: $INSTALLED_ARCHES" >&2
+            exit 1
+          fi
+          shasum -a 256 "$DMG" "release-builds/macos/AHT-Launcher-macOS-universal-$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version").zip" | tee "validation/${{ matrix.arch }}/artifacts-sha256.txt"
 
       - name: Inspect signing, notarization, and Gatekeeper state
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version")"
-          DMG="release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-$VERSION.dmg"
+          DMG="release-builds/macos/AHT-Launcher-macOS-universal-$VERSION.dmg"
           APP="$RUNNER_TEMP/aht-installed-${{ matrix.arch }}/A Hard Time Launcher macOS.app"
           REPORT="validation/${{ matrix.arch }}/apple-trust.txt"
 
@@ -378,12 +387,12 @@ jobs:
           name: aht-macos-validation-${{ matrix.arch }}
           path: |
             validation/${{ matrix.arch }}/**
-            release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-*.dmg
-            release-builds/macos/AHT-Launcher-macOS-${{ matrix.arch }}-*.zip
+            release-builds/macos/AHT-Launcher-macOS-universal-*.dmg
+            release-builds/macos/AHT-Launcher-macOS-universal-*.zip
           if-no-files-found: warn
 
-  validate-ubuntu-runtime:
-    name: Validate Ubuntu Linux x64
+  validate-linux-runtime:
+    name: Validate portable Linux x64 on Ubuntu
     if: github.event_name == 'workflow_dispatch' && inputs.validation_only == true
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -405,7 +414,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p validation/ubuntu
+          mkdir -p validation/linux
           {
             echo "runner=ubuntu-latest"
             echo "expected_arch=x64"
@@ -413,7 +422,7 @@ jobs:
             echo "uname=$(uname -a)"
             lsb_release -a 2>/dev/null || true
             echo "node=$(node --version)"
-          } | tee validation/ubuntu/runner.txt
+          } | tee validation/linux/runner.txt
           test "$(uname -m)" = "x86_64"
 
       - name: Install dependencies
@@ -435,22 +444,22 @@ jobs:
       - name: Audit dependency security
         run: npm run security:audit
 
-      - name: Run Ubuntu source and Electron regression suite
+      - name: Run Linux source and Electron regression suite
         run: xvfb-run -a npm run verify:local
         env:
-          AHT_TEST_EVIDENCE_DIR: validation/ubuntu
+          AHT_TEST_EVIDENCE_DIR: validation/linux
 
-      - name: Build native Ubuntu packages
-        run: npm run dist:regular:ubuntu
+      - name: Build portable Linux package
+        run: npm run dist:regular:linux
 
-      - name: Verify and install native Ubuntu package
+      - name: Verify portable Linux AppImage and compatibility bridge
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version")"
-          DEB="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.deb"
-          APPIMAGE="release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-$VERSION.AppImage"
-          EXTRACTED="$RUNNER_TEMP/aht-ubuntu-validation-package"
+          DEB="release-builds/linux/AHT-Launcher-Linux-x64-$VERSION.deb"
+          APPIMAGE="release-builds/linux/AHT-Launcher-Linux-x64-$VERSION.AppImage"
+          EXTRACTED="$RUNNER_TEMP/aht-linux-appimage"
 
           test -s "$DEB"
           test -s "$APPIMAGE"
@@ -458,41 +467,45 @@ jobs:
           test "$(dpkg-deb -f "$DEB" Architecture)" = "amd64"
           rm -rf "$EXTRACTED"
           mkdir -p "$EXTRACTED"
-          dpkg-deb -x "$DEB" "$EXTRACTED"
-          ASAR="$(find "$EXTRACTED" -type f -path '*/resources/app.asar' -print -quit)"
+          (cd "$EXTRACTED" && "$GITHUB_WORKSPACE/$APPIMAGE" --appimage-extract >/dev/null)
+          APP_RUN="$EXTRACTED/squashfs-root/AppRun"
+          ASAR="$(find "$EXTRACTED/squashfs-root" -type f -path '*/resources/app.asar' -print -quit)"
+          SANDBOX="$(find "$EXTRACTED/squashfs-root" -type f -name chrome-sandbox -print -quit)"
+          test -x "$APP_RUN"
           test -n "$ASAR"
-          ./node_modules/.bin/asar list "$ASAR" > validation/ubuntu/asar-files.txt
-          if grep -Eiq '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' validation/ubuntu/asar-files.txt; then
-            echo "Ubuntu player package contains a forbidden developer, operator, or secret-bearing path." >&2
+          test -n "$SANDBOX"
+          sudo chown root:root "$SANDBOX"
+          sudo chmod 4755 "$SANDBOX"
+          ./node_modules/.bin/asar list "$ASAR" > validation/linux/asar-files.txt
+          if grep -Eiq '(^|/)(\.codex|cloudflare|server-lock-mod|work)(/|$)|access-control-and-data-security|wrangler\.toml|(^|/)\.env($|/)' validation/linux/asar-files.txt; then
+            echo "Linux AppImage contains a forbidden developer, operator, or secret-bearing path." >&2
             exit 1
           fi
 
-          timeout 30s "$APPIMAGE" --appimage-version | tee validation/ubuntu/appimage-version.txt
-          sudo apt-get install -y "$PWD/$DEB"
-          test "$(command -v a-hard-time-launcher)" = "/usr/bin/a-hard-time-launcher"
-          file /usr/bin/a-hard-time-launcher | tee validation/ubuntu/installed-executable.txt
-          sha256sum "$DEB" "$APPIMAGE" | tee validation/ubuntu/artifacts-sha256.txt
+          timeout 30s "$APPIMAGE" --appimage-version | tee validation/linux/appimage-version.txt
+          file "$APP_RUN" | tee validation/linux/appimage-apprun.txt
+          sha256sum "$DEB" "$APPIMAGE" | tee validation/linux/artifacts-sha256.txt
 
-      - name: Run installed Ubuntu player interaction suite
+      - name: Run extracted AppImage player interaction suite
         env:
-          AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher
+          AHT_INSTALLED_PLAYER_EXE: ${{ runner.temp }}/aht-linux-appimage/squashfs-root/AppRun
           AHT_SMOKE_USE_TEMP_DEFAULTS: "1"
         run: xvfb-run -a npm run verify:installed-player
 
-      - name: Recheck startup transition against installed Ubuntu package
+      - name: Recheck startup transition against extracted AppImage
         env:
-          AHT_SMOKE_EXE: /usr/bin/a-hard-time-launcher
+          AHT_SMOKE_EXE: ${{ runner.temp }}/aht-linux-appimage/squashfs-root/AppRun
         run: xvfb-run -a npm run test:startup-transition
 
-      - name: Upload native Ubuntu validation evidence
+      - name: Upload native Linux validation evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: aht-ubuntu-validation-x64
+          name: aht-linux-validation-x64
           path: |
-            validation/ubuntu/**
-            release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-*.deb
-            release-builds/ubuntu/AHT-Launcher-Ubuntu-x64-*.AppImage
+            validation/linux/**
+            release-builds/linux/AHT-Launcher-Linux-x64-*.deb
+            release-builds/linux/AHT-Launcher-Linux-x64-*.AppImage
           if-no-files-found: warn
 
   publish-launcher-update:
@@ -518,6 +531,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+
+      - name: Install publishing dependencies
+        run: npm ci
 
       - name: Test launcher update manifest
         run: npm run test:launcher-update-manifest
@@ -545,6 +562,10 @@ jobs:
       - name: Enforce immutable launcher versions
         run: node scripts/check-launcher-release-immutability.mjs --candidate ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"
 
+      - name: Deploy tracked universal-download Worker contract
+        if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        run: npx --yes wrangler@4.124.0 deploy --config cloudflare/wrangler.toml
+
       - name: Create or update GitHub Release
         run: |
           set -euo pipefail
@@ -556,7 +577,7 @@ jobs:
           {
             echo "Automated AHT Launcher release $VERSION."
             echo
-            echo "Includes Windows 10/11, macOS Apple Silicon, macOS Intel, and Ubuntu Linux x64 builds."
+            echo "Includes Windows 10/11, one universal macOS build for Intel and Apple Silicon, and one portable Linux x64 AppImage."
             echo
             echo "Launcher update feed: $AHT_LAUNCHER_UPDATE_URL"
             echo "Source commit: $GITHUB_SHA"
@@ -569,14 +590,14 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
 
           shopt -s nullglob
-          release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-artifacts/*.deb ci-artifacts/*.AppImage ci-launcher-update/launcher-latest.json)
+          release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-artifacts/*.AppImage ci-launcher-update/launcher-latest.json)
           if [ "${#release_assets[@]}" -eq 0 ]; then
             echo "No public release assets found."
             exit 1
           fi
           echo "Public GitHub release assets:"
           printf ' - %s\n' "${release_assets[@]}"
-          echo "Windows and macOS ZIP artifacts are kept in the R2 launcher update feed for in-app updates only. Ubuntu DEB and AppImage packages remain public release assets."
+          echo "Windows and macOS ZIP artifacts plus the one-release Linux DEB compatibility bridge stay in R2 for in-app updates. Only the universal macOS DMG and portable Linux AppImage are public platform downloads."
 
           for asset in "${release_assets[@]}"; do
             name="$(basename "$asset")"

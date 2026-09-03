@@ -164,7 +164,7 @@ try {
   console.log(`Running ${pureChecks.length} pure checks with concurrency ${parallel}...`);
   const pureResults = await runParallel(pureChecks, parallel);
   if (linuxExcludedElectronChecks.size) {
-    console.log(`Skipping ${[...linuxExcludedElectronChecks].join(', ')} on Linux: the Ubuntu artifact is player-only, while these smokes require an interactive desktop OS secret service for developer credentials.`);
+    console.log(`Skipping ${[...linuxExcludedElectronChecks].join(', ')} on Linux: the portable player artifact excludes developer credentials, while these smokes require an interactive desktop OS secret service.`);
   }
   console.log(`Running ${electronChecks.length} Electron checks serially...`);
   const electronResults = await runSerial(electronChecks);

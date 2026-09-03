@@ -26,7 +26,19 @@ const LAUNCHER_SOCIAL_ACTIONS = new Set([
 ]);
 const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
-const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64', 'ubuntu-x64', 'ubuntu-x64-appimage']);
+const LAUNCHER_DOWNLOAD_KEY_ALIASES = new Map([
+  ['macos-arm64', 'macos-universal'],
+  ['macos-x64', 'macos-universal'],
+  ['linux-x64', 'ubuntu-x64-appimage'],
+  ['ubuntu-x64', 'ubuntu-x64-appimage']
+]);
+const LAUNCHER_DOWNLOAD_KEYS = new Set([
+  'windows-x64',
+  'macos-universal',
+  'linux-x64',
+  'ubuntu-x64-appimage',
+  ...LAUNCHER_DOWNLOAD_KEY_ALIASES.keys()
+]);
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;
 const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH = '/launcher-installer-download-limit';
@@ -118,7 +130,7 @@ function normalizePlatform(value = '') {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'win32' || platform === 'win64' || platform.includes('windows')) return 'Windows';
   if (platform === 'darwin' || platform === 'mac' || platform.startsWith('macos') || platform.includes('mac os')) return 'Mac';
-  if (platform === 'linux' || platform === 'ubuntu' || platform.includes('ubuntu')) return 'Linux';
+  if (platform === 'linux' || platform === 'ubuntu' || platform.includes('linux') || platform.includes('ubuntu')) return 'Linux';
   return '';
 }
 
@@ -474,6 +486,23 @@ async function writeReleaseCache(request, key, response, context) {
   else await write;
 }
 
+function launcherManifestDownload(manifest, platformKey = '') {
+  const candidates = (() => {
+    if (platformKey === 'macos-universal') return ['macos-universal', 'macos-arm64', 'macos-x64'];
+    if (platformKey === 'macos-arm64') return ['macos-universal', 'macos-arm64'];
+    if (platformKey === 'macos-x64') return ['macos-universal', 'macos-x64'];
+    if (platformKey === 'linux-x64') return ['ubuntu-x64-appimage', 'linux-x64'];
+    if (platformKey === 'ubuntu-x64-appimage') return ['ubuntu-x64-appimage', 'linux-x64'];
+    if (platformKey === 'ubuntu-x64') return ['ubuntu-x64-appimage', 'ubuntu-x64', 'linux-x64'];
+    return [LAUNCHER_DOWNLOAD_KEY_ALIASES.get(platformKey) || platformKey];
+  })();
+  for (const candidate of candidates) {
+    const artifact = manifest?.downloads?.[candidate];
+    if (artifact) return artifact;
+  }
+  return null;
+}
+
 async function authorizeTaggedLauncherInstallerArtifact(request, env, origin, key, context) {
   const requestUrl = new URL(request.url);
   const platformKey = cleanString(requestUrl.searchParams.get('aht_download') || '', 80);
@@ -488,7 +517,7 @@ async function authorizeTaggedLauncherInstallerArtifact(request, env, origin, ke
     console.error('launcher installer manifest authorization failed', error);
     return { response: launcherInstallerLimitUnavailable(origin), quota: null };
   }
-  const artifact = manifest?.downloads?.[platformKey];
+  const artifact = launcherManifestDownload(manifest, platformKey);
   const expectedKey = safeReleaseKey(`/${artifact?.path || ''}`);
   if (!artifact || expectedKey !== key) return { response: null, quota: null };
   return authorizeLauncherInstallerDelivery(request, env, origin, platformKey, manifest, artifact, context);
@@ -859,7 +888,7 @@ async function launcherInstallerDownload(request, env, origin, platformKey, cont
     return json({ error: 'Unknown launcher download platform' }, 404, origin);
   }
   const manifest = await readLauncherManifest(env);
-  const artifact = manifest?.downloads?.[platformKey];
+  const artifact = launcherManifestDownload(manifest, platformKey);
   const key = safeReleaseKey(`/${artifact?.path || ''}`);
   if (!artifact || !key || !key.startsWith('launcher/files/')) {
     return json({ error: `Launcher installer is not available for ${platformKey}` }, 404, origin);
@@ -3638,7 +3667,7 @@ export default {
           '/server/{serverArtifact}',
           '/launcher/latest.json',
           '/launcher/files/{launcherArtifact}',
-          '/launcher/download/{windows-x64|macos-arm64|macos-x64|ubuntu-x64|ubuntu-x64-appimage}',
+          '/launcher/download/{windows-x64|macos-universal|linux-x64}',
           '/cf/mods/{projectId}/files/{fileId}',
           '/cf/mods/{projectId}/files/{fileId}/download-url',
           '/api/events',

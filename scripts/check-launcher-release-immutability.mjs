@@ -35,7 +35,8 @@ export async function checkLauncherReleaseImmutability({ candidatePath, latestUr
   const candidateValidation = validateLauncherUpdateManifest(candidate, {
     latestUrl,
     requireTrackedDownloads: true,
-    requireStagedWindows: true
+    requireStagedWindows: true,
+    requireStagedLinux: true
   });
   if (!candidateValidation.ok) {
     throw new Error(`Candidate launcher manifest is invalid: ${candidateValidation.errors.join('; ')}`);

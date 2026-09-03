@@ -20,25 +20,28 @@ const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const artifactName = process.platform === 'win32'
   ? 'AHT-Launcher-Windows-10-11-9.9.9.zip'
   : process.platform === 'darwin'
-    ? 'AHT-Launcher-macOS-x64-9.9.9.zip'
+    ? 'AHT-Launcher-macOS-universal-9.9.9.zip'
     : process.platform === 'linux'
-      ? 'AHT-Launcher-Ubuntu-x64-9.9.9.deb'
+      ? 'AHT-Launcher-Linux-x64-9.9.9.AppImage'
       : '';
 if (!artifactName) {
-  throw new Error(`Launcher self-update smoke only supports Windows, macOS, and Ubuntu artifacts, got ${process.platform}.`);
+  throw new Error(`Launcher self-update smoke only supports Windows, macOS, and Linux artifacts, got ${process.platform}.`);
 }
 const windowsTargetExe = path.join(root, 'A Hard Time Launcher Windows', 'A Hard Time Launcher Windows.exe');
+const linuxTargetAppImage = path.join(root, 'AHT-Launcher-Linux-x64-current.AppImage');
 if (process.platform === 'win32') {
   fs.mkdirSync(path.dirname(windowsTargetExe), { recursive: true });
   fs.writeFileSync(windowsTargetExe, 'old launcher fixture\n');
   fs.writeFileSync(path.join(path.dirname(windowsTargetExe), 'Uninstall A Hard Time Launcher Windows.exe'), 'uninstaller fixture\n');
 }
+if (process.platform === 'linux') {
+  fs.writeFileSync(linuxTargetAppImage, 'old launcher fixture\n');
+  fs.chmodSync(linuxTargetAppImage, 0o755);
+}
 const readyTitle = process.platform === 'win32' ? 'Update finished' : 'Ready to Install';
 const readyButton = process.platform === 'win32'
   ? 'Restart Launcher'
-  : process.platform === 'linux'
-    ? 'Open Package Installer'
-    : 'Install and Restart';
+  : 'Install and Restart';
 const fixtureAsarPath = smokeExe
   ? path.join(path.dirname(smokeExe), 'resources', 'app.asar')
   : path.resolve('node_modules', 'electron', 'dist', 'resources', 'default_app.asar');
@@ -54,6 +57,7 @@ const artifactBytes = process.platform === 'win32'
   : Buffer.from('fake launcher installer\n');
 const artifactHash = crypto.createHash('sha256').update(artifactBytes).digest('hex');
 const legacyWindowsArtifactName = 'AHT-Launcher-Windows-10-11-9.9.9.exe';
+const legacyLinuxArtifactName = 'AHT-Launcher-Linux-x64-9.9.9.deb';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
@@ -214,10 +218,11 @@ const server = http.createServer((request, response) => {
   }
   if (url.pathname === '/launcher/latest.json') {
     const artifactPath = `launcher/files/${process.platform}-${process.arch}/${artifactName}`;
-    const legacyArtifactPath = `launcher/files/${process.platform}-${process.arch}/${legacyWindowsArtifactName}`;
+    const legacyArtifactName = process.platform === 'linux' ? legacyLinuxArtifactName : legacyWindowsArtifactName;
+    const legacyArtifactPath = `launcher/files/${process.platform}-${process.arch}/${legacyArtifactName}`;
     const selectedEntry = {
       label: 'Smoke platform',
-      kind: process.platform === 'linux' ? 'deb' : 'zip',
+      kind: process.platform === 'linux' ? 'appimage' : 'zip',
       fileName: artifactName,
       path: artifactPath,
       url: `${workerEndpoint}/${artifactPath}`,
@@ -236,7 +241,29 @@ const server = http.createServer((request, response) => {
           size: 1,
           installArgs: ['/S']
         }
-      : selectedEntry;
+      : process.platform === 'linux'
+        ? {
+            label: 'Smoke Linux compatibility bridge',
+            kind: 'deb',
+            fileName: legacyLinuxArtifactName,
+            path: legacyArtifactPath,
+            url: `${workerEndpoint}/${legacyArtifactPath}`,
+            sha256: 'c'.repeat(64),
+            size: 1,
+            installArgs: []
+          }
+        : selectedEntry;
+    const stagedPlatforms = process.platform === 'win32'
+      ? {
+          [`${process.platform}-${process.arch}`]: selectedEntry,
+          [process.platform]: selectedEntry
+        }
+      : process.platform === 'linux'
+        ? {
+            'portable-linux-x64': selectedEntry,
+            'portable-linux': selectedEntry
+          }
+        : {};
     const body = JSON.stringify({
       schemaVersion: 1,
       product: 'aht-launcher',
@@ -247,12 +274,7 @@ const server = http.createServer((request, response) => {
         [`${process.platform}-${process.arch}`]: legacyEntry,
         [process.platform]: legacyEntry
       },
-      ...(process.platform === 'win32' ? {
-        stagedPlatforms: {
-          [`${process.platform}-${process.arch}`]: selectedEntry,
-          [process.platform]: selectedEntry
-        }
-      } : {})
+      stagedPlatforms
     });
     response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
     response.end(body);
@@ -289,6 +311,8 @@ let child = spawn(electronBin, electronArgs, {
     ...(process.platform === 'win32' ? {
       AHT_TEST_LAUNCHER_UPDATE_TARGET_EXE: windowsTargetExe,
       AHT_TEST_LAUNCHER_UPDATE_PRODUCT_VERSION: '9.9.9.0'
+    } : process.platform === 'linux' ? {
+      AHT_TEST_LAUNCHER_UPDATE_TARGET_APPIMAGE: linuxTargetAppImage
     } : {}),
     ELECTRON_ENABLE_LOGGING: '0'
   },
@@ -359,16 +383,14 @@ try {
   const expectedHandoffLine = process.platform === 'win32'
     ? 'Restart requested.'
     : process.platform === 'linux'
-      ? 'Opening the Ubuntu package installer.'
+      ? 'Installing the portable Linux AppImage update.'
       : 'Install and restart requested.';
   if (!clickProof.log.includes(expectedHandoffLine) && !clickProof.log.includes('Test mode verified the restart helper')) {
     throw new Error(`Launcher update action did not start the prepared handoff: ${JSON.stringify(clickProof)}`);
   }
   const installingPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
-  const expectedPendingStatus = process.platform === 'win32' ? 'swapping' : process.platform === 'linux' ? 'staged' : 'installing';
-  const installingTimestampValid = process.platform === 'linux'
-    ? !installingPending.installingStartedAt
-    : Boolean(installingPending.installingStartedAt);
+  const expectedPendingStatus = process.platform === 'win32' ? 'swapping' : 'installing';
+  const installingTimestampValid = Boolean(installingPending.installingStartedAt);
   if (installingPending.status !== expectedPendingStatus || installingPending.version !== '9.9.9' || !installingTimestampValid) {
     throw new Error(`Pending launcher update was not marked as an active restart handoff before quit: ${JSON.stringify(installingPending)}`);
   }
@@ -476,14 +498,30 @@ try {
   if (process.platform === 'linux') {
     const launched = proof.state.lastResult.launched || {};
     const prepared = proof.state.lastResult.preparedRestart || {};
-    if (launched.strategy !== 'linux-package-installer' || prepared.strategy !== 'linux-package-installer') {
-      throw new Error(`Ubuntu launcher update did not use the desktop DEB installer handoff: ${JSON.stringify({ prepared, launched })}`);
+    if (launched.strategy !== 'linux-appimage-helper' || prepared.strategy !== 'linux-appimage-helper') {
+      throw new Error(`Linux launcher update did not use the AppImage swap helper: ${JSON.stringify({ prepared, launched })}`);
     }
-    if (!/^(?:xdg-open|gio)$/i.test(path.basename(String(prepared.command || '')))) {
-      throw new Error(`Ubuntu launcher update did not resolve a supported desktop package opener: ${JSON.stringify(prepared)}`);
+    for (const file of [prepared.payloadPath, prepared.scriptPath, launched.logPath]) {
+      if (!file || !fs.existsSync(file)) {
+        throw new Error(`Linux AppImage update helper file was not created: ${JSON.stringify({ prepared, launched })}`);
+      }
     }
-    if (!prepared.args?.includes(proof.state.lastResult.downloadedPath)) {
-      throw new Error(`Ubuntu package opener was not bound to the verified downloaded DEB: ${JSON.stringify(prepared)}`);
+    const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
+    if (payload.mode !== 'appimage-swap' || payload.installerPath !== proof.state.lastResult.downloadedPath || payload.targetAppImage !== linuxTargetAppImage || !payload.fallbackAppImage?.endsWith('.AppImage') || payload.testStartOnly !== true) {
+      throw new Error(`Linux AppImage helper payload is missing update details: ${JSON.stringify(payload)}`);
+    }
+    if (!prepared.payloadSha256 || !prepared.scriptSha256) {
+      throw new Error(`Linux AppImage helper files were not hash-bound: ${JSON.stringify(prepared)}`);
+    }
+    const helperLog = fs.readFileSync(launched.logPath, 'utf8');
+    if (!helperLog.includes('Test mode helper startup confirmed.')) {
+      throw new Error(`Linux AppImage helper did not write startup confirmation: ${helperLog}`);
+    }
+    const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
+    for (const required of ['target_appimage.next-update', 'target_appimage.previous-update', 'chmod 755', 'nohup "$target_appimage"', 'fallback_appimage', 'pending_failure_path']) {
+      if (!scriptText.includes(required)) {
+        throw new Error(`Linux AppImage helper script is missing ${required}: ${scriptText}`);
+      }
     }
   }
   await client.call('Browser.close').catch(() => {});
@@ -512,42 +550,18 @@ try {
     windowsHide: true
   });
   let guardExit = null;
-  let ubuntuPackageInstallerRetryReady = false;
-  if (process.platform === 'linux') {
-    let guardClient = null;
-    try {
-      const guardTarget = await waitForTarget(guardPort);
-      guardClient = await connect(guardTarget.webSocketDebuggerUrl);
-      await guardClient.call('Runtime.enable');
-      await waitFor(guardClient, `document.readyState === 'complete'
-        && document.querySelector('#launcherUpdateOverlay')?.hidden === false
-        && document.querySelector('#launcherUpdateNowButton')?.textContent.includes('Open Package Installer')`, 'retryable Ubuntu package installer prompt');
-      ubuntuPackageInstallerRetryReady = true;
-      await guardClient.call('Browser.close').catch(() => {});
-      guardClient.close();
-      guardClient = null;
-    } finally {
-      if (guardClient) {
-        await guardClient.call('Browser.close').catch(() => {});
-        guardClient.close();
-      }
-      guardChild.kill();
-      guardExit = await waitForExit(guardChild, 10000).catch(() => ({ code: guardChild.exitCode, signal: guardChild.signalCode }));
-    }
-  } else {
-    guardExit = await waitForExit(guardChild, 10000).catch((error) => {
-      guardChild.kill();
-      throw new Error(`reopened old launcher did not exit during pending install: ${error.message}`);
-    });
-    if (guardExit.code !== 0) {
-      throw new Error(`reopened old launcher exited with unexpected status during pending install: ${JSON.stringify(guardExit)}`);
-    }
-    const probeLines = fs.existsSync(startupProbePath)
-      ? fs.readFileSync(startupProbePath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
-      : [];
-    if (!probeLines.some((line) => line.stage === 'launcher-update-install-pending-exit')) {
-      throw new Error(`reopened old launcher did not use pending install exit guard: ${JSON.stringify(probeLines)}`);
-    }
+  guardExit = await waitForExit(guardChild, 10000).catch((error) => {
+    guardChild.kill();
+    throw new Error(`reopened old launcher did not exit during pending install: ${error.message}`);
+  });
+  if (guardExit.code !== 0) {
+    throw new Error(`reopened old launcher exited with unexpected status during pending install: ${JSON.stringify(guardExit)}`);
+  }
+  const probeLines = fs.existsSync(startupProbePath)
+    ? fs.readFileSync(startupProbePath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    : [];
+  if (!probeLines.some((line) => line.stage === 'launcher-update-install-pending-exit')) {
+    throw new Error(`reopened old launcher did not use pending install exit guard: ${JSON.stringify(probeLines)}`);
   }
 
   console.log(JSON.stringify({
@@ -561,8 +575,7 @@ try {
       downloadedPath: proof.state.lastResult.downloadedPath,
       latestVersion: proof.status.launcherUpdate.latestVersion,
       launcherStrategy: proof.state.lastResult.launched?.strategy || 'direct',
-      pendingInstallReopenExit: guardExit,
-      ubuntuPackageInstallerRetryReady
+      pendingInstallReopenExit: guardExit
     }
   }, null, 2));
 } finally {

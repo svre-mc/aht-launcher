@@ -32,7 +32,7 @@ if (
 ) {
   throw new Error(`Sync client did not send canonical UUID/platform fields: ${JSON.stringify(sentLauncherPayload)}`);
 }
-if (launcherTelemetryPlatform('linux') !== 'Linux' || launcherTelemetryPlatform('Ubuntu 24.04') !== 'Linux') {
+if (launcherTelemetryPlatform('linux') !== 'Linux' || launcherTelemetryPlatform('Linux x64 AppImage') !== 'Linux' || launcherTelemetryPlatform('Ubuntu 24.04') !== 'Linux') {
   throw new Error('Sync client did not normalize Ubuntu/Linux telemetry.');
 }
 
@@ -114,24 +114,21 @@ const env = {
   }
 };
 
-objects.set('launcher/latest.json', JSON.stringify({
+const universalLauncherManifest = {
   schemaVersion: 1,
   product: 'aht-launcher',
   version: '9.9.9',
   required: true,
   downloads: {
     'windows-x64': { label: 'Windows 10/11', fileName: 'AHT-Windows.exe', path: 'launcher/files/win32-x64/AHT-Windows.exe' },
-    'macos-arm64': { label: 'macOS Apple Silicon', fileName: 'AHT-arm64.dmg', path: 'launcher/files/darwin-arm64/AHT-arm64.dmg' },
-    'macos-x64': { label: 'macOS Intel', fileName: 'AHT-x64.dmg', path: 'launcher/files/darwin-x64/AHT-x64.dmg' },
-    'ubuntu-x64': { label: 'Ubuntu Linux x64', fileName: 'AHT-Ubuntu.deb', path: 'launcher/files/linux-x64/AHT-Ubuntu.deb' },
-    'ubuntu-x64-appimage': { label: 'Ubuntu Linux x64 AppImage', fileName: 'AHT-Ubuntu.AppImage', path: 'launcher/files/linux-x64/AHT-Ubuntu.AppImage' }
+    'macos-universal': { label: 'macOS universal (Intel and Apple Silicon)', fileName: 'AHT-universal.dmg', path: 'launcher/files/darwin-universal/AHT-universal.dmg' },
+    'ubuntu-x64-appimage': { label: 'Linux x64 AppImage (all major distributions)', fileName: 'AHT-Linux.AppImage', path: 'launcher/files/linux-x64/AHT-Linux.AppImage' }
   }
-}));
+};
+objects.set('launcher/latest.json', JSON.stringify(universalLauncherManifest));
 objects.set('launcher/files/win32-x64/AHT-Windows.exe', 'windows installer');
-objects.set('launcher/files/darwin-arm64/AHT-arm64.dmg', 'mac arm installer');
-objects.set('launcher/files/darwin-x64/AHT-x64.dmg', 'mac intel installer');
-objects.set('launcher/files/linux-x64/AHT-Ubuntu.deb', 'ubuntu deb');
-objects.set('launcher/files/linux-x64/AHT-Ubuntu.AppImage', 'ubuntu appimage');
+objects.set('launcher/files/darwin-universal/AHT-universal.dmg', 'universal mac installer');
+objects.set('launcher/files/linux-x64/AHT-Linux.AppImage', 'linux appimage');
 
 async function jsonRequest(path, options = {}) {
   const response = await worker.fetch(new Request(`https://worker.test${path}`, options), env, {
@@ -152,33 +149,82 @@ async function trackedDownload(path, headers = {}) {
   return response.headers.get('Location') || '';
 }
 
+async function untrackedHeadDownload(path) {
+  const response = await worker.fetch(new Request(`https://worker.test${path}`, { method: 'HEAD' }), env, {});
+  if (response.status !== 302) {
+    throw new Error(`${path} did not redirect to an installer on HEAD: ${response.status} ${await response.text()}`);
+  }
+  return response.headers.get('Location') || '';
+}
+
 const windowsDownload = await trackedDownload('/launcher/download/windows-x64?aht_player=DownloadUser&aht_uuid=01234567-89ab-cdef-0123-456789abcdef', {
   'CF-Connecting-IP': '203.0.113.42',
   'User-Agent': 'AHT website test'
 });
-await trackedDownload('/launcher/download/macos-arm64', {
+const macosDownload = await trackedDownload('/launcher/download/macos-universal', {
   'CF-Connecting-IP': '2001:db8::10',
   'CF-Pseudo-IPv4': '240.10.20.30',
   'User-Agent': 'AHT website test'
 });
-await trackedDownload('/launcher/download/macos-x64', {
-  'CF-Connecting-IP': '2001:db8::20',
-  'User-Agent': 'AHT website test'
-});
-const ubuntuDownload = await trackedDownload('/launcher/download/ubuntu-x64', {
+const linuxDownload = await trackedDownload('/launcher/download/linux-x64', {
   'CF-Connecting-IP': '203.0.113.44',
-  'User-Agent': 'AHT website Ubuntu test'
+  'User-Agent': 'AHT website Linux test'
 });
-const ubuntuAppImageDownload = await trackedDownload('/launcher/download/ubuntu-x64-appimage', {
+const legacyMacArmDownload = await trackedDownload('/launcher/download/macos-arm64', {
   'CF-Connecting-IP': '203.0.113.45',
-  'User-Agent': 'AHT website Ubuntu portable test'
+  'User-Agent': 'AHT legacy macOS arm64 link test'
+});
+const legacyMacX64Download = await trackedDownload('/launcher/download/macos-x64', {
+  'CF-Connecting-IP': '2001:db8::20',
+  'User-Agent': 'AHT legacy macOS x64 link test'
+});
+const legacyUbuntuDownload = await trackedDownload('/launcher/download/ubuntu-x64', {
+  'CF-Connecting-IP': '203.0.113.46',
+  'User-Agent': 'AHT legacy Ubuntu link test'
+});
+const legacyUbuntuAppImageDownload = await trackedDownload('/launcher/download/ubuntu-x64-appimage', {
+  'CF-Connecting-IP': '203.0.113.47',
+  'User-Agent': 'AHT legacy Ubuntu AppImage link test'
 });
 if (!windowsDownload.endsWith('/launcher/files/win32-x64/AHT-Windows.exe')) {
   throw new Error(`Tracked Windows download redirected to the wrong file: ${windowsDownload}`);
 }
-if (!ubuntuDownload.endsWith('/launcher/files/linux-x64/AHT-Ubuntu.deb') || !ubuntuAppImageDownload.endsWith('/launcher/files/linux-x64/AHT-Ubuntu.AppImage')) {
-  throw new Error(`Tracked Ubuntu downloads redirected to the wrong files: ${ubuntuDownload}, ${ubuntuAppImageDownload}`);
+if (!macosDownload.endsWith('/launcher/files/darwin-universal/AHT-universal.dmg') || !linuxDownload.endsWith('/launcher/files/linux-x64/AHT-Linux.AppImage')) {
+  throw new Error(`Canonical universal downloads redirected to the wrong files: ${macosDownload}, ${linuxDownload}`);
 }
+if (![legacyMacArmDownload, legacyMacX64Download].every((location) => location.endsWith('/launcher/files/darwin-universal/AHT-universal.dmg'))
+    || ![legacyUbuntuDownload, legacyUbuntuAppImageDownload].every((location) => location.endsWith('/launcher/files/linux-x64/AHT-Linux.AppImage'))) {
+  throw new Error(`Legacy platform links did not resolve to the universal artifacts: ${JSON.stringify({ legacyMacArmDownload, legacyMacX64Download, legacyUbuntuDownload, legacyUbuntuAppImageDownload })}`);
+}
+
+const legacyLauncherManifest = {
+  ...universalLauncherManifest,
+  downloads: {
+    'windows-x64': universalLauncherManifest.downloads['windows-x64'],
+    'macos-arm64': { label: 'macOS Apple Silicon', fileName: 'AHT-arm64.dmg', path: 'launcher/files/darwin-arm64/AHT-arm64.dmg' },
+    'macos-x64': { label: 'macOS Intel', fileName: 'AHT-x64.dmg', path: 'launcher/files/darwin-x64/AHT-x64.dmg' },
+    'ubuntu-x64': { label: 'Ubuntu x64 DEB', fileName: 'AHT-Ubuntu.deb', path: 'launcher/files/linux-x64/AHT-Ubuntu.deb' },
+    'ubuntu-x64-appimage': { label: 'Ubuntu x64 AppImage', fileName: 'AHT-Ubuntu.AppImage', path: 'launcher/files/linux-x64/AHT-Ubuntu.AppImage' }
+  }
+};
+objects.set('launcher/files/darwin-arm64/AHT-arm64.dmg', 'legacy arm64 installer');
+objects.set('launcher/files/darwin-x64/AHT-x64.dmg', 'legacy x64 installer');
+objects.set('launcher/files/linux-x64/AHT-Ubuntu.deb', 'legacy deb installer');
+objects.set('launcher/files/linux-x64/AHT-Ubuntu.AppImage', 'legacy appimage installer');
+objects.set('launcher/latest.json', JSON.stringify(legacyLauncherManifest));
+const transitionMacUniversal = await untrackedHeadDownload('/launcher/download/macos-universal');
+const transitionMacArm = await untrackedHeadDownload('/launcher/download/macos-arm64');
+const transitionMacX64 = await untrackedHeadDownload('/launcher/download/macos-x64');
+const transitionLinux = await untrackedHeadDownload('/launcher/download/linux-x64');
+const transitionUbuntu = await untrackedHeadDownload('/launcher/download/ubuntu-x64');
+if (!transitionMacUniversal.endsWith('/launcher/files/darwin-arm64/AHT-arm64.dmg')
+    || !transitionMacArm.endsWith('/launcher/files/darwin-arm64/AHT-arm64.dmg')
+    || !transitionMacX64.endsWith('/launcher/files/darwin-x64/AHT-x64.dmg')
+    || ![transitionLinux, transitionUbuntu].every((location) => location.endsWith('/launcher/files/linux-x64/AHT-Ubuntu.AppImage'))) {
+  throw new Error(`Universal routes did not bridge the legacy manifest: ${JSON.stringify({ transitionMacUniversal, transitionMacArm, transitionMacX64, transitionLinux, transitionUbuntu })}`);
+}
+objects.set('launcher/latest.json', JSON.stringify(universalLauncherManifest));
+
 const downloadCountBeforeDirectUpdate = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
 const directUpdate = await worker.fetch(new Request('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe'), env, {});
 if (!directUpdate.ok) throw new Error(`Direct launcher update artifact failed: ${directUpdate.status}`);
@@ -851,7 +897,7 @@ while (downloadCursor) {
   downloadCursor = page.hasMore ? page.cursor : '';
 }
 if (
-  allDownloadRecords.length !== 6
+  allDownloadRecords.length !== 8
   || allDownloadRecords.some((item) => String(item.ipv4 || '').includes(':'))
   || allDownloadRecords.some((item) => item.minecraftUsername && item.minecraftUsername !== 'DownloadUser')
   || allDownloadRecords.some((item) => !['Windows', 'Mac', 'Linux'].includes(item.platform))
@@ -862,7 +908,7 @@ const namedDownload = allDownloadRecords.find((item) => item.minecraftUsername =
 if (!namedDownload || namedDownload.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef') {
   throw new Error(`Launcher download history did not preserve the download-link player identity: ${JSON.stringify(namedDownload)}`);
 }
-const pseudoIpv4Download = allDownloadRecords.find((item) => item.platformKey === 'macos-arm64');
+const pseudoIpv4Download = allDownloadRecords.find((item) => item.platformKey === 'macos-universal');
 if (
   !pseudoIpv4Download
   || pseudoIpv4Download.ip !== '2001:db8::10'

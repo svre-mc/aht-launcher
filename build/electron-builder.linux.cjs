@@ -2,9 +2,9 @@ const { launcherReleaseVersion, regularPlayerConfig } = require('./electron-buil
 
 module.exports = {
   ...regularPlayerConfig({
-    productName: 'A Hard Time Launcher Ubuntu',
-    output: 'release-builds/ubuntu',
-    target: 'ubuntu'
+    productName: 'A Hard Time Launcher Linux',
+    output: 'release-builds/linux',
+    target: 'linux'
   }),
   executableName: 'a-hard-time-launcher',
   linux: {
@@ -18,7 +18,7 @@ module.exports = {
         arch: ['x64']
       }
     ],
-    artifactName: `AHT-Launcher-Ubuntu-x64-${launcherReleaseVersion}.\${ext}`,
+    artifactName: `AHT-Launcher-Linux-x64-${launcherReleaseVersion}.\${ext}`,
     category: 'Game',
     synopsis: 'A Hard Time Minecraft modpack launcher',
     description: 'Install, update, repair, and launch the A Hard Time Minecraft modpack.',

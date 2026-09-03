@@ -99,7 +99,7 @@ const launcherUpdaterOwner = launcherUpdaterStart >= 0 && launcherUpdaterEnd > l
 const configs = {
   windows: require('../build/electron-builder.windows.cjs'),
   macos: require('../build/electron-builder.macos.cjs'),
-  ubuntu: require('../build/electron-builder.ubuntu.cjs')
+  linux: require('../build/electron-builder.linux.cjs')
 };
 const developerOnlySourceFiles = commonBuilder.developerOnlySourceFiles || [];
 const developerOnlyNodeModules = commonBuilder.developerOnlyNodeModules || [];
@@ -280,6 +280,16 @@ assert(rendererApp.includes('iframe.setAttribute("sandbox", "allow-scripts allow
 assert(preloadScript.includes("devPlayerRecords: (payload) => ipcRenderer.invoke('dev:playerRecords'") && preloadScript.includes("devLauncherUpdates: (payload) => ipcRenderer.invoke('dev:launcherUpdates'"), 'Developer preload must expose current player records and launcher-update history only through developer IPC.');
 assert(workerSource.includes("const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/'") && workerSource.includes("'/admin/player-records'") && workerSource.includes("'/admin/launcher-updates'") && workerSource.includes('currentOnly: true'), 'Worker must expose canonical current players and dedicated launcher updates without historical IP joins.');
 assert(workerSource.includes('canonicalAccountLauncherUpdate') && workerSource.includes('readAllR2JsonObjects') && workerSource.includes('identitySource') && workerSource.includes('aht_player'), 'Worker player-data reads must retain explicit download identities and surface current canonical launcher versions when dedicated update telemetry is missing.');
+assert(
+  workerSource.includes("['macos-arm64', 'macos-universal']")
+    && workerSource.includes("['macos-x64', 'macos-universal']")
+    && workerSource.includes("['linux-x64', 'ubuntu-x64-appimage']")
+    && workerSource.includes("['ubuntu-x64', 'ubuntu-x64-appimage']")
+    && workerSource.includes("if (platformKey === 'macos-universal') return ['macos-universal', 'macos-arm64', 'macos-x64'];")
+    && workerSource.includes("if (platformKey === 'ubuntu-x64') return ['ubuntu-x64-appimage', 'ubuntu-x64', 'linux-x64'];")
+    && workerSource.includes('launcherManifestDownload(manifest, platformKey)'),
+  'Worker must keep legacy download URLs working across both the split legacy manifest and the consolidated universal manifest.'
+);
 assert(
   workerSource.includes('const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;')
   && workerSource.includes('const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;')
@@ -723,12 +733,12 @@ assert(checkProductionReadiness.includes('live launcher Windows staged update ma
 assert(checkProductionReadiness.includes('function windowsAuthenticodeStatus') && checkProductionReadiness.includes('Windows Authenticode: ${label}') && checkProductionReadiness.includes("signature.status === 'Valid'") && checkProductionReadiness.includes("signature.status === 'NotSigned'") && checkProductionReadiness.includes('explicitly unsigned publication policy') && checkProductionReadiness.includes('only Valid or NotSigned is permitted'), 'Production readiness must warn for explicitly unsigned Windows artifacts while blocking invalid signature states.');
 assert(checkProductionReadiness.includes('api/launcher-proof/status') && checkProductionReadiness.includes('json.privateKeyConfigured === true') && checkProductionReadiness.includes('json.publicKeyConfigured === true') && checkProductionReadiness.includes('json.algorithm === "RS256"') && checkProductionReadiness.includes('json.signingVerified === true') && workerSource.includes('LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8') && workerSource.includes('LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI') && !checkProductionReadiness.includes('AHTProofCheck') && !checkProductionReadiness.includes('api/users/register'), 'Production readiness must require the Worker read-only external RS256 launcher-attestation self-test without creating synthetic player records.');
 assert(checkProductionReadiness.includes('stalePackFeed && staleLauncherFeed') && checkProductionReadiness.includes('publish an exact AHT client ZIP release and a launcher update'), 'Production readiness must report both stale pack and launcher feed blockers when both are present.');
-assert(checkProductionReadiness.includes("from './validate-launcher-update-manifest.mjs'") && checkProductionReadiness.includes('function validateLauncherDownloads') && checkProductionReadiness.includes('validateLauncherUpdateManifest(manifest') && checkProductionReadiness.includes('live launcher update feed has Windows, macOS, and Ubuntu downloads'), 'Production readiness must use the reusable strict launcher manifest validator for live launcher update feeds.');
-assert(checkProductionReadiness.includes("names.includes('live launcher update feed has Windows, macOS, and Ubuntu downloads')"), 'Production readiness next-step guidance must route missing launcher downloads to a launcher update publish.');
+assert(checkProductionReadiness.includes("from './validate-launcher-update-manifest.mjs'") && checkProductionReadiness.includes('function validateLauncherDownloads') && checkProductionReadiness.includes('validateLauncherUpdateManifest(manifest') && checkProductionReadiness.includes('live launcher update feed has one Windows, one universal macOS, and one Linux download'), 'Production readiness must use the reusable strict launcher manifest validator for live launcher update feeds.');
+assert(checkProductionReadiness.includes("names.includes('live launcher update feed has one Windows, one universal macOS, and one Linux download')"), 'Production readiness next-step guidance must route missing launcher downloads to a launcher update publish.');
 assert(launcherUpdateManifestTest.includes('validateLauncherUpdateManifest(manifest') && launcherUpdateManifestTest.includes('generated launcher manifest failed reusable validation'), 'Launcher update manifest test must reuse the manifest validator.');
 assert(launcherUpdateManifestValidator.includes("from '../src/launcherUpdateManifest.js'") && launcherUpdateManifestValidator.includes('validateLauncherUpdateManifestFile'), 'Launcher update manifest CLI must wrap the shared runtime validator.');
-assert(launcherUpdateManifestSource.includes("'ubuntu-x64', 'ubuntu-x64-appimage'") && launcherUpdateManifestSource.includes('REQUIRED_STAGED_WINDOWS_KEYS') && launcherUpdateManifestSource.includes('manual downloads must use website-facing keys only') && launcherUpdateManifestSource.includes("isPortableDownload ? 'appimage' : 'deb'") && launcherUpdateManifestSource.includes('must include /S silent install args'), 'Launcher update manifest validator must lock Windows, macOS, and Ubuntu manual downloads, platform artifacts, hashes, and installer formats.');
-assert(prepareLauncherUpdateScript.includes('escapeRegExp(version)') && prepareLauncherUpdateScript.includes('AHT-Launcher-Windows-10-11-${artifactVersion}') && prepareLauncherUpdateScript.includes('AHT-Launcher-macOS-arm64-${artifactVersion}') && prepareLauncherUpdateScript.includes('AHT-Launcher-Ubuntu-x64-${artifactVersion}'), 'Launcher update prep must only select Windows, macOS, and Ubuntu artifacts matching the package version.');
+assert(launcherUpdateManifestSource.includes("'macos-universal', 'ubuntu-x64-appimage'") && launcherUpdateManifestSource.includes('REQUIRED_STAGED_WINDOWS_KEYS') && launcherUpdateManifestSource.includes('REQUIRED_STAGED_LINUX_KEYS') && launcherUpdateManifestSource.includes('manual downloads contain unexpected keys') && launcherUpdateManifestSource.includes("isPortableDownload ? 'appimage' : 'deb'") && launcherUpdateManifestSource.includes('must include /S silent install args'), 'Launcher update manifest validator must lock one Windows, one universal macOS, and one legacy-readable portable Linux download plus compatibility update formats.');
+assert(prepareLauncherUpdateScript.includes('escapeRegExp(version)') && prepareLauncherUpdateScript.includes('AHT-Launcher-Windows-10-11-${artifactVersion}') && prepareLauncherUpdateScript.includes('AHT-Launcher-macOS-universal-${artifactVersion}') && prepareLauncherUpdateScript.includes('AHT-Launcher-Linux-x64-${artifactVersion}'), 'Launcher update prep must only select Windows, universal macOS, and Linux artifacts matching the package version.');
 assert(prepareLauncherUpdateScript.includes('function requireHttpsLatestUrl') && prepareLauncherUpdateScript.includes('Launcher update latest URL must be HTTPS'), 'Launcher update prep must reject non-HTTPS latest URLs before generating manifests.');
 assert(launcherUpdateManifestSource.includes('fileNameMatchesVersion') && launcherUpdateManifestSource.includes('fileName must include launcher version'), 'Launcher update validator must reject stale artifact filenames that do not match the manifest version.');
 assert(launcherUpdateManifestSource.includes('path basename must match fileName') && launcherUpdateManifestSource.includes('url basename must match fileName'), 'Launcher update validator must ensure paths and URLs point to the declared artifact fileName.');
@@ -737,6 +747,7 @@ assert(launcherUpdateManifestSource.includes('assertLauncherReleaseAdvance') && 
 assert(desktopMain.includes('assertWindowsLauncherPublishSignatureState') && desktopMain.includes('Get-AuthenticodeSignature') && desktopMain.includes("status !== 'Valid' && status !== 'NotSigned'") && desktopMain.includes('explicitlyUnsigned') && desktopMain.includes('assertLauncherPublishAdvance'), 'Developer launcher publication must accept only Valid or explicitly NotSigned Windows artifacts and a strictly newer immutable release version.');
 assert(launcherUpdateManifestTest.includes('stale launcher artifact filenames') && launcherUpdateManifestTest.includes('path basename must match fileName') && launcherUpdateManifestTest.includes('non-HTTPS launcher artifact URLs') && launcherUpdateManifestTest.includes('non-HTTPS latest URLs') && launcherUpdateManifestTest.includes('artifacts that do not match the manifest/package version'), 'Launcher update manifest test must cover stale artifact filename, path, URL, and HTTPS rejection.');
 assert(releaseWorkflow.includes('name: Test launcher update manifest') && releaseWorkflow.includes('npm run test:launcher-update-manifest'), 'GitHub launcher publish workflow must run the launcher update manifest test before publishing release data.');
+assert(releaseWorkflow.includes('name: Install publishing dependencies') && releaseWorkflow.includes('run: npm ci'), 'GitHub launcher publish job must install the pinned dependencies needed by manifest upload and Worker deployment scripts.');
 assert(releaseWorkflow.includes('name: Validate generated launcher update manifest') && releaseWorkflow.includes('node scripts/validate-launcher-update-manifest.mjs ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"'), 'GitHub launcher publish workflow must validate the generated launcher/latest.json before creating releases or uploading R2.');
 assert(releaseWorkflow.includes('WINDOWS_CERTIFICATE_BASE64') && releaseWorkflow.includes('WINDOWS_CERTIFICATE_PASSWORD') && releaseWorkflow.includes('WINDOWS_CERTIFICATE_NAME'), 'Windows public builds must accept dedicated Authenticode certificate secrets.');
 assert(
@@ -1072,27 +1083,28 @@ const macDmgTarget = macTargets.find((target) => target.target === 'dmg');
 const macZipTarget = macTargets.find((target) => target.target === 'zip');
 assert(macDmgTarget, 'macOS regular launcher must build DMG installers.');
 assert(macZipTarget, 'macOS regular launcher must build ZIP update artifacts.');
-assert(macDmgTarget.arch?.includes('arm64') && macZipTarget.arch?.includes('arm64'), 'macOS regular launcher should include Apple Silicon.');
-assert(macDmgTarget.arch?.includes('x64') && macZipTarget.arch?.includes('x64'), 'macOS regular launcher should include Intel.');
+assert(macDmgTarget.arch?.length === 1 && macDmgTarget.arch[0] === 'universal', 'macOS regular launcher must build one universal DMG.');
+assert(macZipTarget.arch?.length === 1 && macZipTarget.arch[0] === 'universal', 'macOS regular launcher must build one universal ZIP update.');
 assert(releaseWorkflow.includes('release-builds/macos/*.zip'), 'GitHub macOS workflow must upload ZIP self-update artifacts.');
 assert(releaseWorkflow.includes('release-builds/windows/*.zip'), 'GitHub Windows workflow must upload the staged ZIP update artifact.');
-assert(releaseWorkflow.includes('release-builds/ubuntu/*.deb') && releaseWorkflow.includes('release-builds/ubuntu/*.AppImage'), 'GitHub Ubuntu workflow must upload DEB and AppImage artifacts.');
+assert(releaseWorkflow.includes('release-builds/linux/*.deb') && releaseWorkflow.includes('release-builds/linux/*.AppImage'), 'GitHub Linux workflow must carry the compatibility DEB and portable AppImage into manifest generation.');
 assert(releaseWorkflow.includes('hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"') && !releaseWorkflow.includes('-acceptlicense') && releaseWorkflow.includes('trap cleanup_mount EXIT') && releaseWorkflow.includes('trap - EXIT'), 'Native macOS validation must mount DMGs with supported hdiutil options and always detach failed mounts.');
-assert(releaseWorkflow.includes('release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-artifacts/*.deb ci-artifacts/*.AppImage ci-launcher-update/launcher-latest.json)') && releaseWorkflow.includes('Ubuntu DEB and AppImage packages remain public release assets.') && !releaseWorkflow.includes('for asset in ci-artifacts/* ci-launcher-update/launcher-latest.json'), 'GitHub public releases must expose Windows, macOS, and Ubuntu manual packages while keeping internal staged artifacts out of the public asset list.');
+assert(releaseWorkflow.includes('release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-artifacts/*.AppImage ci-launcher-update/launcher-latest.json)') && releaseWorkflow.includes('one-release Linux DEB compatibility bridge stay in R2') && !releaseWorkflow.includes('ci-artifacts/*.deb ci-artifacts/*.AppImage'), 'GitHub public releases must expose one Windows installer, one universal macOS DMG, and one Linux AppImage while keeping update-only artifacts out of the public asset list.');
 assert(desktopMain.includes('launchMacLauncherUpdateHelper'), 'macOS launcher self-update must use the app-bundle restart helper.');
 assert(!desktopMain.includes('backup_app="${target_app}.previous-update"') && desktopMain.includes('backup_app="$target_app.previous-update"'), 'macOS launcher self-update must preserve target_app as a shell variable instead of evaluating it as JavaScript.');
 assert(smokePlayerUpdatePlay.includes('fs.realpathSync.native(launcherMarker.cwd) !== fs.realpathSync.native(mcRoot)'), 'Cross-platform Play validation must treat macOS /var and /private/var aliases as the same Minecraft launcher directory.');
 assert(smokePlayerUpdateLogs.includes('waitForNewsCarouselSettled') && smokePlayerUpdateLogs.includes("label, 20"), 'News carousel validation must wait for bounded transition cleanup instead of assuming an exact runner timer.');
 assert([smokeR2ReleaseFlow, smokeR2ReleaseUiFlow].every((source) => source.includes("AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : ''") && source.includes("path.join(mcRoot, 'minecraft.exe')")), 'Stable and PTB release smokes must provide deterministic native Minecraft Launcher fixtures before Update validation.');
 
-assert(fs.existsSync(new URL('../build/electron-builder.ubuntu.cjs', import.meta.url)), 'Ubuntu builder config must exist.');
-assert(packageJson.scripts['dist:linux'] === 'npm run dist:regular:ubuntu', 'Linux package alias must invoke the regular Ubuntu build.');
-assert(packageJson.scripts['dist:regular:ubuntu']?.includes('--linux AppImage deb --x64'), 'Ubuntu regular launcher script must force x64 AppImage and DEB targets.');
+assert(fs.existsSync(new URL('../build/electron-builder.linux.cjs', import.meta.url)), 'Linux builder config must exist.');
+assert(!fs.existsSync(new URL('../build/electron-builder.ubuntu.cjs', import.meta.url)), 'Stale Ubuntu-only builder config must be removed.');
+assert(packageJson.scripts['dist:linux'] === 'npm run dist:regular:linux', 'Linux package alias must invoke the portable Linux build.');
+assert(packageJson.scripts['dist:regular:linux']?.includes('--linux AppImage deb --x64'), 'Linux build must emit the public AppImage plus the legacy-client DEB bridge.');
 assert(!packageJson.build?.linux, 'package.json must not define Linux build targets.');
-assert(releaseWorkflow.includes('id: ubuntu') && releaseWorkflow.includes('runner: ubuntu-latest'), 'GitHub workflow must include a native Ubuntu runner.');
-assert(releaseWorkflow.includes('dist:regular:ubuntu'), 'GitHub workflow must call the Ubuntu build script.');
-assert(releaseWorkflow.includes('aht-launcher-ubuntu'), 'GitHub workflow must upload Ubuntu launcher artifacts.');
-assert(releaseWorkflow.includes('validate-ubuntu-runtime:') && releaseWorkflow.includes('AHT_INSTALLED_PLAYER_EXE: /usr/bin/a-hard-time-launcher'), 'GitHub validation must install and exercise the native Ubuntu package.');
+assert(releaseWorkflow.includes('id: linux') && releaseWorkflow.includes('runner: ubuntu-latest'), 'GitHub workflow must include a native Linux runner.');
+assert(releaseWorkflow.includes('dist:regular:linux'), 'GitHub workflow must call the portable Linux build script.');
+assert(releaseWorkflow.includes('aht-launcher-linux'), 'GitHub workflow must upload Linux launcher artifacts.');
+assert(releaseWorkflow.includes('validate-linux-runtime:') && releaseWorkflow.includes('squashfs-root/AppRun'), 'GitHub validation must extract and exercise the portable AppImage runtime.');
 assert(
   releaseWorkflow.includes('AHT_SMOKE_USE_TEMP_DEFAULTS: "1"')
   && [smokePlayerDefaults, smokeSettingsProfile].every((source) => (
@@ -1100,7 +1112,7 @@ assert(
     && source.includes('const packagedDefaults = smokeExe && !useTempDefaults')
     && source.includes("AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults")
   )),
-  'Installed Ubuntu smokes must keep mutable defaults fixtures out of the root-owned application and /usr/bin directories.'
+  'Installed Linux smokes must keep mutable defaults fixtures out of the packaged application directory.'
 );
 assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')
@@ -1111,40 +1123,41 @@ assert(
   && releaseWorkflow.includes('timeout 30s "$APPIMAGE" --appimage-version')
   && !releaseWorkflow.includes('APPIMAGE_EXTRACT_AND_RUN=1 timeout 30s')
   && !releaseWorkflow.includes('"$APPIMAGE" --no-sandbox --version')
-  && releaseWorkflow.includes('sudo apt-get install -y "$PWD/$DEB"')
-  && !releaseWorkflow.includes('sudo apt-get install -y "$DEB"')
+  && releaseWorkflow.includes('"$GITHUB_WORKSPACE/$APPIMAGE" --appimage-extract')
+  && !releaseWorkflow.includes('sudo apt-get install')
   && !desktopMain.includes('AHT_TEST_DISABLE_CHROMIUM_SANDBOX'),
-  'Ubuntu CI must configure Electron\'s SUID test sandbox, probe AppImage runtime metadata without launching the GUI, and install the DEB from an unambiguous local path.'
+  'Linux CI must configure Electron\'s SUID test sandbox, probe and extract the AppImage, and exercise its packaged AppRun without installing a distro package.'
 );
 assert(smokePlayerUpdateLogs.includes('Electron exited before exposing a debugger target') && smokePlayerUpdateLogs.includes("stdio: ['ignore', 'pipe', 'pipe']"), 'The first native Electron smoke must preserve early process diagnostics.');
 const platformProfileSource = readText(new URL('../src/platformProfile.js', import.meta.url));
 assert(platformProfileSource.includes('Unsupported AHT launcher platform'), 'Platform profile must reject unsupported platforms instead of keeping a generic Linux/Desktop fallback.');
 assert(desktopMain.includes("import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';"), 'Main process must use the shared platform policy for platform-specific paths.');
 assert(desktopMain.includes("if (process.platform === 'linux')") && desktopMain.includes("'PTB Instance'") && desktopMain.includes("'Developer Instance'"), 'Linux stable, PTB, and developer instance paths must be explicitly owned.');
-assert(platformProfileSource.includes('XDG_DATA_HOME') && platformProfileSource.includes('Ubuntu Linux'), 'Platform profile must use the Ubuntu XDG data path and label.');
-assert(rendererHtml.includes('Actions builds Windows, macOS, and Ubuntu'), 'Developer launcher update UI must advertise the full public platform matrix.');
+assert(platformProfileSource.includes('XDG_DATA_HOME') && platformProfileSource.includes('Linux x64'), 'Platform profile must use the Linux XDG data path and generic label.');
+assert(rendererHtml.includes('one universal macOS package') && rendererHtml.includes('one portable Linux AppImage'), 'Developer launcher update UI must advertise the consolidated public platform matrix.');
 assert(!rendererApp.includes('launcherUbuntuPathInput'), 'Renderer must not keep stale Ubuntu launcher artifact inputs.');
 assert(packageJson.scripts['dist:regular:windows']?.includes('--win'), 'Windows regular script must force --win.');
 assert(packageJson.scripts['dist:regular:macos']?.includes('--mac'), 'macOS regular script must force --mac.');
 
-assert(configs.ubuntu.productName === 'A Hard Time Launcher Ubuntu', 'Ubuntu product name is not tailored.');
-assert(configs.ubuntu.executableName === 'a-hard-time-launcher', 'Ubuntu executable name must remain stable for desktop installs and runtime validation.');
-assert(configs.ubuntu.directories?.output === 'release-builds/ubuntu', 'Ubuntu output folder is wrong.');
-const ubuntuTargets = configs.ubuntu.linux?.target || [];
-assert(ubuntuTargets.some((target) => target.target === 'AppImage' && target.arch?.includes('x64')), 'Ubuntu regular launcher must build an x64 AppImage.');
-assert(ubuntuTargets.some((target) => target.target === 'deb' && target.arch?.includes('x64')), 'Ubuntu regular launcher must build an x64 DEB.');
+assert(configs.linux.productName === 'A Hard Time Launcher Linux', 'Linux product name is not generic.');
+assert(configs.linux.executableName === 'a-hard-time-launcher', 'Linux executable name must remain stable for runtime validation.');
+assert(configs.linux.directories?.output === 'release-builds/linux', 'Linux output folder is wrong.');
+const linuxTargets = configs.linux.linux?.target || [];
+assert(linuxTargets.some((target) => target.target === 'AppImage' && target.arch?.includes('x64')), 'Linux launcher must build an x64 AppImage.');
+assert(linuxTargets.some((target) => target.target === 'deb' && target.arch?.includes('x64')), 'Linux launcher must retain the hidden x64 DEB compatibility bridge.');
 assert(/^\d+\.\d+\.\d+$/.test(launcherReleaseVersion), 'Public launcher version must use numeric major.minor.patch notation.');
 assert(packageJson.version === launcherPackageVersionForRelease(launcherReleaseVersion), 'Internal npm package version must be the valid SemVer form of the public launcher version.');
-assert(configs.ubuntu.linux?.category === 'Game' && configs.ubuntu.linux?.artifactName === `AHT-Launcher-Ubuntu-x64-${launcherReleaseVersion}.\${ext}`, 'Ubuntu package metadata and artifact naming are not stable.');
+assert(configs.linux.linux?.category === 'Game' && configs.linux.linux?.artifactName === `AHT-Launcher-Linux-x64-${launcherReleaseVersion}.\${ext}`, 'Linux package metadata and artifact naming are not stable.');
 assert(Object.values(configs).every((config) => config.extraMetadata?.ahtLauncherVersion === launcherReleaseVersion), 'Every packaged launcher must carry the public launcher version.');
 assert(configs.windows.win?.artifactName === `AHT-Launcher-Windows-10-11-${launcherReleaseVersion}.\${ext}`, 'Windows artifact must use the public launcher version.');
-assert(configs.macos.mac?.artifactName === `AHT-Launcher-macOS-\${arch}-${launcherReleaseVersion}.\${ext}`, 'macOS artifacts must use the public launcher version.');
+assert(configs.macos.mac?.artifactName === `AHT-Launcher-macOS-universal-${launcherReleaseVersion}.\${ext}`, 'Universal macOS artifacts must use the public launcher version.');
 assert(releaseWorkflow.includes('ahtLauncherVersion || require(\'./package.json\').version'), 'GitHub release workflow must publish the public launcher version.');
 assert(desktopMain.includes('launcherReleaseVersionFromPackage') && desktopMain.includes('return publicLauncherVersion || app.getVersion()'), 'Packaged launcher UI and update logic must report the public launcher version.');
 assert(launcherUpdateStagingSource.includes('launcherVersionsReferToSameRelease(actual, expected)'), 'Windows staging must accept the npm-compatible product version for a zero-padded public release.');
-assert(desktopMain.includes("strategy: 'linux-package-installer'") && desktopMain.includes("commandOnPath('xdg-open')") && desktopMain.includes("commandOnPath('gio')"), 'Ubuntu launcher updates must open the verified DEB through the desktop package installer.');
-assert(desktopMain.includes("status: 'staged'") && desktopMain.includes('Ubuntu package installer opened') && rendererApp.includes('Open Package Installer'), 'Ubuntu package updates must remain retryable and must not promise an automatic restart.');
-assert(desktopMain.includes('function linuxMinecraftLauncherCandidates') && desktopMain.includes("commandOnPath('minecraft-launcher')") && desktopMain.includes("args: ['--workDir', cwd]"), 'Ubuntu Play must resolve and open the native Minecraft Launcher with the managed root.');
+assert(desktopMain.includes("strategy: 'linux-appimage-helper'") && desktopMain.includes('launcherUpdateInstalledLinuxAppImagePath') && desktopMain.includes('linuxAppImageUpdateHelperScript'), 'Linux launcher updates must atomically replace the verified running AppImage.');
+assert(desktopMain.includes('target_appimage.next-update') && desktopMain.includes('target_appimage.previous-update') && desktopMain.includes('nohup "$target_appimage"'), 'Linux AppImage updates must stage, back up, replace, and reopen the portable file.');
+assert(smokeLauncherSelfUpdate.includes("launched.strategy !== 'linux-appimage-helper'") && smokeLauncherSelfUpdate.includes("payload.mode !== 'appimage-swap'"), 'Linux self-update smoke must prove the AppImage swap helper contract.');
+assert(desktopMain.includes('function linuxMinecraftLauncherCandidates') && desktopMain.includes("commandOnPath('minecraft-launcher')") && desktopMain.includes("args: ['--workDir', cwd]"), 'Linux Play must resolve and open the native Minecraft Launcher with the managed root.');
 
 for (const [name, config] of Object.entries(configs)) {
   assert(config.extraMetadata?.ahtLauncherMode === 'player', `${name} config should be regular/player mode.`);

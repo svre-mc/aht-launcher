@@ -166,12 +166,10 @@ export async function prepareLauncherUpdate(options = {}) {
   const artifactVersion = escapeRegExp(version);
   const windowsInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Windows-10-11-${artifactVersion}\\.exe$`, 'i'), 'Windows 10/11 installer');
   const windowsUpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Windows-10-11-${artifactVersion}\\.zip$`, 'i'), 'Windows 10/11 staged update ZIP');
-  const macArmUpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-arm64-${artifactVersion}\\.zip$`, 'i'), 'macOS Apple Silicon update ZIP');
-  const macX64UpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.zip$`, 'i'), 'macOS Intel update ZIP');
-  const macArmInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-arm64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Apple Silicon DMG');
-  const macX64InstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-x64-${artifactVersion}\\.dmg$`, 'i'), 'macOS Intel DMG');
-  const ubuntuDebFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Ubuntu-x64-${artifactVersion}\\.deb$`, 'i'), 'Ubuntu x64 DEB');
-  const ubuntuAppImageFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Ubuntu-x64-${artifactVersion}\\.AppImage$`, 'i'), 'Ubuntu x64 AppImage');
+  const macUniversalUpdateFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-universal-${artifactVersion}\\.zip$`, 'i'), 'universal macOS update ZIP');
+  const macUniversalInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-universal-${artifactVersion}\\.dmg$`, 'i'), 'universal macOS DMG');
+  const linuxCompatibilityDebFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Linux-x64-${artifactVersion}\\.deb$`, 'i'), 'Linux x64 compatibility DEB');
+  const linuxAppImageFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Linux-x64-${artifactVersion}\\.AppImage$`, 'i'), 'universal Linux x64 AppImage');
 
   const platforms = {};
   const stagedPlatforms = {};
@@ -198,69 +196,49 @@ export async function prepareLauncherUpdate(options = {}) {
   uploads.push(windowsUpdate.upload);
   addAliases(stagedPlatforms, ['win32-x64', 'win32', 'windows', 'windows-x64'], windowsUpdate.entry);
 
-  const macArm = await artifactEntry({
-    file: macArmUpdateFile,
-    key: 'darwin-arm64',
-    label: 'macOS Apple Silicon',
+  const macUniversal = await artifactEntry({
+    file: macUniversalUpdateFile,
+    key: 'darwin-universal',
+    label: 'macOS universal update',
     kind: 'zip',
     rootUrl
   });
-  uploads.push(macArm.upload);
-  addAliases(platforms, ['darwin-arm64', 'macos-arm64'], macArm.entry);
+  uploads.push(macUniversal.upload);
+  addAliases(platforms, ['darwin-arm64', 'macos-arm64', 'darwin-x64', 'macos-x64', 'darwin', 'macos'], macUniversal.entry);
 
-  const macX64 = await artifactEntry({
-    file: macX64UpdateFile,
-    key: 'darwin-x64',
-    label: 'macOS Intel',
-    kind: 'zip',
-    rootUrl
-  });
-  uploads.push(macX64.upload);
-  addAliases(platforms, ['darwin-x64', 'macos-x64', 'darwin', 'macos'], macX64.entry);
-
-  const macArmInstaller = await artifactEntry({
-    file: macArmInstallerFile,
-    key: 'darwin-arm64',
-    label: 'macOS Apple Silicon installer',
+  const macUniversalInstaller = await artifactEntry({
+    file: macUniversalInstallerFile,
+    key: 'darwin-universal',
+    label: 'macOS universal (Intel and Apple Silicon)',
     kind: 'dmg',
     rootUrl
   });
-  uploads.push(macArmInstaller.upload);
+  uploads.push(macUniversalInstaller.upload);
 
-  const macX64Installer = await artifactEntry({
-    file: macX64InstallerFile,
-    key: 'darwin-x64',
-    label: 'macOS Intel installer',
-    kind: 'dmg',
-    rootUrl
-  });
-  uploads.push(macX64Installer.upload);
-
-  const ubuntuDeb = await artifactEntry({
-    file: ubuntuDebFile,
+  const linuxCompatibilityDeb = await artifactEntry({
+    file: linuxCompatibilityDebFile,
     key: 'linux-x64',
-    label: 'Ubuntu Linux x64 package',
+    label: 'Linux x64 compatibility update',
     kind: 'deb',
     rootUrl
   });
-  uploads.push(ubuntuDeb.upload);
-  addAliases(platforms, ['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'], ubuntuDeb.entry);
+  uploads.push(linuxCompatibilityDeb.upload);
+  addAliases(platforms, ['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'], linuxCompatibilityDeb.entry);
 
-  const ubuntuAppImage = await artifactEntry({
-    file: ubuntuAppImageFile,
+  const linuxAppImage = await artifactEntry({
+    file: linuxAppImageFile,
     key: 'linux-x64',
-    label: 'Ubuntu Linux x64 portable AppImage',
+    label: 'Linux x64 AppImage (all major distributions)',
     kind: 'appimage',
     rootUrl
   });
-  uploads.push(ubuntuAppImage.upload);
+  uploads.push(linuxAppImage.upload);
+  addAliases(stagedPlatforms, ['portable-linux-x64', 'portable-linux'], linuxAppImage.entry);
 
   const downloads = {
     'windows-x64': { ...windowsInstaller.entry, url: trackedInstallerUrl(windowsInstaller.entry.url, 'windows-x64') },
-    'macos-arm64': { ...macArmInstaller.entry, url: trackedInstallerUrl(macArmInstaller.entry.url, 'macos-arm64') },
-    'macos-x64': { ...macX64Installer.entry, url: trackedInstallerUrl(macX64Installer.entry.url, 'macos-x64') },
-    'ubuntu-x64': { ...ubuntuDeb.entry, url: trackedInstallerUrl(ubuntuDeb.entry.url, 'ubuntu-x64') },
-    'ubuntu-x64-appimage': { ...ubuntuAppImage.entry, url: trackedInstallerUrl(ubuntuAppImage.entry.url, 'ubuntu-x64-appimage') }
+    'macos-universal': { ...macUniversalInstaller.entry, url: trackedInstallerUrl(macUniversalInstaller.entry.url, 'macos-universal') },
+    'ubuntu-x64-appimage': { ...linuxAppImage.entry, url: trackedInstallerUrl(linuxAppImage.entry.url, 'ubuntu-x64-appimage') }
   };
 
   const manifest = {

@@ -18,11 +18,11 @@ module.exports = {
     target: [
       {
         target: 'dmg',
-        arch: ['x64', 'arm64']
+        arch: ['universal']
       },
       {
         target: 'zip',
-        arch: ['x64', 'arm64']
+        arch: ['universal']
       }
     ],
     category: 'public.app-category.games',
@@ -38,7 +38,7 @@ module.exports = {
           identity: null,
           notarize: false
         }),
-    artifactName: `AHT-Launcher-macOS-\${arch}-${launcherReleaseVersion}.\${ext}`
+    artifactName: `AHT-Launcher-macOS-universal-${launcherReleaseVersion}.\${ext}`
   },
   dmg: {
     title: 'A Hard Time Launcher',

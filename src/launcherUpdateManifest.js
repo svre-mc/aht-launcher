@@ -1,7 +1,8 @@
 import path from 'node:path';
 
-export const REQUIRED_DOWNLOAD_KEYS = ['windows-x64', 'macos-arm64', 'macos-x64', 'ubuntu-x64', 'ubuntu-x64-appimage'];
+export const REQUIRED_DOWNLOAD_KEYS = ['windows-x64', 'macos-universal', 'ubuntu-x64-appimage'];
 export const REQUIRED_STAGED_WINDOWS_KEYS = ['win32-x64', 'win32', 'windows', 'windows-x64'];
+export const REQUIRED_STAGED_LINUX_KEYS = ['portable-linux-x64', 'portable-linux'];
 export const REQUIRED_PLATFORM_KEYS = [
   'win32-x64',
   'win32',
@@ -173,19 +174,22 @@ function validateKnownEntryShape(errors, entry, key) {
     }
   }
   if (/^(?:darwin|macos)/i.test(entryKey)) {
-    const isManualDownload = key.startsWith('downloads.macos-');
+    const isManualDownload = collection === 'downloads';
     validateKindAndExtension(errors, entry, key, isManualDownload ? 'dmg' : 'zip', isManualDownload ? '.dmg' : '.zip');
   }
+  if (/^portable-linux(?:-|$)/i.test(entryKey)) {
+    validateKindAndExtension(errors, entry, key, 'appimage', '.appimage');
+  }
   if (/^(?:linux|ubuntu)/i.test(entryKey)) {
-    const isPortableDownload = key === 'downloads.ubuntu-x64-appimage';
+    const isPortableDownload = collection === 'downloads' && entryKey === 'ubuntu-x64-appimage';
     validateKindAndExtension(errors, entry, key, isPortableDownload ? 'appimage' : 'deb', isPortableDownload ? '.appimage' : '.deb');
   }
 }
 
 export function launcherPlatformKeys(platform = process.platform, arch = process.arch) {
   if (platform === 'linux') {
-    if (arch !== 'x64') return [`linux-${arch}`, `ubuntu-${arch}`];
-    return ['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'];
+    if (arch !== 'x64') return [`portable-linux-${arch}`, `linux-${arch}`, `ubuntu-${arch}`];
+    return ['portable-linux-x64', 'portable-linux', 'linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'];
   }
   const keys = [`${platform}-${arch}`, platform];
   if (platform === 'win32') keys.push('windows', 'windows-x64');
@@ -249,10 +253,15 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
       if (!stagedPlatforms[key]) errors.push(`staged platform entry missing: ${key}`);
     }
   }
+  if (options.requireStagedLinux) {
+    for (const key of REQUIRED_STAGED_LINUX_KEYS) {
+      if (!stagedPlatforms[key]) errors.push(`staged platform entry missing: ${key}`);
+    }
+  }
 
-  const forbiddenDownloadKeys = Object.keys(downloads).filter((key) => /^(?:darwin|win32|linux)/i.test(key));
-  if (forbiddenDownloadKeys.length) {
-    errors.push(`manual downloads must use website-facing keys only: ${forbiddenDownloadKeys.join(', ')}`);
+  const unexpectedDownloadKeys = Object.keys(downloads).filter((key) => !REQUIRED_DOWNLOAD_KEYS.includes(key));
+  if (unexpectedDownloadKeys.length) {
+    errors.push(`manual downloads contain unexpected keys: ${unexpectedDownloadKeys.join(', ')}`);
   }
   for (const [key, entry] of Object.entries(downloads)) {
     validateCommonEntry(errors, entry, `downloads.${key}`, expectedRootUrl, manifestVersion, options);

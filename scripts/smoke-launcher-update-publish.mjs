@@ -17,12 +17,10 @@ const uploadLog = path.join(root, 'upload-log.jsonl');
 const bucket = 'ahtlauncher';
 const installer = path.join(root, 'AHT-Launcher-Windows-10-11-9.9.10.exe');
 const windowsZip = path.join(root, 'AHT-Launcher-Windows-10-11-9.9.10.zip');
-const macosArmZip = path.join(root, 'AHT-Launcher-macOS-arm64-9.9.10.zip');
-const macosX64Zip = path.join(root, 'AHT-Launcher-macOS-x64-9.9.10.zip');
-const macosArmDmg = path.join(root, 'AHT-Launcher-macOS-arm64-9.9.10.dmg');
-const macosX64Dmg = path.join(root, 'AHT-Launcher-macOS-x64-9.9.10.dmg');
-const ubuntuDeb = path.join(root, 'AHT-Launcher-Ubuntu-x64-9.9.10.deb');
-const ubuntuAppImage = path.join(root, 'AHT-Launcher-Ubuntu-x64-9.9.10.AppImage');
+const macosUniversalZip = path.join(root, 'AHT-Launcher-macOS-universal-9.9.10.zip');
+const macosUniversalDmg = path.join(root, 'AHT-Launcher-macOS-universal-9.9.10.dmg');
+const linuxCompatibilityDeb = path.join(root, 'AHT-Launcher-Linux-x64-9.9.10.deb');
+const linuxAppImage = path.join(root, 'AHT-Launcher-Linux-x64-9.9.10.AppImage');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -132,12 +130,10 @@ await fsp.mkdir(fakeBin, { recursive: true });
 await fsp.mkdir(path.join(fakeR2Root, bucket), { recursive: true });
 await fsp.writeFile(installer, 'fake windows launcher installer\n', 'utf8');
 await fsp.writeFile(windowsZip, 'fake windows staged update zip\n', 'utf8');
-await fsp.writeFile(macosArmZip, 'fake macos arm64 update zip\n', 'utf8');
-await fsp.writeFile(macosX64Zip, 'fake macos x64 update zip\n', 'utf8');
-await fsp.writeFile(macosArmDmg, 'fake macos arm64 dmg\n', 'utf8');
-await fsp.writeFile(macosX64Dmg, 'fake macos x64 dmg\n', 'utf8');
-await fsp.writeFile(ubuntuDeb, 'fake ubuntu deb\n', 'utf8');
-await fsp.writeFile(ubuntuAppImage, 'fake ubuntu appimage\n', 'utf8');
+await fsp.writeFile(macosUniversalZip, 'fake universal macos update zip\n', 'utf8');
+await fsp.writeFile(macosUniversalDmg, 'fake universal macos dmg\n', 'utf8');
+await fsp.writeFile(linuxCompatibilityDeb, 'fake linux compatibility deb\n', 'utf8');
+await fsp.writeFile(linuxAppImage, 'fake linux appimage\n', 'utf8');
 
 const fakeWrangler = path.join(fakeBin, 'fake-wrangler.mjs');
 await fsp.writeFile(fakeWrangler, `
@@ -263,12 +259,10 @@ try {
     version: '9.9.10',
     windowsPath: ${JSON.stringify(installer)},
     windowsZipPath: ${JSON.stringify(windowsZip)},
-    macosArmZipPath: ${JSON.stringify(macosArmZip)},
-    macosX64ZipPath: ${JSON.stringify(macosX64Zip)},
-    macosArmDmgPath: ${JSON.stringify(macosArmDmg)},
-    macosX64DmgPath: ${JSON.stringify(macosX64Dmg)},
-    ubuntuDebPath: ${JSON.stringify(ubuntuDeb)},
-    ubuntuAppImagePath: ${JSON.stringify(ubuntuAppImage)},
+    macosUniversalZipPath: ${JSON.stringify(macosUniversalZip)},
+    macosUniversalDmgPath: ${JSON.stringify(macosUniversalDmg)},
+    linuxCompatibilityDebPath: ${JSON.stringify(linuxCompatibilityDeb)},
+    linuxAppImagePath: ${JSON.stringify(linuxAppImage)},
     bucket: ${JSON.stringify(bucket)},
     publicLatestUrl: ${JSON.stringify(`${workerEndpoint}/latest.json`)}
   })`);
@@ -286,20 +280,20 @@ try {
   if (manifest.stagedPlatforms?.['win32-x64']?.kind !== 'zip' || !manifest.stagedPlatforms?.windows?.fileName?.endsWith('.zip')) {
     throw new Error(`Published launcher manifest missing the Windows staged update ZIP aliases: ${JSON.stringify(manifest.stagedPlatforms)}`);
   }
-  if (manifest.platforms?.['darwin-arm64']?.kind !== 'zip' || manifest.platforms?.['darwin-x64']?.kind !== 'zip') {
-    throw new Error(`Published launcher manifest must use macOS ZIP artifacts for self-update: ${JSON.stringify(manifest.platforms)}`);
+  if (manifest.platforms?.['darwin-arm64']?.kind !== 'zip' || manifest.platforms?.['darwin-x64']?.path !== manifest.platforms?.['darwin-arm64']?.path) {
+    throw new Error(`Published launcher manifest must use one universal macOS ZIP for self-update: ${JSON.stringify(manifest.platforms)}`);
   }
-  if (manifest.downloads?.['macos-arm64']?.kind !== 'dmg' || manifest.downloads?.['macos-x64']?.kind !== 'dmg') {
-    throw new Error(`Published launcher manifest must use macOS DMG artifacts for manual downloads: ${JSON.stringify(manifest.downloads)}`);
+  if (manifest.downloads?.['macos-universal']?.kind !== 'dmg') {
+    throw new Error(`Published launcher manifest must expose one universal macOS DMG: ${JSON.stringify(manifest.downloads)}`);
   }
   if (manifest.platforms?.['linux-x64']?.kind !== 'deb' || manifest.platforms?.['ubuntu-x64']?.kind !== 'deb') {
-    throw new Error(`Published launcher manifest must use the Ubuntu DEB for self-update: ${JSON.stringify(manifest.platforms)}`);
+    throw new Error(`Published launcher manifest must retain the pre-0.2.02 Linux DEB update bridge: ${JSON.stringify(manifest.platforms)}`);
   }
-  if (manifest.downloads?.['ubuntu-x64']?.kind !== 'deb' || manifest.downloads?.['ubuntu-x64-appimage']?.kind !== 'appimage') {
-    throw new Error(`Published launcher manifest must include Ubuntu DEB and AppImage manual downloads: ${JSON.stringify(manifest.downloads)}`);
+  if (manifest.stagedPlatforms?.['portable-linux-x64']?.kind !== 'appimage' || manifest.downloads?.['ubuntu-x64-appimage']?.kind !== 'appimage') {
+    throw new Error(`Published launcher manifest must use the portable AppImage for current Linux clients and downloads: ${JSON.stringify(manifest)}`);
   }
-  if (!manifest.downloads?.['windows-x64'] || !manifest.downloads?.['macos-arm64'] || !manifest.downloads?.['macos-x64'] || !manifest.downloads?.['ubuntu-x64'] || !manifest.downloads?.['ubuntu-x64-appimage']) {
-    throw new Error(`Published launcher manifest missing website download entries: ${JSON.stringify(manifest.downloads)}`);
+  if (Object.keys(manifest.downloads || {}).sort().join(',') !== 'macos-universal,ubuntu-x64-appimage,windows-x64') {
+    throw new Error(`Published launcher manifest must contain exactly three website download entries: ${JSON.stringify(manifest.downloads)}`);
   }
   const uploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);
   console.log(JSON.stringify({

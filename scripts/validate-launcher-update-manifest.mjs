@@ -8,6 +8,7 @@ import {
   launcherPlatformKeys,
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,
+  REQUIRED_STAGED_LINUX_KEYS,
   REQUIRED_STAGED_WINDOWS_KEYS,
   selectLauncherArtifact,
   validateLauncherUpdateManifest
@@ -19,6 +20,7 @@ export {
   launcherPlatformKeys,
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,
+  REQUIRED_STAGED_LINUX_KEYS,
   REQUIRED_STAGED_WINDOWS_KEYS,
   selectLauncherArtifact,
   validateLauncherUpdateManifest
@@ -63,13 +65,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   validateLauncherUpdateManifestFile(args.manifestPath, {
     latestUrl: args['latest-url'] || process.env.AHT_LAUNCHER_UPDATE_URL || '',
     requireTrackedDownloads: true,
-    requireStagedWindows: true
+    requireStagedWindows: true,
+    requireStagedLinux: true
   }).then((result) => {
     console.log(JSON.stringify({
       ok: true,
       manifestPath: result.manifestPath,
       version: result.manifest.version,
       downloads: REQUIRED_DOWNLOAD_KEYS,
+      stagedLinux: REQUIRED_STAGED_LINUX_KEYS,
       stagedWindows: REQUIRED_STAGED_WINDOWS_KEYS
     }, null, 2));
   }).catch((error) => {

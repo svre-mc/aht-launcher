@@ -6031,6 +6031,8 @@ function assertPreparedLauncherUpdatePayload(prepared = {}, payload = {}, expect
     pathFields.push('installDir', 'stagingDir', 'backupDir', 'failedCandidateDir', 'receiptPath');
   } else if (mode === 'legacy-installer') {
     pathFields.push('installDir', 'targetExe', 'installerPath');
+  } else if (mode === 'appimage-swap') {
+    pathFields.push('installerPath', 'targetAppImage', 'fallbackAppImage');
   }
   for (const field of exactFields) {
     if (prepared[field] === undefined || prepared[field] === '') continue;
@@ -6050,12 +6052,14 @@ function assertPreparedLauncherUpdatePayload(prepared = {}, payload = {}, expect
 }
 
 async function validatePreparedLauncherUpdateHandoff(prepared = {}, expectedVersion = '') {
-  if (!['windows-helper', 'windows-staged-helper'].includes(prepared.strategy)) return null;
+  if (!['windows-helper', 'windows-staged-helper', 'linux-appimage-helper'].includes(prepared.strategy)) return null;
   const requiredFiles = [
     [prepared.scriptPath, prepared.scriptSha256, 'helper script'],
-    [prepared.bootstrapScriptPath, prepared.bootstrapScriptSha256, 'bootstrap script'],
     [prepared.payloadPath, prepared.payloadSha256, 'payload']
   ];
+  if (prepared.strategy !== 'linux-appimage-helper') {
+    requiredFiles.splice(1, 0, [prepared.bootstrapScriptPath, prepared.bootstrapScriptSha256, 'bootstrap script']);
+  }
   for (const [filePath, expectedSha256, label] of requiredFiles) {
     const stat = filePath ? await fs.stat(filePath).catch(() => null) : null;
     if (!stat?.isFile() || !expectedSha256) {
@@ -6881,6 +6885,160 @@ async function prepareMacLauncherUpdateHelper(filePath, artifact = {}, options =
   return { ok: true, prepared: true, strategy: 'macos-helper', command, args, cwd: path.dirname(helper.scriptPath), ...helper };
 }
 
+function launcherUpdateInstalledLinuxAppImagePath() {
+  if (process.platform !== 'linux') return '';
+  const testTarget = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_LAUNCHER_UPDATE_TARGET_APPIMAGE || '').trim()
+    : '';
+  const candidate = testTarget || String(process.env.APPIMAGE || '').trim();
+  if (!candidate || !path.isAbsolute(candidate) || !candidate.toLowerCase().endsWith('.appimage')) return '';
+  return path.resolve(candidate);
+}
+
+function linuxAppImageUpdateHelperScript(payload) {
+  const relaunchArgs = (payload.relaunchArgs || []).map((item) => shellSingleQuote(item)).join(' ');
+  return `#!/bin/sh
+set -eu
+appimage_path=${shellSingleQuote(payload.installerPath)}
+target_appimage=${shellSingleQuote(payload.targetAppImage)}
+fallback_appimage=${shellSingleQuote(payload.fallbackAppImage)}
+old_pid=${Number(payload.oldPid) || 0}
+log_path=${shellSingleQuote(payload.logPath)}
+pending_failure_path=${shellSingleQuote(payload.pendingFailurePath)}
+test_start_only=${payload.testStartOnly ? '1' : '0'}
+set -- ${relaunchArgs}
+write_log() {
+  parent_dir=$(dirname "$log_path")
+  mkdir -p "$parent_dir" 2>/dev/null || true
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$log_path" 2>/dev/null || true
+}
+fail_update() {
+  write_log "Launcher update helper failed: $1"
+  if [ -n "$pending_failure_path" ]; then
+    mkdir -p "$(dirname "$pending_failure_path")" 2>/dev/null || true
+    printf '%s\n' "$1" > "$pending_failure_path" 2>/dev/null || true
+  fi
+  exit 1
+}
+write_log "Waiting for old launcher PID $old_pid"
+if [ "$test_start_only" = "1" ]; then
+  write_log "Test mode helper startup confirmed."
+  exit 0
+fi
+if [ "$old_pid" -gt 0 ]; then
+  waits=0
+  while kill -0 "$old_pid" 2>/dev/null; do
+    waits=$((waits + 1))
+    if [ "$waits" -ge 240 ]; then break; fi
+    sleep 0.5
+  done
+fi
+sleep 0.6
+[ -n "$appimage_path" ] && [ -f "$appimage_path" ] || fail_update "Update AppImage was not found: $appimage_path"
+case "$appimage_path" in *.AppImage|*.appimage) ;; *) fail_update "Update is not an AppImage: $appimage_path" ;; esac
+case "$target_appimage" in /*.AppImage|/*.appimage) ;; *) fail_update "Target is not an absolute AppImage path: $target_appimage" ;; esac
+install_to_target() {
+  parent_dir=$(dirname "$target_appimage")
+  candidate_appimage="$target_appimage.next-update"
+  backup_appimage="$target_appimage.previous-update"
+  mkdir -p "$parent_dir" || return 11
+  rm -f "$candidate_appimage" "$backup_appimage"
+  cp "$appimage_path" "$candidate_appimage" || return 12
+  chmod 755 "$candidate_appimage" || return 13
+  if [ -f "$target_appimage" ]; then
+    mv "$target_appimage" "$backup_appimage" || { rm -f "$candidate_appimage"; return 14; }
+  fi
+  if mv "$candidate_appimage" "$target_appimage"; then
+    rm -f "$backup_appimage"
+    return 0
+  fi
+  rm -f "$candidate_appimage"
+  if [ -f "$backup_appimage" ]; then mv "$backup_appimage" "$target_appimage" || true; fi
+  return 15
+}
+if install_to_target; then
+  write_log "Installed AppImage update to $target_appimage"
+else
+  install_status=$?
+  if [ -n "$fallback_appimage" ] && [ "$target_appimage" != "$fallback_appimage" ]; then
+    write_log "Primary install target failed with $install_status. Trying fallback $fallback_appimage"
+    target_appimage="$fallback_appimage"
+    install_to_target || fail_update "Could not install updated AppImage to fallback: $target_appimage"
+    write_log "Installed AppImage update to fallback $target_appimage"
+  else
+    fail_update "Could not install updated AppImage"
+  fi
+fi
+write_log "Starting updated launcher $target_appimage"
+nohup "$target_appimage" "$@" >/dev/null 2>&1 &
+write_log "Launcher AppImage update handoff complete."
+exit 0
+`;
+}
+
+async function writeLinuxAppImageUpdateHelper({ filePath, latestVersion, downloadDir }) {
+  const helperDir = path.join(downloadDir, 'handoff');
+  await ensureDir(helperDir);
+  const targetAppImage = launcherUpdateInstalledLinuxAppImagePath();
+  if (!targetAppImage && !launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')) {
+    throw new Error('Could not resolve the running Linux AppImage for restart. Download the current AppImage once and launch it directly.');
+  }
+  const fallbackAppImage = path.join(app.getPath('home'), 'Applications', path.basename(filePath));
+  const payloadPath = path.join(helperDir, 'linux-appimage-payload.json');
+  const scriptPath = path.join(helperDir, 'apply-launcher-update-linux-appimage.sh');
+  const logPath = path.join(helperDir, 'linux-appimage-handoff.log');
+  const payload = {
+    mode: 'appimage-swap',
+    installerPath: filePath,
+    targetAppImage: targetAppImage || fallbackAppImage,
+    fallbackAppImage,
+    expectedVersion: latestVersion || '',
+    oldPid: process.pid,
+    logPath,
+    pendingFailurePath: launcherUpdatePendingFailurePath(),
+    relaunchArgs: launcherUpdateRelaunchArgs(),
+    testStartOnly: launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY'),
+    createdAt: new Date().toISOString()
+  };
+  await writeJsonFile(payloadPath, payload);
+  await fs.writeFile(scriptPath, linuxAppImageUpdateHelperScript(payload), 'utf8');
+  await fs.chmod(scriptPath, 0o755);
+  const [payloadSha256, scriptSha256] = await Promise.all([
+    hashFile(payloadPath, 'sha256'),
+    hashFile(scriptPath, 'sha256')
+  ]);
+  return {
+    payloadPath,
+    payloadSha256,
+    scriptPath,
+    scriptSha256,
+    logPath,
+    targetAppImage: payload.targetAppImage,
+    fallbackAppImage,
+    expectedVersion: payload.expectedVersion,
+    mode: payload.mode
+  };
+}
+
+async function prepareLinuxAppImageUpdateHelper(filePath, artifact = {}, options = {}) {
+  const helper = await writeLinuxAppImageUpdateHelper({
+    filePath,
+    latestVersion: options.latestVersion || '',
+    downloadDir: options.downloadDir || path.dirname(filePath)
+  });
+  return {
+    ok: true,
+    prepared: true,
+    strategy: 'linux-appimage-helper',
+    command: '/bin/sh',
+    args: [helper.scriptPath],
+    cwd: path.dirname(helper.scriptPath),
+    downloadedPath: filePath,
+    artifact,
+    ...helper
+  };
+}
+
 async function launchDownloadedLauncherUpdate(filePath, artifact = {}, options = {}) {
   const prepared = await prepareDownloadedLauncherUpdate(filePath, artifact, options);
   return launchPreparedLauncherUpdate(prepared);
@@ -6895,7 +7053,7 @@ function linuxPackageInstallerHandoff(filePath) {
   if (gio) {
     return { command: gio, args: ['open', filePath] };
   }
-  throw new Error('Ubuntu package installer could not be opened. Install xdg-utils, then retry the launcher update.');
+  throw new Error('Linux package installer could not be opened. Install xdg-utils, then retry the launcher update.');
 }
 
 async function prepareDownloadedLauncherUpdate(filePath, artifact = {}, options = {}) {
@@ -6908,6 +7066,9 @@ async function prepareDownloadedLauncherUpdate(filePath, artifact = {}, options 
   }
   if (process.platform === 'darwin' && fileName.endsWith('.zip')) {
     return prepareMacLauncherUpdateHelper(filePath, artifact, options);
+  }
+  if (process.platform === 'linux' && fileName.endsWith('.appimage')) {
+    return prepareLinuxAppImageUpdateHelper(filePath, artifact, options);
   }
   if (process.platform === 'linux' && fileName.endsWith('.deb')) {
     const handoff = linuxPackageInstallerHandoff(filePath);
@@ -7051,7 +7212,7 @@ async function prepareDeveloperLauncherReinstall() {
 }
 
 async function waitForLauncherUpdateHelperStart(prepared = {}, timeoutMs = ['windows-helper', 'windows-staged-helper'].includes(prepared.strategy) ? 120_000 : 5000) {
-  if (!prepared.logPath || !['windows-helper', 'windows-staged-helper', 'macos-helper'].includes(prepared.strategy)) return;
+  if (!prepared.logPath || !['windows-helper', 'windows-staged-helper', 'macos-helper', 'linux-appimage-helper'].includes(prepared.strategy)) return;
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
@@ -7062,9 +7223,10 @@ async function waitForLauncherUpdateHelperStart(prepared = {}, timeoutMs = ['win
       const testReady = launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY')
         && text.includes('Test mode helper startup confirmed.');
       const macReady = prepared.strategy === 'macos-helper' && text.includes('Waiting for old launcher PID');
+      const linuxReady = prepared.strategy === 'linux-appimage-helper' && text.includes('Waiting for old launcher PID');
       const windowsReady = ['windows-helper', 'windows-staged-helper'].includes(prepared.strategy)
         && (stagedReady || testReady);
-      if (windowsReady || (prepared.strategy !== 'windows-helper' && prepared.strategy !== 'windows-staged-helper' && nonceReady) || macReady) {
+      if (windowsReady || (prepared.strategy !== 'windows-helper' && prepared.strategy !== 'windows-staged-helper' && nonceReady) || macReady || linuxReady) {
         return;
       }
     } catch {
@@ -7125,6 +7287,10 @@ function spawnBootstrapWithLog(command, args, cwd, env, logPath) {
 }
 
 async function armPreparedLauncherUpdate(prepared = {}) {
+  if (prepared.strategy === 'linux-appimage-helper') {
+    await validatePreparedLauncherUpdateHandoff(prepared, prepared.expectedVersion || '');
+    return prepared;
+  }
   if (!['windows-helper', 'windows-staged-helper'].includes(prepared.strategy)) return prepared;
   const payload = await validatePreparedLauncherUpdateHandoff(prepared, prepared.expectedVersion || '');
   if (!payload || payload.handoffNonce !== prepared.handoffNonce) {
@@ -7287,6 +7453,7 @@ async function runLauncherUpdate() {
     const preparedRestart = await prepareDownloadedLauncherUpdate(target, update.artifact, { latestVersion: update.latestVersion, downloadDir });
     const instantRestartReady = preparedRestart.strategy === 'windows-staged-helper';
     const externalPackageInstall = preparedRestart.strategy === 'linux-package-installer';
+    const portableLinuxUpdate = preparedRestart.strategy === 'linux-appimage-helper';
     const stagedAt = new Date().toISOString();
     const result = {
       ok: true,
@@ -7297,6 +7464,7 @@ async function runLauncherUpdate() {
       restartRequired: true,
       instantRestartReady,
       externalPackageInstall,
+      portableLinuxUpdate,
       stagedAt,
       preparedRestart
     };
@@ -7322,7 +7490,9 @@ async function runLauncherUpdate() {
         instantRestartReady
           ? 'Update finished. Click Restart Launcher to switch to the prepared version immediately.'
           : externalPackageInstall
-            ? 'Ready to install. Open the Ubuntu package installer, finish the DEB installation, then reopen AHT Launcher.'
+            ? 'Ready to install. Open the Linux package installer, finish the compatibility DEB installation, then reopen AHT Launcher.'
+            : portableLinuxUpdate
+              ? 'Portable Linux update verified. Click Install and Restart to replace this AppImage and reopen it.'
             : 'Ready to install. Click Install and Restart to apply the legacy installer.'
       ]
     };
@@ -7338,12 +7508,16 @@ async function runLauncherUpdate() {
     appendOperationLine(launcherUpdateState, instantRestartReady
       ? 'Update finished. The complete launcher is staged and verified.'
       : externalPackageInstall
-        ? 'Ubuntu DEB package is ready.'
+        ? 'Linux compatibility DEB package is ready.'
+        : portableLinuxUpdate
+          ? 'Portable Linux AppImage update is ready.'
         : 'Legacy installer is ready.');
     appendOperationLine(launcherUpdateState, instantRestartReady
       ? 'Click Restart Launcher to close this copy and open the prepared update immediately.'
       : externalPackageInstall
         ? 'Open the package installer, finish installation, then reopen AHT Launcher.'
+        : portableLinuxUpdate
+          ? 'Click Install and Restart to atomically replace this AppImage and reopen AHT Launcher.'
         : 'Click Install and Restart to apply the legacy installer.');
     return result;
   } catch (error) {
@@ -7367,6 +7541,7 @@ async function restartLauncherUpdate() {
     assertDeveloperAuthenticated();
   }
   const externalPackageInstall = staged.preparedRestart.strategy === 'linux-package-installer';
+  const portableLinuxUpdate = staged.preparedRestart.strategy === 'linux-appimage-helper';
   const pendingMetadata = await readPendingLauncherUpdate();
   const stagedPurpose = staged.developerReinstall
     ? 'developer-reinstall'
@@ -7383,7 +7558,9 @@ async function restartLauncherUpdate() {
   appendOperationLine(launcherUpdateState, staged.instantRestartReady
     ? 'Restart requested. Starting the prepared launcher handoff.'
     : externalPackageInstall
-      ? 'Opening the Ubuntu package installer.'
+      ? 'Opening the Linux package installer.'
+      : portableLinuxUpdate
+        ? 'Installing the portable Linux AppImage update.'
       : 'Install and restart requested. Starting the legacy launcher update helper.');
   let preparedRestart = staged.preparedRestart;
   try {
@@ -7417,7 +7594,9 @@ async function restartLauncherUpdate() {
         staged.instantRestartReady
           ? 'Restarting into the fully prepared launcher update.'
           : externalPackageInstall
-            ? 'Opening the Ubuntu package installer. Finish the DEB installation, then reopen AHT Launcher.'
+            ? 'Opening the Linux package installer. Finish the compatibility DEB installation, then reopen AHT Launcher.'
+            : portableLinuxUpdate
+              ? 'Replacing the current AppImage and reopening the portable Linux launcher.'
             : 'Installing launcher update. If this copy opens before installation finishes, it will close so the helper can complete.'
       ]
     };
@@ -7430,7 +7609,7 @@ async function restartLauncherUpdate() {
         installingStartedAt: '',
         lines: [
           `Launcher update ${launcherVersion()} -> ${staged.version}`,
-          'Ubuntu package installer opened. Finish the DEB installation, then reopen AHT Launcher.'
+          'Linux package installer opened. Finish the compatibility DEB installation, then reopen AHT Launcher.'
         ]
       });
     }
@@ -7449,7 +7628,9 @@ async function restartLauncherUpdate() {
       : staged.instantRestartReady
         ? 'Prepared update handoff is running. Closing this launcher now.'
         : externalPackageInstall
-          ? 'Ubuntu package installer opened. Closing this launcher; reopen it after installation finishes.'
+          ? 'Linux package installer opened. Closing this launcher; reopen it after installation finishes.'
+          : portableLinuxUpdate
+            ? 'Portable AppImage update helper is running. Closing this launcher so it can replace and reopen the file.'
           : 'Install helper is running. Closing AHT Launcher so the update can install and reopen.');
     if (!launcherUpdateTestHook('AHT_TEST_LAUNCHER_UPDATE_NO_QUIT')) {
       setTimeout(() => app.quit(), 0);
@@ -8791,56 +8972,41 @@ function launcherArtifactDescriptors(payload = {}) {
       file: payload.windowsZipPath || payload.win32ZipPath || ''
     },
     {
-      key: 'darwin-arm64',
-      aliases: ['macos-arm64'],
-      label: 'macOS Apple Silicon update ZIP',
+      key: 'darwin-universal',
+      aliases: ['darwin-arm64', 'macos-arm64', 'darwin-x64', 'macos-x64', 'darwin', 'macos'],
+      label: 'macOS universal update ZIP',
       kind: 'zip',
       installArgs: [],
-      file: payload.macosArmZipPath || payload.darwinArm64ZipPath || ''
+      file: payload.macosUniversalZipPath || payload.macosZipPath || payload.darwinZipPath || ''
     },
     {
-      key: 'darwin-x64',
-      aliases: ['macos-x64', 'darwin', 'macos'],
-      label: 'macOS Intel update ZIP',
-      kind: 'zip',
-      installArgs: [],
-      file: payload.macosX64ZipPath || payload.darwinX64ZipPath || payload.macosZipPath || payload.darwinZipPath || ''
-    },
-    {
-      key: 'darwin-arm64',
-      label: 'macOS Apple Silicon DMG',
+      key: 'darwin-universal',
+      label: 'macOS universal (Intel and Apple Silicon)',
       kind: 'dmg',
       installArgs: [],
-      downloadKey: 'macos-arm64',
+      downloadKey: 'macos-universal',
       platform: false,
-      file: payload.macosArmDmgPath || payload.darwinArm64DmgPath || ''
-    },
-    {
-      key: 'darwin-x64',
-      label: 'macOS Intel DMG',
-      kind: 'dmg',
-      installArgs: [],
-      downloadKey: 'macos-x64',
-      platform: false,
-      file: payload.macosX64DmgPath || payload.darwinX64DmgPath || payload.macosPath || payload.darwinPath || ''
+      file: payload.macosUniversalDmgPath || payload.macosPath || payload.darwinPath || ''
     },
     {
       key: 'linux-x64',
       aliases: ['linux', 'ubuntu-x64', 'ubuntu'],
-      label: 'Ubuntu Linux x64 DEB',
+      label: 'Linux x64 compatibility update',
       kind: 'deb',
       installArgs: [],
-      downloadKey: 'ubuntu-x64',
-      file: payload.ubuntuDebPath || payload.linuxDebPath || ''
+      file: payload.linuxCompatibilityDebPath || payload.linuxDebPath || payload.ubuntuDebPath || ''
     },
     {
       key: 'linux-x64',
-      label: 'Ubuntu Linux x64 portable AppImage',
+      aliases: ['portable-linux'],
+      stagedKey: 'portable-linux-x64',
+      label: 'Linux x64 AppImage (all major distributions)',
       kind: 'appimage',
       installArgs: [],
       downloadKey: 'ubuntu-x64-appimage',
       platform: false,
-      file: payload.ubuntuAppImagePath || payload.linuxAppImagePath || ''
+      stagedPlatform: true,
+      file: payload.linuxAppImagePath || payload.ubuntuAppImagePath || ''
     }
   ].filter((item) => String(item.file || '').trim());
 }
@@ -8885,7 +9051,7 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
       }
     }
     if (descriptor.stagedPlatform === true) {
-      stagedPlatforms[descriptor.key] = entry;
+      stagedPlatforms[descriptor.stagedKey || descriptor.key] = entry;
       for (const alias of descriptor.aliases || []) {
         stagedPlatforms[alias] = entry;
       }
@@ -8919,7 +9085,8 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     latestUrl: launcherLatestUrlFromInput(publicLatestUrl || config.launcherUpdate?.latestUrl || config.latestUrl || ''),
     allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1',
     requireTrackedDownloads: true,
-    requireStagedWindows: true
+    requireStagedWindows: true,
+    requireStagedLinux: true
   });
   if (!validation.ok) {
     throw new Error(`Launcher update manifest is invalid: ${validation.errors.join('; ')}`);
@@ -8946,8 +9113,8 @@ async function findLauncherBuilds() {
   const macosRoots = [
     path.join(appRoot, 'release-builds', 'macos')
   ];
-  const ubuntuRoots = [
-    path.join(appRoot, 'release-builds', 'ubuntu')
+  const linuxRoots = [
+    path.join(appRoot, 'release-builds', 'linux')
   ];
   return {
     version: launcherVersion(),
@@ -8959,13 +9126,10 @@ async function findLauncherBuilds() {
       path.join(appRoot, 'release-builds', 'windows'),
       path.join(appRoot, 'release-builds')
     ], /AHT-Launcher-Windows-10-11-.*\.zip$/i),
-    macosArmZipPath: await findNewestFile(macosRoots, /(?:arm64|aarch64).*\.zip$/i),
-    macosX64ZipPath: await findNewestFile(macosRoots, /(?:x64|x86_64|intel).*\.zip$/i),
-    macosArmDmgPath: await findNewestFile(macosRoots, /(?:arm64|aarch64).*\.dmg$/i),
-    macosX64DmgPath: await findNewestFile(macosRoots, /(?:x64|x86_64|intel).*\.dmg$/i),
-    macosPath: await findNewestFile(macosRoots, /\.dmg$/i),
-    ubuntuDebPath: await findNewestFile(ubuntuRoots, /AHT-Launcher-Ubuntu-x64-.*\.deb$/i),
-    ubuntuAppImagePath: await findNewestFile(ubuntuRoots, /AHT-Launcher-Ubuntu-x64-.*\.AppImage$/i)
+    macosUniversalZipPath: await findNewestFile(macosRoots, /AHT-Launcher-macOS-universal-.*\.zip$/i),
+    macosUniversalDmgPath: await findNewestFile(macosRoots, /AHT-Launcher-macOS-universal-.*\.dmg$/i),
+    linuxCompatibilityDebPath: await findNewestFile(linuxRoots, /AHT-Launcher-Linux-x64-.*\.deb$/i),
+    linuxAppImagePath: await findNewestFile(linuxRoots, /AHT-Launcher-Linux-x64-.*\.AppImage$/i)
   };
 }
 
@@ -9145,6 +9309,7 @@ async function waitForPublishedLauncherVersion(config, version) {
         latestUrl,
         requireTrackedDownloads: true,
         requireStagedWindows: true,
+        requireStagedLinux: true,
         allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
       });
       if (!validation.ok) {
@@ -9213,7 +9378,7 @@ async function runLauncherDeploy(payload = {}) {
       run: completedRun,
       releaseUrl: `https://github.com/${workflow.repo}/releases/tag/launcher-v${version}`,
       latestUrl: verification.latestUrl,
-      publicArtifacts: ['Windows 10/11 installer', 'macOS Apple Silicon DMG', 'macOS Intel DMG', 'Ubuntu x64 DEB', 'Ubuntu x64 AppImage'],
+      publicArtifacts: ['Windows 10/11 installer', 'macOS universal DMG', 'Linux x64 AppImage'],
       developerArtifactsUploaded: false
     };
     appendOperationLine(launcherDeployState, `Verified launcher/latest.json at ${version}.`);
@@ -9241,6 +9406,7 @@ async function verifyRemoteLauncherUpdate({ publicLatestUrl, localManifest }) {
   const validation = validateLauncherUpdateManifest(remote, {
     latestUrl,
     requireStagedWindows: true,
+    requireStagedLinux: true,
     allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
   });
   if (!validation.ok) {
