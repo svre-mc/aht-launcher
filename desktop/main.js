@@ -11350,6 +11350,8 @@ async function openMinecraftLauncher(config, options = {}) {
 
 function createWindow() {
   const windowQuery = isDeveloperMode() ? { mode: 'developer' } : {};
+  const keepTestRendererActive = process.env.AHT_TEST_HOOKS === '1'
+    && process.env.AHT_TEST_KEEP_RENDERER_ACTIVE === '1';
   if (process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_STALL_IMAGE_DECODE === '1') {
     windowQuery.testStallImageDecode = '1';
   }
@@ -11374,6 +11376,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: !keepTestRendererActive,
       webviewTag: false
     }
   });

@@ -693,6 +693,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_STARTUP_PREPARATION_SECRET: 'b'.repeat(64),
     AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
+    AHT_TEST_KEEP_RENDERER_ACTIVE: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
     AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',

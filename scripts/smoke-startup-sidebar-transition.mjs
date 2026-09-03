@@ -26,9 +26,14 @@ const screenshotDir = process.env.AHT_SMOKE_OUTPUT_DIR
 const reducedMotionArgs = process.env.AHT_TEST_FORCE_REDUCED_MOTION === '1'
   ? ['--force-prefers-reduced-motion=reduce']
   : [];
+const visualAutomationArgs = [
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding'
+];
 const electronArgsFor = (debugPort) => smokeExe
-  ? [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`, ...reducedMotionArgs]
-  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`, ...reducedMotionArgs];
+  ? [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`, ...visualAutomationArgs, ...reducedMotionArgs]
+  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`, ...visualAutomationArgs, ...reducedMotionArgs];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -273,6 +278,8 @@ function spawnLauncher(debugPort) {
       AHT_TEST_HOOKS: '1',
       AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort),
       AHT_TEST_USER_DATA: userData,
+      AHT_TEST_KEEP_RENDERER_ACTIVE: '1',
+      AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
       ELECTRON_ENABLE_LOGGING: '0'
     },
     stdio: 'ignore',
@@ -386,6 +393,39 @@ try {
     const topbar = document.querySelector('.topbar').getBoundingClientRect();
     return { sidebar: [sidebar.x, sidebar.y, sidebar.width, sidebar.height], topbar: [topbar.x, topbar.y, topbar.width, topbar.height] };
   })()`);
+  await evaluate(client, `(() => {
+    const samples = [];
+    const capture = () => {
+      const view = document.querySelector('.view.active');
+      const loader = document.querySelector('#sidebarSwitchLoader');
+      const workspace = document.querySelector('.workspace');
+      samples.push({
+        at: performance.now(),
+        leaving: Boolean(view?.classList.contains('sidebar-view-leaving')),
+        entering: Boolean(view?.classList.contains('sidebar-view-entering-active')),
+        opacity: Number(view ? getComputedStyle(view).opacity : 0),
+        transform: view ? getComputedStyle(view).transform : '',
+        loaderHidden: Boolean(loader?.hidden),
+        loaderVisible: Boolean(loader && !loader.hidden && getComputedStyle(loader).display !== 'none'),
+        actionMode: document.querySelector('#playButton')?.dataset.actionMode || '',
+        activePack: document.querySelector('.game-tile.active')?.dataset.pack || '',
+        workspaceSwitching: Boolean(workspace?.classList.contains('is-sidebar-switching')),
+        workspaceBusy: Boolean(workspace?.hasAttribute('aria-busy'))
+      });
+      if (samples.length > 500) samples.shift();
+    };
+    const timer = window.setInterval(capture, 8);
+    window.__ahtSidebarSwitchTrace = {
+      samples,
+      stop() {
+        window.clearInterval(timer);
+        capture();
+        return samples;
+      }
+    };
+    capture();
+    return true;
+  })()`);
   const switchStartedAt = Date.now();
   await pointerClick(client, '#ptbTileButton');
   const immediateProof = await evaluate(client, `(() => ({
@@ -412,69 +452,15 @@ try {
   assert(immediateProof.sidebarLoaderVisible && immediateProof.sidebarLoaderLabel === 'Switching to PTB' && immediateProof.sidebarMoneyLogo === 'assets/aht-bill-transparent.png' && immediateProof.sidebarMoneyStars === 8 && immediateProof.sidebarMoneyAnimation.includes('startup-money-drift') && immediateProof.sidebarLoaderZIndex === '9999' && immediateProof.sidebarMoneyOpacity >= 0.95, 'The bottom-right money animation was not shown above the launcher as soon as the pack switch began', immediateProof);
   assert(Math.abs(immediateProof.sidebarLoaderRect[0] - immediateProof.sidebarLoaderRect[2]) < 1 && Math.abs(immediateProof.sidebarLoaderRect[1] - immediateProof.sidebarLoaderRect[3]) < 1, 'The pack-switch money animation was not anchored to the bottom-right corner', immediateProof.sidebarLoaderRect);
   assert(immediateProof.viewOpacity > 0.98 && immediateProof.viewTransform === 'none', 'Outgoing view moved or faded before the measured lead-in', immediateProof);
-
-  const exitProof = await waitFor(client, `(() => {
-    const view = document.querySelector('.view.active');
-    const loader = document.querySelector('#sidebarSwitchLoader');
-    const proof = {
-      opacity: Number(getComputedStyle(view).opacity),
-      leaving: view.classList.contains('sidebar-view-leaving'),
-      transform: getComputedStyle(view).transform,
-      transitionDuration: getComputedStyle(view).transitionDuration,
-      sidebarLoaderVisible: !loader?.hidden && getComputedStyle(loader).display !== 'none'
-    };
-    return proof.leaving && proof.opacity < 0.98 && proof.transform === 'none' && proof.sidebarLoaderVisible ? proof : false;
-  })()`, 'outgoing pack fade with the switch loader still visible', 40, 20);
-  assert(exitProof.opacity >= 0 && exitProof.opacity < 0.98, 'The loader did not remain visible while the pack switch was genuinely unresolved', exitProof);
-
-  const commitProof = await waitFor(client, `(() => {
-    const button = document.querySelector('#playButton');
-    if (button?.dataset.actionMode !== 'install') return false;
-    const view = document.querySelector('.view.active');
-    const workspace = document.querySelector('.workspace');
-    const sidebar = document.querySelector('.sidebar');
-    const topbar = document.querySelector('.topbar');
-    const loader = document.querySelector('#sidebarSwitchLoader');
-    const sidebarRect = sidebar.getBoundingClientRect();
-    const topbarRect = topbar.getBoundingClientRect();
-    return {
-      viewOpacity: Number(getComputedStyle(view).opacity),
-      workspaceBusy: workspace.getAttribute('aria-busy'),
-      sidebarOpacity: Number(getComputedStyle(sidebar).opacity),
-      topbarOpacity: Number(getComputedStyle(topbar).opacity),
-      entering: view.classList.contains('sidebar-view-entering-active'),
-      transform: getComputedStyle(view).transform,
-      playActionMode: button.dataset.actionMode,
-      sidebarLoaderHidden: Boolean(loader?.hidden),
-      sidebarLoaderVisible: !loader?.hidden && getComputedStyle(loader).display !== 'none',
-      shell: { sidebar: [sidebarRect.x, sidebarRect.y, sidebarRect.width, sidebarRect.height], topbar: [topbarRect.x, topbarRect.y, topbarRect.width, topbarRect.height] }
-    };
-  })()`, 'PTB status and view commit');
-  commitProof.elapsedMs = Date.now() - switchStartedAt;
-  assert(commitProof.sidebarLoaderHidden && !commitProof.sidebarLoaderVisible && commitProof.workspaceBusy === 'true', 'The bottom-right money animation remained visible after the selected pack and Play action committed', commitProof);
-  assert(commitProof.sidebarOpacity === 1 && commitProof.topbarOpacity === 1 && JSON.stringify(commitProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, commit: commitProof });
-
-  const enterProof = await waitFor(client, `(() => {
-    const view = document.querySelector('.view.active');
-    const opacity = Number(getComputedStyle(view).opacity);
-    if (!view.classList.contains('sidebar-view-entering-active') || opacity <= 0.05 || opacity >= 0.98) return false;
-    const loader = document.querySelector('#sidebarSwitchLoader');
-    return {
-      opacity,
-      entering: true,
-      transform: getComputedStyle(view).transform,
-      sidebarLoaderHidden: Boolean(loader?.hidden),
-      sidebarLoaderVisible: !loader?.hidden && getComputedStyle(loader).display !== 'none'
-    };
-  })()`, 'incoming opacity fade after loader cleanup');
-  assert(enterProof.transform === 'none' && enterProof.sidebarLoaderHidden && !enterProof.sidebarLoaderVisible, 'The money loader overlapped the incoming pack view or Play action', enterProof);
-  screenshots.push(await captureScreenshot(client, 'sidebar-switch-entering-loader-hidden'));
+  screenshots.push(await captureScreenshot(client, 'sidebar-switch-loader-visible'));
 
   const finalProof = await waitFor(client, `(() => {
     const workspace = document.querySelector('.workspace');
     const button = document.querySelector('#playButton');
     const activeView = document.querySelector('.view.active');
     if (workspace.classList.contains('is-sidebar-switching') || button?.dataset.actionMode !== 'install') return false;
+    const sidebar = document.querySelector('.sidebar').getBoundingClientRect();
+    const topbar = document.querySelector('.topbar').getBoundingClientRect();
     return {
       activePack: document.querySelector('.game-tile.active')?.dataset.pack || '',
       activeView: activeView?.id || '',
@@ -482,12 +468,23 @@ try {
       sidebarLoaderHidden: Boolean(document.querySelector('#sidebarSwitchLoader')?.hidden),
       label: button.textContent.trim(),
       background: getComputedStyle(button).backgroundImage,
-      workspaceBusy: workspace.hasAttribute('aria-busy')
+      workspaceBusy: workspace.hasAttribute('aria-busy'),
+      shell: { sidebar: [sidebar.x, sidebar.y, sidebar.width, sidebar.height], topbar: [topbar.x, topbar.y, topbar.width, topbar.height] }
     };
   })()`, 'completed PTB transition');
   finalProof.elapsedMs = Date.now() - switchStartedAt;
+  const transitionTrace = await evaluate(client, 'window.__ahtSidebarSwitchTrace?.stop?.() || []');
+  const exitProof = transitionTrace.find((sample) => sample.leaving && sample.opacity < 0.98 && sample.transform === 'none' && sample.loaderVisible);
+  const commitProof = transitionTrace.find((sample) => sample.actionMode === 'install' && sample.entering && sample.workspaceBusy && sample.loaderHidden && !sample.loaderVisible);
+  const enterProof = transitionTrace.find((sample) => sample.entering && sample.opacity > 0.05 && sample.opacity < 0.98 && sample.transform === 'none' && sample.loaderHidden && !sample.loaderVisible);
+  const loaderPlayOverlap = transitionTrace.find((sample) => sample.loaderVisible && sample.actionMode === 'install');
+  assert(exitProof, 'The renderer never painted an outgoing pack fade while the switch loader remained visible', transitionTrace);
+  assert(commitProof, 'The PTB Play action did not commit with the switch loader already hidden', transitionTrace);
+  assert(enterProof, 'The renderer never painted the incoming opacity fade after loader cleanup', transitionTrace);
+  assert(!loaderPlayOverlap, 'The bottom-right money animation overlapped the committed PTB Play action', loaderPlayOverlap);
   assert(finalProof.activePack === 'ptb' && finalProof.activeView === 'player' && finalProof.viewOpacity === 1 && finalProof.sidebarLoaderHidden && !finalProof.workspaceBusy, 'Sidebar transition did not cleanly finish and hide its money animation', finalProof);
   assert(finalProof.elapsedMs < 1_500, 'Sidebar transition performed long preparation work instead of using the startup-prepared path', finalProof);
+  assert(JSON.stringify(finalProof.shell) === JSON.stringify(shellBefore), 'Fixed launcher chrome changed during the switch', { before: shellBefore, final: finalProof });
   assert(finalProof.label === 'Install' && finalProof.background !== readyProof.background, 'Install and Update palettes were not distinct', { update: readyProof, install: finalProof });
   assert(!/116,\s*164,\s*88|147,\s*201,\s*112/.test(finalProof.background), 'Install action retained the saturated green palette', finalProof.background);
   screenshots.push(await captureScreenshot(client, 'sidebar-switch-complete-install-palette'));
