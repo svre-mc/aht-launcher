@@ -1114,6 +1114,15 @@ assert(releaseWorkflow.includes('dist:regular:linux'), 'GitHub workflow must cal
 assert(releaseWorkflow.includes('aht-launcher-linux'), 'GitHub workflow must upload Linux launcher artifacts.');
 assert(releaseWorkflow.includes('validate-linux-runtime:') && releaseWorkflow.includes('squashfs-root/AppRun'), 'GitHub validation must extract and exercise the portable AppImage runtime.');
 assert(
+  releaseWorkflow.includes('intel_layout_diagnostic:')
+  && releaseWorkflow.includes('diagnose-macos-intel-layout:')
+  && releaseWorkflow.includes("inputs.validation_only == true && inputs.intel_layout_diagnostic == true")
+  && releaseWorkflow.includes('runs-on: macos-15-intel')
+  && releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/x64')
+  && releaseWorkflow.includes('name: aht-macos-intel-player-diagnostics'),
+  'GitHub validation must provide a non-publishing native-Intel packaged-player diagnostic route with retained evidence.'
+);
+assert(
   releaseWorkflow.includes('AHT_SMOKE_USE_TEMP_DEFAULTS: "1"')
   && [smokePlayerDefaults, smokeSettingsProfile].every((source) => (
     source.includes("const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';")
@@ -1150,11 +1159,19 @@ assert(
   && smokePlayerLayout.includes('AbortSignal.timeout(2_000)')
   && smokePlayerLayout.includes('Math.min(5_000, remainingMs)')
   && smokePlayerLayout.includes("reject(new Error('CDP socket closed'))")
+  && smokePlayerLayout.includes('interactivePlayerChromeExpression')
+  && smokePlayerLayout.includes('window.__ahtStartupTaskTimings')
+  && smokePlayerLayout.includes('readDebuggerTargets')
+  && smokePlayerLayout.includes('reconnectPlayerDebugger')
+  && smokePlayerLayout.includes('interactiveChromeDiagnostics')
+  && smokePlayerLayout.includes("stdio: ['ignore', 'pipe', 'pipe']")
+  && smokePlayerLayout.includes('player-layout-cdp-diagnostics.json')
+  && smokePlayerLayout.includes('player-layout-electron-output.log')
   && smokePlayerLayout.includes('await stopElectronChild(child);')
   && smokePlayerLayout.includes("console.log('[player-layout] debugger foregrounded; waiting for hydrated UI')")
   && playerLayoutForegroundIndex >= 0
   && playerLayoutForegroundIndex < playerLayoutHydrationIndex,
-  'Packaged player layout validation must isolate host launcher prerequisites, avoid unrelated account-recovery/keychain enrollment, foreground a directly launched macOS package before hydration, keep headless native renderers active, retry bounded debugger hydration, expose socket closure, and fully stop its owned native process.'
+  'Packaged player layout validation must isolate host launcher prerequisites, avoid unrelated account-recovery/keychain enrollment, foreground a directly launched macOS package before hydration, keep headless native renderers active, record exact renderer readiness, recover a stale debugger session, retain failure evidence, and fully stop its owned native process.'
 );
 assert(
   desktopMain.includes("const keepTestRendererActive = process.env.AHT_TEST_HOOKS === '1'")

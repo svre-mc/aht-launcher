@@ -266,18 +266,22 @@ async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2_000) });
-      if (response.ok) {
-        const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
-        if (page) return page;
-      }
+      const targets = await readDebuggerTargets();
+      const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+      if (page) return page;
     } catch (error) {
       lastError = error;
     }
     await sleep(250);
   }
   throw new Error(`Timed out waiting for Electron debugger target: ${lastError?.message || 'no target'}`);
+}
+
+async function readDebuggerTargets() {
+  const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2_000) });
+  if (!response.ok) throw new Error(`Debugger target list returned HTTP ${response.status}`);
+  const targets = await response.json();
+  return Array.isArray(targets) ? targets : [];
 }
 
 function connect(wsUrl) {
@@ -375,6 +379,147 @@ async function waitFor(client, expression, label, timeoutMs = 60_000) {
     if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
   }
   throw new Error(`Timed out waiting for ${label}: ${lastError?.message || 'condition stayed false'}`);
+}
+
+const interactivePlayerChromeExpression = `
+  (() => {
+    const frame = document.querySelector('.app-frame');
+    const controls = document.querySelector('.window-controls');
+    const profile = document.querySelector('#profileFriendsButton');
+    const launcherReady = document.body.classList.contains('is-launcher-ready');
+    const booting = document.body.classList.contains('is-booting');
+    const frameInteractive = Boolean(frame)
+      && !frame.hasAttribute('inert')
+      && frame.getAttribute('aria-hidden') !== 'true';
+    const controlsStyle = launcherReady && !booting && frameInteractive && controls
+      ? getComputedStyle(controls)
+      : null;
+    const controlsVisible = Boolean(controlsStyle)
+      && controlsStyle.visibility === 'visible'
+      && controlsStyle.pointerEvents !== 'none';
+    const profileVisible = Boolean(profile) && !profile.hidden;
+    return {
+      ready: launcherReady && !booting && frameInteractive && controlsVisible && profileVisible,
+      sampledAt: Math.round(performance.now()),
+      documentReadyState: document.readyState,
+      visibilityState: document.visibilityState,
+      hasAht: Boolean(window.aht),
+      launcherReady,
+      booting,
+      framePresent: Boolean(frame),
+      frameInteractive,
+      controlsPresent: Boolean(controls),
+      controlsVisibility: controlsStyle?.visibility || '',
+      controlsPointerEvents: controlsStyle?.pointerEvents || '',
+      profilePresent: Boolean(profile),
+      profileHidden: profile?.hidden ?? null,
+      startupTasks: window.__ahtStartupTaskTimings || null
+    };
+  })()
+`;
+
+const interactiveChromeDiagnostics = [];
+
+function summarizeDebuggerTargets(targets = []) {
+  return targets.map((target) => ({
+    id: target.id || '',
+    type: target.type || '',
+    title: target.title || '',
+    url: target.url || '',
+    webSocketDebuggerUrl: target.webSocketDebuggerUrl || ''
+  }));
+}
+
+async function reconnectPlayerDebugger(reason) {
+  const targets = await readDebuggerTargets();
+  const summarizedTargets = summarizeDebuggerTargets(targets);
+  const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+  if (!page) throw new Error(`No page target was available during CDP recovery: ${JSON.stringify(summarizedTargets)}`);
+  const freshClient = await connect(page.webSocketDebuggerUrl);
+  try {
+    await freshClient.call('Runtime.enable', {}, 5_000);
+    await freshClient.call('Page.enable', {}, 5_000);
+    await freshClient.call('Page.bringToFront', {}, 5_000);
+    await freshClient.call('Emulation.setFocusEmulationEnabled', { enabled: true }, 5_000);
+  } catch (error) {
+    freshClient.close();
+    throw error;
+  }
+  const priorClient = client;
+  client = freshClient;
+  priorClient?.close();
+  const recovery = {
+    at: Date.now(),
+    reason,
+    target: summarizedTargets.find((target) => target.id === page.id) || summarizedTargets[0] || null,
+    targetCount: summarizedTargets.length
+  };
+  interactiveChromeDiagnostics.push({ type: 'cdp-reconnected', ...recovery });
+  console.log(`[player-layout] recovered CDP session: ${JSON.stringify(recovery)}`);
+}
+
+async function waitForInteractivePlayerChrome(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  let lastStateFingerprint = '';
+  let lastError = null;
+  let reconnectCount = 0;
+  while (Date.now() < deadline) {
+    try {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const state = await evaluate(client, interactivePlayerChromeExpression, Math.min(2_500, remainingMs));
+      lastState = state || null;
+      const { sampledAt: _sampledAt, ...stableState } = lastState || {};
+      const stateFingerprint = JSON.stringify(stableState);
+      if (stateFingerprint !== lastStateFingerprint) {
+        lastStateFingerprint = stateFingerprint;
+        console.log(`[player-layout] interactive readiness: ${stateFingerprint}`);
+      }
+      if (state?.ready) return state;
+    } catch (error) {
+      lastError = error;
+      let targets = [];
+      let targetError = '';
+      try {
+        targets = summarizeDebuggerTargets(await readDebuggerTargets());
+      } catch (listError) {
+        targetError = listError?.message || String(listError);
+      }
+      const diagnostic = {
+        type: 'cdp-evaluate-failure',
+        at: Date.now(),
+        error: error?.message || String(error),
+        reconnectCount,
+        targets,
+        targetError,
+        lastState
+      };
+      interactiveChromeDiagnostics.push(diagnostic);
+      console.warn(`[player-layout] CDP readiness failure: ${JSON.stringify(diagnostic)}`);
+      if (reconnectCount < 3 && /CDP (?:call timed out|socket closed)/i.test(diagnostic.error)) {
+        reconnectCount += 1;
+        try {
+          await reconnectPlayerDebugger(diagnostic.error);
+          continue;
+        } catch (reconnectError) {
+          const failedRecovery = {
+            type: 'cdp-reconnect-failure',
+            at: Date.now(),
+            reconnectCount,
+            error: reconnectError?.message || String(reconnectError)
+          };
+          interactiveChromeDiagnostics.push(failedRecovery);
+          console.warn(`[player-layout] CDP recovery failed: ${JSON.stringify(failedRecovery)}`);
+        }
+      }
+    }
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
+  }
+  throw new Error(`Timed out waiting for interactive player window chrome: ${JSON.stringify({
+    lastError: lastError?.message || '',
+    lastState,
+    diagnostics: interactiveChromeDiagnostics
+  })}`);
 }
 
 async function moveMouseUntilHovered(client, selector, point, label, attempts = 8) {
@@ -680,6 +825,10 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
+let electronOutput = '';
+const appendElectronOutput = (chunk) => {
+  electronOutput = `${electronOutput}${String(chunk)}`.slice(-262_144);
+};
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
@@ -700,9 +849,11 @@ const child = spawn(electronBin, electronArgs, {
     AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     ELECTRON_ENABLE_LOGGING: '0'
   },
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true
 });
+child.stdout?.on('data', appendElectronOutput);
+child.stderr?.on('data', appendElectronOutput);
 
 let client;
 try {
@@ -722,21 +873,8 @@ try {
   await sleep(250);
   console.log('[player-layout] debugger foregrounded; waiting for hydrated UI');
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
-  await waitFor(client, `
-    (() => {
-      const frame = document.querySelector('.app-frame');
-      const controls = document.querySelector('.window-controls');
-      return document.body.classList.contains('is-launcher-ready')
-        && !document.body.classList.contains('is-booting')
-        && frame
-        && !frame.hasAttribute('inert')
-        && frame.getAttribute('aria-hidden') !== 'true'
-        && controls
-        && getComputedStyle(controls).visibility === 'visible'
-        && getComputedStyle(controls).pointerEvents !== 'none'
-        && !document.querySelector('#profileFriendsButton')?.hidden;
-    })()
-  `, 'interactive player window chrome');
+  const interactiveChromeState = await waitForInteractivePlayerChrome();
+  console.log(`[player-layout] interactive player window ready: ${JSON.stringify(interactiveChromeState)}`);
   console.log('[player-layout] hydrated UI ready; enabling foreground input');
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
@@ -2225,6 +2363,23 @@ try {
 } catch (error) {
   const startupProbe = await fsp.readFile(startupProbePath, 'utf8').catch(() => 'No startup probe was written.');
   console.error(`AHT layout startup probe:\n${startupProbe.trim()}`);
+  if (electronOutput.trim()) console.error(`AHT packaged Electron output:\n${electronOutput.trim()}`);
+  let failureScreenshot = null;
+  if (client) {
+    failureScreenshot = await client.call('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: false
+    }, 2_000).then((result) => Buffer.from(result.data, 'base64')).catch(() => null);
+  }
+  if (testEvidenceDir) {
+    await fsp.mkdir(testEvidenceDir, { recursive: true }).catch(() => {});
+    await Promise.allSettled([
+      fsp.writeFile(path.join(testEvidenceDir, 'player-layout-startup-probe.jsonl'), startupProbe, 'utf8'),
+      fsp.writeFile(path.join(testEvidenceDir, 'player-layout-cdp-diagnostics.json'), `${JSON.stringify(interactiveChromeDiagnostics, null, 2)}\n`, 'utf8'),
+      fsp.writeFile(path.join(testEvidenceDir, 'player-layout-electron-output.log'), electronOutput || 'No packaged Electron output was captured.\n', 'utf8'),
+      ...(failureScreenshot ? [fsp.writeFile(path.join(testEvidenceDir, 'player-layout-failure.png'), failureScreenshot)] : [])
+    ]);
+  }
   throw error;
 } finally {
   if (client) {
