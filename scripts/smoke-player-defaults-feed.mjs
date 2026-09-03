@@ -56,6 +56,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer) clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function stopElectronChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill();
+  if (await waitForChildExit(child, 5_000)) return;
+  child.kill('SIGKILL');
+  if (!await waitForChildExit(child, 5_000)) {
+    throw new Error(`Owned Electron child ${child.pid} did not exit after SIGKILL.`);
+  }
+}
+
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -363,8 +388,10 @@ try {
     await client.call('Browser.close').catch(() => {});
     client.close();
   }
-  child.kill();
-  await new Promise((resolve) => server.close(resolve));
+  await stopElectronChild(child);
+  const closePromise = new Promise((resolve) => server.close(resolve));
+  server.closeAllConnections?.();
+  await closePromise;
   if (packagedDefaults) {
     if (originalDefaults) {
       await fsp.writeFile(packagedDefaults, originalDefaults);

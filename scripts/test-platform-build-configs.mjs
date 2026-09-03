@@ -1123,6 +1123,12 @@ assert(
   'Installed macOS and Linux smokes must keep mutable defaults fixtures out of the packaged application directory.'
 );
 assert(
+  [smokePlayerDefaults, readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url))]
+    .every((source) => source.includes('await stopElectronChild(child);') && source.includes("child.kill('SIGKILL')"))
+  && readText(new URL('../scripts/test-player-privacy.mjs', import.meta.url)).includes('AbortSignal.timeout(2_000)'),
+  'The first packaged smokes must wait for their owned Electron process to exit, and privacy startup must bound every DevTools discovery request.'
+);
+assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')
   && releaseWorkflow.includes('sudo chown root:root "$ELECTRON_SANDBOX"')
   && releaseWorkflow.includes('sudo chmod 4755 "$ELECTRON_SANDBOX"')

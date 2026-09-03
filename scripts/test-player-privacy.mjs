@@ -25,6 +25,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer) clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function stopElectronChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill();
+  if (await waitForChildExit(child, 5_000)) return;
+  child.kill('SIGKILL');
+  if (!await waitForChildExit(child, 5_000)) {
+    throw new Error(`Owned Electron child ${child.pid} did not exit after SIGKILL.`);
+  }
+}
+
 async function writeJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -34,7 +59,7 @@ async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2_000) });
       if (response.ok) {
         const targets = await response.json();
         const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -164,13 +189,17 @@ const child = spawn(electronBin, electronArgs, {
 });
 let client = null;
 try {
+  console.log('[player-privacy] waiting for packaged Electron debugger target');
   const target = await waitForTarget();
+  console.log('[player-privacy] debugger target ready; connecting');
   client = await connect(target.webSocketDebuggerUrl);
+  console.log('[player-privacy] debugger connected; waiting for hydrated UI');
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, 'document.readyState === "complete" && window.aht && !document.body.classList.contains("is-booting") && document.querySelector("#startupLoader")?.hidden', 'fully revealed player DOM');
+  console.log('[player-privacy] hydrated UI ready');
   const proof = await evaluate(client, `
     (async () => {
       const status = await window.aht.getStatus();
@@ -335,7 +364,7 @@ try {
     await client.call('Browser.close').catch(() => {});
     client.close();
   }
-  child.kill();
+  await stopElectronChild(child);
   const closePromise = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections?.();
   await closePromise;
