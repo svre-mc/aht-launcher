@@ -3,23 +3,31 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// Installed checks run after the source suite on the same native runner. Give
+// every packaged-app launch its own debugger port range so a slow-closing
+// source or packaged Electron process cannot wedge the next check.
 const checks = [
-  ['test:player-defaults'],
-  ['test:player-privacy'],
-  ['test:player-layout'],
-  ['test:friends-panel'],
-  ['test:legal-panel'],
-  ['test:settings-profile'],
-  ['test:account-duplicate'],
-  ['test:account-switch'],
-  ['test:update-logs'],
-  ['test:single-instance'],
-  ['test:close-during-update'],
-  ['test:play-gate'],
-  ['test:player-update-play'],
-  ['test:launcher-self-update'],
-  ['test:developer-launcher-reinstall']
+  ['test:player-defaults', '--', '19700'],
+  ['test:player-privacy', '--', '20720'],
+  ['test:player-layout', '--', '19760'],
+  ['test:friends-panel', '--', '19870'],
+  ['test:legal-panel', '--', '19872'],
+  ['test:settings-profile', '--', '20500'],
+  ['test:account-duplicate', '--', '20060'],
+  ['test:account-switch', '--', '20190'],
+  ['test:update-logs', '--', '20160'],
+  ['test:single-instance', '--', '20200'],
+  ['test:close-during-update', '--', '20240'],
+  ['test:play-gate', '--', '20130'],
+  ['test:player-update-play', '--', '21130'],
+  ['test:launcher-self-update', '--', '20420'],
+  ['test:developer-launcher-reinstall', '--', '20570']
 ];
+
+const checkTimeoutMs = Number(process.env.AHT_INSTALLED_PLAYER_CHECK_TIMEOUT_MS || 8 * 60 * 1000);
+if (!Number.isFinite(checkTimeoutMs) || checkTimeoutMs < 30_000) {
+  throw new Error(`Invalid installed-player check timeout: ${process.env.AHT_INSTALLED_PLAYER_CHECK_TIMEOUT_MS}`);
+}
 
 function packageManagerInvocation(args) {
   const activePackageManager = String(process.env.npm_execpath || '').trim();
@@ -74,14 +82,34 @@ function runCheck(args, smokeExe) {
       }
     });
 
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      const error = new Error(`${label} exceeded the ${formatMs(checkTimeoutMs)} per-check limit`);
+      error.output = output;
+      error.label = label;
+      error.elapsed = Date.now() - started;
+      reject(error);
+    }, checkTimeoutMs);
+
+    console.log(`[RUN] ${label} with installed player app`);
+
     child.stdout.on('data', (chunk) => { output += String(chunk); });
     child.stderr.on('data', (chunk) => { output += String(chunk); });
     child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       error.output = output;
       error.label = label;
       reject(error);
     });
     child.on('exit', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       const elapsed = Date.now() - started;
       if (code === 0) {
         console.log(`[PASS] ${label} with installed player app (${formatMs(elapsed)})`);
