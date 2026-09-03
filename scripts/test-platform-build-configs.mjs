@@ -1101,8 +1101,10 @@ assert(
   && releaseWorkflow.includes('timeout 30s "$APPIMAGE" --appimage-version')
   && !releaseWorkflow.includes('APPIMAGE_EXTRACT_AND_RUN=1 timeout 30s')
   && !releaseWorkflow.includes('"$APPIMAGE" --no-sandbox --version')
+  && releaseWorkflow.includes('sudo apt-get install -y "$PWD/$DEB"')
+  && !releaseWorkflow.includes('sudo apt-get install -y "$DEB"')
   && !desktopMain.includes('AHT_TEST_DISABLE_CHROMIUM_SANDBOX'),
-  'Ubuntu CI must configure Electron\'s SUID test sandbox and probe AppImage runtime metadata without launching the GUI.'
+  'Ubuntu CI must configure Electron\'s SUID test sandbox, probe AppImage runtime metadata without launching the GUI, and install the DEB from an unambiguous local path.'
 );
 assert(smokePlayerUpdateLogs.includes('Electron exited before exposing a debugger target') && smokePlayerUpdateLogs.includes("stdio: ['ignore', 'pipe', 'pipe']"), 'The first native Electron smoke must preserve early process diagnostics.');
 const platformProfileSource = readText(new URL('../src/platformProfile.js', import.meta.url));

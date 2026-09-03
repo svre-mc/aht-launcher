@@ -468,7 +468,7 @@ jobs:
           fi
 
           timeout 30s "$APPIMAGE" --appimage-version | tee validation/ubuntu/appimage-version.txt
-          sudo apt-get install -y "$DEB"
+          sudo apt-get install -y "$PWD/$DEB"
           test "$(command -v a-hard-time-launcher)" = "/usr/bin/a-hard-time-launcher"
           file /usr/bin/a-hard-time-launcher | tee validation/ubuntu/installed-executable.txt
           sha256sum "$DEB" "$APPIMAGE" | tee validation/ubuntu/artifacts-sha256.txt
