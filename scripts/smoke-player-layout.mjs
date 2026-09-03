@@ -266,7 +266,7 @@ function connect(wsUrl) {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
-            }, 10000);
+            }, 30000);
           });
         },
         close() {
