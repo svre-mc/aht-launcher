@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   assertLauncherReleaseAdvance,
   compareLauncherReleaseVersions,
+  KNOWN_LEGACY_DOWNLOAD_KEYS,
   launcherPlatformKeys,
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,
@@ -17,6 +18,7 @@ import {
 export {
   assertLauncherReleaseAdvance,
   compareLauncherReleaseVersions,
+  KNOWN_LEGACY_DOWNLOAD_KEYS,
   launcherPlatformKeys,
   REQUIRED_DOWNLOAD_KEYS,
   REQUIRED_PLATFORM_KEYS,

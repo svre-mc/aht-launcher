@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 export const REQUIRED_DOWNLOAD_KEYS = ['windows-x64', 'macos-universal', 'ubuntu-x64-appimage'];
+export const KNOWN_LEGACY_DOWNLOAD_KEYS = ['macos-arm64', 'macos-x64', 'ubuntu-x64'];
 export const REQUIRED_STAGED_WINDOWS_KEYS = ['win32-x64', 'win32', 'windows', 'windows-x64'];
 export const REQUIRED_STAGED_LINUX_KEYS = ['portable-linux-x64', 'portable-linux'];
 export const REQUIRED_PLATFORM_KEYS = [
@@ -259,7 +260,10 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
     }
   }
 
-  const unexpectedDownloadKeys = Object.keys(downloads).filter((key) => !REQUIRED_DOWNLOAD_KEYS.includes(key));
+  const allowedDownloadKeys = options.allowKnownLegacyDownloadKeys === true
+    ? [...REQUIRED_DOWNLOAD_KEYS, ...KNOWN_LEGACY_DOWNLOAD_KEYS]
+    : REQUIRED_DOWNLOAD_KEYS;
+  const unexpectedDownloadKeys = Object.keys(downloads).filter((key) => !allowedDownloadKeys.includes(key));
   if (unexpectedDownloadKeys.length) {
     errors.push(`manual downloads contain unexpected keys: ${unexpectedDownloadKeys.join(', ')}`);
   }

@@ -1,11 +1,13 @@
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { checkLauncherReleaseImmutability } from './check-launcher-release-immutability.mjs';
 import { prepareLauncherUpdate } from './prepare-launcher-update.mjs';
 import { uploadR2Plan } from './upload-r2-plan.mjs';
 import {
   assertLauncherReleaseAdvance,
   compareLauncherReleaseVersions,
+  KNOWN_LEGACY_DOWNLOAD_KEYS,
   REQUIRED_DOWNLOAD_KEYS,
   selectLauncherArtifact,
   validateLauncherUpdateManifest
@@ -61,6 +63,55 @@ for (const candidateVersion of ['7.8.9', '7.8.8']) {
   }
   assert(immutableRejected, `published launcher ${candidateVersion} must not be replaceable`);
 }
+const legacyManifest = JSON.parse(JSON.stringify(manifest).replaceAll('7.8.9', '7.8.8'));
+const legacyDownloads = legacyManifest.downloads;
+legacyManifest.downloads = {
+  'windows-x64': legacyDownloads['windows-x64'],
+  'macos-arm64': legacyDownloads['macos-universal'],
+  'macos-x64': legacyDownloads['macos-universal'],
+  'ubuntu-x64': legacyManifest.platforms['ubuntu-x64'],
+  'ubuntu-x64-appimage': legacyDownloads['ubuntu-x64-appimage']
+};
+const strictLegacyValidation = validateLauncherUpdateManifest(legacyManifest, {
+  latestUrl: 'https://example.test/launcher/latest.json',
+  requireStagedWindows: true,
+  requireAllPlatforms: false,
+  requireDownloads: false
+});
+assert(
+  !strictLegacyValidation.ok && strictLegacyValidation.errors.some((error) => error.includes('manual downloads contain unexpected keys')),
+  'Legacy manual-download keys must remain invalid for strict candidate validation'
+);
+const compatibleLegacyValidation = validateLauncherUpdateManifest(legacyManifest, {
+  latestUrl: 'https://example.test/launcher/latest.json',
+  requireStagedWindows: true,
+  requireAllPlatforms: false,
+  requireDownloads: false,
+  allowKnownLegacyDownloadKeys: true
+});
+assert(compatibleLegacyValidation.ok, `Known 0.2.01 download keys must remain readable for an immutability comparison: ${compatibleLegacyValidation.errors.join('; ')}`);
+assert(KNOWN_LEGACY_DOWNLOAD_KEYS.slice().sort().join(',') === 'macos-arm64,macos-x64,ubuntu-x64', 'The historical download-key allowance must remain exactly bounded');
+const unknownLegacyManifest = JSON.parse(JSON.stringify(legacyManifest));
+unknownLegacyManifest.downloads['unexpected-linux'] = unknownLegacyManifest.downloads['ubuntu-x64'];
+const unknownLegacyValidation = validateLauncherUpdateManifest(unknownLegacyManifest, {
+  latestUrl: 'https://example.test/launcher/latest.json',
+  requireStagedWindows: true,
+  requireAllPlatforms: false,
+  requireDownloads: false,
+  allowKnownLegacyDownloadKeys: true
+});
+assert(!unknownLegacyValidation.ok && unknownLegacyValidation.errors.some((error) => error.includes('unexpected-linux')), 'The legacy comparison allowance must still reject unknown download keys');
+const legacyAdvance = await checkLauncherReleaseImmutability({
+  candidatePath: result.manifestPath,
+  latestUrl: 'https://example.test/launcher/latest.json',
+  fetchImpl: async () => ({
+    status: 200,
+    statusText: 'OK',
+    ok: true,
+    json: async () => legacyManifest
+  })
+});
+assert(legacyAdvance.ok && legacyAdvance.candidateVersion === '7.8.9' && legacyAdvance.liveVersion === '7.8.8', 'Immutability checking must compare a strict new candidate against the known legacy live shape');
 const requiredDownloadKeys = REQUIRED_DOWNLOAD_KEYS;
 assert(uploadScript.includes("process.platform === 'win32' && /\\.cmd$/i.test(command)"), 'Windows R2 upload must shell-wrap npx.cmd');
 assert(manifest.version === '7.8.9', 'manifest version mismatch');

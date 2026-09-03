@@ -60,7 +60,8 @@ export async function checkLauncherReleaseImmutability({ candidatePath, latestUr
     latestUrl: publicLatestUrl,
     requireStagedWindows: true,
     requireAllPlatforms: false,
-    requireDownloads: false
+    requireDownloads: false,
+    allowKnownLegacyDownloadKeys: true
   });
   if (!liveValidation.ok) {
     throw new Error(`Live launcher manifest is invalid: ${liveValidation.errors.join('; ')}`);
