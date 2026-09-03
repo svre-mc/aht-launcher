@@ -88,17 +88,22 @@ function Assert-FileSha256([string] $PathValue, [string] $Expected, [string] $La
 }
 
 function Write-UpdateLog([string] $Message) {
-    try {
-        if (-not $script:logPath) { return }
-        $parent = Split-Path -Parent $script:logPath
-        if ($parent) {
-            $null = Assert-NoReparsePath $parent $true
+    if (-not $script:logPath) { return }
+    for ($attempt = 0; $attempt -lt 40; $attempt += 1) {
+        try {
+            $parent = Split-Path -Parent $script:logPath
+            if ($parent) {
+                $null = Assert-NoReparsePath $parent $true
+            }
+            if (Test-Path -LiteralPath $script:logPath) {
+                $null = Assert-RegularFile $script:logPath 'Launcher update log'
+            }
+            Add-Content -LiteralPath $script:logPath -Value ((Get-Date).ToString('o') + ' ' + $Message) -Encoding UTF8
+            return
+        } catch {
+            if ($attempt -lt 39) { Start-Sleep -Milliseconds 25 }
         }
-        if (Test-Path -LiteralPath $script:logPath) {
-            $null = Assert-RegularFile $script:logPath 'Launcher update log'
-        }
-        Add-Content -LiteralPath $script:logPath -Value ((Get-Date).ToString('o') + ' ' + $Message) -Encoding UTF8
-    } catch {}
+    }
 }
 
 function Write-PendingFailure([string] $Message) {
