@@ -1137,12 +1137,15 @@ assert(
   && smokePlayerLayout.includes('autoImportAccount: false')
   && smokePlayerLayout.includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
   && smokePlayerLayout.includes("AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1'")
+  && smokePlayerLayout.includes("usernameRegistrationMode: 'worker'")
+  && smokePlayerLayout.includes('remoteRegistrationConfirmedAt: registeredAt')
+  && smokePlayerLayout.includes('remoteRegistrationWorkerBaseUrl: `${workerEndpoint}/`')
   && smokePlayerLayout.includes('AbortSignal.timeout(2_000)')
   && smokePlayerLayout.includes('Math.min(5_000, remainingMs)')
   && smokePlayerLayout.includes("reject(new Error('CDP socket closed'))")
   && smokePlayerLayout.includes('await stopElectronChild(child);')
   && smokePlayerLayout.includes("console.log('[player-layout] debugger ready; waiting for hydrated UI')"),
-  'Packaged player layout validation must isolate host launcher prerequisites, retry bounded debugger hydration, expose socket closure, and fully stop its owned native process.'
+  'Packaged player layout validation must isolate host launcher prerequisites, avoid unrelated account-recovery/keychain enrollment, retry bounded debugger hydration, expose socket closure, and fully stop its owned native process.'
 );
 assert(
   verifyInstalledPlayerScript.includes('function createIsolatedCheckEnvironment()')

@@ -570,6 +570,7 @@ await fsp.writeFile(java8Executable, 'AHT Java 8 executable fixture', 'utf8');
 if (process.platform !== 'win32') await fsp.chmod(java8Executable, 0o755);
 await fsp.writeFile(path.join(java8Home, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
 const deviceCredential = createDeviceCredential();
+const registeredAt = new Date().toISOString();
 await writeJson(path.join(userData, 'device-identity.json'), {
   schemaVersion: deviceCredential.schemaVersion,
   protocol: deviceCredential.protocol,
@@ -585,10 +586,13 @@ await writeJson(path.join(userData, 'device-identity.json'), {
 });
 await writeJson(path.join(userData, 'identity.json'), {
   installId: 'layout-smoke-install',
-  createdAt: new Date().toISOString(),
+  createdAt: registeredAt,
   minecraftUsername: 'LayoutUser_1',
-  usernameRegisteredAt: new Date().toISOString(),
-  usernameRegistrationMode: 'layout-smoke'
+  usernameRegisteredAt: registeredAt,
+  usernameRegistrationMode: 'worker',
+  remoteRegistrationAttemptedAt: registeredAt,
+  remoteRegistrationConfirmedAt: registeredAt,
+  remoteRegistrationWorkerBaseUrl: `${workerEndpoint}/`
 });
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
