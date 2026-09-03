@@ -431,9 +431,10 @@ for (const installedPlayerCheck of [
   'test:launcher-self-update',
   'test:developer-launcher-reinstall'
 ]) {
-  assert(verifyInstalledPlayer.includes(`['${installedPlayerCheck}', '--', '`), `Installed player verifier must include ${installedPlayerCheck} with an isolated debugger port.`);
+  assert(verifyInstalledPlayer.includes(`['${installedPlayerCheck}']`), `Installed player verifier must include ${installedPlayerCheck}.`);
 }
 assert(verifyInstalledPlayer.includes('AHT_INSTALLED_PLAYER_CHECK_TIMEOUT_MS'), 'Installed player verifier must bound each packaged-app check independently.');
+assert(verifyInstalledPlayer.includes("import net from 'node:net'") && verifyInstalledPlayer.includes('findAvailablePortBlock') && verifyInstalledPlayer.includes("server.listen({ host: '127.0.0.1', port: basePort + offset, exclusive: true }"), 'Installed player verifier must dynamically probe a free loopback port block for every packaged-app check.');
 
 assert(rendererApp.includes('window.aht.selectFolder(els.instanceInput.value.trim() || currentStatus?.config?.instanceDir || "")'), 'Modpack Folder Browse must open at the folder path currently listed in Game Settings.');
 assert(!rendererApp.includes('els.pickInstanceButton.addEventListener("click", async () => {\n    const folder = await window.aht.selectFolder();'), 'Modpack Folder Browse must not call selectFolder without a default path.');

@@ -1,27 +1,25 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-// Installed checks run after the source suite on the same native runner. Give
-// every packaged-app launch its own debugger port range so a slow-closing
-// source or packaged Electron process cannot wedge the next check.
 const checks = [
-  ['test:player-defaults', '--', '19700'],
-  ['test:player-privacy', '--', '20720'],
-  ['test:player-layout', '--', '19760'],
-  ['test:friends-panel', '--', '19870'],
-  ['test:legal-panel', '--', '19872'],
-  ['test:settings-profile', '--', '20500'],
-  ['test:account-duplicate', '--', '20060'],
-  ['test:account-switch', '--', '20190'],
-  ['test:update-logs', '--', '20160'],
-  ['test:single-instance', '--', '20200'],
-  ['test:close-during-update', '--', '20240'],
-  ['test:play-gate', '--', '20130'],
-  ['test:player-update-play', '--', '21130'],
-  ['test:launcher-self-update', '--', '20420'],
-  ['test:developer-launcher-reinstall', '--', '20570']
+  ['test:player-defaults'],
+  ['test:player-privacy'],
+  ['test:player-layout'],
+  ['test:friends-panel'],
+  ['test:legal-panel'],
+  ['test:settings-profile'],
+  ['test:account-duplicate'],
+  ['test:account-switch'],
+  ['test:update-logs'],
+  ['test:single-instance'],
+  ['test:close-during-update'],
+  ['test:play-gate'],
+  ['test:player-update-play'],
+  ['test:launcher-self-update'],
+  ['test:developer-launcher-reinstall']
 ];
 
 const checkTimeoutMs = Number(process.env.AHT_INSTALLED_PLAYER_CHECK_TIMEOUT_MS || 8 * 60 * 1000);
@@ -61,11 +59,42 @@ function formatMs(ms) {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+async function closeServers(servers) {
+  await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+}
+
+async function findAvailablePortBlock(width = 4) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const basePort = 20_000 + Math.floor(Math.random() * (40_000 - width));
+    const servers = [];
+    try {
+      for (let offset = 0; offset < width; offset += 1) {
+        const server = net.createServer();
+        await new Promise((resolve, reject) => {
+          server.once('error', reject);
+          server.listen({ host: '127.0.0.1', port: basePort + offset, exclusive: true }, resolve);
+        });
+        servers.push(server);
+      }
+      await closeServers(servers);
+      return basePort;
+    } catch {
+      await closeServers(servers);
+    }
+  }
+  throw new Error('Could not reserve a free loopback port block for an installed-player check.');
+}
+
 function installedPlayerExe() {
   return String(process.env.AHT_INSTALLED_PLAYER_EXE || process.env.AHT_SMOKE_EXE || defaultInstalledPlayerExe()).trim();
 }
 
-function runCheck(args, smokeExe) {
+async function runCheck(check, smokeExe) {
+  // Installed checks run after the source suite on the same native runner.
+  // Probe a fresh consecutive range so runner-local services or slow-closing
+  // Electron processes cannot capture a packaged app's debugger/worker ports.
+  const port = await findAvailablePortBlock();
+  const args = [...check, '--', String(port)];
   const label = `npm run ${args.join(' ')}`;
   const started = Date.now();
   return new Promise((resolve, reject) => {
