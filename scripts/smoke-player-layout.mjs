@@ -357,21 +357,76 @@ function connect(wsUrl) {
   });
 }
 
-async function evaluate(client, expression, timeoutMs = 30_000) {
-  const result = await client.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
+async function evaluateOnce(activeClient, expression, timeoutMs) {
+  const result = await activeClient.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
   return result.result?.value;
 }
 
-async function waitFor(client, expression, label, timeoutMs = 60_000) {
+let automaticCdpRecoveryCount = 0;
+const maxAutomaticCdpRecoveries = 4;
+let forceCdpEvaluationTimeout = process.env.AHT_TEST_FORCE_CDP_EVALUATE_TIMEOUT === '1';
+
+async function evaluate(activeClient, expression, timeoutMs = 30_000) {
+  try {
+    if (forceCdpEvaluationTimeout && String(expression || '').includes('const rectOf = (node) =>')) {
+      forceCdpEvaluationTimeout = false;
+      throw new Error('CDP call timed out: Runtime.evaluate');
+    }
+    return await evaluateOnce(activeClient, expression, timeoutMs);
+  } catch (error) {
+    const message = error?.message || String(error);
+    const canRecover = activeClient === client
+      && automaticCdpRecoveryCount < maxAutomaticCdpRecoveries
+      && /CDP (?:call timed out|socket closed)/i.test(message);
+    if (!canRecover) throw error;
+
+    automaticCdpRecoveryCount += 1;
+    const recoveryAttempt = {
+      type: 'cdp-evaluate-retry',
+      at: Date.now(),
+      error: message,
+      recoveryCount: automaticCdpRecoveryCount,
+      expressionLength: String(expression || '').length
+    };
+    interactiveChromeDiagnostics.push(recoveryAttempt);
+    console.warn(`[player-layout] recovering stalled CDP evaluation: ${JSON.stringify(recoveryAttempt)}`);
+    await reconnectPlayerDebugger(message);
+    try {
+      const value = await evaluateOnce(client, expression, timeoutMs);
+      interactiveChromeDiagnostics.push({
+        type: 'cdp-evaluate-retry-succeeded',
+        at: Date.now(),
+        recoveryCount: automaticCdpRecoveryCount
+      });
+      return value;
+    } catch (retryError) {
+      const retryDiagnostic = {
+        type: 'cdp-evaluate-retry-failed',
+        at: Date.now(),
+        recoveryCount: automaticCdpRecoveryCount,
+        error: retryError?.message || String(retryError)
+      };
+      interactiveChromeDiagnostics.push(retryDiagnostic);
+      throw new Error(`CDP evaluation remained unavailable after fresh-session recovery: ${JSON.stringify({
+        initialError: message,
+        retryError: retryDiagnostic.error,
+        recoveryCount: automaticCdpRecoveryCount
+      })}`);
+    }
+  }
+}
+
+async function waitFor(activeClient, expression, label, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
     try {
+      if (client && activeClient !== client) activeClient = client;
       const remainingMs = Math.max(1, deadline - Date.now());
-      const value = await evaluate(client, expression, Math.min(5_000, remainingMs));
+      const value = await evaluate(activeClient, expression, Math.min(5_000, remainingMs));
       if (value) return value;
     } catch (error) {
       lastError = error;
@@ -2337,10 +2392,20 @@ try {
     await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
   }
 
+  if (testEvidenceDir) {
+    await fsp.mkdir(testEvidenceDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(testEvidenceDir, 'player-layout-cdp-diagnostics.json'),
+      `${JSON.stringify(interactiveChromeDiagnostics, null, 2)}\n`,
+      'utf8'
+    );
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
     screenshots,
+    cdpDiagnostics: interactiveChromeDiagnostics,
     windowControls: {
       nativeHitTestSupported: nativeWindowControlProof.supported,
       clientSamples: nativeWindowControlProof.samples.filter((sample) => sample.controlId !== 'windowDragRegion').length,

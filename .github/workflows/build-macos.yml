@@ -378,6 +378,7 @@ jobs:
       - name: Run packaged-player interaction suite
         env:
           AHT_INSTALLED_PLAYER_EXE: ${{ runner.temp }}/aht-installed-${{ matrix.arch }}/A Hard Time Launcher macOS.app/Contents/MacOS/A Hard Time Launcher macOS
+          AHT_TEST_EVIDENCE_DIR: validation/${{ matrix.arch }}
         run: npm run verify:installed-player
 
       - name: Recheck startup transition against packaged app
@@ -597,6 +598,7 @@ jobs:
         env:
           AHT_INSTALLED_PLAYER_EXE: ${{ runner.temp }}/aht-linux-appimage/squashfs-root/AppRun
           AHT_SMOKE_USE_TEMP_DEFAULTS: "1"
+          AHT_TEST_EVIDENCE_DIR: validation/linux
         run: xvfb-run -a npm run verify:installed-player
 
       - name: Recheck startup transition against extracted AppImage

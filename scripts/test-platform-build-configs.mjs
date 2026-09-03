@@ -1164,6 +1164,9 @@ assert(
   && smokePlayerLayout.includes('readDebuggerTargets')
   && smokePlayerLayout.includes('reconnectPlayerDebugger')
   && smokePlayerLayout.includes('interactiveChromeDiagnostics')
+  && smokePlayerLayout.includes('AHT_TEST_FORCE_CDP_EVALUATE_TIMEOUT')
+  && smokePlayerLayout.includes("type: 'cdp-evaluate-retry-succeeded'")
+  && smokePlayerLayout.includes('CDP evaluation remained unavailable after fresh-session recovery')
   && smokePlayerLayout.includes("stdio: ['ignore', 'pipe', 'pipe']")
   && smokePlayerLayout.includes('player-layout-cdp-diagnostics.json')
   && smokePlayerLayout.includes('player-layout-electron-output.log')
@@ -1172,6 +1175,11 @@ assert(
   && playerLayoutForegroundIndex >= 0
   && playerLayoutForegroundIndex < playerLayoutHydrationIndex,
   'Packaged player layout validation must isolate host launcher prerequisites, avoid unrelated account-recovery/keychain enrollment, foreground a directly launched macOS package before hydration, keep headless native renderers active, record exact renderer readiness, recover a stale debugger session, retain failure evidence, and fully stop its owned native process.'
+);
+assert(
+  releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/${{ matrix.arch }}')
+  && releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/linux'),
+  'Native packaged-player validation must retain CDP readiness and recovery evidence for macOS and Linux.'
 );
 assert(
   desktopMain.includes("const keepTestRendererActive = process.env.AHT_TEST_HOOKS === '1'")
