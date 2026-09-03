@@ -4420,6 +4420,8 @@ async function transitionSidebarSelection(tile) {
   els.workspace?.classList.add("is-sidebar-switching");
   els.workspace?.setAttribute("aria-busy", "true");
   setSidebarSwitchLoader(true, nextPack);
+  sourceView?.classList.add("sidebar-view-leaving-ready");
+  if (sourceView) void getComputedStyle(sourceView).opacity;
 
   const exitGate = (async () => {
     await waitForUiDelay(SIDEBAR_SWITCH_EXIT_DELAY_MS);
@@ -4456,7 +4458,7 @@ async function transitionSidebarSelection(tile) {
     setSidebarSwitchLoader(false);
 
     if (statusResult.error) incomingView?.classList.add("sidebar-view-entering");
-    sourceView?.classList.remove("sidebar-view-leaving");
+    sourceView?.classList.remove("sidebar-view-leaving", "sidebar-view-leaving-ready");
     void incomingView?.offsetWidth;
     await waitForNextPaint();
     await waitForNextPaint();
@@ -4465,7 +4467,7 @@ async function transitionSidebarSelection(tile) {
     await waitForUiDelay(SIDEBAR_SWITCH_ENTER_MS);
   } finally {
     for (const view of els.views) {
-      view.classList.remove("sidebar-view-leaving", "sidebar-view-entering", "sidebar-view-entering-active");
+      view.classList.remove("sidebar-view-leaving-ready", "sidebar-view-leaving", "sidebar-view-entering", "sidebar-view-entering-active");
     }
     els.workspace?.classList.remove("is-sidebar-switching", "is-sidebar-switch-entering");
     els.workspace?.removeAttribute("aria-busy");

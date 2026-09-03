@@ -1006,9 +1006,12 @@ body.dev-mode .developer-window-drag-region {
   position: relative;
 }
 
+.workspace > .view.sidebar-view-leaving-ready {
+  transition: opacity 180ms ease-in;
+}
+
 .workspace > .view.sidebar-view-leaving {
   opacity: 0;
-  transition: opacity 180ms ease-in;
 }
 
 .workspace > .view.sidebar-view-entering {

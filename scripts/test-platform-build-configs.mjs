@@ -403,7 +403,15 @@ assert(desktopMain.includes("ipcMain.handle('dialog:folder', async (_event, defa
 assert(desktopMain.includes("process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_DIALOG_ECHO_DEFAULT_PATH === '1'"), 'Dialog test hook must require the explicit AHT_TEST_HOOKS gate.');
 assert(desktopMain.includes('function configureTestRemoteDebugPort()') && desktopMain.includes("process.env.AHT_TEST_HOOKS !== '1'") && desktopMain.includes('AHT_TEST_REMOTE_DEBUG_PORT'), 'Packaged smoke remote-debug hook must be gated by AHT_TEST_HOOKS and an explicit port env var.');
 assert(desktopMain.includes('function writeTestStartupProbe') && desktopMain.includes('AHT_TEST_STARTUP_PROBE_PATH'), 'Packaged startup diagnostics must be gated behind AHT_TEST_HOOKS and an explicit probe path.');
-assert(smokePlayerUpdatePlay.includes('AHT_TEST_REMOTE_DEBUG_PORT: String(port)') && smokePlayerUpdatePlay.includes('AHT_TEST_STARTUP_PROBE_PATH: startupProbePath') && smokePlayerUpdatePlay.includes('? [`--user-data-dir=${userData}`]'), 'Installed player update/play smoke must use the gated main-process remote-debug hook and startup probe.');
+assert(
+  smokePlayerUpdatePlay.includes('AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort)')
+  && smokePlayerUpdatePlay.includes('AHT_TEST_STARTUP_PROBE_PATH: startupProbePath')
+  && smokePlayerUpdatePlay.includes('? [`--user-data-dir=${userData}`]')
+  && smokePlayerUpdatePlay.includes('const warmDebugPort = port + 2')
+  && smokePlayerUpdatePlay.includes('warmChild = spawnPlayerLauncher(warmDebugPort)')
+  && smokePlayerUpdatePlay.includes('waitForTarget(warmDebugEndpoint)'),
+  'Installed player update/play smoke must use the gated main-process remote-debug hook, startup probe, and a distinct debug listener for its warm relaunch.'
+);
 assert(smokePlayerDefaults.includes('const minecraftRoot = path.join(root, \'.minecraft\')') && smokePlayerDefaults.includes('enabled: true') && smokePlayerDefaults.includes('rootDir: minecraftRoot'), 'Player defaults smoke must exercise enabled Minecraft Launcher profile integration against an isolated temp root.');
 assert(smokePlayerLayout.includes('const minecraftRoot = path.join(root, \'.minecraft\')') && smokePlayerLayout.includes('serializedEnabled') && smokePlayerLayout.includes('closeLauncherWhenGameStartsInput') && smokePlayerLayout.includes('profileToggleAbsent'), 'Player layout smoke must prove Minecraft profile integration is forced and the replacement close setting is present.');
 assert(

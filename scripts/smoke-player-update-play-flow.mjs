@@ -15,6 +15,8 @@ const port = Number(process.argv[2] || 10130);
 const endpoint = `http://127.0.0.1:${port}`;
 const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
+const warmDebugPort = port + 2;
+const warmDebugEndpoint = `http://127.0.0.1:${warmDebugPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-update-play-'));
 const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
@@ -44,9 +46,9 @@ const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
-const electronArgs = smokeExe
+const electronArgsFor = (debugPort) => smokeExe
   ? [`--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 const smokeStartedAt = Date.now();
 await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
@@ -148,11 +150,11 @@ async function makeClientZip(file) {
   return await fsp.readFile(file);
 }
 
-async function waitForTarget() {
+async function waitForTarget(debugEndpoint = endpoint) {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${debugEndpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
         const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -473,8 +475,8 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
-function spawnPlayerLauncher() {
-  return spawn(electronBin, electronArgs, {
+function spawnPlayerLauncher(debugPort = port) {
+  return spawn(electronBin, electronArgsFor(debugPort), {
     cwd: electronCwd,
     env: {
       ...process.env,
@@ -483,7 +485,7 @@ function spawnPlayerLauncher() {
       AHT_TEST_USER_DATA: userData,
       AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
       AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
-      AHT_TEST_REMOTE_DEBUG_PORT: String(port),
+      AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort),
       AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
       AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
       AHT_TEST_EXPECT_FORGE_INSTALLER_URL: forgeInstallerUrl,
@@ -1001,8 +1003,8 @@ try {
     mtimeMs: fs.statSync(warmPreparationCachePath).mtimeMs
   };
   const warmSpawnedAt = Date.now();
-  warmChild = spawnPlayerLauncher();
-  const warmTarget = await waitForTarget();
+  warmChild = spawnPlayerLauncher(warmDebugPort);
+  const warmTarget = await waitForTarget(warmDebugEndpoint);
   const warmTargetReadyMs = Date.now() - warmSpawnedAt;
   checkpoint('warm debugger target found');
   client = await connect(warmTarget.webSocketDebuggerUrl);
