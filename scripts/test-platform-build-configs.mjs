@@ -1113,14 +1113,34 @@ assert(releaseWorkflow.includes('id: linux') && releaseWorkflow.includes('runner
 assert(releaseWorkflow.includes('dist:regular:linux'), 'GitHub workflow must call the portable Linux build script.');
 assert(releaseWorkflow.includes('aht-launcher-linux'), 'GitHub workflow must upload Linux launcher artifacts.');
 assert(releaseWorkflow.includes('validate-linux-runtime:') && releaseWorkflow.includes('squashfs-root/AppRun'), 'GitHub validation must extract and exercise the portable AppImage runtime.');
+const macSourceValidation = releaseWorkflow.slice(
+  releaseWorkflow.indexOf('  validate-macos-runtime:'),
+  releaseWorkflow.indexOf('  diagnose-macos-intel-layout:')
+);
+const freshIntelPackageValidation = releaseWorkflow.slice(
+  releaseWorkflow.indexOf('  diagnose-macos-intel-layout:'),
+  releaseWorkflow.indexOf('  validate-macos-apple-silicon-package:')
+);
+const freshArmPackageValidation = releaseWorkflow.slice(
+  releaseWorkflow.indexOf('  validate-macos-apple-silicon-package:'),
+  releaseWorkflow.indexOf('  validate-linux-runtime:')
+);
 assert(
   releaseWorkflow.includes('intel_layout_diagnostic:')
   && releaseWorkflow.includes('diagnose-macos-intel-layout:')
-  && releaseWorkflow.includes("inputs.validation_only == true && inputs.intel_layout_diagnostic == true")
-  && releaseWorkflow.includes('runs-on: macos-15-intel')
-  && releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/x64')
-  && releaseWorkflow.includes('name: aht-macos-intel-player-diagnostics'),
-  'GitHub validation must provide a non-publishing native-Intel packaged-player diagnostic route with retained evidence.'
+  && freshIntelPackageValidation.includes("inputs.validation_only == true")
+  && freshIntelPackageValidation.includes('runs-on: macos-15-intel')
+  && freshIntelPackageValidation.includes('AHT_TEST_EVIDENCE_DIR: validation/x64')
+  && freshIntelPackageValidation.includes('name: aht-macos-intel-player-diagnostics')
+  && freshIntelPackageValidation.indexOf('Recheck startup transition on fresh Intel runner') < freshIntelPackageValidation.indexOf('Run packaged-player sequence with retained diagnostics')
+  && releaseWorkflow.includes('validate-macos-apple-silicon-package:')
+  && freshArmPackageValidation.includes('runs-on: macos-15')
+  && freshArmPackageValidation.includes('AHT_TEST_EVIDENCE_DIR: validation/arm64')
+  && freshArmPackageValidation.includes('name: aht-macos-apple-silicon-player-diagnostics')
+  && freshArmPackageValidation.indexOf('Recheck startup transition on fresh Apple Silicon runner') < freshArmPackageValidation.indexOf('Run Apple Silicon packaged-player sequence')
+  && !macSourceValidation.includes('verify:installed-player')
+  && !macSourceValidation.includes('test:startup-transition'),
+  'macOS source/package-structure checks and packaged-runtime checks must use separate native runners, with startup transition checked before the packaged suite on each fresh runtime host.'
 );
 assert(
   releaseWorkflow.includes('AHT_SMOKE_USE_TEMP_DEFAULTS: "1"')
@@ -1177,7 +1197,8 @@ assert(
   'Packaged player layout validation must isolate host launcher prerequisites, avoid unrelated account-recovery/keychain enrollment, foreground a directly launched macOS package before hydration, keep headless native renderers active, record exact renderer readiness, recover a stale debugger session, retain failure evidence, and fully stop its owned native process.'
 );
 assert(
-  releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/${{ matrix.arch }}')
+  releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/x64')
+  && releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/arm64')
   && releaseWorkflow.includes('AHT_TEST_EVIDENCE_DIR: validation/linux'),
   'Native packaged-player validation must retain CDP readiness and recovery evidence for macOS and Linux.'
 );
