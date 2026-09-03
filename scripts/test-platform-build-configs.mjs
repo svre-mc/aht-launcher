@@ -1133,6 +1133,22 @@ assert(
   'The first packaged smokes must wait for their owned Electron process to exit, while privacy startup isolates host launcher prerequisites and hard-bounds DevTools discovery and hydration.'
 );
 assert(
+  smokePlayerLayout.includes('HOME: fakeHome')
+  && smokePlayerLayout.includes('autoImportAccount: false')
+  && smokePlayerLayout.includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
+  && smokePlayerLayout.includes('AbortSignal.timeout(2_000)')
+  && smokePlayerLayout.includes("console.log('[player-layout] debugger ready; waiting for hydrated UI')"),
+  'Packaged player layout validation must isolate host launcher prerequisites, bound debugger discovery, and identify its exact startup phase.'
+);
+assert(
+  verifyInstalledPlayerScript.includes('function createIsolatedCheckEnvironment()')
+  && verifyInstalledPlayerScript.includes('...isolatedHost.env')
+  && verifyInstalledPlayerScript.includes("AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file'")
+  && verifyInstalledPlayerScript.includes('HOME: fakeHome')
+  && verifyInstalledPlayerScript.includes("fs.rmSync(isolatedHost.root, { recursive: true, force: true })"),
+  'Every packaged-player check must run under a disposable host profile with deterministic Java discovery and remove that profile after success.'
+);
+assert(
   releaseWorkflow.includes('node node_modules/electron/install.js')
   && releaseWorkflow.includes('sudo chown root:root "$ELECTRON_SANDBOX"')
   && releaseWorkflow.includes('sudo chmod 4755 "$ELECTRON_SANDBOX"')

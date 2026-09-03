@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 9760);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -16,7 +17,14 @@ const electronBin = smokeExe || (process.platform === 'win32'
   : path.resolve('node_modules', '.bin', 'electron'));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-layout-'));
 const userData = path.join(root, 'userData');
+const fakeHome = path.join(root, 'home');
+const fakeAppData = path.join(root, 'appdata');
+const fakeLocalAppData = path.join(root, 'localappdata');
 const minecraftRoot = path.join(root, '.minecraft');
+const java8Home = path.join(minecraftRoot, '.aht-launcher', 'java', 'temurin8');
+const java8Executable = path.join(java8Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft.app');
+const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const defaultsPath = tempDefaults;
@@ -216,7 +224,7 @@ async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2_000) });
       if (response.ok) {
         const targets = await response.json();
         const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
@@ -258,7 +266,7 @@ function connect(wsUrl) {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
-            }, 30000);
+            }, 10000);
           });
         },
         close() {
@@ -483,6 +491,32 @@ const launcherSocialLinks = Object.freeze({
   forum: 'https://ahardtime.net/forum/launcher-layout'
 });
 
+await Promise.all([
+  fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true }),
+  fsp.mkdir(path.join(fakeHome, 'Downloads'), { recursive: true }),
+  fsp.mkdir(fakeAppData, { recursive: true }),
+  fsp.mkdir(fakeLocalAppData, { recursive: true }),
+  fsp.mkdir(userData, { recursive: true }),
+  fsp.mkdir(minecraftRoot, { recursive: true }),
+  fsp.mkdir(path.dirname(java8Executable), { recursive: true }),
+  fsp.mkdir(macMinecraftApp, { recursive: true })
+]);
+await fsp.writeFile(java8Executable, 'AHT Java 8 executable fixture', 'utf8');
+await fsp.writeFile(path.join(java8Home, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
+const deviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: deviceCredential.schemaVersion,
+  protocol: deviceCredential.protocol,
+  algorithm: deviceCredential.algorithm,
+  deviceId: deviceCredential.deviceId,
+  publicKey: deviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(deviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: deviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 await writeJson(path.join(userData, 'identity.json'), {
   installId: 'layout-smoke-install',
   createdAt: new Date().toISOString(),
@@ -490,8 +524,6 @@ await writeJson(path.join(userData, 'identity.json'), {
   usernameRegisteredAt: new Date().toISOString(),
   usernameRegistrationMode: 'layout-smoke'
 });
-await fsp.mkdir(minecraftRoot, { recursive: true });
-
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
   latestUrl: `${workerEndpoint}/latest.json`,
@@ -506,7 +538,7 @@ await writeJson(defaultsPath, {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 }
+  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, javaPath: java8Executable, autoImportAccount: false, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 }
 });
 
 const server = http.createServer((request, response) => {
@@ -565,10 +597,21 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    HOME: fakeHome,
+    USERPROFILE: fakeHome,
+    APPDATA: fakeAppData,
+    LOCALAPPDATA: fakeLocalAppData,
     AHT_APP_DEFAULTS: tempDefaults,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_OPEN_EXTERNAL_ECHO: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_TEST_REMOTE_DEBUG_PORT: String(port),
+    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+    AHT_TEST_STARTUP_PREPARATION_SECRET: 'b'.repeat(64),
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
@@ -577,13 +620,17 @@ const child = spawn(electronBin, electronArgs, {
 
 let client;
 try {
+  console.log('[player-layout] waiting for packaged Electron debugger target');
   const target = await waitForTarget();
+  console.log(`[player-layout] debugger target ready; connecting (${JSON.stringify({ title: target.title || '', url: target.url || '' })})`);
   client = await connect(target.webSocketDebuggerUrl);
+  console.log('[player-layout] debugger connected; enabling Runtime and Page');
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
+  console.log('[player-layout] debugger ready; waiting for hydrated UI');
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
   await waitFor(client, `
     (() => {

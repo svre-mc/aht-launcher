@@ -89,6 +89,51 @@ function installedPlayerExe() {
   return String(process.env.AHT_INSTALLED_PLAYER_EXE || process.env.AHT_SMOKE_EXE || defaultInstalledPlayerExe()).trim();
 }
 
+function createIsolatedCheckEnvironment() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-installed-player-host-'));
+  const fakeHome = path.join(root, 'home');
+  const fakeAppData = process.platform === 'win32'
+    ? path.join(fakeHome, 'AppData', 'Roaming')
+    : path.join(root, 'appdata');
+  const fakeLocalAppData = process.platform === 'win32'
+    ? path.join(fakeHome, 'AppData', 'Local')
+    : path.join(root, 'localappdata');
+  const javaHome = path.join(root, 'java', 'temurin8');
+  const javaExecutable = path.join(javaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+  const macMinecraftApp = path.join(root, 'Minecraft.app');
+  for (const dir of [
+    path.join(fakeHome, 'Documents'),
+    path.join(fakeHome, 'Downloads'),
+    fakeAppData,
+    fakeLocalAppData,
+    path.dirname(javaExecutable),
+    macMinecraftApp
+  ]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(javaExecutable, 'AHT installed-player Java 8 fixture', 'utf8');
+  if (process.platform !== 'win32') fs.chmodSync(javaExecutable, 0o755);
+  fs.writeFileSync(path.join(javaHome, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
+  return {
+    root,
+    env: {
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+      APPDATA: fakeAppData,
+      LOCALAPPDATA: fakeLocalAppData,
+      XDG_CONFIG_HOME: path.join(root, 'xdg-config'),
+      XDG_CACHE_HOME: path.join(root, 'xdg-cache'),
+      AHT_JAVA_HOME: javaHome,
+      JAVA8_HOME: javaHome,
+      JAVA_HOME: javaHome,
+      AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+      AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+      AHT_TEST_STARTUP_PREPARATION_SECRET: 'c'.repeat(64),
+      ...(process.platform === 'darwin' ? { AHT_MINECRAFT_MAC_APP: macMinecraftApp } : {})
+    }
+  };
+}
+
 function processGroupExists(pid) {
   try {
     process.kill(-pid, 0);
@@ -126,6 +171,7 @@ async function runCheck(check, smokeExe) {
   const args = [...check, '--', String(port)];
   const label = `npm run ${args.join(' ')}`;
   const started = Date.now();
+  const isolatedHost = createIsolatedCheckEnvironment();
   return new Promise((resolve, reject) => {
     const invocation = packageManagerInvocation(args);
     let output = '';
@@ -135,6 +181,7 @@ async function runCheck(check, smokeExe) {
       detached: process.platform !== 'win32',
       env: {
         ...process.env,
+        ...isolatedHost.env,
         AHT_SMOKE_EXE: smokeExe,
         AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
         ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING || '0'
@@ -147,7 +194,7 @@ async function runCheck(check, smokeExe) {
       settled = true;
       await terminateOwnedProcessTree(child).catch(() => {});
       const error = new Error(`${label} exceeded the ${formatMs(checkTimeoutMs)} per-check limit`);
-      error.output = output;
+      error.output = `${output}\n[installed-player isolated host: ${isolatedHost.root}]`;
       error.label = label;
       error.elapsed = Date.now() - started;
       reject(error);
@@ -180,12 +227,18 @@ async function runCheck(check, smokeExe) {
         return;
       }
       if (code === 0) {
+        try {
+          fs.rmSync(isolatedHost.root, { recursive: true, force: true });
+        } catch {
+          // The hosted runner is ephemeral; cleanup must not turn a passed
+          // native launcher check into an unrelated filesystem failure.
+        }
         console.log(`[PASS] ${label} with installed player app (${formatMs(elapsed)})`);
         resolve({ label, elapsed, output });
         return;
       }
       const error = new Error(`${label} failed with ${signal || `exit code ${code}`}`);
-      error.output = output;
+      error.output = `${output}\n[installed-player isolated host: ${isolatedHost.root}]`;
       error.label = label;
       error.elapsed = elapsed;
       reject(error);
