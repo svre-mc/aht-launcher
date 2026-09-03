@@ -1098,9 +1098,11 @@ assert(
   && releaseWorkflow.includes('sudo chmod 4755 "$ELECTRON_SANDBOX"')
   && releaseWorkflow.includes('electron_sandbox=$ELECTRON_SANDBOX_IDENTITY')
   && releaseWorkflow.includes('test "$ELECTRON_SANDBOX_IDENTITY" = "root:root 4755"')
-  && releaseWorkflow.includes('"$APPIMAGE" --no-sandbox --version')
+  && releaseWorkflow.includes('timeout 30s "$APPIMAGE" --appimage-version')
+  && !releaseWorkflow.includes('APPIMAGE_EXTRACT_AND_RUN=1 timeout 30s')
+  && !releaseWorkflow.includes('"$APPIMAGE" --no-sandbox --version')
   && !desktopMain.includes('AHT_TEST_DISABLE_CHROMIUM_SANDBOX'),
-  'Ubuntu CI must configure Electron\'s SUID test sandbox while limiting --no-sandbox to extracted AppImage version probing.'
+  'Ubuntu CI must configure Electron\'s SUID test sandbox and probe AppImage runtime metadata without launching the GUI.'
 );
 assert(smokePlayerUpdateLogs.includes('Electron exited before exposing a debugger target') && smokePlayerUpdateLogs.includes("stdio: ['ignore', 'pipe', 'pipe']"), 'The first native Electron smoke must preserve early process diagnostics.');
 const platformProfileSource = readText(new URL('../src/platformProfile.js', import.meta.url));
