@@ -68,6 +68,28 @@ function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
+function startupPreparationPayload(file) {
+  const envelope = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return JSON.parse(Buffer.from(envelope.payload, 'base64').toString('utf8'));
+}
+
+function changedJsonPaths(before, after, prefix = '', changes = []) {
+  if (changes.length >= 40) return changes;
+  if (Object.is(before, after)) return changes;
+  const beforeObject = before && typeof before === 'object';
+  const afterObject = after && typeof after === 'object';
+  if (!beforeObject || !afterObject || Array.isArray(before) !== Array.isArray(after)) {
+    changes.push({ path: prefix || '<root>', before, after });
+    return changes;
+  }
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+  for (const key of keys) {
+    changedJsonPaths(before[key], after[key], prefix ? `${prefix}.${key}` : key, changes);
+    if (changes.length >= 40) break;
+  }
+  return changes;
+}
+
 function launchReportsFor(instancePath) {
   const directory = path.join(instancePath, 'logs', 'launcher');
   if (!fs.existsSync(directory)) return [];
@@ -972,19 +994,59 @@ try {
     )));
   }
   await fsp.rm(fakeLauncherMarker, { force: true });
+  const warmPreparationCachePath = path.join(userData, 'startup-preparation-cache.json');
+  const warmPreparationPayloadBefore = startupPreparationPayload(warmPreparationCachePath);
+  const warmPreparationCacheBefore = {
+    sha256: sha256(fs.readFileSync(warmPreparationCachePath)),
+    mtimeMs: fs.statSync(warmPreparationCachePath).mtimeMs
+  };
   const warmSpawnedAt = Date.now();
   warmChild = spawnPlayerLauncher();
   const warmTarget = await waitForTarget();
+  const warmTargetReadyMs = Date.now() - warmSpawnedAt;
   checkpoint('warm debugger target found');
   client = await connect(warmTarget.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "!document.body.classList.contains('is-booting')", '31-minute warm startup', 200);
   const warmStartupMs = Date.now() - warmSpawnedAt;
+  const warmPostTargetRevealMs = warmStartupMs - warmTargetReadyMs;
   checkpoint('warm startup ready');
   const warmStatus = await evaluate(client, `window.aht.getStatus('stable', { preferCache: true })`);
-  if (warmStartupMs >= 5_000 || !warmStatus.launchReady || warmStatus.launchPreparationState !== 'ready') {
-    throw new Error(`A 31-minute warm startup re-evaluated the modpack instead of reusing saved prerequisites: ${JSON.stringify({ warmStartupMs, warmStatus })}`);
+  const warmStartupTaskTimings = await evaluate(client, 'window.__ahtStartupTaskTimings');
+  const warmTaskElapsedMs = Math.max(0, ...Object.values(warmStartupTaskTimings?.settled || {})
+    .map((entry) => Number(entry?.elapsedMs) || 0));
+  const warmPreparationCacheAfter = {
+    sha256: sha256(fs.readFileSync(warmPreparationCachePath)),
+    mtimeMs: fs.statSync(warmPreparationCachePath).mtimeMs
+  };
+  const warmPreparationPayloadAfter = startupPreparationPayload(warmPreparationCachePath);
+  const warmPreparationCacheChanges = changedJsonPaths(
+    warmPreparationPayloadBefore,
+    warmPreparationPayloadAfter
+  );
+  const warmPreparationCacheReused = warmPreparationCacheAfter.sha256 === warmPreparationCacheBefore.sha256
+    && warmPreparationCacheAfter.mtimeMs === warmPreparationCacheBefore.mtimeMs;
+  const warmStartupProof = {
+    warmStartupMs,
+    warmTargetReadyMs,
+    warmPostTargetRevealMs,
+    warmTaskElapsedMs,
+    warmStartupTaskTimings,
+    warmPreparationCacheReused,
+    warmPreparationCacheChanges,
+    warmPreparationCacheBefore,
+    warmPreparationCacheAfter,
+    warmStatus
+  };
+  if (!warmPreparationCacheReused) {
+    throw new Error(`A 31-minute warm startup rewrote the saved prerequisite cache instead of reusing it: ${JSON.stringify(warmStartupProof)}`);
+  }
+  if (!warmStatus.launchReady || warmStatus.launchPreparationState !== 'ready') {
+    throw new Error(`A 31-minute warm startup did not restore ready-to-play state: ${JSON.stringify(warmStartupProof)}`);
+  }
+  if (warmTaskElapsedMs >= 5_000 || warmPostTargetRevealMs >= 5_000 || warmStartupMs >= 5_000) {
+    throw new Error(`A 31-minute warm startup exceeded its bounded launcher or host startup budget: ${JSON.stringify(warmStartupProof)}`);
   }
   const warmProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
     sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
@@ -1027,6 +1089,10 @@ try {
     secondPtbPlayAfterSettings: { handoffMs: secondPtbPlayHandoffMs, preparationReused: true },
     warmAfter31Minutes: {
       startupMs: warmStartupMs,
+      targetReadyMs: warmTargetReadyMs,
+      postTargetRevealMs: warmPostTargetRevealMs,
+      launcherTaskMs: warmTaskElapsedMs,
+      prerequisiteCacheReused: warmPreparationCacheReused,
       playHandoffMs: warmPlayHandoffMs,
       unrelatedConfigFilesIgnored: 1_500,
       launcherMetadataUnchangedByPlay: true

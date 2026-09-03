@@ -12332,6 +12332,10 @@ async function persistPreparedLaunchEntry(key, entry = {}, options = {}) {
     java8Runtime: entry.java8Runtime || null,
     minecraftAssets: entry.minecraftAssets || null
   };
+  const minecraftJavaPath = await minecraftJavaExecutable(
+    entry.java8Runtime?.path || cachedEntry.launcherPaths.javaPath
+  );
+  if (minecraftJavaPath) cachedEntry.launcherPaths.javaPath = minecraftJavaPath;
   await queueStartupSnapshotMutation((snapshot) => ({
     ...snapshot,
     packs: { ...(snapshot.packs || {}), [key]: cachedEntry }
