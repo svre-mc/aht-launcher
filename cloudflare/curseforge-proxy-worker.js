@@ -21,6 +21,9 @@ const RELEASE_PREFIXES = [
   'launcher/files/',
   'update-media/'
 ];
+const LEGACY_LAUNCHER_WORKER_NAME = 'aht-curseforge-proxy';
+const LEGACY_LAUNCHER_UPDATE_PATH = '/launcher/latest.json';
+const LEGACY_LAUNCHER_MANIFEST_COLLECTIONS = ['downloads', 'platforms', 'stagedPlatforms'];
 const LAUNCHER_SOCIAL_ACTIONS = new Set([
   'accept_friend',
   'decline_friend',
@@ -174,6 +177,77 @@ function legacyWorkersDevRedirect(request, env) {
   } catch {
     return null;
   }
+}
+
+function legacyLauncherUpdateVerificationUrl(request) {
+  if (request.method !== 'GET') return null;
+  try {
+    const source = new URL(request.url);
+    const hostParts = source.hostname.toLowerCase().split('.');
+    const queryEntries = [...source.searchParams.entries()];
+    if (hostParts[0] !== LEGACY_LAUNCHER_WORKER_NAME
+        || !source.hostname.toLowerCase().endsWith('.workers.dev')
+        || source.pathname !== LEGACY_LAUNCHER_UPDATE_PATH
+        || queryEntries.length !== 1
+        || queryEntries[0][0] !== 'aht_verify'
+        || !/^\d{10,17}$/.test(queryEntries[0][1])) {
+      return null;
+    }
+    return source;
+  } catch {
+    return null;
+  }
+}
+
+function legacyLauncherUpdateManifest(manifest, sourceOrigin, publicOrigin) {
+  const result = structuredClone(manifest);
+  const legacyOrigin = new URL(sourceOrigin);
+  const brandedOrigin = new URL(publicOrigin);
+  for (const collectionName of LEGACY_LAUNCHER_MANIFEST_COLLECTIONS) {
+    const collection = result?.[collectionName];
+    if (!collection || typeof collection !== 'object' || Array.isArray(collection)) continue;
+    for (const entry of Object.values(collection)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      try {
+        const artifact = new URL(String(entry.url || ''));
+        if (artifact.origin !== brandedOrigin.origin || !artifact.pathname.startsWith('/launcher/files/')) continue;
+        entry.url = new URL(`${artifact.pathname}${artifact.search}`, legacyOrigin).toString();
+      } catch {
+        // The signed release manifest validator owns malformed artifact handling.
+      }
+    }
+  }
+  return result;
+}
+
+async function legacyLauncherUpdateManifestResponse(request, env, origin) {
+  const source = legacyLauncherUpdateVerificationUrl(request);
+  if (!source) return null;
+  const configuredOrigin = cleanString(env.AHT_PUBLIC_ORIGIN || '', 300);
+  if (!configuredOrigin) return null;
+  let targetOrigin;
+  try {
+    targetOrigin = new URL(configuredOrigin);
+    if (targetOrigin.protocol !== 'https:'
+        || targetOrigin.username
+        || targetOrigin.password
+        || targetOrigin.pathname !== '/'
+        || targetOrigin.search
+        || targetOrigin.hash) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const manifest = legacyLauncherUpdateManifest(
+    await readLauncherManifest(env),
+    source.origin,
+    targetOrigin.origin
+  );
+  return Response.json(manifest, {
+    status: 200,
+    headers: { ...corsHeaders(origin), 'Cache-Control': 'private, no-store' }
+  });
 }
 
 function normalizeMinecraftUuid(value = '') {
@@ -3711,6 +3785,8 @@ export default {
 
     const url = new URL(request.url);
     try {
+      const legacyLauncherManifest = await legacyLauncherUpdateManifestResponse(request, env, origin);
+      if (legacyLauncherManifest) return legacyLauncherManifest;
       const brandedRedirect = legacyWorkersDevRedirect(request, env);
       if (brandedRedirect) return brandedRedirect;
       if (url.pathname === LAUNCHER_SERVER_STATE_PATH) {

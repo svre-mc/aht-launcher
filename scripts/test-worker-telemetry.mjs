@@ -149,6 +149,70 @@ objects.set('launcher/files/darwin-universal/AHT-universal.dmg', 'universal mac 
 objects.set('launcher/files/linux-x64/AHT-Linux.AppImage', 'linux appimage');
 objects.set('pdf1', '%PDF-1.7 A Hard Time Update Log 001');
 
+const legacyUpdateBridgeOrigin = 'https://aht-curseforge-proxy.private-account.workers.dev';
+const legacyUpdateBridgeManifest = {
+  ...universalLauncherManifest,
+  downloads: {
+    ...universalLauncherManifest.downloads,
+    'windows-x64': {
+      ...universalLauncherManifest.downloads['windows-x64'],
+      url: 'https://api.ahardtime.net/launcher/files/win32-x64/AHT-Windows.exe',
+      downloadUrl: 'https://api.ahardtime.net/launcher/download/windows-x64'
+    }
+  },
+  platforms: {
+    'darwin-arm64': {
+      fileName: 'AHT-darwin-arm64.zip',
+      path: 'launcher/files/darwin-arm64/AHT-darwin-arm64.zip',
+      url: 'https://api.ahardtime.net/launcher/files/darwin-arm64/AHT-darwin-arm64.zip'
+    }
+  },
+  stagedPlatforms: {
+    'portable-linux-x64': {
+      fileName: 'AHT-Linux.AppImage',
+      path: 'launcher/files/linux-x64/AHT-Linux.AppImage',
+      url: 'https://api.ahardtime.net/launcher/files/linux-x64/AHT-Linux.AppImage'
+    }
+  }
+};
+objects.set('launcher/latest.json', JSON.stringify(legacyUpdateBridgeManifest));
+const legacyUpdateBridge = await worker.fetch(new Request(
+  `${legacyUpdateBridgeOrigin}/launcher/latest.json?aht_verify=1788550000000`
+), env, {});
+const legacyUpdateBridgeBody = await legacyUpdateBridge.json();
+for (const collectionName of ['downloads', 'platforms', 'stagedPlatforms']) {
+  for (const entry of Object.values(legacyUpdateBridgeBody[collectionName] || {})) {
+    if (!entry.url) continue;
+    const artifactUrl = new URL(entry.url);
+    if (artifactUrl.origin !== legacyUpdateBridgeOrigin || !artifactUrl.pathname.startsWith('/launcher/files/')) {
+      throw new Error(`Legacy launcher bridge did not rewrite ${collectionName} artifact URL: ${entry.url}`);
+    }
+  }
+}
+if (legacyUpdateBridge.status !== 200
+    || legacyUpdateBridge.headers.get('Cache-Control') !== 'private, no-store'
+    || legacyUpdateBridge.headers.has('Location')
+    || legacyUpdateBridgeBody.downloads['windows-x64'].downloadUrl !== 'https://api.ahardtime.net/launcher/download/windows-x64') {
+  throw new Error(`Legacy launcher bridge did not return a private compatibility manifest: ${legacyUpdateBridge.status}`);
+}
+const legacyUpdateBrowserRedirect = await worker.fetch(new Request(
+  `${legacyUpdateBridgeOrigin}/launcher/latest.json`
+), env, {});
+if (legacyUpdateBrowserRedirect.status !== 308
+    || legacyUpdateBrowserRedirect.headers.get('Location') !== 'https://api.ahardtime.net/launcher/latest.json') {
+  throw new Error('Normal legacy manifest requests did not remain on the branded redirect path.');
+}
+const legacyUpdateLeakyQueryRedirect = await worker.fetch(new Request(
+  `${legacyUpdateBridgeOrigin}/launcher/latest.json?aht_verify=1788550000000&email=owner%40example.com`
+), env, {});
+const legacyUpdateLeakyLocation = String(legacyUpdateLeakyQueryRedirect.headers.get('Location') || '');
+if (legacyUpdateLeakyQueryRedirect.status !== 308
+    || legacyUpdateLeakyLocation !== 'https://api.ahardtime.net/launcher/latest.json'
+    || /owner|email|workers\.dev/i.test(legacyUpdateLeakyLocation)) {
+  throw new Error(`Legacy manifest query data escaped the branded redirect: ${legacyUpdateLeakyLocation}`);
+}
+objects.set('launcher/latest.json', JSON.stringify(universalLauncherManifest));
+
 const legacyPublicRedirect = await worker.fetch(new Request(
   'https://private-account.workers.dev/launcher/files/linux-x64/AHT-Linux.AppImage?aht_download=linux-x64&aht_player=owner%40example.com&aht_uuid=private-uuid&email=owner%40example.com&keep=public'
 ), env, {});
