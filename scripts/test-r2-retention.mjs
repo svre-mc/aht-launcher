@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { extractReferencedKeys, planR2Retention } from './r2-retention.mjs';
+import { extractReferencedKeys, fetchR2Manifests, planR2Retention } from './r2-retention.mjs';
 
 const MiB = 1024 * 1024;
 const baseUrl = 'https://releases.example.test';
@@ -79,6 +79,28 @@ assert.equal(plan.versions.launcher.rollback, '0.1.86');
 assert.equal(plan.versions.stable.rollback, '2.8.533');
 assert.equal(plan.versions.ptb.rollback, '2.8.61');
 
+const accountId = 'a'.repeat(32);
+const requestedManifestUrls = [];
+const fetched = await fetchR2Manifests({
+  accountId,
+  bucket: 'ahtlauncher',
+  token: 'test-token',
+  fetchImpl: async (url, options) => {
+    requestedManifestUrls.push(String(url));
+    assert.equal(options?.headers?.Authorization, 'Bearer test-token');
+    const prefix = `https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/ahtlauncher/objects/`;
+    assert(String(url).startsWith(prefix));
+    const key = String(url).slice(prefix.length);
+    return new Response(JSON.stringify(manifests()[key]), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+});
+assert.deepEqual(Object.keys(fetched.manifests), ['latest.json', 'ptb/latest.json', 'launcher/latest.json']);
+assert.equal(requestedManifestUrls.length, 3);
+assert(requestedManifestUrls.every((url) => url.startsWith('https://api.cloudflare.com/')), 'Retention must never depend on the public release Worker for manifest reads');
+
 assert.throws(() => planR2Retention({
   inventory: inventory().filter((item) => item.key !== 'packs/a-hard-time-dregora-2.8.534.zip'),
   manifests: manifests(),
@@ -98,4 +120,4 @@ assert.throws(() => planR2Retention({
   maxRetainedBytes: 1
 }), /above the 1-byte safety target/);
 
-console.log(JSON.stringify({ ok: true, tests: 17, deleted: plan.deleteObjects.length }, null, 2));
+console.log(JSON.stringify({ ok: true, tests: 20, deleted: plan.deleteObjects.length }, null, 2));

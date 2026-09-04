@@ -340,14 +340,18 @@ async function mapConcurrent(values, limit, worker) {
   }
 }
 
-async function fetchLiveManifests(baseUrlValue, fetchImpl = fetch) {
-  const baseUrl = cleanBaseUrl(baseUrlValue);
+export async function fetchR2Manifests({ accountId, bucket, token, fetchImpl = fetch }) {
   const manifests = {};
   const digests = {};
   for (const manifestPath of MANIFEST_PATHS) {
-    const url = new URL(manifestPath, `${baseUrl.toString()}/`);
-    const response = await fetchImpl(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) throw new Error(`Live manifest ${manifestPath} returned HTTP ${response.status}.`);
+    const url = `${apiBase(accountId, bucket)}/${encodedObjectKey(manifestPath)}`;
+    const response = await fetchImpl(url, {
+      headers: {
+        ...apiHeaders(token),
+        Accept: 'application/json'
+      }
+    });
+    if (!response.ok) throw new Error(`R2 manifest ${manifestPath} returned HTTP ${response.status}.`);
     const text = await response.text();
     let parsed;
     try {
@@ -398,7 +402,7 @@ export async function runRetention({
     throw new Error('The retained-byte safety target must be a positive safe integer.');
   }
   const [{ manifests, digests }, inventory] = await Promise.all([
-    fetchLiveManifests(baseUrl, fetchImpl),
+    fetchR2Manifests({ accountId, bucket, token, fetchImpl }),
     listR2Objects({ accountId, bucket, token, fetchImpl })
   ]);
   const plan = planR2Retention({ inventory, manifests, baseUrl, maxRetainedBytes });
@@ -413,7 +417,7 @@ export async function runRetention({
   if (!apply) return summary;
   if (plan.deleteObjects.length === 0) return { ...summary, readbackVerified: true };
 
-  const { digests: preDeleteDigests } = await fetchLiveManifests(baseUrl, fetchImpl);
+  const { digests: preDeleteDigests } = await fetchR2Manifests({ accountId, bucket, token, fetchImpl });
   for (const manifestPath of MANIFEST_PATHS) {
     if (preDeleteDigests[manifestPath] !== digests[manifestPath]) {
       throw new Error(`Live manifest ${manifestPath} changed before deletion; rerun retention with a fresh plan.`);
@@ -429,7 +433,7 @@ export async function runRetention({
   }));
 
   const [{ digests: readbackDigests }, readbackInventory] = await Promise.all([
-    fetchLiveManifests(baseUrl, fetchImpl),
+    fetchR2Manifests({ accountId, bucket, token, fetchImpl }),
     listR2Objects({ accountId, bucket, token, fetchImpl })
   ]);
   for (const manifestPath of MANIFEST_PATHS) {
