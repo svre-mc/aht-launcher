@@ -457,7 +457,6 @@ try {
   assert(immediateProof.sidebarLoaderVisible && immediateProof.sidebarLoaderLabel === 'Switching to PTB' && immediateProof.sidebarMoneyLogo === 'assets/aht-bill-transparent.png' && immediateProof.sidebarMoneyStars === 8 && immediateProof.sidebarMoneyAnimation.includes('startup-money-drift') && immediateProof.sidebarLoaderZIndex === '9999' && immediateProof.sidebarMoneyOpacity >= 0.95, 'The bottom-right money animation was not shown above the launcher as soon as the pack switch began', immediateProof);
   assert(Math.abs(immediateProof.sidebarLoaderRect[0] - immediateProof.sidebarLoaderRect[2]) < 1 && Math.abs(immediateProof.sidebarLoaderRect[1] - immediateProof.sidebarLoaderRect[3]) < 1, 'The pack-switch money animation was not anchored to the bottom-right corner', immediateProof.sidebarLoaderRect);
   assert(immediateProof.viewOpacity > 0.98 && immediateProof.viewTransform === 'none', 'Outgoing view moved or faded before the measured lead-in', immediateProof);
-  screenshots.push(await captureScreenshot(client, 'sidebar-switch-loader-visible'));
 
   const finalProof = await waitFor(client, `(() => {
     const workspace = document.querySelector('.workspace');
