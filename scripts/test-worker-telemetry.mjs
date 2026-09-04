@@ -129,6 +129,26 @@ objects.set('launcher/latest.json', JSON.stringify(universalLauncherManifest));
 objects.set('launcher/files/win32-x64/AHT-Windows.exe', 'windows installer');
 objects.set('launcher/files/darwin-universal/AHT-universal.dmg', 'universal mac installer');
 objects.set('launcher/files/linux-x64/AHT-Linux.AppImage', 'linux appimage');
+objects.set('pdf1', '%PDF-1.7 A Hard Time Update Log 001');
+
+const websitePdf = await worker.fetch(new Request('https://worker.test/pdf1'), env, {});
+if (websitePdf.status !== 200
+    || websitePdf.headers.get('Content-Type') !== 'application/pdf'
+    || websitePdf.headers.get('Content-Disposition') !== 'inline; filename="A Hard Time Update Log 001.pdf"'
+    || await websitePdf.text() !== '%PDF-1.7 A Hard Time Update Log 001') {
+  throw new Error('The numbered website PDF route did not serve the exact R2 object with professional PDF metadata.');
+}
+const websitePdfHead = await worker.fetch(new Request('https://worker.test/pdf1', { method: 'HEAD' }), env, {});
+if (websitePdfHead.status !== 200
+    || websitePdfHead.headers.get('Content-Type') !== 'application/pdf'
+    || Number(websitePdfHead.headers.get('Content-Length')) !== new TextEncoder().encode('%PDF-1.7 A Hard Time Update Log 001').length
+    || await websitePdfHead.text() !== '') {
+  throw new Error('The numbered website PDF HEAD response did not preserve PDF metadata without a response body.');
+}
+for (const rejectedPdfPath of ['/pdf0', '/pdf01', '/pdf-test']) {
+  const response = await worker.fetch(new Request(`https://worker.test${rejectedPdfPath}`), env, {});
+  if (response.status !== 404) throw new Error(`Malformed website PDF path was accepted: ${rejectedPdfPath}`);
+}
 
 async function jsonRequest(path, options = {}) {
   const response = await worker.fetch(new Request(`https://worker.test${path}`, options), env, {
@@ -621,8 +641,8 @@ const curseForgeOnlyProofResponse = await worker.fetch(new Request('https://work
 }, {});
 const curseForgeOnlyProof = await curseForgeOnlyProofResponse.json();
 if (curseForgeOnlyProofResponse.status !== 500
-    || curseForgeOnlyProof.error !== 'Internal service error.'
-    || !curseForgeOnlyProof.requestId) {
+    || curseForgeOnlyProof.error !== 'AHT Proxy could not complete the request.'
+    || curseForgeOnlyProof.requestId) {
   throw new Error(`CurseForge API key should not sign launcher proofs: ${curseForgeOnlyProofResponse.status} ${JSON.stringify(curseForgeOnlyProof)}`);
 }
 
@@ -1047,8 +1067,8 @@ const wrongConfiguredKidResponse = await worker.fetch(new Request('https://worke
 }), { ...env, LAUNCHER_ATTESTATION_KEY_ID: 'wrong-key-id' }, {});
 const wrongConfiguredKid = await wrongConfiguredKidResponse.json();
 if (wrongConfiguredKidResponse.status !== 500
-    || wrongConfiguredKid.error !== 'Internal service error.'
-    || !wrongConfiguredKid.requestId) {
+    || wrongConfiguredKid.error !== 'AHT Proxy could not complete the request.'
+    || wrongConfiguredKid.requestId) {
   throw new Error(`Worker issued a proof with a key ID rejected by anti-cheat: ${wrongConfiguredKidResponse.status} ${JSON.stringify(wrongConfiguredKid)}`);
 }
 const emptyLogs = await jsonRequest('/api/update-logs?limit=3');

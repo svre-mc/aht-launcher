@@ -72,6 +72,7 @@ const electronSmokeIsolationFailures = fs.readdirSync(new URL('./', import.meta.
       !source.includes('AHT_TEST_USER_DATA: userData')
       && !source.includes('AHT_TEST_USER_DATA: developerUserData')
       && !source.includes('AHT_TEST_USER_DATA: targetUserData')
+      && !source.includes('AHT_TEST_USER_DATA: profileUserData')
     )
   ))
   .map(({ name }) => name);
@@ -405,8 +406,8 @@ assert(desktopMain.includes('function configureTestRemoteDebugPort()') && deskto
 assert(desktopMain.includes('function writeTestStartupProbe') && desktopMain.includes('AHT_TEST_STARTUP_PROBE_PATH'), 'Packaged startup diagnostics must be gated behind AHT_TEST_HOOKS and an explicit probe path.');
 assert(
   smokePlayerUpdatePlay.includes('AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort)')
-  && smokePlayerUpdatePlay.includes('AHT_TEST_STARTUP_PROBE_PATH: startupProbePath')
-  && smokePlayerUpdatePlay.includes('? [`--user-data-dir=${userData}`]')
+  && smokePlayerUpdatePlay.includes('AHT_TEST_STARTUP_PROBE_PATH: options.startupProbePath || startupProbePath')
+  && smokePlayerUpdatePlay.includes('? [`--user-data-dir=${profileUserData}`]')
   && smokePlayerUpdatePlay.includes('const warmDebugPort = port + 2')
   && smokePlayerUpdatePlay.includes('warmChild = spawnPlayerLauncher(warmDebugPort)')
   && smokePlayerUpdatePlay.includes('waitForTarget(warmDebugEndpoint)'),
@@ -736,6 +737,8 @@ assert(desktopMain.includes('allowLegacyCurseForge') && desktopMain.includes('as
 assert(desktopMain.includes("add('error', 'legacy CurseForge release blocked'"), 'Release validation must block legacy CurseForge artifacts before R2 upload.');
 assert(checkProductionReadiness.includes('live pack release is exact AHT client ZIP') && checkProductionReadiness.includes("from '../src/clientPackFormat.js'") && !checkProductionReadiness.includes("const CLIENT_PACK_FORMAT = 'aht-full-client-zip';"), 'Production readiness must import the shared client pack format instead of duplicating the full-client ZIP string.');
 assert(checkProductionReadiness.includes('function httpRangeStatus') && checkProductionReadiness.includes('Range: "bytes=0-0"') && checkProductionReadiness.includes('live pack ZIP supports parallel range downloads'), 'Production readiness must verify live Worker/R2 pack ZIP Range support for fast multipart downloads.');
+assert((installerSource.match(/AHT_PACK_DOWNLOAD_PART_MB\) \|\| 64/g) || []).length >= 2 && utilsSource.includes('positiveInteger(options.multipartPartSizeBytes, 64 * 1024 * 1024)'), 'Pack downloads must default to 64 MiB ranges so multi-gigabyte client ZIPs stay below the legacy AHT Proxy request bucket.');
+assert(workerSource.includes('const requestScope = `${cleanString(key, 512)}\\n${rangeKey}`') && workerSource.includes('sha256Hex(requestScope)'), 'AHT Proxy release limiting must scope immutable multipart ranges independently instead of rate-limiting one valid client download against itself.');
 assert(desktopMain.includes("from '../src/clientPackFormat.js'") && !desktopMain.includes("const CLIENT_PACK_FORMAT = 'aht-full-client-zip';") && !desktopMain.includes("const CLIENT_PACK_METADATA_ENTRY = 'aht-client-pack.json';"), 'Main process must import shared client pack constants instead of duplicating them.');
 assert(checkProductionReadiness.includes('function nextRequiredStep') && checkProductionReadiness.includes('publish an exact AHT client ZIP release') && checkProductionReadiness.includes('report.nextRequiredStep'), 'Production readiness must print blocker-specific next steps instead of generic cloud setup guidance.');
 assert(!checkProductionReadiness.includes("console.log('Next required step: run Developer > Setup Cloud after Cloudflare login, then re-run this check.');"), 'Production readiness must not always print the cloud setup next step for unrelated blockers.');

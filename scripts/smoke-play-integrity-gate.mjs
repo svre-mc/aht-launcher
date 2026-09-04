@@ -610,14 +610,23 @@ try {
   const copiedFailure = await evaluate(client, `
     window.aht.copyErrorReport({ title: 'Launch failed', context: 'play:start', packKey: 'stable' })
   `);
-  if (!copiedFailure?.copied || copiedFailure.chars < 1000 || copiedFailure.fileName !== 'ahtlatest.log'
-      || (process.platform === 'win32' && copiedFailure.copyKind !== 'file')) {
+  if (!copiedFailure?.copied || copiedFailure.chars < 1000 || copiedFailure.fileName !== 'AHT Error Report.txt'
+      || copiedFailure.copyKind !== 'file' || !fs.existsSync(copiedFailure.filePath)) {
     throw new Error(`Failed Play report was not copied from the saved attempt: ${JSON.stringify(copiedFailure)}`);
+  }
+  const supportFailureText = fs.readFileSync(copiedFailure.filePath, 'utf8');
+  if (
+    !supportFailureText.includes('A HARD TIME LAUNCH REPORT')
+    || supportFailureText.includes(instanceDir)
+    || supportFailureText.includes(userData)
+    || /https?:\/\/|workers\.dev|AHT_RELEASES|CURSEFORGE_API_KEY|LAUNCHER_PROOF_SECRET/i.test(supportFailureText)
+  ) {
+    throw new Error(`The copied support file is missing useful report data or exposes private infrastructure: ${supportFailureText.slice(0, 1400)}`);
   }
   if (process.platform === 'win32') {
     const clipboardFiles = await windowsClipboardFiles();
     if (clipboardFiles.length !== 1 || path.resolve(clipboardFiles[0]) !== path.resolve(copiedFailure.filePath)) {
-      throw new Error(`Copy latest launch report did not place ahtlatest.log on the Windows file clipboard: ${JSON.stringify({ clipboardFiles, copiedFailure })}`);
+      throw new Error(`Copy error log did not place AHT Error Report.txt on the Windows file clipboard: ${JSON.stringify({ clipboardFiles, copiedFailure })}`);
     }
   }
 
@@ -655,7 +664,9 @@ try {
   })()`);
   await waitFor(client, `
     [...document.querySelectorAll('#toastStack .toast.success')]
-      .some((toast) => toast.textContent.trim() === 'Copied to Clipboard' && toast.querySelectorAll('span, button').length === 0)
+      .some((toast) => toast.querySelector('strong')?.textContent.trim() === 'Error log copied'
+        && toast.querySelector('span')?.textContent.trim() === 'Paste to attach the .txt file.'
+        && toast.querySelectorAll('button').length === 0)
   `, 'copy-success toast');
   const uiFailureReports = await waitForReportFiles(launchLogsDir, /^AHT-Launch-.*-FAILED-.*\.txt$/i, 2);
   if (uiFailureReports.length !== 2) {
@@ -937,7 +948,9 @@ try {
     })()`);
     await waitFor(client, `
       [...document.querySelectorAll('#toastStack .toast.success')]
-        .some((toast) => toast.textContent.trim() === 'Copied to Clipboard' && toast.querySelectorAll('span, button').length === 0)
+        .some((toast) => toast.querySelector('strong')?.textContent.trim() === 'Error log copied'
+          && toast.querySelector('span')?.textContent.trim() === 'Paste to attach the .txt file.'
+          && toast.querySelectorAll('button').length === 0)
     `, 'stale-signal filtered report copy');
     const benignRefreshText = fs.readFileSync(path.join(launchLogsDir, latestHandoffReport), 'utf8');
     if (benignRefreshText.includes(stalePreLaunchSignal) || benignRefreshText.includes(staleInstanceSignal) || !benignRefreshText.includes('completed its handoff to a verified Minecraft Launcher window')) {
@@ -954,7 +967,9 @@ try {
     })()`);
     await waitFor(client, `
       [...document.querySelectorAll('#toastStack .toast.success')]
-        .some((toast) => toast.textContent.trim() === 'Copied to Clipboard' && toast.querySelectorAll('span, button').length === 0)
+        .some((toast) => toast.querySelector('strong')?.textContent.trim() === 'Error log copied'
+          && toast.querySelector('span')?.textContent.trim() === 'Paste to attach the .txt file.'
+          && toast.querySelectorAll('button').length === 0)
     `, 'post-handoff report copy');
     const handoffReportsAfterCopy = fs.readdirSync(launchLogsDir)
       .filter((name) => /^AHT-Launch-.*-HANDOFF.*\.txt$/i.test(name))

@@ -6,6 +6,7 @@ const RELEASE_PATHS = new Set([
   'ptb/release-report.json',
   'launcher/latest.json'
 ]);
+const SITE_DOCUMENT_PATH_PATTERN = /^pdf[1-9]\d*$/;
 const RELEASE_PREFIXES = [
   'packs/',
   'patches/',
@@ -316,6 +317,7 @@ function launcherDownloadKey(receivedAt = new Date().toISOString(), id = crypto.
 function isReleaseCandidatePath(pathname) {
   const trimmed = pathname.replace(/^\/+/, '');
   return RELEASE_PATHS.has(trimmed)
+    || SITE_DOCUMENT_PATH_PATTERN.test(trimmed)
     || RELEASE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
     || trimmed.startsWith('releases/');
 }
@@ -332,7 +334,7 @@ function safeReleaseKey(pathname) {
   if (!key || key.includes('\0') || key.split('/').includes('..')) {
     return '';
   }
-  if (RELEASE_PATHS.has(key) || RELEASE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+  if (RELEASE_PATHS.has(key) || SITE_DOCUMENT_PATH_PATTERN.test(key) || RELEASE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
     return key;
   }
   return '';
@@ -340,6 +342,7 @@ function safeReleaseKey(pathname) {
 
 function contentTypeForKey(key) {
   const lower = key.toLowerCase();
+  if (SITE_DOCUMENT_PATH_PATTERN.test(lower)) return 'application/pdf';
   if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
   if (lower.endsWith('.zip')) return 'application/zip';
   if (lower.endsWith('.jar')) return 'application/java-archive';
@@ -397,7 +400,15 @@ function parseHttpRangeHeader(header = '', size = 0) {
 function releaseHeaders(key, origin, object, range = null) {
   const headers = corsHeaders(origin);
   headers['Cache-Control'] = cacheControlForKey(key);
-  headers['Content-Type'] = object.httpMetadata?.contentType || contentTypeForKey(key);
+  headers['Content-Type'] = SITE_DOCUMENT_PATH_PATTERN.test(key)
+    ? 'application/pdf'
+    : (object.httpMetadata?.contentType || contentTypeForKey(key));
+  if (SITE_DOCUMENT_PATH_PATTERN.test(key)) {
+    const documentNumber = key.slice(3).padStart(3, '0');
+    headers['Content-Disposition'] = `inline; filename="A Hard Time Update Log ${documentNumber}.pdf"`;
+  } else if (object.httpMetadata?.contentDisposition) {
+    headers['Content-Disposition'] = object.httpMetadata.contentDisposition;
+  }
   headers['Accept-Ranges'] = 'bytes';
   if (object.httpEtag) headers.ETag = object.httpEtag;
   if (range) {
@@ -419,17 +430,24 @@ function rangeNotSatisfiable(origin, objectSize) {
 }
 
 function releaseNotFound(key, origin) {
-  return json({ error: 'Release object not found', key }, 404, origin);
+  return json({ error: 'Download not found.' }, 404, origin);
 }
 
-async function enforceReleaseRateLimit(request, env, origin) {
+async function enforceReleaseRateLimit(request, env, origin, key = '') {
   if (!env.AHT_PLAYER_API_RATE_LIMITER?.limit) return null;
   const connection = requestIpv4(request);
   const ipKey = connection.ip || 'unavailable';
+  const rangeKey = cleanString(request.headers.get('Range') || 'whole-object', 160);
   let allowed = false;
   try {
+    // A full client ZIP can contain hundreds of valid parallel byte ranges. A
+    // single IP-wide counter made the launcher's own range downloader exhaust
+    // the bucket and receive 429 responses mid-install. Scope the counter to
+    // the immutable object and exact range so repeated abusive requests are
+    // still bounded without treating one multipart download as an API burst.
+    const requestScope = `${cleanString(key, 512)}\n${rangeKey}`;
     const result = await env.AHT_PLAYER_API_RATE_LIMITER.limit({
-      key: `release:${(await sha256Hex(ipKey)).slice(0, 40)}`
+      key: `release:${(await sha256Hex(ipKey)).slice(0, 20)}:${(await sha256Hex(requestScope)).slice(0, 20)}`
     });
     allowed = result?.success === true;
   } catch {
@@ -532,14 +550,14 @@ async function serveReleaseObject(request, env, origin, context = null) {
   }
   const bucket = releaseBucket(env);
   if (!bucket) {
-    return json({ error: 'AHT_RELEASES R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const key = safeReleaseKey(pathname);
   if (!key) {
-    return json({ error: 'Invalid release path' }, 400, origin);
+    return json({ error: 'Invalid download request.' }, 400, origin);
   }
 
-  const rateLimited = await enforceReleaseRateLimit(request, env, origin);
+  const rateLimited = await enforceReleaseRateLimit(request, env, origin, key);
   if (rateLimited) return rateLimited;
 
   const rangeHeader = request.headers.get('Range') || '';
@@ -1283,7 +1301,7 @@ async function verifyToken(request, env) {
 
 async function proxyCurseForge(pathname, env, origin) {
   if (!env.CURSEFORGE_API_KEY) {
-    return json({ error: 'CURSEFORGE_API_KEY is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const target = `${CURSEFORGE_BASE}${pathname}`;
   const response = await fetch(target, {
@@ -1662,7 +1680,7 @@ async function indexAccountIpv4(env, record) {
 
 async function registerUser(request, env, origin) {
   if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const rateLimited = await enforcePlayerApiRateLimit(request, env, 'register', origin);
   if (rateLimited) return rateLimited;
@@ -2430,7 +2448,7 @@ async function readSocialState(env, username) {
 }
 
 async function launcherSocialState(request, env, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const verified = await verifyLauncherProofRequest(request, env);
   if (!verified.ok) return privateJson({ error: verified.error }, verified.status, origin);
   const username = verified.payload.minecraftUsername;
@@ -2451,7 +2469,7 @@ async function launcherSocialState(request, env, origin) {
 }
 
 async function queueLauncherSocialAction(request, env, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const verified = await verifyLauncherProofRequest(request, env);
   if (!verified.ok) return privateJson({ error: verified.error }, verified.status, origin);
   const body = await readBody(request, 8_192);
@@ -2506,7 +2524,7 @@ async function pendingSocialActions(env, limit = 50) {
 }
 
 async function synchronizeServerSocial(request, env, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const bodyText = await readRawBody(request);
   if (!(await verifyServerSocialRequest(request, env, bodyText))) {
     return privateJson({ error: 'Server social authentication failed.' }, 401, origin);
@@ -2553,7 +2571,7 @@ async function synchronizeServerSocial(request, env, origin) {
 
 async function listUpdateLogs(env, request, origin, requireAuth = false) {
   if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   if (requireAuth && !(await verifyToken(request, env))) {
     return json({ error: 'Unauthorized' }, 401, origin);
@@ -2699,7 +2717,7 @@ async function likeUpdateLog(request, env, origin, routeLogId) {
 
 async function publishUpdateLog(request, env, origin) {
   if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   if (!(await verifyToken(request, env))) {
     return json({ error: 'Unauthorized' }, 401, origin);
@@ -2830,7 +2848,7 @@ async function recordLauncherUpdate(env, body, account, clientIp, receivedAt) {
 
 async function writeEvent(request, env, origin) {
   if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const rateLimited = await enforcePlayerApiRateLimit(request, env, 'events', origin);
   if (rateLimited) return rateLimited;
@@ -3681,6 +3699,7 @@ export default {
           '/api/social/actions',
           '/server/social/sync',
           '/api/update-logs',
+          '/pdf{number}',
           '/admin/login',
           '/admin/summary',
           '/admin/events',
@@ -3706,7 +3725,7 @@ export default {
         pathname: url.pathname,
         error: cleanString(error?.message || String(error), 1000)
       }));
-      return privateJson({ error: 'Internal service error.', requestId }, 500, origin);
+      return privateJson({ error: 'AHT Proxy could not complete the request.' }, 500, origin);
     }
   }
 };

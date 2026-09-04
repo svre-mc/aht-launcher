@@ -376,7 +376,7 @@ async function downloadRangePart({ source, fileHandle, start, end, total, option
 
 async function downloadMultipartToFile(source, tmp, options, attempt, timeoutMs) {
   const threshold = positiveInteger(options.multipartThresholdBytes, 16 * 1024 * 1024);
-  const partSize = positiveInteger(options.multipartPartSizeBytes, 8 * 1024 * 1024);
+  const partSize = positiveInteger(options.multipartPartSizeBytes, 64 * 1024 * 1024);
   const concurrency = Math.min(12, positiveInteger(options.multipartConcurrency, 6));
   const probe = await probeRangeDownload(source, options, timeoutMs);
   if (!probe.supported || probe.total < threshold) {

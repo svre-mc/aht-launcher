@@ -625,8 +625,9 @@
     <section class="downloads-dialog" role="dialog" aria-modal="true" aria-labelledby="downloadsTitle">
       <div class="downloads-head">
         <h2 id="downloadsTitle">DOWNLOADS</h2>
-        <button id="downloadsCloseButton" class="ghost-button compact" type="button" aria-label="Close downloads">
+        <button id="downloadsCloseButton" class="ghost-button compact downloads-close-button" type="button" aria-label="Close downloads">
           <span class="button-icon icon-close" aria-hidden="true"></span>
+          <span>Close</span>
         </button>
       </div>
 
@@ -647,8 +648,18 @@
         </article>
       </div>
 
+      <div id="downloadsErrorPanel" class="downloads-error-panel" role="alert" hidden>
+        <strong>Download Failed</strong>
+        <button id="downloadsErrorReportButton" class="downloads-error-report" type="button">Click here to copy error log</button>
+      </div>
       <pre id="downloadsLog" class="downloads-log" hidden></pre>
-      <div class="downloads-footer">Maximum download speed (unlimited)</div>
+      <div class="downloads-footer">
+        <button id="downloadsBackButton" class="downloads-back-button" type="button" aria-label="Exit downloads">
+          <span class="button-icon icon-close" aria-hidden="true"></span>
+          <span>Back to Launcher</span>
+        </button>
+        <span>Maximum download speed (unlimited)</span>
+      </div>
     </section>
   </div>
   <div id="repairPromptOverlay" class="overlay repair-prompt-overlay" hidden>

@@ -603,11 +603,14 @@ const els = {
   sidebarProgressBar: $("#sidebarProgressBar"),
   downloadsOverlay: $("#downloadsOverlay"),
   downloadsCloseButton: $("#downloadsCloseButton"),
+  downloadsBackButton: $("#downloadsBackButton"),
   downloadsState: $("#downloadsState"),
   downloadsProgressText: $("#downloadsProgressText"),
   downloadsRowProgress: $("#downloadsRowProgress"),
   downloadsProgressBar: $("#downloadsProgressBar"),
   downloadsLog: $("#downloadsLog"),
+  downloadsErrorPanel: $("#downloadsErrorPanel"),
+  downloadsErrorReportButton: $("#downloadsErrorReportButton"),
   downloadsUpdateIconButton: $("#downloadsUpdateIconButton"),
   launcherUpdateOverlay: $("#launcherUpdateOverlay"),
   launcherUpdateTitle: $("#launcherUpdateTitle"),
@@ -1004,19 +1007,35 @@ function applyDeveloperGate(status) {
 }
 
 function cleanErrorMessage(error) {
-  return String(error?.message || error || "Unknown error")
+  const value = String(error?.message || error || "Unknown error")
     .replace(/^Error invoking remote method '[^']+': (?:Error|RangeError|SyntaxError): /, "")
     .replace(/^Error invoking remote method '[^']+': /, "")
     .replace(/^Error: /, "");
+  if (bootDeveloperMode) return value;
+  if (/Minecraft (?:Launcher is required|not installed)/i.test(value)) return "Minecraft Launcher is required to play.";
+  if (/No usable 64-bit Java 8|Java 8 (?:path|runtime)|initialized Java 8/i.test(value)) return "A 64-bit Java 8 runtime is required to play.";
+  if (/Review and accept the current Terms|Terms and Privacy/i.test(value)) return "Review and accept the Terms and Privacy notice to continue.";
+  if (/Update package is not ready|verified AHT update package is not available/i.test(value)) return "The verified AHT update package is not available yet.";
+  if (/Repair required|needs Repair|managed file issue|files changed after initialization|corrupt/i.test(value)) return "Repair required before playing.";
+  if (/is not installed|Install the pack before playing/i.test(value)) return "Install the modpack before playing.";
+  if (/launcher (?:session|preparation|setup).*?(?:no longer|not ready|changed)/i.test(value)) return "Launcher setup could not be refreshed. Click Play again.";
+  if (/(?:download|429|Too Many Requests)/i.test(value)) return "Download failed.";
+  if (/(?:https?:\/\/|aht-curseforge-proxy|workers\.dev|\b(?:R2|D1|KV)\b|binding|ECONN|ENOTFOUND|fetch failed)/i.test(value)) {
+    return "AHT Proxy is temporarily unavailable.";
+  }
+  if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users|opt|var|tmp)\/)/.test(value)) {
+    return "The launcher could not complete this action.";
+  }
+  return "The launcher could not complete this action.";
 }
 
 async function copyErrorReportFromToast(payload = {}) {
   if (!window.aht?.copyErrorReport) return;
   try {
-    await window.aht.copyErrorReport(payload);
-    showToast("Copied to Clipboard", "", "success", { durationMs: 1800, disableDiagnostics: true });
+    const result = await window.aht.copyErrorReport(payload);
+    showToast("Error log copied", result?.copyKind === "file" ? "Paste to attach the .txt file." : "", "success", { durationMs: 1800, disableDiagnostics: true });
   } catch {
-    showToast("Copy failed", "Open the AHT instance logs\\launcher folder and send ahtlatest.log.", "warn", { durationMs: 1800, disableDiagnostics: true });
+    showToast("Copy failed", "Try again, or contact A Hard Time support.", "warn", { durationMs: 1800, disableDiagnostics: true });
   }
 }
 
@@ -2222,12 +2241,17 @@ function playerSafeFeedProblem(status = currentStatus) {
 
 function playerSafeBlockedReason(status = currentStatus) {
   if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return playerSafeFeedProblem(status);
-  return status?.launchBlockedReason || "";
+  return playerSafeErrorMessage(status?.launchBlockedReason || "", status);
 }
 
 function playerSafeErrorMessage(message = "", status = currentStatus) {
   const value = cleanErrorMessage(message);
   if (status?.developerMode) return value;
+  if (/Minecraft (?:Launcher is required|not installed)/i.test(value)) return "Minecraft Launcher is required to play.";
+  if (/Java 8/i.test(value)) return "A 64-bit Java 8 runtime is required to play.";
+  if (/launcher (?:session|preparation|setup).*?(?:no longer|not ready|changed)/i.test(value)) {
+    return "Launcher setup could not be refreshed. Click Play again.";
+  }
   if (/Release feed cannot be checked|latest\.json|GET https?:\/\//i.test(value)) {
     return playerSafeFeedProblem({ ...status, latestError: status?.latestError || value });
   }
@@ -2757,7 +2781,7 @@ function showToast(title, detail = "", type = "info", options = {}) {
     const action = document.createElement("button");
     action.type = "button";
     action.className = "toast-copy-action";
-    action.textContent = options.copyLabel || "Click here to copy";
+    action.textContent = options.copyLabel || "Click here to copy error log";
     body.appendChild(action);
     const copy = (event) => {
       event.preventDefault();
@@ -2961,7 +2985,7 @@ function isUnavailable(button) {
 
 function downloadStateLabel(status, state) {
   if (state?.running) return state.progress?.phase || "Installing";
-  if (state?.error) return "Needs attention";
+  if (state?.error) return "Download Failed";
   if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state)) return "Complete";
   if (!status?.config?.latestUrl) return "Setup required";
   if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return isFirstPublishPending(status) ? "Not installed" : (status.developerMode ? "Feed unavailable" : "Service unavailable");
@@ -2972,6 +2996,12 @@ function downloadStateLabel(status, state) {
 }
 
 function downloadLogText(state) {
+  if (!currentStatus?.developerMode) {
+    if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state) && state.lastResult?.installed?.version) {
+      return `Installed ${state.lastResult.installed.version}`;
+    }
+    return "";
+  }
   const lines = [...(state?.lines || [])];
   if (state?.error) lines.push(`ERROR: ${state.error}`);
   if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state) && state.lastResult?.installed?.version) {
@@ -2997,7 +3027,8 @@ function renderDownloads(state = lastUpdateState) {
   setMiniProgress(els.downloadsProgressBar, percent);
   const logText = downloadLogText(state);
   setTextContentBounded(els.downloadsLog, logText, LOG_TEXT_LIMIT);
-  els.downloadsLog.hidden = logText === "No downloads yet.";
+  els.downloadsLog.hidden = !logText || logText === "No downloads yet.";
+  if (els.downloadsErrorPanel) els.downloadsErrorPanel.hidden = !state?.error;
   setUnavailable(els.downloadsUpdateIconButton, !status?.latest || !status?.updateRequired || Boolean(state?.running));
 }
 
@@ -3007,9 +3038,17 @@ function openDownloads() {
   els.downloadsCloseButton.focus();
 }
 
-function closeDownloads() {
+function closeDownloads(options = {}) {
   els.downloadsOverlay.hidden = true;
-  els.downloadsButton.focus();
+  if (options.restoreFocus !== false) els.downloadsButton.focus();
+}
+
+function showDownloadFailureToast(packKey = activeSidebarPack) {
+  showToast("Download Failed", "", "error", {
+    context: "update:start",
+    packKey,
+    copyLabel: "Click here to copy error log"
+  });
 }
 
 function launcherUpdatePercent(state) {
@@ -4359,6 +4398,9 @@ function syncNavigationSelection(name = activeTabName, packKey = activeSidebarPa
 }
 
 function activateTab(name, options = {}) {
+  if (els.downloadsOverlay && !els.downloadsOverlay.hidden) {
+    closeDownloads({ restoreFocus: false });
+  }
   if (name !== "news" && activeTabName === "news" && options.preserveNewsArticleTransition !== true) {
     stopActiveNewsCarouselMedia();
     if (!els.updateLogOverlay.hidden || els.newsView?.classList.contains("is-transitioning")) closeUpdateLog(true);
@@ -4900,7 +4942,7 @@ async function pollUpdate() {
     updatePoll = null;
     const completedKind = activeUpdateKind;
     if (state.error) {
-      showToast(completedKind === "repair" ? "Repair failed" : "Update failed", state.error, "error");
+      showDownloadFailureToast(state.packKey || activeSidebarPack);
     } else if (state.lastResult?.installed?.version) {
       if (completedKind === "repair") {
         lastIntegrityScan = null;
@@ -4956,16 +4998,18 @@ async function startUpdate(forceRepair, options = {}) {
   renderDownloads(lastUpdateState);
   showToast(forceRepair ? "Repair started" : "Update started", "Progress is shown in the sidebar.", "info");
   window.aht.startUpdate({ forceRepair, replaceGameSettings: Boolean(options.replaceGameSettings), packKey: activeSidebarPack }).catch((error) => {
-    const message = cleanErrorMessage(error);
+    const technicalMessage = cleanErrorMessage(error);
+    const message = forceRepair ? "Repair failed." : "Download failed.";
     lastUpdateState = ensureTerminalUpdateTimestamp({
       ...(lastUpdateState || {}),
       running: false,
       error: message,
       progress: { ...(lastUpdateState?.progress || {}), phase: forceRepair ? "Repair failed" : "Update failed", percent: 100 }
     });
-    appendLog(`ERROR: ${message}`);
+    if (currentStatus?.developerMode) appendLog(`ERROR: ${technicalMessage}`);
+    else setLog(message);
     renderDownloads(lastUpdateState);
-    showToast(forceRepair ? "Repair failed" : "Update failed", message, "error");
+    showDownloadFailureToast(activeSidebarPack);
     clearInterval(updatePoll);
     updatePoll = null;
     activeUpdateKind = "";
@@ -5200,6 +5244,15 @@ els.setupAutoButton.addEventListener("click", applyRecommendedSetup);
 els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
 els.downloadsButton.addEventListener("click", openDownloads);
 els.downloadsCloseButton.addEventListener("click", closeDownloads);
+if (els.downloadsBackButton) els.downloadsBackButton.addEventListener("click", closeDownloads);
+if (els.downloadsErrorReportButton) {
+  els.downloadsErrorReportButton.addEventListener("click", () => copyErrorReportFromToast({
+    title: "Download Failed",
+    message: "Download failed.",
+    context: "update:start",
+    packKey: lastUpdateState?.packKey || activeSidebarPack
+  }));
+}
 if (els.windowMinimizeButton) els.windowMinimizeButton.addEventListener("click", () => window.aht.windowMinimize());
 if (els.windowCloseButton) els.windowCloseButton.addEventListener("click", () => window.aht.windowClose());
 if (els.profileFriendsButton) els.profileFriendsButton.addEventListener("click", openFriendsPanel);

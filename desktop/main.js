@@ -627,6 +627,47 @@ async function persistLaunchAttempt(attempt, config = {}) {
   return diagnostic;
 }
 
+function playerPublicErrorMessage(error = null, channel = '') {
+  const message = String(error?.message || error || 'The launcher could not complete this action.').trim();
+  if (isDeveloperMode()) return message;
+  const code = String(error?.code || '');
+  if (code === 'AHT_MINECRAFT_NOT_INSTALLED' || /Minecraft not installed/i.test(message)) {
+    return 'Minecraft Launcher is required to play.';
+  }
+  if (/Review and accept the current Terms|Terms and Privacy/i.test(message)) {
+    return 'Review and accept the Terms and Privacy notice to continue.';
+  }
+  if (/No usable 64-bit Java 8|Java 8 (?:path|runtime)|initialized Java 8/i.test(message)) {
+    return 'A 64-bit Java 8 runtime is required to play.';
+  }
+  if (/Update package is not ready/i.test(message)) {
+    return 'The verified AHT update package is not available yet.';
+  }
+  if (/Repair required|needs Repair|managed file issue|files changed after initialization|corrupt/i.test(message)) {
+    return 'Repair required before playing.';
+  }
+  if (/is not installed|Install the pack before playing/i.test(message)) {
+    return 'Install the modpack before playing.';
+  }
+  if (channel === 'update:start' || /(?:download|429|Too Many Requests)/i.test(message)) {
+    return 'Download failed.';
+  }
+  if (/(?:https?:\/\/|aht-curseforge-proxy|workers\.dev|\b(?:R2|D1|KV)\b|binding|ECONN|ENOTFOUND|fetch failed)/i.test(message)) {
+    return 'AHT Proxy is temporarily unavailable.';
+  }
+  if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users|opt|var|tmp)\/)/.test(message)) {
+    return 'The launcher could not complete this action.';
+  }
+  return 'The launcher could not complete this action.';
+}
+
+function errorForRenderer(channel, error) {
+  if (isDeveloperMode()) return error;
+  const safe = new Error(playerPublicErrorMessage(error, channel));
+  if (error?.code) safe.code = error.code;
+  return safe;
+}
+
 function stageLaunchAttempt(attempt, config = {}) {
   const effectiveConfig = config?.instanceDir ? config : configForPack(defaultConfig(), attempt?.pack?.channel || 'stable');
   lastLaunchDiagnostic = {
@@ -715,7 +756,7 @@ function launchDiagnosticIpc(handler) {
           reportWriteError: reportError?.message || String(reportError || 'Launch report could not be written.')
         });
       });
-      throw error;
+      throw errorForRenderer('play:start', error);
     }
   };
 }
@@ -1048,7 +1089,13 @@ async function buildErrorDiagnosticReport(payload = {}) {
       ? refreshLastLaunchDiagnostic()
       : manualLaunchDiagnostic({ ...payload, packKey: target.id }))
       .catch(() => null);
-    if (diagnostic?.text) return { text: diagnostic.text, path: diagnostic.path || '' };
+    if (diagnostic?.text) {
+      return {
+        text: diagnostic.text,
+        path: diagnostic.path || '',
+        instanceDir: diagnostic.config?.instanceDir || diagnostic.attempt?.instanceDir || ''
+      };
+    }
   }
 
   const config = await loadConfig().catch(() => null);
@@ -1086,10 +1133,48 @@ async function buildErrorDiagnosticReport(payload = {}) {
   try {
     await fs.mkdir(path.dirname(reportPath), { recursive: true });
     await fs.writeFile(reportPath, text, 'utf8');
-    return { text, path: reportPath };
+    return { text, path: reportPath, instanceDir };
   } catch {
-    return { text, path: '' };
+    return { text, path: '', instanceDir };
   }
+}
+
+function escapedRegExp(value = '') {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function supportSafeReportText(report = {}) {
+  let text = String(report.text || '')
+    .split(/\r?\n/)
+    .map((line) => sanitizeDiagnosticText(line, 4_000))
+    .join('\r\n');
+  const knownPaths = [
+    [report.instanceDir, '<AHT-install>'],
+    [app.getPath('userData'), '<launcher-data>'],
+    [app.getPath('home'), '<user-home>']
+  ];
+  for (const [knownPath, label] of knownPaths) {
+    const value = String(knownPath || '').trim();
+    if (!value) continue;
+    text = text.replace(new RegExp(escapedRegExp(value), process.platform === 'win32' ? 'gi' : 'g'), label);
+  }
+  return text
+    .replace(/https?:\/\/[^\s|)]+/gi, 'AHT Proxy')
+    .replace(/aht[- ]curseforge[- ]proxy[^\s|)]*/gi, 'AHT Proxy')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '<network-address>')
+    .replace(/\b(?:AHT_RELEASES|AHT_DATA|CURSEFORGE_API_KEY|LAUNCHER_PROOF_SECRET)\b/g, 'AHT Proxy')
+    .trimEnd() + '\r\n';
+}
+
+async function writeSupportReportFile(report = {}) {
+  const directory = report.path
+    ? path.dirname(path.resolve(report.path))
+    : path.join(app.getPath('userData'), 'support');
+  const file = path.join(directory, 'AHT Error Report.txt');
+  const text = supportSafeReportText(report);
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(file, text, 'utf8');
+  return { file, text };
 }
 
 async function setWindowsClipboardFile(file) {
@@ -1128,20 +1213,69 @@ async function setWindowsClipboardFile(file) {
   });
 }
 
+async function setMacClipboardFile(file) {
+  const reportPath = path.resolve(String(file || ''));
+  const stat = await fs.stat(reportPath);
+  if (!stat.isFile()) throw new Error('The error report file is unavailable.');
+  await new Promise((resolve, reject) => {
+    const child = spawn('/usr/bin/osascript', [
+      '-e',
+      'set the clipboard to (POSIX file (system attribute "AHT_CLIPBOARD_REPORT"))'
+    ], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, AHT_CLIPBOARD_REPORT: reportPath }
+    });
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error('Copying the error report file timed out.'));
+    }, 5_000);
+    child.stderr?.on('data', (chunk) => {
+      if (stderr.length < 2_000) stderr += chunk.toString('utf8');
+    });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || 'The error report could not be copied.'));
+    });
+  });
+}
+
+async function setLinuxClipboardFile(file) {
+  const reportPath = path.resolve(String(file || ''));
+  const stat = await fs.stat(reportPath);
+  if (!stat.isFile()) throw new Error('The error report file is unavailable.');
+  const uriList = `${pathToFileURL(reportPath).href}\r\n`;
+  clipboard.clear();
+  clipboard.writeBuffer('text/uri-list', Buffer.from(uriList, 'utf8'));
+  const formats = clipboard.availableFormats();
+  if (!formats.some((format) => String(format).toLowerCase().startsWith('text/uri-list'))) {
+    throw new Error('The error report could not be copied as a file.');
+  }
+}
+
+async function setClipboardFile(file) {
+  if (process.platform === 'win32') return setWindowsClipboardFile(file);
+  if (process.platform === 'darwin') return setMacClipboardFile(file);
+  if (process.platform === 'linux') return setLinuxClipboardFile(file);
+  throw new Error('File clipboard is not supported on this platform.');
+}
+
 async function copyErrorDiagnosticReport(payload = {}) {
   const report = await buildErrorDiagnosticReport(payload);
-  if (!report.path || path.basename(report.path).toLowerCase() !== 'ahtlatest.log') {
-    throw new Error('The latest launch report file is unavailable.');
-  }
-  if (process.platform === 'win32') await setWindowsClipboardFile(report.path);
-  else clipboard.writeText(report.text);
+  const supportReport = await writeSupportReportFile(report);
+  await setClipboardFile(supportReport.file);
   return {
     ok: true,
     copied: true,
-    chars: report.text.length,
-    copyKind: process.platform === 'win32' ? 'file' : 'text',
-    fileName: path.basename(report.path),
-    filePath: report.path
+    chars: supportReport.text.length,
+    copyKind: 'file',
+    fileName: path.basename(supportReport.file),
+    filePath: supportReport.file
   };
 }
 
@@ -1151,7 +1285,7 @@ function diagnosticIpc(channel, handler) {
       return await handler(event, ...args);
     } catch (error) {
       recordErrorDiagnostic(channel, error);
-      throw error;
+      throw errorForRenderer(channel, error);
     }
   };
 }
@@ -4874,6 +5008,66 @@ function rendererStatusConfig(config = {}) {
   return isDeveloperMode() ? config : playerSafeConfig(config);
 }
 
+function publicUpdatePhase(phase = '', kind = 'install') {
+  const value = String(phase || '');
+  if (/complete/i.test(value)) return 'Complete';
+  if (/fail/i.test(value)) return kind === 'repair' ? 'Repair failed' : 'Download failed';
+  if (/verif|hash|scan/i.test(value)) return 'Verifying files';
+  if (/forge|minecraft|runtime|java/i.test(value)) return 'Preparing Minecraft';
+  if (/extract|install|copy|replace|apply|patch/i.test(value)) return kind === 'repair' ? 'Repairing files' : 'Installing files';
+  if (/download|fetch|range|stream/i.test(value)) return 'Downloading';
+  if (/repair/i.test(value)) return 'Preparing repair';
+  return kind === 'repair' ? 'Preparing repair' : 'Preparing download';
+}
+
+function installedPackForRenderer(installed = null) {
+  if (!installed || typeof installed !== 'object') return null;
+  return {
+    packId: String(installed.packId || ''),
+    name: String(installed.name || ''),
+    version: String(installed.version || ''),
+    installedAt: String(installed.installedAt || '')
+  };
+}
+
+function updateResultForRenderer(result = null) {
+  if (isDeveloperMode() || !result || typeof result !== 'object') return result;
+  return {
+    ok: result.ok !== false,
+    installed: installedPackForRenderer(result.installed),
+    launchPreparationDeferred: Boolean(result.launchPreparationDeferred),
+    launchBlockedReason: result.launchPreparationDeferred
+      ? playerPublicErrorMessage(result.launchBlockedReason || 'Minecraft Launcher is required to play.', 'play:prepare')
+      : ''
+  };
+}
+
+function updateStateForRenderer(state = {}) {
+  if (isDeveloperMode()) return state;
+  const kind = state.kind === 'repair' ? 'repair' : 'install';
+  const progress = state.progress ? {
+    phase: publicUpdatePhase(state.progress.phase, kind),
+    completed: Math.max(0, Number(state.progress.completed || 0)),
+    total: Math.max(0, Number(state.progress.total || 0)),
+    percent: Math.max(0, Math.min(100, Number(state.progress.percent || 0))),
+    completedBytes: Math.max(0, Number(state.progress.completedBytes || state.progress.loaded || 0)),
+    totalBytes: Math.max(0, Number(state.progress.totalBytes || state.progress.total || 0)),
+    speedBytesPerSecond: Math.max(0, Number(state.progress.speedBytesPerSecond || 0))
+  } : null;
+  return {
+    running: Boolean(state.running),
+    kind,
+    releaseTarget: String(state.releaseTarget || ''),
+    packKey: String(state.packKey || ''),
+    startedAt: state.startedAt || null,
+    completedAt: state.completedAt || null,
+    lines: [],
+    lastResult: updateResultForRenderer(state.lastResult),
+    error: state.error ? (kind === 'repair' ? 'Repair failed.' : 'Download failed.') : null,
+    progress
+  };
+}
+
 function launcherUpdateForRenderer(update = {}) {
   if (!update?.localReinstallTest) return update;
   return {
@@ -5429,24 +5623,49 @@ async function runUpdate(forceRepair = false, options = {}) {
     const preparedIntegrity = developerClientBypassAllowed()
       ? { ...storedIntegrity, source: 'developer-update-bypass', developerClientBypass: true }
       : storedIntegrity;
-    await publishCompletedUpdatePreparation({
-      target,
-      config,
-      launcherConfig,
-      identity,
-      latest: latestAfterInstall,
-      installed: result.installed,
-      integrity: preparedIntegrity,
-      minecraftProfile: preparedMinecraftProfile,
-      launcherProof: preparedLauncherProof,
-      minecraftAssets: preparedMinecraftAssets
-    });
+    try {
+      await publishCompletedUpdatePreparation({
+        target,
+        config,
+        launcherConfig,
+        identity,
+        latest: latestAfterInstall,
+        installed: result.installed,
+        integrity: preparedIntegrity,
+        minecraftProfile: preparedMinecraftProfile,
+        launcherProof: preparedLauncherProof,
+        minecraftAssets: preparedMinecraftAssets
+      });
+    } catch (error) {
+      if (error?.code !== 'AHT_MINECRAFT_NOT_INSTALLED') throw error;
+      result.launchPreparationDeferred = true;
+      result.launchBlockedReason = 'Minecraft Launcher is required to play.';
+      blockedLaunchPreparation(target, error, {
+        config,
+        launcherConfig,
+        identity,
+        latest: latestAfterInstall,
+        installed: result.installed,
+        integrity: preparedIntegrity,
+        java8Runtime: await java8RuntimeStatus(launcherConfig).catch(() => null),
+        minecraftProfile: preparedMinecraftProfile,
+        launcherProof: preparedLauncherProof,
+        minecraftAssets: preparedMinecraftAssets
+      });
+      appendOperationLine(updateState, 'Modpack installed. Install Minecraft Launcher before playing.');
+    }
     await sendLauncherEvent(config, identity, {
       type: forceRepair ? 'repair_completed' : 'install_completed',
       version: result.installed?.version || null,
       manifestFileCount: result.installed?.manifestFileCount || 0,
       overrideFileCount: result.installed?.overrideFileCount || 0
     }).catch((error) => appendOperationLine(updateState, `Sync warning: ${error.message}`));
+    if (
+      process.env.AHT_TEST_HOOKS === '1'
+      && String(process.env.AHT_TEST_DROP_PREPARATION_AFTER_UPDATE || '') === target.id
+    ) {
+      invalidateLaunchPreparation(target.id);
+    }
     completeOperationState(updateState, result, 'Complete');
     return result;
   } catch (error) {
@@ -10850,6 +11069,9 @@ function minecraftNotInstalledError() {
 async function resolveMinecraftLauncherRoute(config = {}) {
   const requestedCwd = String(config.minecraftLauncher?.rootDir || '').trim() || app.getPath('home');
   const cwd = await existingLaunchCwd(requestedCwd);
+  if (process.env.AHT_TEST_HOOKS === '1' && process.env.AHT_TEST_FORCE_MINECRAFT_NOT_INSTALLED === '1') {
+    throw minecraftNotInstalledError();
+  }
   if (trustedMinecraftOpenCommandAllowed() && config.minecraftLauncher?.openCommand) {
     return {
       kind: 'custom',
@@ -11473,11 +11695,11 @@ ipcMain.handle('settings:testFeed', async (_event, payload = {}) => {
   }
   return testReleaseFeed(payload || {}, 'stable');
 });
-ipcMain.handle('update:start', diagnosticIpc('update:start', async (_event, payload = {}) => runUpdate(Boolean(payload.forceRepair), {
+ipcMain.handle('update:start', diagnosticIpc('update:start', async (_event, payload = {}) => updateResultForRenderer(await runUpdate(Boolean(payload.forceRepair), {
   replaceGameSettings: Boolean(payload.replaceGameSettings),
   packKey: payload.packKey || 'stable'
-})));
-ipcMain.handle('update:state', async () => updateState);
+}))));
+ipcMain.handle('update:state', async () => updateStateForRenderer(updateState));
 ipcMain.handle('launcher:updateStart', diagnosticIpc('launcher:updateStart', async () => {
   try {
     const result = await runLauncherUpdate();
@@ -12830,6 +13052,9 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
   const installed = descriptor.installed || null;
   const developerClientBypass = developerClientBypassAllowed();
   const attempt = options.attempt || createLaunchDiagnosticAttempt(target);
+  attempt.instanceDir = config.instanceDir;
+  attempt.minecraftRoot = config.minecraftLauncher?.rootDir || '';
+  attempt.runtimeConfig = config;
   const reportProgress = (phase, percent) => options.onProgress?.({ phase, percent });
   try {
     reportProgress(`Checking ${target.name} launcher paths`, 10);
@@ -12855,6 +13080,8 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       launcherRoute = await resolveMinecraftLauncherRoute(launcherConfig);
       cacheNeedsPersist = true;
     }
+    attempt.minecraftRoot = launcherConfig.minecraftLauncher?.rootDir || attempt.minecraftRoot;
+    attempt.runtimeConfig = launcherConfig;
     reportProgress('Checking Java 8', 55);
     let java8Runtime = reusable?.java8Runtime || null;
     if (!(await preparedJava8RuntimeAvailable(java8Runtime))) {
@@ -13275,7 +13502,13 @@ ipcMain.handle('play:select-prepared', async (_event, payload = {}) => {
 ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, attempt) => {
   const target = releaseTarget(payload?.packKey || payload || 'stable');
   const key = target.id;
-  const prepared = launchPreparationCache.get(key);
+  let prepared = launchPreparationCache.get(key);
+  if (!prepared || prepared?.error?.code === 'AHT_MINECRAFT_NOT_INSTALLED') {
+    prepared = await prepareLaunchForPack(key, {
+      force: prepared?.error?.code === 'AHT_MINECRAFT_NOT_INSTALLED',
+      persist: true
+    });
+  }
   const preparedRuntimeConfig = prepared?.launcherConfig || prepared?.runtimeConfig || prepared?.attempt?.runtimeConfig || null;
   if (preparedRuntimeConfig) {
     attempt.runtimeConfig = preparedRuntimeConfig;
@@ -13297,6 +13530,9 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     );
   }
   const currentPrepared = launchPreparationCache.get(key);
+  if (currentPrepared?.state === 'ready' && currentPrepared !== prepared) {
+    prepared = currentPrepared;
+  }
   if (currentPrepared !== prepared) {
     const preparationError = currentPrepared?.error
       || new Error('The startup-prepared launch state changed. Restart A Hard Time Launcher.');

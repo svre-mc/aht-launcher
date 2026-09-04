@@ -37,6 +37,7 @@ const java8Home = path.join(minecraftRoot, '.aht-launcher', 'java', 'temurin8');
 const java8Executable = path.join(java8Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const macMinecraftApp = path.join(root, 'Minecraft.app');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
+const instanceDir = path.join(root, 'A Hard Time');
 const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const defaultsPath = tempDefaults;
@@ -813,6 +814,7 @@ await writeJson(path.join(userData, 'identity.json'), {
 });
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
+  instanceDir,
   latestUrl: `${workerEndpoint}/latest.json`,
   packs: {
     ptb: {
@@ -2387,9 +2389,112 @@ try {
     if (!downloadsDecorationProof || /(?:115|135)deg/.test(`${downloadsDecorationProof.background} ${downloadsDecorationProof.before}`)) {
       throw new Error(`Downloads must not render either long diagonal decoration line: ${JSON.stringify(downloadsDecorationProof)}`);
     }
+    const downloadsFailureProof = await evaluate(client, `(() => {
+      renderDownloads({
+        running: false,
+        error: 'Download failed for https://raw-worker.example.workers.dev/ptb/packs/private.zip: 429 Too Many Requests',
+        lines: ['C:\\\\Users\\\\private\\\\AHT: raw internal failure'],
+        progress: { phase: 'failed', currentPath: 'C:\\\\Users\\\\private\\\\AHT' }
+      });
+      const visible = (element) => {
+        if (!element || element.hidden) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const overlay = document.querySelector('#downloadsOverlay');
+      const text = overlay?.innerText || '';
+      const hitTarget = (selector) => {
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        if (!rect) return '';
+        return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('button')?.id || '';
+      };
+      return {
+        closeVisible: visible(document.querySelector('#downloadsCloseButton')),
+        backVisible: visible(document.querySelector('#downloadsBackButton')),
+        closeHit: hitTarget('#downloadsCloseButton'),
+        backHit: hitTarget('#downloadsBackButton'),
+        errorVisible: visible(document.querySelector('#downloadsErrorPanel')),
+        reportVisible: visible(document.querySelector('#downloadsErrorReportButton')),
+        reportLabel: document.querySelector('#downloadsErrorReportButton')?.textContent?.trim() || '',
+        text
+      };
+    })()`);
+    if (
+      !downloadsFailureProof.closeVisible
+      || !downloadsFailureProof.backVisible
+      || downloadsFailureProof.closeHit !== 'downloadsCloseButton'
+      || downloadsFailureProof.backHit !== 'downloadsBackButton'
+      || !downloadsFailureProof.errorVisible
+      || !downloadsFailureProof.reportVisible
+    ) {
+      throw new Error(`Downloads exit and failure controls must remain visible: ${JSON.stringify(downloadsFailureProof)}`);
+    }
+    if (downloadsFailureProof.reportLabel !== 'Click here to copy error log') {
+      throw new Error(`Downloads error-report action has the wrong label: ${JSON.stringify(downloadsFailureProof)}`);
+    }
+    if (!downloadsFailureProof.text.includes('Download Failed') || /https?:\/\/|workers\.dev|Too Many Requests|C:\\\\Users|private\.zip/i.test(downloadsFailureProof.text)) {
+      throw new Error(`Player Downloads exposed technical error details: ${JSON.stringify(downloadsFailureProof)}`);
+    }
+    const copiedDownloadReport = await evaluate(client, `window.aht.copyErrorReport({
+      title: 'Download Failed',
+      message: 'Download failed for https://raw-worker.example.workers.dev/ptb/packs/private.zip at C:\\\\Users\\\\private\\\\AHT',
+      context: 'update:start',
+      packKey: 'aht'
+    })`);
+    if (
+      !copiedDownloadReport?.copied
+      || copiedDownloadReport.copyKind !== 'file'
+      || copiedDownloadReport.fileName !== 'AHT Error Report.txt'
+      || !fs.existsSync(copiedDownloadReport.filePath)
+    ) {
+      throw new Error(`Download failure did not copy a .txt file attachment: ${JSON.stringify(copiedDownloadReport)}`);
+    }
+    const copiedDownloadText = fs.readFileSync(copiedDownloadReport.filePath, 'utf8');
+    if (
+      !copiedDownloadText.includes('A HARD TIME LAUNCHER ERROR REPORT')
+      || !copiedDownloadText.includes('AHT Proxy')
+      || /https?:\/\/|workers\.dev|raw-worker|C:\\\\Users\\\\private|private\.zip/i.test(copiedDownloadText)
+    ) {
+      throw new Error(`Copied download error report exposed the raw endpoint or path: ${copiedDownloadText.slice(0, 1400)}`);
+    }
+    await click(client, '#downloadsErrorReportButton');
+    const downloadReportToast = await waitFor(client, `(() => {
+      const toast = [...document.querySelectorAll('#toastStack .toast.success')]
+        .find((item) => item.querySelector('strong')?.textContent.trim() === 'Error log copied');
+      return toast?.querySelector('span')?.textContent.trim() === 'Paste to attach the .txt file.' ? true : false;
+    })()`, 'download error report copy confirmation');
+    if (!downloadReportToast) throw new Error('Download error report click did not confirm the .txt attachment copy.');
+    await evaluate(client, `document.querySelector('#toastStack')?.replaceChildren(); true`);
     reports.push(await assertLayout(client, `${size.name}-downloads`));
-    screenshots.push(await captureScreenshot(client, `${size.name}-downloads`));
+    screenshots.push(await captureScreenshot(client, `${size.name}-downloads-failed`));
+
+    await click(client, '#downloadsBackButton');
+    const backExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
+    if (!backExitProof) throw new Error('The Downloads footer button did not exit Downloads.');
+
+    await click(client, '#downloadsButton');
+    await click(client, '#downloadsCloseButton');
+    const closeExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
+    if (!closeExitProof) throw new Error('The Downloads Close button did not exit Downloads.');
+
+    for (const [tab, view] of [['player', 'player'], ['news', 'news'], ['settings', 'settings']]) {
+      await click(client, '#downloadsButton');
+      await click(client, `.nav [data-tab="${tab}"]`);
+      const navigationExitProof = await evaluate(client, `(() => ({
+        downloadsClosed: document.querySelector('#downloadsOverlay')?.hidden === true,
+        viewVisible: document.querySelector('#${view}')?.hidden === false
+      }))()`);
+      if (!navigationExitProof.downloadsClosed || !navigationExitProof.viewVisible) {
+        throw new Error(`${tab} navigation did not escape Downloads: ${JSON.stringify(navigationExitProof)}`);
+      }
+    }
+
+    await click(client, '#downloadsButton');
     await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    const escapeExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
+    if (!escapeExitProof) throw new Error('Escape did not exit Downloads.');
   }
 
   if (testEvidenceDir) {

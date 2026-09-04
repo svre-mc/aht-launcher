@@ -27,6 +27,7 @@ const store = new Map([
   ['launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe', { value: new Uint8Array([7, 8, 9]), contentType: '' }],
   ['cache/files/test.jar', { value: new Uint8Array([1, 2, 3]), contentType: '' }],
   ['packs/range-test.zip', { value: new Uint8Array([10, 11, 12, 13, 14]), contentType: '' }],
+  ['packs/multipart-rate-test.zip', { value: Uint8Array.from({ length: 140 }, (_, index) => index), contentType: '' }],
   ['packs/empty.zip', { value: new Uint8Array([]), contentType: '' }],
   ['server/aht_version_lock.cfg', { value: 'verificationUrl=https://worker.test/api/launcher-proof/verify', contentType: '' }]
 ]);
@@ -182,12 +183,12 @@ results.push(await check('head jar', new Request('https://worker.test/cache/file
 results.push(await check('missing', new Request('https://worker.test/packs/missing.zip'), {
   status: 404,
   contentType: 'application/json',
-  body: '{"error":"Release object not found","key":"packs/missing.zip"}'
+  body: '{"error":"Download not found."}'
 }));
 results.push(await check('invalid', new Request('https://worker.test/cache/%00/secret.jar'), {
   status: 400,
   contentType: 'application/json',
-  body: '{"error":"Invalid release path"}'
+  body: '{"error":"Invalid download request."}'
 }));
 results.push(await check('root', new Request('https://worker.test/'), {
   status: 200,
@@ -214,5 +215,33 @@ const blocked = await worker.fetch(new Request('https://worker.test/packs/range-
 }, {});
 assert.equal(blocked.status, 429, 'release limiter should reject abusive request bursts');
 assert.equal(Number(releaseReads.get('packs/range-test.zip') || 0), readsBeforeRateLimit, 'rate limit should run before R2');
+
+const multipartRangeCounts = new Map();
+const multipartEnv = {
+  ...env,
+  AHT_PLAYER_API_RATE_LIMITER: {
+    async limit({ key }) {
+      const count = Number(multipartRangeCounts.get(key) || 0) + 1;
+      multipartRangeCounts.set(key, count);
+      return { success: count === 1 };
+    }
+  }
+};
+for (let index = 0; index < 130; index += 1) {
+  const response = await worker.fetch(new Request('https://worker.test/packs/multipart-rate-test.zip', {
+    headers: {
+      Range: `bytes=${index}-${index}`,
+      'CF-Connecting-IP': '203.0.113.44'
+    }
+  }), multipartEnv, {});
+  assert.equal(response.status, 206, `multipart range ${index} should not share a global IP download bucket`);
+}
+const repeatedRange = await worker.fetch(new Request('https://worker.test/packs/multipart-rate-test.zip', {
+  headers: {
+    Range: 'bytes=0-0',
+    'CF-Connecting-IP': '203.0.113.44'
+  }
+}), multipartEnv, {});
+assert.equal(repeatedRange.status, 429, 'an identical abusive range retry should still be rate limited');
 
 console.log(JSON.stringify(results, null, 2));

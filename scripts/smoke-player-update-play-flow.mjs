@@ -17,6 +17,8 @@ const workerPort = port + 1;
 const workerEndpoint = `http://127.0.0.1:${workerPort}`;
 const warmDebugPort = port + 2;
 const warmDebugEndpoint = `http://127.0.0.1:${warmDebugPort}`;
+const missingLauncherDebugPort = port + 3;
+const missingLauncherDebugEndpoint = `http://127.0.0.1:${missingLauncherDebugPort}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-update-play-'));
 const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
@@ -46,9 +48,9 @@ const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
-const electronArgsFor = (debugPort) => smokeExe
-  ? [`--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userData}`];
+const electronArgsFor = (debugPort, profileUserData = userData) => smokeExe
+  ? [`--user-data-dir=${profileUserData}`]
+  : ['.', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profileUserData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 const smokeStartedAt = Date.now();
 await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
@@ -475,23 +477,26 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
-function spawnPlayerLauncher(debugPort = port) {
-  return spawn(electronBin, electronArgsFor(debugPort), {
+function spawnPlayerLauncher(debugPort = port, options = {}) {
+  const profileUserData = options.userData || userData;
+  return spawn(electronBin, electronArgsFor(debugPort, profileUserData), {
     cwd: electronCwd,
     env: {
       ...process.env,
-      AHT_APP_DEFAULTS: defaultsPath,
+      AHT_APP_DEFAULTS: options.defaultsPath || defaultsPath,
       AHT_TEST_HOOKS: '1',
-      AHT_TEST_USER_DATA: userData,
+      AHT_TEST_USER_DATA: profileUserData,
       AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
-      AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: '1',
+      AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: options.forceMinecraftMissing ? '0' : '1',
+      AHT_TEST_FORCE_MINECRAFT_NOT_INSTALLED: options.forceMinecraftMissing ? '1' : '0',
       AHT_TEST_REMOTE_DEBUG_PORT: String(debugPort),
-      AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+      AHT_TEST_STARTUP_PROBE_PATH: options.startupProbePath || startupProbePath,
       AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
       AHT_TEST_EXPECT_FORGE_INSTALLER_URL: forgeInstallerUrl,
       AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
       AHT_TEST_JAVA_ARCH: 'amd64',
       AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
+      AHT_TEST_DROP_PREPARATION_AFTER_UPDATE: options.dropPreparation === false ? '' : 'stable',
       ELECTRON_ENABLE_LOGGING: '0'
     },
     stdio: 'ignore',
@@ -506,6 +511,8 @@ const childExitPromise = new Promise((resolve) => {
 
 let client;
 let warmChild = null;
+let missingLauncherChild = null;
+let installWithoutMinecraftProof = null;
 try {
   const target = await waitForTarget().catch((error) => {
     if (fs.existsSync(startupProbePath)) {
@@ -552,11 +559,11 @@ try {
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
   `);
-  if (blockedUpdate.ok || !/Update package is not ready/i.test(blockedUpdate.message || '')) {
+  if (blockedUpdate.ok || !/verified AHT update package is not available yet/i.test(blockedUpdate.message || '')) {
     throw new Error(`Legacy feed update should fail with a safe player message: ${JSON.stringify(blockedUpdate)}`);
   }
-  if (/server owner/i.test(blockedUpdate.message || '') || !/verified AHT client package/i.test(blockedUpdate.message || '')) {
-    throw new Error(`Legacy feed update error must use clean verified-package wording: ${JSON.stringify(blockedUpdate)}`);
+  if (/server owner|https?:\/\/|workers\.dev|AHT_RELEASES|R2 binding/i.test(blockedUpdate.message || '')) {
+    throw new Error(`Legacy feed update error exposed technical details: ${JSON.stringify(blockedUpdate)}`);
   }
   if (packRequests.length) {
     throw new Error(`Legacy feed started downloading pack files before being blocked: ${JSON.stringify(packRequests)}`);
@@ -610,13 +617,15 @@ try {
   if (!updateResult.ok || updateResult.result?.installed?.version !== '7.7.7') {
     throw new Error(`Fresh player update failed: ${JSON.stringify(updateResult)}`);
   }
-  await waitFor(client, `window.aht.getStatus().then((status) =>
+  const droppedPreparation = await waitFor(client, `window.aht.getStatus().then((status) =>
     status.installed?.version === '7.7.7'
-      && status.launchPreparationState === 'ready'
-      && status.launchReady
+      && status.launchPreparationState === 'missing'
       ? status
       : false
-  )`, 'post-update startup-equivalent launch preparation');
+  )`, 'simulated missing in-memory launch preparation');
+  if (/Restart A Hard Time Launcher/i.test(droppedPreparation.launchBlockedReason || '')) {
+    throw new Error(`A missing in-memory launch preparation still instructed the player to restart: ${JSON.stringify(droppedPreparation)}`);
+  }
   if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 1 || proofRequests.length < 2) {
     throw new Error(`Update did not refresh stale launcher proof registration after Worker rejection: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
   }
@@ -669,8 +678,8 @@ try {
   }
 
   const afterUpdate = await evaluate(client, 'window.aht.getStatus()');
-  if (!afterUpdate.launchReady || afterUpdate.launchBlockedReason || afterUpdate.integrity?.counts?.corrupted !== 0) {
-    throw new Error(`Player stayed launch-locked after clean update: ${JSON.stringify(afterUpdate)}`);
+  if (afterUpdate.launchPreparationState !== 'missing' || afterUpdate.integrity?.counts?.corrupted !== 0) {
+    throw new Error(`The cache-loss regression fixture was not preserved until Play: ${JSON.stringify(afterUpdate)}`);
   }
   const instanceStateKey = crypto.createHash('sha256')
     .update(path.resolve(instanceDir))
@@ -702,6 +711,10 @@ try {
   `);
   if (!playResult.ok || !playResult.result?.ok) {
     throw new Error(`Clean player Play failed: ${JSON.stringify(playResult)}`);
+  }
+  const recoveredPreparation = await evaluate(client, 'window.aht.getStatus()');
+  if (!recoveredPreparation.launchReady || recoveredPreparation.launchPreparationState !== 'ready') {
+    throw new Error(`Play did not rebuild a missing in-memory launch preparation: ${JSON.stringify(recoveredPreparation)}`);
   }
   checkpoint('stable Play handoff returned');
   for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) {
@@ -1077,6 +1090,130 @@ try {
     throw new Error('Warm Play rewrote launcher metadata instead of reusing initialization state.');
   }
   await evaluate(client, 'window.aht?.windowClose?.(); true').catch(() => {});
+  client.close();
+  client = null;
+
+  const missingLauncherRoot = path.join(root, 'without-minecraft-launcher');
+  const missingLauncherUserData = path.join(missingLauncherRoot, 'userData');
+  const missingLauncherDefaultsPath = path.join(missingLauncherRoot, 'app.defaults.json');
+  const missingLauncherInstanceDir = path.join(missingLauncherRoot, 'A Hard Time');
+  const missingLauncherMcRoot = path.join(missingLauncherRoot, '.minecraft');
+  const missingLauncherStartupProbe = path.join(missingLauncherRoot, 'startup-probe.jsonl');
+  await writeJson(missingLauncherDefaultsPath, {
+    packId: 'a-hard-time',
+    instanceDir: missingLauncherInstanceDir,
+    latestUrl: `${workerEndpoint}/latest.json`,
+    curseforge: { proxyBaseUrl: '', apiKeyEnv: 'CURSEFORGE_API_KEY' },
+    sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
+    launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-attestation-v2' },
+    launcherUpdate: { enabled: false, latestUrl: '' },
+    minecraftLauncher: {
+      enabled: true,
+      rootDir: missingLauncherMcRoot,
+      profileId: 'a-hard-time',
+      profileName: 'A Hard Time',
+      memoryMb: 6144,
+      javaPath: fakeJavaPath,
+      syncRoots: [],
+      syncDefaultRoots: false,
+      autoImportAccount: false,
+      openCommand: '',
+      openArgs: []
+    },
+    playCommand: { command: '', args: [], cwd: missingLauncherInstanceDir }
+  });
+  await writeJson(path.join(missingLauncherUserData, 'identity.json'), {
+    installId: 'player-without-minecraft-launcher',
+    createdAt: new Date().toISOString(),
+    minecraftUsername: 'NoLauncherPlayer',
+    usernameRegisteredAt: new Date().toISOString(),
+    usernameRegistrationMode: 'minecraft-launcher'
+  });
+  const missingLauncherCredential = createDeviceCredential();
+  await writeJson(path.join(missingLauncherUserData, 'device-identity.json'), {
+    schemaVersion: missingLauncherCredential.schemaVersion,
+    protocol: missingLauncherCredential.protocol,
+    algorithm: missingLauncherCredential.algorithm,
+    deviceId: missingLauncherCredential.deviceId,
+    publicKey: missingLauncherCredential.publicKey,
+    privateKey: {
+      value: Buffer.from(missingLauncherCredential.privateKey, 'utf8').toString('base64'),
+      encrypted: false
+    },
+    createdAt: missingLauncherCredential.createdAt,
+    protectedBy: 'explicit-test-fallback'
+  });
+
+  missingLauncherChild = spawnPlayerLauncher(missingLauncherDebugPort, {
+    userData: missingLauncherUserData,
+    defaultsPath: missingLauncherDefaultsPath,
+    startupProbePath: missingLauncherStartupProbe,
+    forceMinecraftMissing: true,
+    dropPreparation: false
+  });
+  const missingLauncherTarget = await waitForTarget(missingLauncherDebugEndpoint);
+  client = await connect(missingLauncherTarget.webSocketDebuggerUrl);
+  await client.call('Runtime.enable');
+  await client.call('Page.enable');
+  await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting')", 'player without Minecraft Launcher DOM');
+  await evaluate(client, `window.__ahtNoMinecraftInstall = window.aht.startUpdate({ forceRepair: false, replaceGameSettings: false, packKey: 'stable' })
+    .then((result) => ({ ok: true, result }))
+    .catch((error) => ({ ok: false, message: String(error?.message || error || '') })); true`);
+  const missingLauncherInstall = await waitFor(client, `Promise.all([
+    window.__ahtNoMinecraftInstall,
+    window.aht.getUpdateState(),
+    window.aht.getStatus('stable')
+  ]).then(([invocation, update, status]) => !update.running ? ({ invocation, update, status }) : false)`, 'install without Minecraft Launcher', 480);
+  if (
+    !missingLauncherInstall.invocation?.ok
+    || missingLauncherInstall.invocation.result?.installed?.version !== '7.7.7'
+    || missingLauncherInstall.invocation.result?.launchPreparationDeferred !== true
+    || missingLauncherInstall.update?.error
+    || missingLauncherInstall.update?.lastResult?.installed?.version !== '7.7.7'
+    || missingLauncherInstall.update?.lastResult?.launchPreparationDeferred !== true
+    || missingLauncherInstall.update?.lines?.length !== 0
+    || missingLauncherInstall.status?.installed?.version !== '7.7.7'
+    || missingLauncherInstall.status?.launchPreparationState !== 'blocked'
+  ) {
+    throw new Error(`Installing without Minecraft Launcher did not complete independently: ${JSON.stringify(missingLauncherInstall)}`);
+  }
+  for (const relPath of ['mods/aht-required.jar', 'mods/aht-version-lock-7.7.7.jar', 'config/aht-client.cfg']) {
+    if (!fs.existsSync(path.join(missingLauncherInstanceDir, relPath))) {
+      throw new Error(`Install without Minecraft Launcher omitted ${relPath}.`);
+    }
+  }
+  const missingLauncherUi = await evaluate(client, `(() => {
+    renderStatus(${JSON.stringify(missingLauncherInstall.status)});
+    const button = document.querySelector('#playButton');
+    return {
+      title: button?.title || '',
+      text: button?.textContent?.trim() || '',
+      disabled: button?.getAttribute('aria-disabled')
+    };
+  })()`);
+  if (
+    !/Minecraft Launcher is required to play/i.test(missingLauncherUi.title)
+    || /https?:\/\/|workers\.dev|[A-Za-z]:[\\/]|\/(?:home|Users|tmp)\//i.test(missingLauncherUi.title)
+  ) {
+    throw new Error(`Missing-Minecraft player UI was not concise and private: ${JSON.stringify(missingLauncherUi)}`);
+  }
+  const missingLauncherPlay = await evaluate(client, `window.aht.play('stable')
+    .then((result) => ({ ok: true, result }))
+    .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))`);
+  if (
+    missingLauncherPlay.ok
+    || !/Minecraft Launcher is required to play\./i.test(missingLauncherPlay.message || '')
+    || /https?:\/\/|workers\.dev|[A-Za-z]:[\\/]|\/(?:home|Users|tmp)\//i.test(missingLauncherPlay.message || '')
+  ) {
+    throw new Error(`Play without Minecraft Launcher did not return the safe player error: ${JSON.stringify(missingLauncherPlay)}`);
+  }
+  installWithoutMinecraftProof = {
+    installedVersion: missingLauncherInstall.update.lastResult.installed.version,
+    launchPreparationDeferred: true,
+    updateError: null,
+    playMessage: missingLauncherPlay.message
+  };
+  await evaluate(client, 'window.aht?.windowClose?.(); true').catch(() => {});
 
   console.log(JSON.stringify({
     ok: true,
@@ -1092,6 +1229,7 @@ try {
     cleanScanUi,
     usernameSurfaceAbsent,
     secondPtbPlayAfterSettings: { handoffMs: secondPtbPlayHandoffMs, preparationReused: true },
+    installWithoutMinecraftLauncher: installWithoutMinecraftProof,
     warmAfter31Minutes: {
       startupMs: warmStartupMs,
       targetReadyMs: warmTargetReadyMs,
@@ -1136,5 +1274,6 @@ try {
   }
   child.kill();
   if (warmChild && !warmChild.killed) warmChild.kill();
+  if (missingLauncherChild && !missingLauncherChild.killed) missingLauncherChild.kill();
   await new Promise((resolve) => server.close(resolve));
 }
