@@ -2410,11 +2410,13 @@ try {
         if (!rect) return '';
         return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('button')?.id || '';
       };
+      const backButton = document.querySelector('#downloadsBackButton');
+      backButton?.focus();
       return {
-        closeVisible: visible(document.querySelector('#downloadsCloseButton')),
-        backVisible: visible(document.querySelector('#downloadsBackButton')),
-        closeHit: hitTarget('#downloadsCloseButton'),
+        closeExists: Boolean(document.querySelector('#downloadsCloseButton')),
+        backVisible: visible(backButton),
         backHit: hitTarget('#downloadsBackButton'),
+        backFocusable: document.activeElement === backButton,
         errorVisible: visible(document.querySelector('#downloadsErrorPanel')),
         reportVisible: visible(document.querySelector('#downloadsErrorReportButton')),
         reportLabel: document.querySelector('#downloadsErrorReportButton')?.textContent?.trim() || '',
@@ -2422,14 +2424,14 @@ try {
       };
     })()`);
     if (
-      !downloadsFailureProof.closeVisible
+      downloadsFailureProof.closeExists
       || !downloadsFailureProof.backVisible
-      || downloadsFailureProof.closeHit !== 'downloadsCloseButton'
       || downloadsFailureProof.backHit !== 'downloadsBackButton'
+      || !downloadsFailureProof.backFocusable
       || !downloadsFailureProof.errorVisible
       || !downloadsFailureProof.reportVisible
     ) {
-      throw new Error(`Downloads exit and failure controls must remain visible: ${JSON.stringify(downloadsFailureProof)}`);
+      throw new Error(`Downloads must expose one focusable footer exit with the failure controls: ${JSON.stringify(downloadsFailureProof)}`);
     }
     if (downloadsFailureProof.reportLabel !== 'Click here to copy error log') {
       throw new Error(`Downloads error-report action has the wrong label: ${JSON.stringify(downloadsFailureProof)}`);
@@ -2439,7 +2441,7 @@ try {
     }
     const copiedDownloadReport = await evaluate(client, `window.aht.copyErrorReport({
       title: 'Download Failed',
-      message: 'Download failed for https://raw-worker.example.workers.dev/ptb/packs/private.zip at C:\\\\Users\\\\private\\\\AHT',
+      message: 'Download failed for https://raw-worker.example.workers.dev/ptb/packs/private.zip?aht_player=owner%40example.com&aht_uuid=private-uuid at C:\\\\Users\\\\private\\\\AHT /home/private/AHT owner@example.com 2001:db8::1234 01234567-89ab-4def-8123-456789abcdef ahtd_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef AHT_RELEASES',
       context: 'update:start',
       packKey: 'aht'
     })`);
@@ -2455,7 +2457,7 @@ try {
     if (
       !copiedDownloadText.includes('A HARD TIME LAUNCHER ERROR REPORT')
       || !copiedDownloadText.includes('AHT Proxy')
-      || /https?:\/\/|workers\.dev|raw-worker|C:\\\\Users\\\\private|private\.zip/i.test(copiedDownloadText)
+      || /https?:\/\/|workers\.dev|raw-worker|C:\\\\Users\\\\private|\/home\/private|private\.zip|owner(?:%40|@)example\.com|private-uuid|2001:db8|01234567-89ab-4def-8123-456789abcdef|ahtd_012345|AHT_RELEASES/i.test(copiedDownloadText)
     ) {
       throw new Error(`Copied download error report exposed the raw endpoint or path: ${copiedDownloadText.slice(0, 1400)}`);
     }
@@ -2475,9 +2477,13 @@ try {
     if (!backExitProof) throw new Error('The Downloads footer button did not exit Downloads.');
 
     await click(client, '#downloadsButton');
-    await click(client, '#downloadsCloseButton');
-    const closeExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
-    if (!closeExitProof) throw new Error('The Downloads Close button did not exit Downloads.');
+    await evaluate(client, `(() => {
+      const overlay = document.querySelector('#downloadsOverlay');
+      overlay?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    const backdropExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
+    if (!backdropExitProof) throw new Error('The Downloads backdrop did not exit Downloads.');
 
     for (const [tab, view] of [['player', 'player'], ['news', 'news'], ['settings', 'settings']]) {
       await click(client, '#downloadsButton');

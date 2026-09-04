@@ -37,6 +37,26 @@ export function defaultInstanceDirForPlatform(platform = process.platform, env =
   platformKey(platform);
 }
 
+export function isMacosPrivacyProtectedPath(value = '', env = process.env) {
+  const candidate = String(value || '').trim();
+  if (!candidate) return false;
+  const home = env.HOME || os.homedir();
+  const normalized = path.posix.resolve(candidate).toLowerCase();
+  const protectedRoots = [
+    'Desktop',
+    'Documents',
+    'Downloads',
+    'Movies',
+    'Music',
+    'Pictures',
+    path.posix.join('Library', 'CloudStorage'),
+    path.posix.join('Library', 'Mobile Documents')
+  ].map((relativePath) => path.posix.resolve(home, relativePath).toLowerCase());
+  return normalized === '/volumes'
+    || normalized.startsWith('/volumes/')
+    || protectedRoots.some((root) => normalized === root || normalized.startsWith(`${root}/`));
+}
+
 export function platformProfile(platform = process.platform, env = process.env) {
   const key = platformKey(platform);
   const instanceDir = defaultInstanceDirForPlatform(platform, env);

@@ -73,7 +73,7 @@ assert(release.latest.curseforge?.disabled === true, 'full-client release should
 assert(release.latest.clientZip?.modFileCount >= 2, 'full-client release did not count mod archives');
 assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.0.0.jar', 'full-client release did not record the client version lock mod');
 const serverLockConfig = await fs.readFile(path.join(outDir, release.latest.serverLock.configPath), 'utf8');
-assert(serverLockConfig.includes('S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify'), 'server launcher lock config is missing the authoritative Worker verifier');
+assert(serverLockConfig.includes('S:verificationUrl=https://api.ahardtime.net/api/launcher-proof/verify'), 'server launcher lock config is missing the authoritative AHT Proxy verifier');
 assert(serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}'), 'server launcher lock config is missing the reconnect update message');
 assert(!serverLockConfig.includes('requiredVersion='), 'server launcher lock config must read launcher policy live instead of freezing a pack version');
 

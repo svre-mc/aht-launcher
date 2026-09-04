@@ -35,11 +35,15 @@ export function sanitizeDiagnosticText(value = '', max = 500) {
   const secretName = '(?:access[-_]?token|client[-_]?token|identity[-_]?token|refresh[-_]?token|session[-_]?token|api[-_]?key|client[-_]?secret|password|secret|signature|proof|token|key)';
   const secretValue = '(?:"[^"\\r\\n]*(?:"|$)|\'[^\'\\r\\n]*(?:\'|$)|[^\\s,;&}]+)';
   return String(value ?? '').replace(/\0/g, '').trim()
+    .replace(/([?&](?:aht_(?:player|username|uuid)|email|user|username)=)[^&#\s|)]*/gi, '$1<redacted>')
     .replace(new RegExp(`(--${secretName}(?:\\s+|\\s*=\\s*))${secretValue}`, 'gi'), '$1<redacted>')
     .replace(new RegExp(`((?:["']?)${secretName}(?:["']?)\\s*[:=]\\s*)${secretValue}`, 'gi'), '$1<redacted>')
     .replace(/(Authorization\s*:\s*)[^\r\n]*/gi, '$1<redacted>')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<redacted-token>')
     .replace(/:\/\/[^/@\s]+:[^/@\s]+@/g, '://<credentials>@')
+    .replace(/https?:\/\/[A-Za-z0-9.-]*\.workers\.dev(?:\/[^\s|)]*)?/gi, 'AHT Proxy')
+    .replace(/\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.workers\.dev\b/gi, 'AHT Proxy')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '<email>')
     .replace(/\r\n?|\n/g, ' | ')
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
     .replace(/ {2,}/g, ' ')

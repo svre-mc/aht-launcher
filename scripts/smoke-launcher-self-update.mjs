@@ -357,6 +357,10 @@ try {
   if (!stagedProof.state.lastResult?.restartRequired || (process.platform === 'win32' && !stagedProof.state.lastResult?.instantRestartReady) || !stagedProof.state.lastResult?.preparedRestart) {
     throw new Error(`Launcher update was not staged for explicit restart: ${JSON.stringify(stagedProof.state)}`);
   }
+  if (stagedProof.log.trim() !== 'Launcher update verified and ready.'
+      || /https?:\/\/|workers\.dev|[A-Za-z]:[\\/]|\/(?:home|Users|tmp|var)\//i.test(stagedProof.log)) {
+    throw new Error(`Player launcher update UI exposed a raw update log: ${JSON.stringify(stagedProof.log)}`);
+  }
   if (stagedProof.status.config?.launcherUpdate?.enabled !== true || stagedProof.status.config?.launcherUpdate?.latestUrl !== `${workerEndpoint}/launcher/latest.json`) {
     throw new Error(`Legacy player update settings were not restored from packaged defaults: ${JSON.stringify(stagedProof.status.config?.launcherUpdate)}`);
   }
@@ -385,8 +389,12 @@ try {
     : process.platform === 'linux'
       ? 'Installing the portable Linux AppImage update.'
       : 'Install and restart requested.';
-  if (!clickProof.log.includes(expectedHandoffLine) && !clickProof.log.includes('Test mode verified the restart helper')) {
+  const internalClickLines = Array.isArray(clickProof.state?.lines) ? clickProof.state.lines.join('\n') : '';
+  if (!internalClickLines.includes(expectedHandoffLine) && !internalClickLines.includes('Test mode verified the restart helper')) {
     throw new Error(`Launcher update action did not start the prepared handoff: ${JSON.stringify(clickProof)}`);
+  }
+  if (/https?:\/\/|workers\.dev|[A-Za-z]:[\\/]|\/(?:home|Users|tmp|var)\//i.test(clickProof.log)) {
+    throw new Error(`Player launcher update action exposed a raw update log: ${JSON.stringify(clickProof.log)}`);
   }
   const installingPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
   const expectedPendingStatus = process.platform === 'win32' ? 'swapping' : 'installing';
@@ -395,7 +403,7 @@ try {
     throw new Error(`Pending launcher update was not marked as an active restart handoff before quit: ${JSON.stringify(installingPending)}`);
   }
   try {
-    await waitFor(client, "document.querySelector('#launcherUpdateLog').textContent.includes('Test mode verified the restart helper')", 'launcher restart helper verified', 80);
+    await waitFor(client, "(async () => (await window.aht.getLauncherUpdateState()).lines.some((line) => line.includes('Test mode verified the restart helper')))()", 'launcher restart helper verified', 80);
   } catch (error) {
     const failedRestart = await evaluate(client, '(async () => ({ log: document.querySelector("#launcherUpdateLog")?.textContent, state: await window.aht.getLauncherUpdateState() }))()').catch(() => null);
     const prepared = failedRestart?.state?.lastResult?.preparedRestart || stagedProof.state.lastResult.preparedRestart || {};

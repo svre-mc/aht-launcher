@@ -3,13 +3,19 @@ account_id = "04235a5734219bed31fa93dec6e3ffb6"
 main = "curseforge-proxy-worker.js"
 compatibility_date = "2026-08-25"
 workers_dev = true
+preview_urls = false
 keep_vars = true
 send_metrics = false
+
+[[routes]]
+pattern = "api.ahardtime.net"
+custom_domain = true
 
 [observability]
 enabled = true
 
 [vars]
+AHT_PUBLIC_ORIGIN = "https://api.ahardtime.net"
 LAUNCHER_ATTESTATION_KEY_ID = "aht-launcher-attestation-v2"
 LAUNCHER_PROOF_PACK_ID = "a-hard-time-dregora"
 AHT_REQUIRE_DEVICE_ATTESTATION = "true"

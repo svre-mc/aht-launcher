@@ -114,11 +114,11 @@ public class LocalProofVerifierTest {
     @Test
     public void stateEndpointMustBeExactAuthenticatedWssPath() {
         assertTrue(ServerStateClient.isEndpointAllowedForTests(
-                "wss://aht-curseforge-proxy.mysticgamer312.workers.dev/server/launcher-state"));
+                "wss://api.ahardtime.net/server/launcher-state"));
         assertFalse(ServerStateClient.isEndpointAllowedForTests(
-                "https://aht-curseforge-proxy.mysticgamer312.workers.dev/server/launcher-state"));
+                "https://api.ahardtime.net/server/launcher-state"));
         assertFalse(ServerStateClient.isEndpointAllowedForTests(
-                "wss://aht-curseforge-proxy.mysticgamer312.workers.dev/server/launcher-state?token=leak"));
+                "wss://api.ahardtime.net/server/launcher-state?token=leak"));
         assertFalse(ServerStateClient.isEndpointAllowedForTests("wss://example.invalid/redirect"));
     }
 

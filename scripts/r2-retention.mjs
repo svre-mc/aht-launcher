@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_BUCKET = 'ahtlauncher';
-const DEFAULT_BASE_URL = 'https://aht-curseforge-proxy.mysticgamer312.workers.dev';
+const DEFAULT_BASE_URL = 'https://api.ahardtime.net';
 const DEFAULT_MAX_RETAINED_BYTES = 8 * 1024 * 1024 * 1024;
 const MANIFEST_PATHS = ['latest.json', 'ptb/latest.json', 'launcher/latest.json'];
 const RELEASE_KEY_PREFIXES = [

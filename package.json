@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.3",
-  "ahtLauncherVersion": "0.2.03",
+  "version": "0.2.4",
+  "ahtLauncherVersion": "0.2.04",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",

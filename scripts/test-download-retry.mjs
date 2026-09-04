@@ -125,7 +125,8 @@ try {
       timeoutMs: 5000
     });
   } catch (error) {
-    denied = /403 Forbidden/.test(error.message);
+    denied = /403 Forbidden/.test(error.message)
+      && !/https?:\/\/|127\.0\.0\.1|forbidden\.zip/i.test(error.message);
   }
   assert(denied, 'hard 403 download did not fail with the original status');
   assert(forbiddenHits === 1, `hard 403 download was retried instead of falling through immediately: ${forbiddenHits}`);
@@ -147,6 +148,7 @@ try {
     });
   } catch (error) {
     deniedProtectedExisting = /403 Forbidden/.test(error.message)
+      && !/https?:\/\/|127\.0\.0\.1|forbidden\.zip/i.test(error.message)
       && await fs.readFile(deniedDest, 'utf8') === 'known-good-before-denied-download'
       && !(await fs.stat(`${deniedDest}.download`).then(() => true).catch(() => false));
   }

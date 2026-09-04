@@ -1,5 +1,6 @@
 import {
   defaultInstanceDirForPlatform,
+  isMacosPrivacyProtectedPath,
   platformProfile
 } from '../src/platformProfile.js';
 
@@ -17,6 +18,16 @@ const linuxXdgDir = defaultInstanceDirForPlatform('linux', {
   HOME: '/home/player',
   XDG_DATA_HOME: '/mnt/player-data'
 });
+
+if (!isMacosPrivacyProtectedPath('/Users/player/Documents/CurseForge', { HOME: '/Users/player' })) {
+  throw new Error('macOS Documents paths must be treated as privacy protected during automatic discovery.');
+}
+if (!isMacosPrivacyProtectedPath('/Volumes/External/Minecraft', { HOME: '/Users/player' })) {
+  throw new Error('macOS external volumes must not be probed automatically.');
+}
+if (isMacosPrivacyProtectedPath('/Users/player/Library/Application Support/minecraft', { HOME: '/Users/player' })) {
+  throw new Error('The standard macOS Minecraft support directory must remain available without a Documents permission prompt.');
+}
 
 if (windowsDir !== 'C:\\AHT\\A Hard Time') {
   throw new Error(`Unexpected Windows instance dir: ${windowsDir}`);

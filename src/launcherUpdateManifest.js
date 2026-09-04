@@ -122,14 +122,14 @@ function validateCommonEntry(errors, entry, key, expectedRootUrl = '', expectedV
   const downloadKey = key.startsWith('downloads.') ? key.slice('downloads.'.length) : '';
   const directFileUrl = hasLauncherFileUrl(entry.url || '', expectedRootUrl, options);
   const trackedDownloadUrl = downloadKey
-    ? hasTrackedLauncherDownloadUrl(entry.url || '', downloadKey, expectedRootUrl, options)
+    ? hasTrackedLauncherDownloadUrl(entry.downloadUrl || entry.url || '', downloadKey, expectedRootUrl, options)
     : false;
   if (downloadKey) {
     if (!directFileUrl && !trackedDownloadUrl) {
       errors.push(`${key} url must point at launcher/download/${downloadKey} or launcher/files/`);
     }
     if (options.requireTrackedDownloads && !trackedDownloadUrl) {
-      errors.push(`${key} url must use launcher/download/${downloadKey}`);
+      errors.push(`${key} downloadUrl must use launcher/download/${downloadKey}`);
     }
   } else if (!directFileUrl) {
     errors.push(`${key} url must point at launcher/files/`);

@@ -1,36 +1,36 @@
 {
   "packId": "a-hard-time-dregora",
-  "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/latest.json",
+  "latestUrl": "https://api.ahardtime.net/latest.json",
   "packs": {
     "ptb": {
       "packId": "a-hard-time-ptb",
       "name": "A Hard Time PTB",
-      "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/ptb/latest.json"
+      "latestUrl": "https://api.ahardtime.net/ptb/latest.json"
     }
   },
   "curseforge": {
-    "proxyBaseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/cf/",
+    "proxyBaseUrl": "https://api.ahardtime.net/cf/",
     "apiKeyEnv": "CURSEFORGE_API_KEY"
   },
   "sync": {
     "enabled": true,
     "sendLocalChanges": true,
-    "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "baseUrl": "https://api.ahardtime.net/",
     "playerLabel": ""
   },
   "launcherUpdate": {
     "enabled": true,
-    "latestUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json"
+    "latestUrl": "https://api.ahardtime.net/launcher/latest.json"
   },
   "launcherProof": {
     "enabled": true,
     "required": true,
-    "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "baseUrl": "https://api.ahardtime.net/",
     "keyId": "aht-launcher-attestation-v2"
   },
   "social": {
     "enabled": true,
-    "baseUrl": "https://aht-curseforge-proxy.mysticgamer312.workers.dev/",
+    "baseUrl": "https://api.ahardtime.net/",
     "stateUrl": "api/social",
     "actionUrl": "api/social/actions"
   },

@@ -85,6 +85,7 @@ async function check(name, request, expected) {
     length: response.headers.get('content-length'),
     contentRange: response.headers.get('content-range'),
     acceptRanges: response.headers.get('accept-ranges'),
+    contentDisposition: response.headers.get('content-disposition'),
     body
   };
   for (const [key, value] of Object.entries(expected)) {
@@ -146,12 +147,34 @@ results.push(await check('launcher latest', new Request('https://worker.test/lau
   length: '44',
   body: '{"product":"aht-launcher","version":"0.1.1"}'
 }));
+store.set('launcher/latest.json', {
+  value: JSON.stringify({ product: 'aht-launcher', version: '0.1.2' }),
+  contentType: 'application/json; charset=utf-8'
+});
+results.push(await check('launcher latest refresh', new Request('https://worker.test/launcher/latest.json'), {
+  status: 200,
+  contentType: 'application/json; charset=utf-8',
+  cacheControl: 'public, max-age=60, must-revalidate',
+  length: '44',
+  body: '{"product":"aht-launcher","version":"0.1.2"}'
+}));
 results.push(await check('launcher installer', new Request('https://worker.test/launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe'), {
   status: 200,
   contentType: 'application/vnd.microsoft.portable-executable',
   cacheControl: 'public, max-age=31536000, immutable',
+  contentDisposition: 'attachment; filename="AHT-Launcher-Windows-10-11-0.1.1.exe"',
   length: '3'
 }));
+const opaqueLimitedDownload = await worker.fetch(new Request('https://worker.test/packs/range-test.zip'), {
+  ...env,
+  AHT_PLAYER_API_RATE_LIMITER: { async limit() { return { success: false }; } }
+}, {});
+if (opaqueLimitedDownload.status !== 429
+    || await opaqueLimitedDownload.text() !== ''
+    || opaqueLimitedDownload.headers.has('Retry-After')
+    || [...opaqueLimitedDownload.headers].some(([name, value]) => /limit|remaining|reset|too many/i.test(`${name}:${value}`))) {
+  throw new Error(`Limited player download exposed implementation or quota details: ${JSON.stringify([...opaqueLimitedDownload.headers])}`);
+}
 results.push(await check('range pack', new Request('https://worker.test/packs/range-test.zip', { headers: { Range: 'bytes=1-3' } }), {
   status: 206,
   contentType: 'application/zip',
@@ -194,6 +217,21 @@ results.push(await check('root', new Request('https://worker.test/'), {
   status: 200,
   contentType: 'application/json'
 }));
+const missingDataAdmin = await worker.fetch(new Request('https://worker.test/admin/events'), {
+  ...env,
+  AHT_DATA: null
+}, {});
+const missingDataAdminBody = await missingDataAdmin.text();
+if (missingDataAdmin.status !== 401
+    || /AHT_DATA|R2|binding|configured/i.test(missingDataAdminBody)) {
+  throw new Error(`Unauthenticated admin request exposed service configuration: ${missingDataAdmin.status} ${missingDataAdminBody}`);
+}
+const missingPublicKey = await worker.fetch(new Request('https://worker.test/api/launcher-proof/public-key'), env, {});
+const missingPublicKeyBody = await missingPublicKey.text();
+if (missingPublicKey.status !== 503
+    || missingPublicKeyBody !== '{"error":"AHT Proxy is temporarily unavailable."}') {
+  throw new Error(`Public service error exposed attestation configuration: ${missingPublicKey.status} ${missingPublicKeyBody}`);
+}
 
 cacheStore.clear();
 const cacheProbeKey = 'launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe';

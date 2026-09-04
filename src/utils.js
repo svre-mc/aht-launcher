@@ -161,7 +161,7 @@ export function isUrl(value) {
 }
 
 export function sourceToDisplay(source) {
-  return isFileUrl(source) ? fileURLToPath(source) : source;
+  return isHttpUrl(source) ? 'AHT download service' : 'local file';
 }
 
 export function resolveSource(baseSource, value) {
@@ -204,7 +204,7 @@ export async function readJsonFromSource(source, headers = {}) {
       cache: 'no-store'
     });
     if (!response.ok) {
-      throw new Error(`GET ${source} failed: ${response.status} ${response.statusText}`);
+      throw new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}`);
     }
     return response.json();
   }
@@ -223,8 +223,8 @@ export async function fetchJson(source, headers = {}) {
     cache: 'no-store'
   });
   if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`GET ${source} failed: ${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}`);
   }
   return response.json();
 }
@@ -323,7 +323,7 @@ async function probeRangeDownload(source, options, timeoutMs) {
     return { supported: true, total: range.total };
   }
   if (!response.ok) {
-    const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+    const error = new Error(`Download failed from ${sourceToDisplay(source)}: ${response.status} ${response.statusText}`);
     error.retryable = retryableHttpStatus(response.status);
     throw error;
   }
@@ -341,16 +341,16 @@ async function downloadRangePart({ source, fileHandle, start, end, total, option
     signal: abortSignal(timeoutMs)
   });
   if (response.status !== 206) {
-    const error = new Error(`Range download failed ${source}: expected 206, got ${response.status} ${response.statusText}`);
+    const error = new Error(`Range download failed from ${sourceToDisplay(source)}: expected 206, got ${response.status} ${response.statusText}`);
     error.retryable = retryableHttpStatus(response.status);
     throw error;
   }
   const range = parseContentRange(response.headers.get('content-range'));
   if (!range || range.start !== start || range.end !== end || range.total !== total) {
-    throw new Error(`Range download returned unexpected Content-Range for ${source}: ${response.headers.get('content-range') || 'missing'}`);
+    throw new Error(`Range download returned unexpected Content-Range from ${sourceToDisplay(source)}: ${response.headers.get('content-range') || 'missing'}`);
   }
   if (!response.body) {
-    throw new Error(`Range download failed ${source}: response body is empty`);
+    throw new Error(`Range download failed from ${sourceToDisplay(source)}: response body is empty`);
   }
   const reader = response.body.getReader();
   let position = start;
@@ -370,7 +370,7 @@ async function downloadRangePart({ source, fileHandle, start, end, total, option
   }
   const expectedBytes = end - start + 1;
   if (bytesRead !== expectedBytes) {
-    throw new Error(`Range download ended early for ${source}: expected ${expectedBytes} bytes, got ${bytesRead}`);
+    throw new Error(`Range download ended early from ${sourceToDisplay(source)}: expected ${expectedBytes} bytes, got ${bytesRead}`);
   }
 }
 
@@ -478,12 +478,12 @@ export async function downloadToFile(source, dest, options = {}) {
             signal: abortSignal(timeoutMs)
           });
           if (!response.ok) {
-            const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+            const error = new Error(`Download failed from ${sourceToDisplay(source)}: ${response.status} ${response.statusText}`);
             error.retryable = retryableHttpStatus(response.status);
             throw error;
           }
           if (!response.body) {
-            throw new Error(`Download failed ${source}: response body is empty`);
+            throw new Error(`Download failed from ${sourceToDisplay(source)}: response body is empty`);
           }
           const total = Number(response.headers.get('content-length')) || 0;
           await pipeline(
@@ -508,16 +508,16 @@ export async function downloadToFile(source, dest, options = {}) {
       await fs.rm(tmp, { force: true }).catch(() => {});
       if (error?.retryable === false || attempt >= attempts) {
         const reason = error?.message || String(error);
-        throw new Error(`Download failed after ${attempt} attempt${attempt === 1 ? '' : 's'} for ${source}: ${reason}`);
+        throw new Error(`Download failed after ${attempt} attempt${attempt === 1 ? '' : 's'} from ${sourceToDisplay(source)}: ${reason}`);
       }
       if (options.logger?.log) {
-        options.logger.log(`Download attempt ${attempt} failed for ${source}; retrying. ${error?.message || error}`);
+        options.logger.log(`Download attempt ${attempt} failed from ${sourceToDisplay(source)}; retrying. ${error?.message || error}`);
       }
       await sleep(retryDelayMs * attempt);
     }
   }
 
-  throw lastError || new Error(`Download failed for ${source}`);
+  throw lastError || new Error(`Download failed from ${sourceToDisplay(source)}`);
 }
 
 export async function removeFileIfExists(filePath) {

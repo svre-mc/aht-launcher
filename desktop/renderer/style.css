@@ -3113,7 +3113,7 @@ body.dev-mode .button.strong.is-disabled {
   justify-content: space-between;
   gap: 16px;
   min-height: 62px;
-  padding-bottom: 72px;
+  padding-bottom: 18px;
   border-bottom: 1px solid var(--line-strong);
 }
 
@@ -3123,21 +3123,6 @@ body.dev-mode .button.strong.is-disabled {
   font-weight: 700;
   letter-spacing: 0;
   text-shadow: 0 3px 0 rgba(0, 0, 0, 0.34);
-}
-
-.downloads-close-button {
-  position: absolute;
-  right: 0;
-  bottom: 14px;
-  z-index: 2;
-  min-width: 96px;
-  min-height: 38px;
-  -webkit-app-region: no-drag;
-}
-
-.downloads-close-button .button-icon {
-  width: 18px;
-  height: 18px;
 }
 
 .downloads-list {

@@ -31,6 +31,15 @@ try {
     assert(!/exposed-|dXNlcj|x{20}/i.test(sanitized), `Secret redaction missed an adversarial form: ${sanitized}`);
     assert(sanitized.includes('<redacted>'), `Secret redaction did not leave a clear placeholder: ${sanitized}`);
   }
+  const privateDiagnostics = [
+    'owner@example.com failed to download',
+    'https://personal-account.workers.dev/launcher/file.zip?aht_player=owner%40example.com&aht_uuid=private-uuid',
+    'upstream=personal-account.workers.dev username=owner@example.com'
+  ];
+  for (const diagnostic of privateDiagnostics) {
+    const sanitized = sanitizeDiagnosticText(diagnostic, 500);
+    assert(!/owner(?:%40|@)example\.com|personal-account|workers\.dev|private-uuid/i.test(sanitized), `Private service or identity data escaped diagnostic redaction: ${sanitized}`);
+  }
 
   const attempt = createLaunchAttempt({
     attemptId: '11111111-2222-4333-8444-555555555555',

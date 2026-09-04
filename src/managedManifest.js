@@ -11,7 +11,8 @@ import {
   isFileUrl,
   isHttpUrl,
   normalizeRelPath,
-  resolveSource
+  resolveSource,
+  sourceToDisplay
 } from './utils.js';
 
 const DEFAULT_MAX_MANIFEST_BYTES = 32 * 1024 * 1024;
@@ -84,7 +85,7 @@ async function readSourceBytes(source, maxBytes) {
     signal: globalThis.AbortSignal?.timeout?.(20_000)
   });
   if (!response.ok) {
-    throw new Error(`GET ${source} failed: ${response.status} ${response.statusText}`);
+    throw new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}`);
   }
   const declaredSize = Number(response.headers.get('Content-Length') || 0);
   if (declaredSize > maxBytes) {

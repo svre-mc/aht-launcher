@@ -96,7 +96,10 @@ const registered = await workerJson('/api/users/register', {
   },
   body: JSON.stringify(registration)
 }, { asn: 64512, asOrganization: 'Test VPN Network', country: 'US', colo: 'LAX' });
-if (!registered.response.ok || registered.body.deviceId !== device.deviceId) {
+const registeredAccount = JSON.parse(objects.get('accounts/usernames/devicerig.json') || 'null');
+if (!registered.response.ok
+    || registeredAccount?.deviceId !== device.deviceId
+    || Object.keys(registered.body).sort().join(',') !== 'minecraftUuid,ok,recovered,username') {
   throw new Error(`Device registration failed: ${registered.response.status} ${JSON.stringify(registered.body)}`);
 }
 

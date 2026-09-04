@@ -189,7 +189,7 @@ const server = http.createServer(async (request, response) => {
     }
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify({ ok: true, launcherUpdateKey: `launcher-updates/${body.appVersion}.json`, accountRefreshed: true }));
+    response.end(JSON.stringify({ ok: true, launcherUpdateRecorded: true }));
     return;
   }
   response.statusCode = 200;

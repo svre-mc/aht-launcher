@@ -37,15 +37,15 @@ if (!window.aht) {
     config: {
       latestUrl: "https://packs.example.com/latest.json",
       instanceDir: "C:\\AHT\\A Hard Time Developer",
-      curseforge: { proxyBaseUrl: "https://aht.example.workers.dev/cf/" },
+      curseforge: { proxyBaseUrl: "https://api.ahardtime.net/cf/" },
       sync: {
         enabled: true,
         sendLocalChanges: true,
-        baseUrl: "https://aht.example.workers.dev/",
+        baseUrl: "https://api.ahardtime.net/",
         playerLabel: "Preview"
       },
       developer: {
-        adminBaseUrl: "https://aht.example.workers.dev/",
+        adminBaseUrl: "https://api.ahardtime.net/",
         defaultOutDir: "C:\\Users\\Player\\Documents\\aht-release",
         defaultCacheModsDir: "C:\\AHT\\fallback-cache\\mods",
         r2Bucket: "ahtlauncher",
@@ -602,7 +602,6 @@ const els = {
   sidebarProgressCount: $("#sidebarProgressCount"),
   sidebarProgressBar: $("#sidebarProgressBar"),
   downloadsOverlay: $("#downloadsOverlay"),
-  downloadsCloseButton: $("#downloadsCloseButton"),
   downloadsBackButton: $("#downloadsBackButton"),
   downloadsState: $("#downloadsState"),
   downloadsProgressText: $("#downloadsProgressText"),
@@ -908,7 +907,6 @@ let friendsBusy = false;
 let friendsLoading = false;
 let friendsActionsAvailable = false;
 let friendsRefreshTimer = null;
-let friendsNotificationTimer = null;
 let friendsPresenceTimer = null;
 let friendsRequestId = 0;
 let friendsSocialState = null;
@@ -2058,21 +2056,6 @@ async function refreshFriendsPanel({ quiet = false } = {}) {
   }
 }
 
-async function refreshFriendsNotification() {
-  if (typeof window.aht?.socialList !== "function" || !accountUsername(currentStatus)) {
-    renderFriendsNotification(null);
-    return;
-  }
-  try {
-    const social = await window.aht.socialList();
-    friendsSocialState = social;
-    renderFriendsNotification(social);
-    if (els.friendsOverlay && !els.friendsOverlay.hidden && !friendsLoading) renderFriendsPanel(social);
-  } catch {
-    // Keep the last known request count until the service is reachable again.
-  }
-}
-
 function queueFriendsRefresh(delayMs) {
   const timer = window.setTimeout(() => {
     friendsActionRefreshTimers.delete(timer);
@@ -3035,7 +3018,7 @@ function renderDownloads(state = lastUpdateState) {
 function openDownloads() {
   renderDownloads();
   els.downloadsOverlay.hidden = false;
-  els.downloadsCloseButton.focus();
+  els.downloadsBackButton?.focus();
 }
 
 function closeDownloads(options = {}) {
@@ -3109,8 +3092,16 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   els.launcherUpdateProgressLabel.textContent = phase;
   els.launcherUpdateProgressCount.textContent = `${Math.round(percent)}%`;
   setMiniProgress(els.launcherUpdateProgressBar, percent);
-  const lines = [...(state?.lines || [])];
-  if (state?.error) lines.push(`ERROR: ${state.error}`);
+  const lines = bootDeveloperMode
+    ? [...(state?.lines || [])]
+    : [state?.error
+      ? "Launcher update failed."
+      : restartReady
+        ? "Launcher update verified and ready."
+        : state?.running
+          ? "Downloading and verifying launcher update."
+          : "Waiting to start launcher update."];
+  if (bootDeveloperMode && state?.error) lines.push(`ERROR: ${state.error}`);
   if (!lines.length) lines.push("Waiting to start launcher update.");
   setTextContentBounded(els.launcherUpdateLog, lines.join("\n"), LOG_TEXT_LIMIT);
   setLauncherUpdateButton(restartReady, instantRestartReady, externalPackageInstall);
@@ -4201,10 +4192,6 @@ function renderStatus(status) {
   els.playerLabelView.textContent = accountUsername(status) || "Player";
   if (els.profileFriendsButton) els.profileFriendsButton.hidden = !accountUsername(status);
   renderFriendsNotification(friendsSocialState);
-  if (!friendsNotificationTimer) {
-    refreshFriendsNotification();
-    friendsNotificationTimer = window.setInterval(refreshFriendsNotification, 15000);
-  }
   setSyncLine(status.config.sync?.enabled === false ? "Offline" : "Online");
   els.developerTab.hidden = !status.developerMode;
   els.developerTileButton.hidden = !status.developerMode;
@@ -4930,10 +4917,10 @@ async function pollUpdate() {
   }
   lastUpdateState = state;
   renderPrimaryAction(currentStatus);
-  const lines = [...state.lines];
+  const lines = bootDeveloperMode ? [...state.lines] : [];
   if (els.activityState) els.activityState.textContent = state.running ? "Running" : "Idle";
   setProgress(shouldShowUpdateProgress(state), estimateProgress(state), updateProgressLabel(state));
-  if (state.error) lines.push(`ERROR: ${state.error}`);
+  if (bootDeveloperMode && state.error) lines.push(`ERROR: ${state.error}`);
   if (isSuccessfulUpdateState(state) && state.lastResult?.installed?.version) lines.push(`Installed ${state.lastResult.installed.version}`);
   setLog(lines.join("\n"));
   renderDownloads(state);
@@ -5243,7 +5230,6 @@ els.setupSettingsButton.addEventListener("click", () => activateTab("settings"))
 els.setupAutoButton.addEventListener("click", applyRecommendedSetup);
 els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
 els.downloadsButton.addEventListener("click", openDownloads);
-els.downloadsCloseButton.addEventListener("click", closeDownloads);
 if (els.downloadsBackButton) els.downloadsBackButton.addEventListener("click", closeDownloads);
 if (els.downloadsErrorReportButton) {
   els.downloadsErrorReportButton.addEventListener("click", () => copyErrorReportFromToast({

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { migrateLegacyAhtServiceUrl } from '../src/ahtServiceUrl.js';
 import { launcherReleaseVersionFromPackage } from '../src/launcherVersion.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -118,10 +119,8 @@ async function artifactEntry({ file, key, label, kind, rootUrl, installArgs = []
   };
 }
 
-function trackedInstallerUrl(entryUrl, downloadKey) {
-  const url = new URL(entryUrl);
-  url.searchParams.set('aht_download', downloadKey);
-  return url.toString();
+function trackedInstallerUrl(rootUrl, downloadKey) {
+  return new URL(`launcher/download/${downloadKey}`, rootUrl).toString();
 }
 
 function addAliases(platforms, aliases, entry) {
@@ -133,7 +132,7 @@ function addAliases(platforms, aliases, entry) {
 function defaultLatestUrl(config) {
   return process.env.AHT_LAUNCHER_UPDATE_URL
     || config?.launcherUpdate?.latestUrl
-    || 'https://aht-curseforge-proxy.mysticgamer312.workers.dev/launcher/latest.json';
+    || 'https://api.ahardtime.net/launcher/latest.json';
 }
 
 function requireHttpsLatestUrl(latestUrl = '') {
@@ -155,7 +154,9 @@ export async function prepareLauncherUpdate(options = {}) {
   const artifactsDir = path.resolve(options.artifactsDir || 'ci-artifacts');
   const outDir = path.resolve(options.outDir || 'ci-launcher-update');
   const version = String(options.version || process.env.AHT_LAUNCHER_VERSION || launcherReleaseVersionFromPackage(packageJson)).trim();
-  const latestUrl = requireHttpsLatestUrl(String(options.latestUrl || defaultLatestUrl(config)).trim());
+  const latestUrl = requireHttpsLatestUrl(migrateLegacyAhtServiceUrl(
+    String(options.latestUrl || defaultLatestUrl(config)).trim()
+  ));
 
   if (!version) throw new Error('Launcher version is required.');
   if (!latestUrl) throw new Error('Launcher update latest URL is required.');
@@ -236,9 +237,9 @@ export async function prepareLauncherUpdate(options = {}) {
   addAliases(stagedPlatforms, ['portable-linux-x64', 'portable-linux'], linuxAppImage.entry);
 
   const downloads = {
-    'windows-x64': { ...windowsInstaller.entry, url: trackedInstallerUrl(windowsInstaller.entry.url, 'windows-x64') },
-    'macos-universal': { ...macUniversalInstaller.entry, url: trackedInstallerUrl(macUniversalInstaller.entry.url, 'macos-universal') },
-    'ubuntu-x64-appimage': { ...linuxAppImage.entry, url: trackedInstallerUrl(linuxAppImage.entry.url, 'ubuntu-x64-appimage') }
+    'windows-x64': { ...windowsInstaller.entry, downloadUrl: trackedInstallerUrl(rootUrl, 'windows-x64') },
+    'macos-universal': { ...macUniversalInstaller.entry, downloadUrl: trackedInstallerUrl(rootUrl, 'macos-universal') },
+    'ubuntu-x64-appimage': { ...linuxAppImage.entry, downloadUrl: trackedInstallerUrl(rootUrl, 'ubuntu-x64-appimage') }
   };
 
   const manifest = {

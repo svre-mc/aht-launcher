@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { isIP } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -44,7 +45,12 @@ import {
   preflightJava8Runtime
 } from '../src/forgeInstaller.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
-import { defaultInstanceDirForPlatform, platformKey, platformProfile } from '../src/platformProfile.js';
+import {
+  defaultInstanceDirForPlatform,
+  isMacosPrivacyProtectedPath,
+  platformKey,
+  platformProfile
+} from '../src/platformProfile.js';
 import { launcherReleaseVersionFromPackage } from '../src/launcherVersion.js';
 import {
   LAUNCHER_ATTESTATION_KEY_ID,
@@ -53,7 +59,13 @@ import {
   launcherProofStorageDir,
   writeLauncherProof
 } from '../src/launcherProof.js';
-import { createDeviceAssertion, createDeviceCredential, validateDeviceCredential } from '../src/deviceIdentity.js';
+import {
+  DEVICE_IDENTITY_PROTOCOL,
+  createDeviceAssertion,
+  createDeviceCredential,
+  deviceIdFromPublicKey,
+  validateDeviceCredential
+} from '../src/deviceIdentity.js';
 import { loadVerifiedManagedManifest } from '../src/managedManifest.js';
 import { fetchSocialState, sendSocialAction } from '../src/socialClient.js';
 import {
@@ -100,6 +112,7 @@ import {
   releaseTargetOutDir,
   workerServiceBaseUrl
 } from '../src/releaseTargets.js';
+import { migrateLegacyAhtServiceUrl } from '../src/ahtServiceUrl.js';
 import {
   buildWindowsMinecraftProcessSnapshotPowerShell,
   isKnownWindowsMinecraftLauncher,
@@ -320,6 +333,7 @@ const launchPreparationProofTimers = new Map();
 const launchPreparationWatchers = new Map();
 let startupPreparationInFlight = null;
 let startupSnapshotWriteQueue = Promise.resolve();
+let startupPreparationSecretPromise = null;
 let startupPreparationState = {
   running: false,
   firstInitialization: false,
@@ -332,6 +346,7 @@ let startupPreparationState = {
 const launcherVersionTelemetryInFlight = new Map();
 const remoteRegistrationRefreshes = new Map();
 const remoteRegistrationsCompletedThisSession = new Map();
+const accountRecoverySecretPromises = new Map();
 const LATEST_RELEASE_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
 const UPDATE_LOGS_CACHE_MAX_AGE_MS = 15 * 1000;
 const UPDATE_LOGS_NETWORK_TIMEOUT_MS = 8 * 1000;
@@ -1160,9 +1175,21 @@ function supportSafeReportText(report = {}) {
   }
   return text
     .replace(/https?:\/\/[^\s|)]+/gi, 'AHT Proxy')
+    .replace(/\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.workers\.dev\b/gi, 'AHT Proxy')
     .replace(/aht[- ]curseforge[- ]proxy[^\s|)]*/gi, 'AHT Proxy')
+    .replace(/([?&](?:aht_(?:player|username|uuid)|email|user|username)=)[^&#\s|)]*/gi, '$1<redacted>')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '<email>')
+    .replace(/\bahtd_[a-f0-9]{64}\b/gi, '<device-id>')
+    .replace(/\b[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\b/gi, '<account-id>')
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '<network-address>')
-    .replace(/\b(?:AHT_RELEASES|AHT_DATA|CURSEFORGE_API_KEY|LAUNCHER_PROOF_SECRET)\b/g, 'AHT Proxy')
+    .replace(/(?<![A-Za-z0-9])\[?[A-Fa-f0-9]*:[A-Fa-f0-9:]+\]?(?![A-Za-z0-9])/g, (candidate) => {
+      const address = candidate.replace(/^\[|\]$/g, '');
+      return isIP(address) === 6 ? '<network-address>' : candidate;
+    })
+    .replace(/\\\\[^\s|)]+[\\/][^\s|)]+/g, '<local-path>')
+    .replace(/\b[A-Za-z]:[\\/][^\s|)]+/g, '<local-path>')
+    .replace(/(^|[\s("'=])\/(?:Users|home|tmp|var|opt|mnt|media|run\/user)\/[^\s|)]+/g, '$1<local-path>')
+    .replace(/\b(?:AHT_[A-Z0-9_]+|CURSEFORGE_API_KEY|ADMIN_(?:USERNAME|PASSWORD|PASSWORD_SHA256|TOKEN_SECRET))\b/g, 'AHT configuration')
     .trimEnd() + '\r\n';
 }
 
@@ -1881,12 +1908,25 @@ async function loadDeviceCredential() {
 }
 
 async function publicDeviceIdentity() {
-  const credential = await loadDeviceCredential();
-  return {
-    deviceId: credential.deviceId,
-    devicePublicKey: credential.publicKey,
-    deviceIdentityProtocol: credential.protocol
-  };
+  const stored = await readJsonFile(deviceIdentityPath()).catch(() => null);
+  try {
+    const publicKey = String(stored?.publicKey || '').trim();
+    const deviceId = String(stored?.deviceId || '').trim();
+    if (
+      stored?.protocol !== DEVICE_IDENTITY_PROTOCOL
+      || stored?.algorithm !== 'Ed25519'
+      || deviceId !== deviceIdFromPublicKey(publicKey)
+    ) {
+      return {};
+    }
+    return {
+      deviceId,
+      devicePublicKey: publicKey,
+      deviceIdentityProtocol: stored.protocol
+    };
+  } catch {
+    return {};
+  }
 }
 
 async function readDeveloperSecretsFile() {
@@ -2252,6 +2292,7 @@ function defaultConfig() {
       enabled: true,
       closeLauncherWhenGameStarts: false,
       rootDir: defaultMinecraftRoot(),
+      rootSelection: 'default',
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
       memoryMb: DEFAULT_MINECRAFT_MEMORY_MB,
@@ -2338,30 +2379,50 @@ function isPlayerDefaultInstanceDir(value = '') {
   return Boolean(value) && samePath(value, defaultPlayerInstanceDir());
 }
 
+function macosAutomaticPathAllowed(value = '') {
+  return process.platform !== 'darwin' || !isMacosPrivacyProtectedPath(value, {
+    ...process.env,
+    HOME: process.env.HOME || app.getPath('home')
+  });
+}
+
+function macosMinecraftRootCandidateAllowed(config = {}, value = '') {
+  if (macosAutomaticPathAllowed(value)) return true;
+  return String(config.minecraftLauncher?.rootSelection || '').trim().toLowerCase() === 'manual'
+    && samePath(value, config.minecraftLauncher?.rootDir || '');
+}
+
 function localInstanceCandidates() {
   const home = app.getPath('home');
-  const documents = app.getPath('documents');
-  return [...new Set([
+  const candidates = [
     path.join(home, 'curseforge', 'minecraft', 'Instances', 'RLCraft Dregora'),
-    path.join(home, 'curseforge', 'minecraft', 'Instances', 'A Hard Time Dregora'),
-    path.join(documents, 'CurseForge', 'minecraft', 'Instances', 'RLCraft Dregora'),
-    path.join(documents, 'CurseForge', 'minecraft', 'Instances', 'A Hard Time Dregora')
-  ])];
+    path.join(home, 'curseforge', 'minecraft', 'Instances', 'A Hard Time Dregora')
+  ];
+  if (process.platform !== 'darwin') {
+    const documents = app.getPath('documents');
+    candidates.push(
+      path.join(documents, 'CurseForge', 'minecraft', 'Instances', 'RLCraft Dregora'),
+      path.join(documents, 'CurseForge', 'minecraft', 'Instances', 'A Hard Time Dregora')
+    );
+  }
+  return [...new Set(candidates)];
 }
 
 function localMinecraftLauncherCandidates() {
   const home = app.getPath('home');
-  const documents = app.getPath('documents');
   const normalRoots = minecraftRootCandidates(process.platform, {
     ...process.env,
     HOME: process.env.HOME || app.getPath('home'),
     USERPROFILE: process.env.USERPROFILE || app.getPath('home')
   });
-  return [...new Set([
+  const candidates = [
     ...normalRoots,
-    path.join(home, 'curseforge', 'minecraft', 'Install'),
-    path.join(documents, 'CurseForge', 'minecraft', 'Install')
-  ])];
+    path.join(home, 'curseforge', 'minecraft', 'Install')
+  ];
+  if (process.platform !== 'darwin') {
+    candidates.push(path.join(app.getPath('documents'), 'CurseForge', 'minecraft', 'Install'));
+  }
+  return [...new Set(candidates)];
 }
 
 function uniqueCurrentPlatformPaths(paths = []) {
@@ -2463,7 +2524,7 @@ function curseForgeStorageMinecraftRootCandidates() {
 
 function localCurseForgeMinecraftRoots(config = {}) {
   const home = app.getPath('home');
-  const documents = app.getPath('documents');
+  const documents = process.platform === 'darwin' ? '' : app.getPath('documents');
   const configuredRoots = [
     config.minecraftLauncher?.rootDir,
     ...(Array.isArray(config.minecraftLauncher?.syncRoots) ? config.minecraftLauncher.syncRoots : [])
@@ -2472,8 +2533,6 @@ function localCurseForgeMinecraftRoots(config = {}) {
     ? [
         path.join(home, 'curseforge', 'minecraft', 'Install'),
         path.join(home, 'CurseForge', 'minecraft', 'Install'),
-        path.join(documents, 'CurseForge', 'minecraft', 'Install'),
-        path.join(documents, 'curseforge', 'minecraft', 'Install'),
         path.join(home, 'Library', 'Application Support', 'CurseForge', 'minecraft', 'Install'),
         path.join(home, 'Library', 'Application Support', 'curseforge', 'minecraft', 'Install')
       ]
@@ -2491,7 +2550,7 @@ function localCurseForgeMinecraftRoots(config = {}) {
     process.env.AHT_TEST_HOOKS === '1' ? process.env.AHT_TEST_CURSEFORGE_MINECRAFT_ROOT : '',
     ...curseForgeStorageMinecraftRootCandidates(),
     ...configuredRoots.filter(isCurseForgeMinecraftRoot)
-  ];
+  ].filter((rootDir) => macosMinecraftRootCandidateAllowed(config, rootDir));
   if (process.env.AHT_TEST_HOOKS !== '1') detectedRoots.push(...staticRoots);
   return uniqueCurrentPlatformPaths(detectedRoots);
 }
@@ -2536,6 +2595,7 @@ async function existingMinecraftLauncherFallbackRoots(config = {}, primaryRoot =
   ]);
   const roots = [];
   for (const candidate of candidates) {
+    if (!macosMinecraftRootCandidateAllowed(config, candidate)) continue;
     if (primaryRoot && samePath(candidate, primaryRoot)) continue;
     if (knownCurseForgeRoots.some((rootDir) => samePath(rootDir, candidate))) continue;
     const requiredFallback = Boolean(
@@ -2726,6 +2786,29 @@ function normalizedWorkerControlConfig(config = {}) {
   };
   let changed = false;
 
+  const migrateUrl = (section, key) => {
+    const current = String((section ? normalized[section]?.[key] : normalized[key]) || '').trim();
+    if (!current) return;
+    const next = migrateLegacyAhtServiceUrl(current);
+    if (next === current) return;
+    if (section) normalized[section][key] = next;
+    else normalized[key] = next;
+    changed = true;
+  };
+  migrateUrl('', 'latestUrl');
+  migrateUrl('curseforge', 'proxyBaseUrl');
+  migrateUrl('sync', 'baseUrl');
+  migrateUrl('developer', 'adminBaseUrl');
+  migrateUrl('launcherUpdate', 'latestUrl');
+  migrateUrl('launcherProof', 'baseUrl');
+  migrateUrl('social', 'baseUrl');
+  const ptbLatest = String(normalized.packs.ptb.latestUrl || '').trim();
+  const migratedPtbLatest = migrateLegacyAhtServiceUrl(ptbLatest);
+  if (migratedPtbLatest !== ptbLatest) {
+    normalized.packs.ptb.latestUrl = migratedPtbLatest;
+    changed = true;
+  }
+
   const normalizeBase = (section, key) => {
     const current = String(normalized[section]?.[key] || '').trim();
     if (!current) return;
@@ -2843,6 +2926,22 @@ async function packagedDefaults() {
       break;
     }
   }
+  const packagedMinecraftRoot = String(configured.minecraftLauncher?.rootDir || '').trim();
+  configured.minecraftLauncher = {
+    ...(configured.minecraftLauncher || {}),
+    rootDir: process.platform === 'darwin' && !macosAutomaticPathAllowed(packagedMinecraftRoot)
+      ? defaultMinecraftRoot()
+      : (packagedMinecraftRoot || defaultMinecraftRoot()),
+    syncRoots: (Array.isArray(configured.minecraftLauncher?.syncRoots)
+      ? configured.minecraftLauncher.syncRoots
+      : []).filter(macosAutomaticPathAllowed),
+    rootSelection: !packagedMinecraftRoot || samePath(packagedMinecraftRoot, defaultMinecraftRoot())
+      ? 'default'
+      : 'automatic'
+  };
+  if (process.platform === 'darwin' && !macosAutomaticPathAllowed(packagedMinecraftRoot)) {
+    configured.minecraftLauncher.rootSelection = 'default';
+  }
   if (!configured.instanceDir || isCurseForgeInstanceDir(configured.instanceDir) || isOldLauncherInstanceDir(configured.instanceDir)) {
     configured.instanceDir = defaultInstanceDir();
   }
@@ -2869,6 +2968,7 @@ async function packagedDefaults() {
     )
   ) {
     configured.minecraftLauncher.rootDir = detectedMinecraftRoot;
+    configured.minecraftLauncher.rootSelection = 'automatic';
   }
   if (!configured.playCommand?.cwd || configured.playCommand.cwd === defaults.playCommand.cwd) {
     configured.playCommand.cwd = configured.instanceDir;
@@ -2897,6 +2997,36 @@ async function loadConfig() {
   const normalizedWorkerConfig = normalizedWorkerControlConfig(config);
   config = normalizedWorkerConfig.config;
   let changed = normalizedWorkerConfig.changed;
+  const storedRootSelection = String(stored.minecraftLauncher?.rootSelection || '').trim().toLowerCase();
+  if (!['default', 'automatic', 'manual'].includes(storedRootSelection)) {
+    config.minecraftLauncher.rootSelection = !String(stored.minecraftLauncher?.rootDir || '').trim() || samePath(
+      stored.minecraftLauncher?.rootDir || '',
+      defaultMinecraftRoot()
+    ) ? 'default' : 'automatic';
+    changed = true;
+  } else if (config.minecraftLauncher.rootSelection !== storedRootSelection) {
+    config.minecraftLauncher.rootSelection = storedRootSelection;
+    changed = true;
+  }
+  if (
+    process.platform === 'darwin'
+    && !macosAutomaticPathAllowed(config.minecraftLauncher?.rootDir || '')
+    && config.minecraftLauncher?.rootSelection !== 'manual'
+  ) {
+    config.minecraftLauncher = {
+      ...config.minecraftLauncher,
+      rootDir: defaultMinecraftRoot(),
+      rootSelection: 'default'
+    };
+    changed = true;
+  }
+  const safeSyncRoots = (Array.isArray(config.minecraftLauncher?.syncRoots)
+    ? config.minecraftLauncher.syncRoots
+    : []).filter(macosAutomaticPathAllowed);
+  if (safeSyncRoots.length !== (Array.isArray(config.minecraftLauncher?.syncRoots) ? config.minecraftLauncher.syncRoots.length : 0)) {
+    config.minecraftLauncher.syncRoots = safeSyncRoots;
+    changed = true;
+  }
   if (!trustedMinecraftOpenCommandAllowed() && String(stored.minecraftLauncher?.openCommand || '').trim()) {
     changed = true;
   }
@@ -2923,15 +3053,21 @@ async function loadConfig() {
     samePath(stored.minecraftLauncher?.rootDir, defaultMinecraftRoot())
   ) {
     config.minecraftLauncher.rootDir = defaults.minecraftLauncher.rootDir;
+    config.minecraftLauncher.rootSelection = defaults.minecraftLauncher.rootSelection || 'automatic';
     changed = true;
   }
   const preferredCurseForgeRoot = await firstExistingCurseForgeMinecraftRoot(config);
-  if (preferredCurseForgeRoot && !samePath(config.minecraftLauncher?.rootDir, preferredCurseForgeRoot)) {
+  if (
+    preferredCurseForgeRoot
+    && config.minecraftLauncher?.rootSelection !== 'manual'
+    && !samePath(config.minecraftLauncher?.rootDir, preferredCurseForgeRoot)
+  ) {
     try {
       await backupConfigBeforeCurseForgeMigration(file);
       config.minecraftLauncher = {
         ...config.minecraftLauncher,
-        rootDir: preferredCurseForgeRoot
+        rootDir: preferredCurseForgeRoot,
+        rootSelection: 'automatic'
       };
       changed = true;
     } catch (error) {
@@ -3105,6 +3241,19 @@ async function refreshMinecraftLauncherProfile(config) {
 async function saveSettings(configPatch, packValue = 'stable') {
   const target = releaseTarget(packValue);
   const previousBaseConfig = await loadConfig();
+  if (
+    Object.prototype.hasOwnProperty.call(configPatch?.minecraftLauncher || {}, 'rootDir')
+    && String(configPatch.minecraftLauncher.rootDir || '').trim()
+    && !samePath(configPatch.minecraftLauncher.rootDir, previousBaseConfig.minecraftLauncher?.rootDir || '')
+  ) {
+    configPatch = {
+      ...configPatch,
+      minecraftLauncher: {
+        ...configPatch.minecraftLauncher,
+        rootSelection: 'manual'
+      }
+    };
+  }
   let baseConfig = null;
   if (target.id === 'stable') {
     baseConfig = await saveConfig(configPatch);
@@ -3240,7 +3389,10 @@ async function applyRecommendedSetup() {
     },
     minecraftLauncher: {
       ...current.minecraftLauncher,
-      rootDir: setup.recommendedMinecraftRoot || current.minecraftLauncher?.rootDir || defaultMinecraftRoot()
+      rootDir: setup.recommendedMinecraftRoot || current.minecraftLauncher?.rootDir || defaultMinecraftRoot(),
+      rootSelection: setup.recommendedMinecraftRoot
+        ? 'automatic'
+        : (current.minecraftLauncher?.rootSelection || 'default')
     },
     playCommand: {
       ...current.playCommand,
@@ -3543,7 +3695,8 @@ async function acceptLauncherLegal(payload = {}) {
   return { ok: true, acceptedAt: record.acceptedAt };
 }
 
-async function identityPayload(config = null) {
+async function identityPayload(config = null, options = {}) {
+  const allowProtectedStorage = options.allowProtectedStorage !== false;
   const identity = await loadIdentity();
   let nextIdentity = identity;
   if (config?.minecraftLauncher?.rootDir && config.minecraftLauncher?.autoImportAccount !== false) {
@@ -3567,7 +3720,11 @@ async function identityPayload(config = null) {
         minecraftUsernameSyncWarning: 'Minecraft account UUID does not match the saved launcher identity.'
       };
       await writeJsonFile(identityPath(), nextIdentity);
-    } else if (detectedUsername && (!sameUsername || (detectedMinecraftUuid && !currentMinecraftUuid))) {
+    } else if (
+      allowProtectedStorage
+      && detectedUsername
+      && (!sameUsername || (detectedMinecraftUuid && !currentMinecraftUuid))
+    ) {
       try {
         const registered = await registerMinecraftUsernameInFlight(config, nextIdentity, detectedUsername, {
           mode: sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher',
@@ -3585,9 +3742,16 @@ async function identityPayload(config = null) {
         };
         await writeJsonFile(identityPath(), nextIdentity);
       }
+    } else if (detectedUsername) {
+      nextIdentity = {
+        ...nextIdentity,
+        minecraftLauncherDetectedUsername: detectedUsername
+      };
     }
   }
-  nextIdentity = await refreshRemoteMinecraftRegistration(config, nextIdentity);
+  if (allowProtectedStorage) {
+    nextIdentity = await refreshRemoteMinecraftRegistration(config, nextIdentity);
+  }
   const device = await publicDeviceIdentity();
   return {
     ...nextIdentity,
@@ -3751,7 +3915,7 @@ function accountRecoveryCredentialPath(config = {}, username = '') {
   return path.join(app.getPath('userData'), 'account-recovery', `${normalizedUsername}.json`);
 }
 
-async function accountRecoverySecret(config = {}, username = '') {
+async function resolveAccountRecoverySecret(config = {}, username = '') {
   const file = accountRecoveryCredentialPath(config, username);
   const normalizedUsername = normalizeMinecraftUsername(username).toLowerCase();
   const legacyFiles = [
@@ -3820,6 +3984,22 @@ async function accountRecoverySecret(config = {}, username = '') {
     protectedBy: protectedSecret.encrypted ? 'electron-safe-storage' : 'explicit-test-fallback'
   });
   return secret;
+}
+
+async function accountRecoverySecret(config = {}, username = '') {
+  const key = normalizeMinecraftUsername(username).toLowerCase();
+  const cached = accountRecoverySecretPromises.get(key);
+  if (cached) return cached;
+  const operation = resolveAccountRecoverySecret(config, username);
+  accountRecoverySecretPromises.set(key, operation);
+  try {
+    return await operation;
+  } catch (error) {
+    if (accountRecoverySecretPromises.get(key) === operation) {
+      accountRecoverySecretPromises.delete(key);
+    }
+    throw error;
+  }
 }
 
 function minecraftUsernameMatchesAuth(auth = {}, username = '') {
@@ -4006,7 +4186,7 @@ async function reportCurrentLauncherVersion(config = {}, identity = {}) {
     toVersion: version,
     fromVersion: previousVersion
   });
-  if (!result?.launcherUpdateKey) {
+  if (!result?.launcherUpdateRecorded) {
     return { skipped: true, reason: 'player data service does not support launcher update records yet' };
   }
 
@@ -4027,7 +4207,7 @@ async function reportCurrentLauncherVersion(config = {}, identity = {}) {
     lastReportedLauncherVersion: version,
     launcherVersionReportedAt: new Date().toISOString()
   });
-  return { ok: true, version, launcherUpdateKey: result.launcherUpdateKey };
+  return { ok: true, version, recorded: true };
 }
 
 function queueCurrentLauncherVersionReport(config = {}, identity = {}) {
@@ -5298,6 +5478,9 @@ function minecraftLauncherHandoffForRenderer(handoff = {}) {
 
 async function getStatus(configOverride = null, packValue = 'stable', options = {}) {
   const statusProbeStartedAt = Date.now();
+  const allowProtectedStorage = options.allowProtectedStorage === undefined
+    ? process.platform !== 'darwin'
+    : options.allowProtectedStorage === true;
   const statusProbe = (stage) => writeTestStartupProbe(`status-${stage}`, {
     packValue: String(packValue || 'stable'),
     elapsedMs: Date.now() - statusProbeStartedAt
@@ -5315,9 +5498,9 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   statusProbe('runtime-config-ready');
   const identity = usePreparedPrerequisites && prepared.identity
     ? prepared.identity
-    : await identityPayload(launcherConfig);
+    : await identityPayload(launcherConfig, { allowProtectedStorage });
   statusProbe('identity-ready');
-  queueCurrentLauncherVersionReport(config, identity);
+  if (allowProtectedStorage) queueCurrentLauncherVersionReport(config, identity);
   let latest = null;
   let latestError = null;
   let updateLogs = [];
@@ -8299,6 +8482,14 @@ function wranglerToml({ releaseBucket = 'ahtlauncher', dataBucket = '' } = {}) {
     'main = "curseforge-proxy-worker.js"',
     'compatibility_date = "2026-06-01"',
     'workers_dev = true',
+    'preview_urls = false',
+    '',
+    '[[routes]]',
+    'pattern = "api.ahardtime.net"',
+    'custom_domain = true',
+    '',
+    '[vars]',
+    'AHT_PUBLIC_ORIGIN = "https://api.ahardtime.net"',
     '',
     '[[r2_buckets]]',
     'binding = "AHT_RELEASES"',
@@ -8347,7 +8538,13 @@ function workerBaseUrlFromLatest(value = '') {
 
 function parseWorkerUrl(output = '') {
   const matches = [...String(output || '').matchAll(/https?:\/\/[^\s"'<>]+/g)].map((match) => match[0].replace(/[),.;]+$/, ''));
-  return matches.find((url) => /workers\.dev/i.test(url)) || matches[0] || '';
+  return matches.find((url) => {
+    try {
+      return new URL(url).origin === 'https://api.ahardtime.net';
+    } catch {
+      return false;
+    }
+  }) || 'https://api.ahardtime.net';
 }
 
 function wranglerOutputShowsAuthenticated(output = '') {
@@ -8702,9 +8899,9 @@ function playerDefaultsTargets() {
       path: path.resolve(process.env.AHT_PLAYER_DEFAULTS_DIR, 'app.defaults.json')
     }];
   }
-  const targets = [
-    { kind: 'documents-copy', path: path.join(app.getPath('documents'), 'aht-launcher', 'app.defaults.json') }
-  ];
+  const targets = [process.platform === 'darwin'
+    ? { kind: 'user-data-copy', path: path.join(app.getPath('userData'), 'player-defaults', 'app.defaults.json') }
+    : { kind: 'documents-copy', path: path.join(app.getPath('documents'), 'aht-launcher', 'app.defaults.json') }];
   if (process.env.AHT_SKIP_SOURCE_DEFAULTS !== '1') {
     targets.unshift({ kind: 'source-config', path: path.join(appRoot, 'config', 'app.defaults.json') });
   }
@@ -10682,7 +10879,7 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
   } else {
     const serverLockConfig = await fs.readFile(serverLockPath, 'utf8');
     const hasPackId = serverLockConfig.includes(`S:requiredPackId=${latest.packId}`);
-    const hasVerifier = serverLockConfig.includes('S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify');
+    const hasVerifier = serverLockConfig.includes('S:verificationUrl=https://api.ahardtime.net/api/launcher-proof/verify');
     const hasReconnectMessage = serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}');
     if (hasPackId && hasVerifier && hasReconnectMessage) {
       add('ok', 'server launcher lock config matches release', path.relative(outDir, serverLockPath));
@@ -12266,16 +12463,7 @@ function startupPreparationReleaseSignature(latest = null) {
   });
 }
 
-async function startupPreparationSecret(options = {}) {
-  const testSecret = process.env.AHT_TEST_HOOKS === '1'
-    ? String(process.env.AHT_TEST_STARTUP_PREPARATION_SECRET || '').trim().toLowerCase()
-    : '';
-  if (testSecret) {
-    if (!/^[a-f0-9]{64}$/.test(testSecret)) {
-      throw new Error('The test quick startup key must be exactly 64 hexadecimal characters.');
-    }
-    return testSecret;
-  }
+async function resolveStartupPreparationSecret(options = {}) {
   const encryptionAvailable = safeStorageAvailable();
   const allowTestFallback = useUnencryptedDeviceSecretTestFallback();
   if (!encryptionAvailable && !allowTestFallback) {
@@ -12309,6 +12497,39 @@ async function startupPreparationSecret(options = {}) {
     createdAt: new Date().toISOString()
   });
   return secret;
+}
+
+function beginStartupPreparationSecretResolution(options = {}) {
+  let cachedOperation = null;
+  cachedOperation = resolveStartupPreparationSecret(options).catch((error) => {
+    if (startupPreparationSecretPromise === cachedOperation) {
+      startupPreparationSecretPromise = null;
+    }
+    throw error;
+  });
+  startupPreparationSecretPromise = cachedOperation;
+  return cachedOperation;
+}
+
+async function startupPreparationSecret(options = {}) {
+  const testSecret = process.env.AHT_TEST_HOOKS === '1'
+    ? String(process.env.AHT_TEST_STARTUP_PREPARATION_SECRET || '').trim().toLowerCase()
+    : '';
+  if (testSecret) {
+    if (!/^[a-f0-9]{64}$/.test(testSecret)) {
+      throw new Error('The test quick startup key must be exactly 64 hexadecimal characters.');
+    }
+    return testSecret;
+  }
+
+  const operation = startupPreparationSecretPromise
+    || beginStartupPreparationSecretResolution({ create: false });
+  const existing = await operation;
+  if (existing || options.create !== true) return existing;
+  if (startupPreparationSecretPromise === operation) {
+    beginStartupPreparationSecretResolution({ create: true });
+  }
+  return startupPreparationSecretPromise;
 }
 
 function signStartupPreparationPayload(payloadText = '', secret = '') {
@@ -13050,7 +13271,6 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
   const target = descriptor.target || releaseTarget(options.packValue || 'stable');
   const config = descriptor.config || configForPack(await loadConfig(), target.id);
   const installed = descriptor.installed || null;
-  const developerClientBypass = developerClientBypassAllowed();
   const attempt = options.attempt || createLaunchDiagnosticAttempt(target);
   attempt.instanceDir = config.instanceDir;
   attempt.minecraftRoot = config.minecraftLauncher?.rootDir || '';
@@ -13110,9 +13330,8 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
       cacheNeedsPersist = true;
     }
-    if ((!developerClientBypass && !minecraftProfile?.profileExists)
-        || !minecraftProfile?.profileId || !minecraftProfile?.versionId) {
-      throw new Error(`${target.name} needs one Repair to create its Minecraft Launcher profile.`);
+    if (!minecraftProfile?.profileId || !minecraftProfile?.versionId) {
+      throw new Error(`${target.name} Minecraft Launcher profile metadata is incomplete. Run Repair once.`);
     }
 
     const identity = reusable?.identity || await loadIdentity();
@@ -13134,7 +13353,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       minecraftProfile.profileExists ? 'PASS' : 'WARN',
       minecraftProfile.profileExists
         ? `${minecraftProfile.profileName || target.name}; ${minecraftProfile.versionId}.`
-        : `${minecraftProfile.profileName || target.name}; ${minecraftProfile.versionId} will be selected for the developer client during loading.`
+        : `${minecraftProfile.profileName || target.name}; ${minecraftProfile.versionId} will be created and selected during launcher loading.`
     );
     setLaunchRequirement(attempt, 'launcherProof', 'NOT CHECKED', 'A fresh one-time launcher proof is requested only when Play is clicked.');
     attempt.instanceDir = config.instanceDir;
@@ -13268,7 +13487,7 @@ async function hydrateLaunchPreparationFromSnapshot(packValue = 'stable', cached
     // profile inputs; Play rewrites and verifies only that owned entry.
     const [launcherRoute, identity] = await Promise.all([
       resolveMinecraftLauncherRoute(launcherConfig),
-      identityPayload(launcherConfig)
+      identityPayload(launcherConfig, { allowProtectedStorage: process.platform !== 'darwin' })
     ]);
     const minecraftProfile = preparedProfileForSnapshot(cached.minecraftProfile);
     setLaunchRequirement(attempt, 'legal', 'PASS', 'Current consent is recorded.');
@@ -13494,9 +13713,20 @@ ipcMain.handle('play:select-prepared', async (_event, payload = {}) => {
   const target = releaseTarget(payload?.packKey || payload || 'stable');
   const entry = launchPreparationCache.get(target.id);
   if (entry?.state !== 'ready') return launchPreparationForRenderer(entry);
-  entry.minecraftProfile = await selectPreparedMinecraftLauncherProfile(entry.minecraftProfile);
-  entry.selectedForPlayAt = new Date().toISOString();
-  return launchPreparationForRenderer(entry);
+  try {
+    const profileWasMissing = entry.minecraftProfile?.profileExists !== true;
+    entry.minecraftProfile = await selectPreparedMinecraftLauncherProfile(entry.minecraftProfile);
+    entry.selectedForPlayAt = new Date().toISOString();
+    if (profileWasMissing) {
+      await persistPreparedLaunchEntry(target.id, entry).catch((error) => {
+        console.warn(`Unable to persist the repaired ${target.name} profile snapshot: ${error.message || error}`);
+      });
+    }
+    return launchPreparationForRenderer(entry);
+  } catch (error) {
+    clearLaunchPreparationResources(target.id);
+    return launchPreparationForRenderer(blockedLaunchPreparation(target, error, { ...entry }));
+  }
 });
 
 ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, attempt) => {
@@ -13595,6 +13825,22 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     runtimeFilesChecked: 0,
     ...finalPrerequisites
   };
+  if (prepared.minecraftProfile?.selectionPrepared !== true) {
+    const profileWasMissing = prepared.minecraftProfile?.profileExists !== true;
+    prepared.minecraftProfile = await runLaunchStep(
+      attempt,
+      'minecraft-profile-selection',
+      'Create and select the A Hard Time Minecraft Launcher profile',
+      async () => selectPreparedMinecraftLauncherProfile(prepared.minecraftProfile),
+      (value) => `${value.profileName || target.name} is created and selected.`
+    );
+    prepared.selectedForPlayAt = new Date().toISOString();
+    if (profileWasMissing) {
+      await persistPreparedLaunchEntry(key, prepared).catch((error) => {
+        console.warn(`Unable to persist the repaired ${target.name} profile snapshot: ${error.message || error}`);
+      });
+    }
+  }
   const launcherOpening = openMinecraftLauncher(prepared.launcherConfig, { route: prepared.launcherRoute }).then(
     (value) => ({ ok: true, value }),
     (error) => ({ ok: false, error })

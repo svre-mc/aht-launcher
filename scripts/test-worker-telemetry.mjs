@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
-import worker, { LauncherStateHub } from '../cloudflare/curseforge-proxy-worker.js';
+import worker, {
+  LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH,
+  LauncherStateHub
+} from '../cloudflare/curseforge-proxy-worker.js';
 import { launcherTelemetryPlatform, sendLauncherEvent } from '../src/syncClient.js';
 import {
   TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
@@ -39,10 +42,25 @@ if (launcherTelemetryPlatform('linux') !== 'Linux' || launcherTelemetryPlatform(
 const objects = new Map();
 const durableObjectStorage = new Map();
 const durableObjectInstances = new Map();
+const releaseCacheStore = new Map();
+Object.defineProperty(globalThis, 'caches', {
+  configurable: true,
+  value: {
+    default: {
+      async match(request) {
+        return releaseCacheStore.get(request.url)?.clone();
+      },
+      async put(request, response) {
+        releaseCacheStore.set(request.url, response.clone());
+      }
+    }
+  }
+});
 const env = {
   ADMIN_USERNAME: 'admin',
   ADMIN_PASSWORD: 'secret',
   ADMIN_TOKEN_SECRET: 'test-admin-token-secret-at-least-32-bytes',
+  AHT_PUBLIC_ORIGIN: 'https://api.ahardtime.net',
   LAUNCHER_PROOF_SECRET: 'proof-secret',
   LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8: TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
   LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI: TEST_LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI,
@@ -131,6 +149,28 @@ objects.set('launcher/files/darwin-universal/AHT-universal.dmg', 'universal mac 
 objects.set('launcher/files/linux-x64/AHT-Linux.AppImage', 'linux appimage');
 objects.set('pdf1', '%PDF-1.7 A Hard Time Update Log 001');
 
+const legacyPublicRedirect = await worker.fetch(new Request(
+  'https://private-account.workers.dev/launcher/files/linux-x64/AHT-Linux.AppImage?aht_download=linux-x64&aht_player=owner%40example.com&aht_uuid=private-uuid&email=owner%40example.com&keep=public'
+), env, {});
+const legacyRedirectLocation = String(legacyPublicRedirect.headers.get('Location') || '');
+if (legacyPublicRedirect.status !== 308
+    || legacyRedirectLocation !== 'https://api.ahardtime.net/launcher/download/linux-x64'
+    || legacyPublicRedirect.headers.has('Set-Cookie')
+    || /private-account|workers\.dev|owner|private-uuid/i.test(legacyRedirectLocation)
+    || await legacyPublicRedirect.text() !== '') {
+  throw new Error(`Legacy Worker request did not migrate to an identity-free branded URL: ${legacyPublicRedirect.status} ${legacyRedirectLocation}`);
+}
+const legacyDoubleSlashRedirect = await worker.fetch(new Request(
+  'https://private-account.workers.dev//outside.example/private?email=owner%40example.com'
+), env, {});
+const legacyDoubleSlashLocation = new URL(String(legacyDoubleSlashRedirect.headers.get('Location') || ''));
+if (legacyDoubleSlashRedirect.status !== 308
+    || legacyDoubleSlashLocation.origin !== 'https://api.ahardtime.net'
+    || legacyDoubleSlashLocation.pathname !== '//outside.example/private'
+    || legacyDoubleSlashLocation.search) {
+  throw new Error(`Legacy Worker path escaped the branded origin: ${legacyDoubleSlashRedirect.status} ${legacyDoubleSlashLocation}`);
+}
+
 const websitePdf = await worker.fetch(new Request('https://worker.test/pdf1'), env, {});
 if (websitePdf.status !== 200
     || websitePdf.headers.get('Content-Type') !== 'application/pdf'
@@ -177,7 +217,7 @@ async function untrackedHeadDownload(path) {
   return response.headers.get('Location') || '';
 }
 
-const windowsDownload = await trackedDownload('/launcher/download/windows-x64?aht_player=DownloadUser&aht_uuid=01234567-89ab-cdef-0123-456789abcdef', {
+const windowsDownload = await trackedDownload('/launcher/download/windows-x64?aht_player=owner%40example.com&aht_username=DownloadUser&aht_uuid=01234567-89ab-cdef-0123-456789abcdef', {
   'CF-Connecting-IP': '203.0.113.42',
   'User-Agent': 'AHT website test'
 });
@@ -247,11 +287,15 @@ objects.set('launcher/latest.json', JSON.stringify(universalLauncherManifest));
 
 const downloadCountBeforeDirectUpdate = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
 const directUpdate = await worker.fetch(new Request('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe'), env, {});
-if (!directUpdate.ok) throw new Error(`Direct launcher update artifact failed: ${directUpdate.status}`);
+if (!directUpdate.ok
+    || directUpdate.headers.get('Content-Disposition') !== 'attachment; filename="AHT-Windows.exe"') {
+  throw new Error(`Direct launcher update artifact failed to force download: ${directUpdate.status}`);
+}
 const downloadCountAfterDirectUpdate = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
 if (downloadCountAfterDirectUpdate !== downloadCountBeforeDirectUpdate) {
   throw new Error('Launcher self-update artifact requests must not be counted as installer downloads.');
 }
+releaseCacheStore.clear();
 const taggedInstaller = await worker.fetch(new Request('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe?aht_download=windows-x64', {
   headers: {
     'CF-Connecting-IP': '203.0.113.43',
@@ -259,6 +303,23 @@ const taggedInstaller = await worker.fetch(new Request('https://worker.test/laun
   }
 }), env, {});
 if (!taggedInstaller.ok) throw new Error(`Tagged launcher installer artifact failed: ${taggedInstaller.status}`);
+const taggedInstallerCookie = String(taggedInstaller.headers.get('Set-Cookie') || '').split(';')[0];
+const cachedTaggedInstaller = releaseCacheStore.get('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe');
+if (!taggedInstallerCookie
+    || taggedInstaller.headers.get('Cache-Control') !== 'private, no-store'
+    || cachedTaggedInstaller?.headers.has('Set-Cookie')) {
+  throw new Error('Installer identity was missing from the player response or leaked into the shared edge cache.');
+}
+const taggedInstallerRetry = await worker.fetch(new Request('https://worker.test/launcher/files/win32-x64/AHT-Windows.exe?aht_download=windows-x64', {
+  headers: {
+    Cookie: taggedInstallerCookie,
+    'CF-Connecting-IP': '192.0.2.143',
+    'User-Agent': 'AHT website cached retry test'
+  }
+}), env, {});
+if (!taggedInstallerRetry.ok || taggedInstallerRetry.headers.has('Set-Cookie')) {
+  throw new Error('A cached installer retry replayed or replaced an existing anonymous identity.');
+}
 const downloadCountAfterTaggedInstaller = [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
 if (downloadCountAfterTaggedInstaller !== downloadCountBeforeDirectUpdate + 1) {
   throw new Error('Telemetry-tagged direct installer request was not counted exactly once.');
@@ -386,6 +447,10 @@ if (registration.username !== 'TestRig' || repeatRegistration.username !== 'test
 }
 if (registration.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef') {
   throw new Error(`Minecraft UUID was not canonicalized during registration: ${JSON.stringify(registration)}`);
+}
+const publicRegistrationKeys = Object.keys(registration).sort().join(',');
+if (publicRegistrationKeys !== 'minecraftUuid,ok,recovered,username') {
+  throw new Error(`Username registration exposed internal account storage or device metadata: ${JSON.stringify(registration)}`);
 }
 if (duplicateResponse.status !== 409 || !/not available/i.test(duplicateBody.error || '')) {
   throw new Error(`Expected duplicate username rejection, got ${duplicateResponse.status} ${JSON.stringify(duplicateBody)}`);
@@ -649,16 +714,11 @@ if (curseForgeOnlyProofResponse.status !== 500
 const objectCountBeforeProofStatus = objects.size;
 const proofStatus = await jsonRequest('/api/launcher-proof/status');
 if (
-  JSON.stringify(Object.keys(proofStatus).sort()) !== JSON.stringify(['algorithm', 'configured', 'dedicatedConfigured', 'keyId', 'ok', 'privateKeyConfigured', 'protocol', 'publicKeyConfigured', 'signingVerified'])
+  JSON.stringify(Object.keys(proofStatus).sort()) !== JSON.stringify(['algorithm', 'ok', 'protocol', 'service'])
   || !proofStatus.ok
-  || !proofStatus.configured
-  || !proofStatus.dedicatedConfigured
-  || !proofStatus.privateKeyConfigured
-  || !proofStatus.publicKeyConfigured
-  || !proofStatus.signingVerified
+  || proofStatus.service !== 'AHT Proxy'
   || proofStatus.protocol !== 'aht-launcher-attestation-v2'
   || proofStatus.algorithm !== 'RS256'
-  || proofStatus.keyId !== 'aht-launcher-attestation-v2'
   || objects.size !== objectCountBeforeProofStatus
 ) {
   throw new Error(`Launcher proof status was not read-only/minimal: ${JSON.stringify(proofStatus)}`);
@@ -674,7 +734,7 @@ const inMemoryProofStatusResponse = await worker.fetch(new Request('https://work
   }
 }, {});
 const inMemoryProofStatus = await inMemoryProofStatusResponse.json();
-if (!inMemoryProofStatusResponse.ok || !inMemoryProofStatus.signingVerified || proofStatusStorageTouched) {
+if (!inMemoryProofStatusResponse.ok || !inMemoryProofStatus.ok || proofStatusStorageTouched) {
   throw new Error(`Launcher proof status self-test was not in-memory only: ${inMemoryProofStatusResponse.status} ${JSON.stringify(inMemoryProofStatus)}`);
 }
 const unconfiguredProofStatusResponse = await worker.fetch(new Request('https://worker.test/api/launcher-proof/status'), {
@@ -683,10 +743,10 @@ const unconfiguredProofStatusResponse = await worker.fetch(new Request('https://
 }, {});
 const unconfiguredProofStatus = await unconfiguredProofStatusResponse.json();
 if (
-  unconfiguredProofStatusResponse.status !== 200
+  unconfiguredProofStatusResponse.status !== 503
   || unconfiguredProofStatus.ok
-  || unconfiguredProofStatus.configured
-  || unconfiguredProofStatus.signingVerified
+  || Object.keys(unconfiguredProofStatus).sort().join(',') !== 'ok,service'
+  || unconfiguredProofStatus.service !== 'AHT Proxy'
 ) {
   throw new Error(`Unconfigured launcher proof status was incorrect: ${unconfiguredProofStatusResponse.status} ${JSON.stringify(unconfiguredProofStatus)}`);
 }
@@ -696,12 +756,10 @@ const adminFallbackProofStatusResponse = await worker.fetch(new Request('https:/
 }, {});
 const adminFallbackProofStatus = await adminFallbackProofStatusResponse.json();
 if (
-  adminFallbackProofStatusResponse.status !== 200
+  adminFallbackProofStatusResponse.status !== 503
   || adminFallbackProofStatus.ok
-  || adminFallbackProofStatus.configured
-  || adminFallbackProofStatus.privateKeyConfigured
-  || adminFallbackProofStatus.publicKeyConfigured
-  || adminFallbackProofStatus.signingVerified
+  || Object.keys(adminFallbackProofStatus).sort().join(',') !== 'ok,service'
+  || adminFallbackProofStatus.service !== 'AHT Proxy'
 ) {
   throw new Error(`Admin-only fallback incorrectly passed production launcher proof status: ${adminFallbackProofStatusResponse.status} ${JSON.stringify(adminFallbackProofStatus)}`);
 }
@@ -711,11 +769,10 @@ const invalidKeyProofStatusResponse = await worker.fetch(new Request('https://wo
 }, {});
 const invalidKeyProofStatus = await invalidKeyProofStatusResponse.json();
 if (
-  invalidKeyProofStatusResponse.status !== 200
+  invalidKeyProofStatusResponse.status !== 503
   || invalidKeyProofStatus.ok
-  || !invalidKeyProofStatus.configured
-  || invalidKeyProofStatus.signingVerified
-  || invalidKeyProofStatus.keyId !== 'wrong-key-id'
+  || Object.keys(invalidKeyProofStatus).sort().join(',') !== 'ok,service'
+  || invalidKeyProofStatus.service !== 'AHT Proxy'
   || objects.size !== objectCountBeforeProofStatus
 ) {
   throw new Error(`Invalid launcher proof key passed the read-only signing self-test: ${invalidKeyProofStatusResponse.status} ${JSON.stringify(invalidKeyProofStatus)}`);
@@ -797,7 +854,8 @@ for (let attempt = 0; attempt < 2; attempt += 1) {
     },
     body: JSON.stringify(launcherUpdatePayload)
   });
-  if (!updateResult.accountValidated || updateResult.accountRefreshed || !updateResult.launcherUpdateKey) {
+  if (!updateResult.launcherUpdateRecorded
+      || Object.keys(updateResult).sort().join(',') !== 'launcherUpdateRecorded,ok') {
     throw new Error(`Registered launcher update was not validated without mutating canonical identity: ${JSON.stringify(updateResult)}`);
   }
 }
@@ -851,13 +909,10 @@ if (
 
 const workerIndexResponse = await worker.fetch(new Request('https://packs.example.com/'), env, {});
 const workerIndex = await workerIndexResponse.json();
-if (workerIndexResponse.status !== 200 || !Array.isArray(workerIndex.endpoints)) {
+if (workerIndexResponse.status !== 200
+    || JSON.stringify(workerIndex) !== JSON.stringify({ ok: true, service: 'AHT Proxy' })
+    || Object.hasOwn(workerIndex, 'endpoints')) {
   throw new Error(`Worker discovery root changed unexpectedly: ${workerIndexResponse.status} ${JSON.stringify(workerIndex)}`);
-}
-for (const endpoint of ['/api/launcher-proof/status', '/admin/player-records', '/admin/launcher-updates']) {
-  if (!workerIndex.endpoints.includes(endpoint)) {
-    throw new Error(`Worker discovery root is missing ${endpoint}: ${JSON.stringify(workerIndex.endpoints)}`);
-  }
 }
 const poisonedAdminRoute = await worker.fetch(new Request('https://packs.example.com/ptb/admin/login', {
   method: 'POST',
@@ -919,14 +974,24 @@ while (downloadCursor) {
 if (
   allDownloadRecords.length !== 8
   || allDownloadRecords.some((item) => String(item.ipv4 || '').includes(':'))
-  || allDownloadRecords.some((item) => item.minecraftUsername && item.minecraftUsername !== 'DownloadUser')
+  || allDownloadRecords.some((item) => item.minecraftUsername || item.minecraftUuid)
+  || allDownloadRecords.some((item) => item.identitySource !== 'anonymous-cookie')
+  || allDownloadRecords.some((item) => Object.hasOwn(item, 'anonymousIdentityHash'))
   || allDownloadRecords.some((item) => !['Windows', 'Mac', 'Linux'].includes(item.platform))
 ) {
-  throw new Error(`Launcher download history must preserve explicit player identity without inventing it: ${JSON.stringify(allDownloadRecords)}`);
+  throw new Error(`Launcher download history must use opaque anonymous identities and ignore player data in URLs: ${JSON.stringify(allDownloadRecords)}`);
 }
-const namedDownload = allDownloadRecords.find((item) => item.minecraftUsername === 'DownloadUser');
-if (!namedDownload || namedDownload.minecraftUuid !== '01234567-89ab-cdef-0123-456789abcdef') {
-  throw new Error(`Launcher download history did not preserve the download-link player identity: ${JSON.stringify(namedDownload)}`);
+if (JSON.stringify(allDownloadRecords).includes('owner@example.com')
+    || JSON.stringify(allDownloadRecords).includes('DownloadUser')
+    || JSON.stringify(allDownloadRecords).includes('01234567-89ab-cdef-0123-456789abcdef')) {
+  throw new Error('Launcher download telemetry retained spoofable identity data from the public URL.');
+}
+const rawInstallerRecords = [...objects.entries()]
+  .filter(([key]) => key.startsWith('launcher-downloads/'))
+  .map(([, value]) => JSON.parse(value));
+if (rawInstallerRecords.some((item) => Object.hasOwn(item, 'anonymousIdentityHash'))
+    || /owner@example\.com|DownloadUser|01234567-89ab-cdef-0123-456789abcdef/i.test(JSON.stringify(rawInstallerRecords))) {
+  throw new Error('Stored download telemetry retained a browser identity hash or public-URL identity value.');
 }
 const pseudoIpv4Download = allDownloadRecords.find((item) => item.platformKey === 'macos-universal');
 if (
@@ -1207,82 +1272,122 @@ if (recoveredInstallResponse.status !== 403
 }
 
 const installerRecordCount = () => [...objects.keys()].filter((key) => key.startsWith('launcher-downloads/')).length;
-const limitUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-const limitIdentityDigest = crypto.createHash('sha256')
-  .update(`minecraft-uuid\0${limitUuid}`)
-  .digest('hex');
-const limitObjectId = `launcher-installer-download:${limitIdentityDigest}`;
-const limitPath = `/launcher/download/windows-x64?aht_uuid=${limitUuid}`;
+const identityCookieFromResponse = (response) => String(response.headers.get('Set-Cookie') || '').split(';')[0];
+const identityObjectIdFromCookie = (cookie) => {
+  const value = String(cookie || '').split('=', 2)[1]?.split('.', 1)[0] || '';
+  if (!/^[a-f0-9]{32}$/.test(value)) throw new Error(`Invalid anonymous installer identity cookie: ${cookie}`);
+  const digest = crypto.createHash('sha256').update(`anonymous-cookie\0${value}`).digest('hex');
+  return `launcher-installer-download:${LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH}:${digest}`;
+};
+const assertOpaqueDownloadResponse = async (response, expectedStatus) => {
+  if (response.status !== expectedStatus) {
+    throw new Error(`Unexpected installer response status: ${response.status}`);
+  }
+  for (const header of ['X-AHT-Download-Limit', 'X-AHT-Download-Remaining', 'X-AHT-Download-Reset', 'Retry-After']) {
+    if (response.headers.has(header)) throw new Error(`Player response exposed installer quota header ${header}.`);
+  }
+  if (expectedStatus === 204 && await response.text() !== '') {
+    throw new Error('Blocked installer response exposed a player-visible response body.');
+  }
+};
+const limitPath = '/launcher/download/windows-x64?aht_player=owner%40example.com&aht_uuid=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const limitHeaders = {
   'CF-Connecting-IP': '198.51.100.70',
   'User-Agent': 'AHT installer limit test'
 };
+const stateCountBeforeHead = durableObjectStorage.size;
 const headDownload = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
   method: 'HEAD',
   headers: limitHeaders
 }), env, {});
-if (headDownload.status !== 302 || durableObjectStorage.has(limitObjectId)) {
+if (headDownload.status !== 302 || durableObjectStorage.size !== stateCountBeforeHead || headDownload.headers.has('Set-Cookie')) {
   throw new Error('HEAD installer checks must neither fail nor consume a download slot.');
 }
 
 const downloadsBeforeLimitProof = installerRecordCount();
-const acceptedResetHeaders = new Set();
-for (let attempt = 1; attempt <= 7; attempt += 1) {
-  const response = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
-    headers: limitHeaders
-  }), env, {});
-  const expectedRemaining = String(7 - attempt);
-  if (response.status !== 302
-      || response.headers.get('X-AHT-Download-Limit') !== '7'
-      || response.headers.get('X-AHT-Download-Remaining') !== expectedRemaining) {
-    throw new Error(`Installer download ${attempt} was not accepted with the correct quota: ${response.status} ${JSON.stringify([...response.headers])}`);
-  }
-  acceptedResetHeaders.add(response.headers.get('X-AHT-Download-Reset'));
-}
-if (acceptedResetHeaders.size !== 1 || installerRecordCount() !== downloadsBeforeLimitProof + 7) {
-  throw new Error('The seven accepted downloads did not retain one anchored window or exactly seven telemetry records.');
-}
-const storedLimitWindow = durableObjectStorage.get(limitObjectId)?.get('launcherInstallerDownloadWindow');
-if (Object.keys(storedLimitWindow || {}).sort().join(',') !== 'count,firstDownloadAt,schemaVersion'
-    || storedLimitWindow.count !== 7
-    || JSON.stringify(storedLimitWindow).includes(limitUuid)
-    || JSON.stringify(storedLimitWindow).includes(limitHeaders['CF-Connecting-IP'])) {
-  throw new Error(`Installer quota storage retained more than the anonymous window counter: ${JSON.stringify(storedLimitWindow)}`);
-}
-const eighthDownload = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
+const firstDownload = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
   headers: limitHeaders
 }), env, {});
-const eighthDownloadBody = await eighthDownload.json();
-const eighthRetryAfter = Number(eighthDownload.headers.get('Retry-After'));
-if (eighthDownload.status !== 429
-    || eighthDownloadBody.code !== 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT'
-    || eighthDownloadBody.limit !== 7
-    || !Number.isInteger(eighthRetryAfter)
-    || eighthRetryAfter < 1
-    || eighthRetryAfter > 86_400
-    || installerRecordCount() !== downloadsBeforeLimitProof + 7) {
-  throw new Error(`The eighth installer download was not rejected cleanly: ${eighthDownload.status} ${JSON.stringify(eighthDownloadBody)}`);
+await assertOpaqueDownloadResponse(firstDownload, 302);
+const identityCookie = identityCookieFromResponse(firstDownload);
+if (!/^__Host-AHT-Download-ID=[a-f0-9]{32}\.[A-Za-z0-9_-]{43}$/.test(identityCookie)
+    || !String(firstDownload.headers.get('Set-Cookie') || '').includes('Secure; HttpOnly; SameSite=Lax')
+    || new URL(firstDownload.headers.get('Location')).search
+    || String(firstDownload.headers.get('Location') || '').includes('owner@example.com')) {
+  throw new Error(`Installer redirect did not issue an opaque secure identity and clean URL: ${JSON.stringify([...firstDownload.headers])}`);
 }
+const limitObjectId = identityObjectIdFromCookie(identityCookie);
+
+const repeatedDownload = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
+  headers: { ...limitHeaders, Cookie: identityCookie, 'CF-Connecting-IP': '203.0.113.200' }
+}), env, {});
+await assertOpaqueDownloadResponse(repeatedDownload, 302);
+if (installerRecordCount() !== downloadsBeforeLimitProof + 1
+    || durableObjectStorage.get(limitObjectId)?.get('launcherInstallerDownloadWindow')?.count !== 1) {
+  throw new Error('A retry of the same installer was counted as another person download.');
+}
+
+const remainingDistinctPlatforms = [
+  'macos-universal',
+  'linux-x64',
+  'ubuntu-x64-appimage',
+  'macos-arm64',
+  'macos-x64',
+  'ubuntu-x64'
+];
+for (const platformKey of remainingDistinctPlatforms) {
+  const response = await worker.fetch(new Request(`https://worker.test/launcher/download/${platformKey}`, {
+    headers: { ...limitHeaders, Cookie: identityCookie }
+  }), env, {});
+  await assertOpaqueDownloadResponse(response, 302);
+}
+if (installerRecordCount() !== downloadsBeforeLimitProof + 7) {
+  throw new Error('Seven distinct person downloads did not produce exactly seven telemetry records.');
+}
+const storedLimitWindow = durableObjectStorage.get(limitObjectId)?.get('launcherInstallerDownloadWindow');
+if (Object.keys(storedLimitWindow || {}).sort().join(',') !== 'count,firstDownloadAt,policyEpoch,recentDownloads,schemaVersion'
+    || storedLimitWindow.count !== 7
+    || storedLimitWindow.policyEpoch !== LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH
+    || storedLimitWindow.schemaVersion !== 3
+    || storedLimitWindow.recentDownloads?.length !== 7
+    || storedLimitWindow.recentDownloads.some((item) => !/^[a-f0-9]{64}$/.test(item.requestKey))
+    || JSON.stringify(storedLimitWindow).includes('owner@example.com')
+    || JSON.stringify(storedLimitWindow).includes('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
+    || JSON.stringify(storedLimitWindow).includes(limitHeaders['CF-Connecting-IP'])
+    || JSON.stringify(storedLimitWindow).includes(identityCookie)) {
+  throw new Error(`Installer quota storage retained identifying or non-opaque data: ${JSON.stringify(storedLimitWindow)}`);
+}
+objects.set('launcher/latest.json', JSON.stringify({ ...universalLauncherManifest, version: '9.9.10' }));
+const eighthDownload = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
+  headers: { ...limitHeaders, Cookie: identityCookie }
+}), env, {});
+await assertOpaqueDownloadResponse(eighthDownload, 204);
+if (installerRecordCount() !== downloadsBeforeLimitProof + 7) {
+  throw new Error('A blocked installer request created player telemetry.');
+}
+objects.set('launcher/latest.json', JSON.stringify(universalLauncherManifest));
 
 const expiredState = durableObjectStorage.get(limitObjectId);
 expiredState.set('launcherInstallerDownloadWindow', {
-  schemaVersion: 1,
+  schemaVersion: 3,
+  policyEpoch: LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH,
   firstDownloadAt: Date.now() - (24 * 60 * 60 * 1000) - 1,
-  count: 7
+  count: 7,
+  recentDownloads: storedLimitWindow.recentDownloads
 });
 const firstDownloadAfterExpiry = await worker.fetch(new Request(`https://worker.test${limitPath}`, {
-  headers: limitHeaders
+  headers: { ...limitHeaders, Cookie: identityCookie }
 }), env, {});
-if (firstDownloadAfterExpiry.status !== 302
-    || firstDownloadAfterExpiry.headers.get('X-AHT-Download-Remaining') !== '6'
-    || installerRecordCount() !== downloadsBeforeLimitProof + 8) {
+await assertOpaqueDownloadResponse(firstDownloadAfterExpiry, 302);
+if (installerRecordCount() !== downloadsBeforeLimitProof + 8
+    || durableObjectStorage.get(limitObjectId)?.get('launcherInstallerDownloadWindow')?.count !== 1) {
   throw new Error('The first download after the anchored 24-hour expiry did not start a fresh window.');
 }
 
 const beforeUpdaterExemption = installerRecordCount();
 for (let attempt = 0; attempt < 9; attempt += 1) {
   const updateResponse = await worker.fetch(new Request(
-    `https://worker.test/launcher/files/win32-x64/AHT-Windows.exe?aht_uuid=${limitUuid}`,
+    'https://worker.test/launcher/files/win32-x64/AHT-Windows.exe?aht_uuid=ignored',
     { headers: limitHeaders }
   ), env, {});
   if (updateResponse.status !== 200) {
@@ -1297,42 +1402,102 @@ if (durableObjectStorage.get(limitObjectId)?.get('launcherInstallerDownloadWindo
   throw new Error('Untagged launcher self-updates changed the installer quota counter.');
 }
 
-const concurrentUuid = '11111111-aaaa-4bbb-8ccc-222222222222';
-const concurrentPath = `/launcher/download/windows-x64?aht_uuid=${concurrentUuid}`;
+const sharedNetworkDownload = await worker.fetch(new Request('https://worker.test/launcher/download/windows-x64', {
+  headers: limitHeaders
+}), env, {});
+await assertOpaqueDownloadResponse(sharedNetworkDownload, 302);
+const sharedNetworkCookie = identityCookieFromResponse(sharedNetworkDownload);
+if (!sharedNetworkCookie || sharedNetworkCookie === identityCookie
+    || identityObjectIdFromCookie(sharedNetworkCookie) === limitObjectId) {
+  throw new Error('Separate people on the same network were assigned the same download identity.');
+}
+const samePersonDifferentNetwork = await worker.fetch(new Request('https://worker.test/launcher/download/windows-x64', {
+  headers: { ...limitHeaders, Cookie: sharedNetworkCookie, 'CF-Connecting-IP': '192.0.2.222' }
+}), env, {});
+await assertOpaqueDownloadResponse(samePersonDifferentNetwork, 302);
+if (durableObjectStorage.get(identityObjectIdFromCookie(sharedNetworkCookie))?.get('launcherInstallerDownloadWindow')?.count !== 1) {
+  throw new Error('The same person was counted again after their network address changed.');
+}
+
+const resetIdentityValue = 'd'.repeat(32);
+const resetIdentitySignature = crypto.createHmac('sha256', env.ADMIN_TOKEN_SECRET)
+  .update(`aht-download-id-v1\0${resetIdentityValue}`)
+  .digest('base64url');
+const resetIdentityCookie = `__Host-AHT-Download-ID=${resetIdentityValue}.${resetIdentitySignature}`;
+const resetIdentityHash = crypto.createHash('sha256')
+  .update(`anonymous-cookie\0${resetIdentityValue}`)
+  .digest('hex');
+const legacyResetObjectId = `launcher-installer-download:${resetIdentityHash}`;
+env.AHT_LAUNCHER_STATE.get(legacyResetObjectId);
+durableObjectStorage.get(legacyResetObjectId).set('launcherInstallerDownloadWindow', {
+  schemaVersion: 2,
+  firstDownloadAt: Date.now(),
+  count: 7,
+  recentDownloads: []
+});
+const firstDownloadAfterPolicyReset = await worker.fetch(new Request(
+  'https://worker.test/launcher/download/windows-x64',
+  { headers: { ...limitHeaders, Cookie: resetIdentityCookie } }
+), env, {});
+await assertOpaqueDownloadResponse(firstDownloadAfterPolicyReset, 302);
+const resetObjectId = identityObjectIdFromCookie(resetIdentityCookie);
+if (resetObjectId === legacyResetObjectId
+    || durableObjectStorage.get(resetObjectId)?.get('launcherInstallerDownloadWindow')?.count !== 1
+    || durableObjectStorage.get(resetObjectId)?.get('launcherInstallerDownloadWindow')?.policyEpoch !== LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH
+    || durableObjectStorage.get(legacyResetObjectId)?.get('launcherInstallerDownloadWindow')?.count !== 7) {
+  throw new Error('The quota policy epoch did not reset every previously stored installer count.');
+}
+
+const concurrentObjectId = `launcher-installer-download:${LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH}:${'c'.repeat(64)}`;
+const concurrentStub = env.AHT_LAUNCHER_STATE.get(concurrentObjectId);
 const beforeConcurrentProof = installerRecordCount();
-const concurrentResponses = await Promise.all(Array.from({ length: 12 }, () => worker.fetch(new Request(
-  `https://worker.test${concurrentPath}`,
-  { headers: { 'CF-Connecting-IP': '198.51.100.71' } }
-), env, {})));
-const concurrentAccepted = concurrentResponses.filter((response) => response.status === 302).length;
+const concurrentResponses = await Promise.all(Array.from({ length: 12 }, (_, index) => concurrentStub.fetch(
+  'https://aht-launcher-state.internal/launcher-installer-download-limit',
+  {
+    method: 'POST',
+    headers: {
+      'X-AHT-Launcher-Installer-Limit-Internal': '1',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ requestKey: crypto.createHash('sha256').update(`concurrent-${index}`).digest('hex') })
+  }
+)));
+const concurrentAccepted = concurrentResponses.filter((response) => response.status === 200).length;
 const concurrentDenied = concurrentResponses.filter((response) => response.status === 429).length;
-if (concurrentAccepted !== 7 || concurrentDenied !== 5 || installerRecordCount() !== beforeConcurrentProof + 7) {
+if (concurrentAccepted !== 7 || concurrentDenied !== 5 || installerRecordCount() !== beforeConcurrentProof) {
   throw new Error(`Concurrent installer limit was not atomic: ${JSON.stringify({ concurrentAccepted, concurrentDenied })}`);
 }
 
-const taggedLimitUuid = '33333333-aaaa-4bbb-8ccc-444444444444';
-const taggedLimitPath = `/launcher/files/win32-x64/AHT-Windows.exe?aht_download=windows-x64&aht_uuid=${taggedLimitUuid}`;
-for (let attempt = 1; attempt <= 7; attempt += 1) {
-  const response = await worker.fetch(new Request(`https://worker.test${taggedLimitPath}`, {
-    headers: { 'CF-Connecting-IP': '198.51.100.72' }
-  }), env, {});
-  if (response.status !== 200 || response.headers.get('X-AHT-Download-Remaining') !== String(7 - attempt)) {
-    throw new Error(`Tagged direct installer ${attempt} was not authorized correctly: ${response.status}`);
-  }
-}
-const taggedEighth = await worker.fetch(new Request(`https://worker.test${taggedLimitPath}`, {
+const taggedLimitPath = '/launcher/files/win32-x64/AHT-Windows.exe?aht_download=windows-x64&aht_player=owner%40example.com';
+const beforeTaggedRetryProof = installerRecordCount();
+const taggedFirst = await worker.fetch(new Request(`https://worker.test${taggedLimitPath}`, {
   headers: { 'CF-Connecting-IP': '198.51.100.72' }
 }), env, {});
-if (taggedEighth.status !== 429) {
-  throw new Error(`Tagged direct installer bypassed the seven-download limit: ${taggedEighth.status}`);
+await assertOpaqueDownloadResponse(taggedFirst, 200);
+const taggedCookie = identityCookieFromResponse(taggedFirst);
+for (let attempt = 0; attempt < 6; attempt += 1) {
+  const rangeResponse = await worker.fetch(new Request(`https://worker.test${taggedLimitPath}`, {
+    headers: { 'CF-Connecting-IP': '198.51.100.72', Range: 'bytes=0-2' }
+  }), env, {});
+  if (rangeResponse.status !== 206) throw new Error(`Historical installer range request ${attempt + 1} failed: ${rangeResponse.status}`);
+}
+const taggedRetry = await worker.fetch(new Request(`https://worker.test${taggedLimitPath}`, {
+  headers: { 'CF-Connecting-IP': '203.0.113.72', Cookie: taggedCookie }
+}), env, {});
+await assertOpaqueDownloadResponse(taggedRetry, 200);
+if (installerRecordCount() !== beforeTaggedRetryProof + 1) {
+  throw new Error('One historical browser download was counted more than once across full and Range retries.');
 }
 
 const downloadLimitProof = {
   limit: 7,
   windowHours: 24,
-  anchoredReset: acceptedResetHeaders.size === 1,
+  anonymousPersonCookie: true,
+  retryIdempotent: true,
+  sharedNetworkIndependent: true,
+  globalPolicyReset: true,
+  playerResponseOpaque: true,
   eighthStatus: eighthDownload.status,
-  retryAfterSeconds: eighthRetryAfter,
   concurrentAccepted,
   concurrentDenied,
   updaterExempt

@@ -132,10 +132,12 @@ assert(selectLauncherArtifact(manifest, 'linux', 'arm64') === null, 'Unsupported
 for (const key of requiredDownloadKeys) {
   const entry = manifest.downloads?.[key];
   assert(entry, `manual download entry missing: ${key}`);
-  const downloadUrl = new URL(entry.url);
-  assert(downloadUrl.pathname.startsWith('/launcher/files/'), `manual download URL is not compatible with installed legacy launchers for ${key}: ${entry.url}`);
-  assert(path.posix.basename(downloadUrl.pathname) === entry.fileName, `manual download URL basename does not match ${key}: ${entry.url}`);
-  assert(downloadUrl.searchParams.get('aht_download') === key, `manual download URL is not telemetry-tagged for ${key}: ${entry.url}`);
+  const legacyArtifactUrl = new URL(entry.url);
+  const downloadUrl = new URL(entry.downloadUrl);
+  assert(legacyArtifactUrl.pathname.startsWith('/launcher/files/'), `manual artifact URL is not compatible with installed legacy launchers for ${key}: ${entry.url}`);
+  assert(path.posix.basename(legacyArtifactUrl.pathname) === entry.fileName, `manual artifact URL basename does not match ${key}: ${entry.url}`);
+  assert(!legacyArtifactUrl.search && !/[?&](?:aht_player|aht_username|aht_uuid|aht_download)=/i.test(entry.url), `legacy artifact URL leaked a download or player identifier for ${key}: ${entry.url}`);
+  assert(downloadUrl.pathname === `/launcher/download/${key}` && !downloadUrl.search, `manual download URL is not the clean tracked route for ${key}: ${entry.downloadUrl}`);
   assert(entry.fileName && entry.path, `manual download fileName/path missing for ${key}`);
   assert(/^[a-f0-9]{64}$/i.test(entry.sha256 || ''), `manual download sha256 missing for ${key}`);
   assert(Number(entry.size) > 0, `manual download size missing for ${key}`);

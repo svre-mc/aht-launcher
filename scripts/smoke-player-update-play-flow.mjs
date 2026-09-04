@@ -677,9 +677,55 @@ try {
     throw new Error(`Synced Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(syncedProfile)}`);
   }
 
+  const stableProfileId = 'a-hard-time-dregora';
+  for (const rootDir of [mcRoot, syncedMcRoot]) {
+    const profilesPath = path.join(rootDir, 'launcher_profiles.json');
+    const launcherProfiles = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
+    if (!Object.prototype.hasOwnProperty.call(launcherProfiles.profiles || {}, stableProfileId)) {
+      throw new Error(`The missing-profile regression could not remove the owned stable profile from ${profilesPath}.`);
+    }
+    delete launcherProfiles.profiles[stableProfileId];
+    await writeJson(profilesPath, launcherProfiles);
+  }
+  await fsp.rm(path.join(userData, 'startup-preparation-cache.json'), { force: true });
+
+  const startupWithoutStableProfile = await evaluate(client, 'window.aht.prepareStartup()');
+  const preparedStableWithoutProfile = startupWithoutStableProfile?.packs?.aht;
+  if (
+    !preparedStableWithoutProfile?.launchReady
+    || preparedStableWithoutProfile.launchPreparationState !== 'ready'
+    || preparedStableWithoutProfile.minecraftProfile?.profileExists
+  ) {
+    throw new Error(`Startup blocked instead of preparing the missing stable profile for selection: ${JSON.stringify(startupWithoutStableProfile)}`);
+  }
+  const selectedStablePreparation = await evaluate(client, `window.aht.selectPreparedPlay('aht')`);
+  if (
+    !selectedStablePreparation?.launchReady
+    || selectedStablePreparation.launchPreparationState !== 'ready'
+    || selectedStablePreparation.minecraftProfile?.profileExists !== true
+  ) {
+    throw new Error(`Selecting the startup-prepared stable pack did not recreate its Minecraft Launcher profile: ${JSON.stringify(selectedStablePreparation)}`);
+  }
+  for (const rootDir of [mcRoot, syncedMcRoot]) {
+    const recreatedProfiles = JSON.parse(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json'), 'utf8'));
+    const recreatedStableProfile = recreatedProfiles.profiles?.[stableProfileId];
+    if (
+      !recreatedStableProfile
+      || recreatedStableProfile.lastVersionId !== versionId
+      || path.resolve(recreatedStableProfile.gameDir || '') !== path.resolve(instanceDir)
+      || path.resolve(recreatedStableProfile.javaDir || '') !== path.resolve(fakeMinecraftJavaPath)
+    ) {
+      throw new Error(`Stable profile selection did not recreate the exact prepared profile in ${rootDir}: ${JSON.stringify(recreatedStableProfile)}`);
+    }
+  }
+  const stableProfilesAfterMissingProfileSelection = [mcRoot, syncedMcRoot].map((rootDir) => (
+    sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
+  ));
+  checkpoint('missing stable profile recreated during prepared selection');
+
   const afterUpdate = await evaluate(client, 'window.aht.getStatus()');
-  if (afterUpdate.launchPreparationState !== 'missing' || afterUpdate.integrity?.counts?.corrupted !== 0) {
-    throw new Error(`The cache-loss regression fixture was not preserved until Play: ${JSON.stringify(afterUpdate)}`);
+  if (!afterUpdate.launchReady || afterUpdate.launchPreparationState !== 'ready' || afterUpdate.integrity?.counts?.corrupted !== 0) {
+    throw new Error(`The recovered missing-profile preparation was not retained until Play: ${JSON.stringify(afterUpdate)}`);
   }
   const instanceStateKey = crypto.createHash('sha256')
     .update(path.resolve(instanceDir))
@@ -704,6 +750,9 @@ try {
   const stableProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
     sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
   ));
+  if (stableProfilesBeforePlay.some((hash, index) => hash !== stableProfilesAfterMissingProfileSelection[index])) {
+    throw new Error('Background preparation rewrote launcher profile metadata after the missing stable profile was selected.');
+  }
   const playResult = await evaluate(client, `
     window.aht.play()
       .then((result) => ({ ok: true, result }))
@@ -726,7 +775,7 @@ try {
   const stableProfilesAfterPlay = [mcRoot, syncedMcRoot].map((rootDir) => (
     sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
   ));
-  if (stableProfilesAfterPlay.some((hash, index) => hash !== stableProfilesBeforePlay[index])) {
+  if (stableProfilesAfterPlay.some((hash, index) => hash !== stableProfilesAfterMissingProfileSelection[index])) {
     throw new Error('Play rewrote Minecraft/CurseForge launcher profile metadata instead of using the profile selected during initialization.');
   }
   const launcherMarker = JSON.parse(fs.readFileSync(fakeLauncherMarker, 'utf8'));

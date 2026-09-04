@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { launcherReleaseVersionFromPackage } from '../src/launcherVersion.js';
 import { fileURLToPath } from 'node:url';
+import { AHT_SERVICE_ORIGIN } from '../src/ahtServiceUrl.js';
 import { CLIENT_PACK_FORMAT } from '../src/clientPackFormat.js';
 import { workerServiceBaseUrl } from '../src/releaseTargets.js';
 import { validateLauncherUpdateManifest } from './validate-launcher-update-manifest.mjs';
@@ -20,6 +21,7 @@ const rootDir = path.resolve(scriptDir, '..');
 const outputsDir = path.resolve(rootDir, '..', '..', 'outputs');
 const releaseDir = path.join(rootDir, 'release-builds');
 const checks = [];
+const forbiddenPublicManifestValuePattern = /workers\.dev|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2})(?:[:/]|$)|[?&](?:aht_player|aht_uuid|aht_username|email|token|secret|key)=|ADMIN_(?:USERNAME|PASSWORD|TOKEN)|CURSEFORGE_API_KEY|LAUNCHER_PROOF_SECRET|resetAt|download-(?:limit|remaining|reset)/i;
 const developerOnlyAsarSourcePattern = /^src\/(?:releaseBuilder|clientModpackZip|serverTransfer|githubActions|r2DirectUpload)\.js$/;
 const developerOnlyAsarDependencyPattern = /^node_modules\/(?:@aws-sdk|@smithy|@aws-crypto|ssh2|yazl)(?:\/|$)/;
 const forbiddenPublicAsarRootPattern = /^(?:cloudflare|server-lock-mod)(?:\/|$)/;
@@ -183,6 +185,20 @@ function collectFiles(relativePaths) {
     visit(path.join(rootDir, relativePath));
   }
   return files;
+}
+
+function gitIgnoredRelativePaths(files) {
+  const relativePaths = files.map((file) => path.relative(rootDir, file).replaceAll('\\', '/'));
+  if (!relativePaths.length) return new Set();
+  const result = spawnSync('git', ['check-ignore', '--stdin', '-z'], {
+    cwd: rootDir,
+    input: `${relativePaths.join('\0')}\0`,
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+    windowsHide: true
+  });
+  if (result.status !== 0 && result.status !== 1) return new Set();
+  return new Set(String(result.stdout || '').split('\0').filter(Boolean));
 }
 
 function newestFile(files) {
@@ -372,22 +388,67 @@ function windowsAuthenticodeStatus(filePath) {
 function liveWorkerPlayerDataCapabilities(baseUrl = '') {
   const normalizedBase = workerServiceBaseUrl(baseUrl);
   const rootUrl = normalizedBase ? new URL('.', normalizedBase).toString() : '';
-  const response = httpJsonStatus(rootUrl);
+  const rootResponse = httpJsonStatus(rootUrl);
+  const rootFields = Object.keys(rootResponse.json || {}).sort();
+  const privateRoot = rootResponse.json?.ok !== true
+    || rootResponse.json?.service !== 'AHT Proxy'
+    || rootFields.join(',') !== 'ok,service';
+  if (!rootResponse.ok || privateRoot) {
+    return {
+      ok: false,
+      detail: rootResponse.ok
+        ? 'Worker root must expose only its generic AHT Proxy identity'
+        : rootResponse.detail
+    };
+  }
+
+  // Exercise each route with a deliberately invalid or unauthenticated request.
+  // This proves routing without creating player/admin data and avoids publishing
+  // an endpoint inventory from the Worker root just to satisfy readiness checks.
   const required = [
-    `/${['api', 'users', 'register'].join('/')}`,
-    '/api/events',
-    '/api/launcher-proof/verify',
-    '/admin/access-decisions',
-    '/admin/player-records',
-    '/admin/launcher-updates'
+    { name: 'player registration', path: ['api', 'users', 'register'].join('/'), method: 'POST', body: '{', statuses: [400] },
+    { name: 'launcher events', path: ['api', 'events'].join('/'), method: 'POST', body: '{', statuses: [400] },
+    { name: 'proof verification', path: ['api', 'launcher-proof', 'verify'].join('/'), method: 'GET', statuses: [401] },
+    { name: 'access decisions', path: '/admin/access-decisions', method: 'GET', statuses: [401] },
+    { name: 'player records', path: '/admin/player-records', method: 'GET', statuses: [401] },
+    { name: 'launcher updates', path: '/admin/launcher-updates', method: 'GET', statuses: [401] }
   ];
-  const endpoints = Array.isArray(response.json?.endpoints) ? response.json.endpoints : [];
-  const missing = required.filter((endpoint) => !endpoints.includes(endpoint));
+  const script = [
+    'const base = process.argv[1];',
+    'const specs = JSON.parse(process.argv[2]);',
+    'const forbidden = /workers\\.dev|[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}|ADMIN_(?:USERNAME|PASSWORD|TOKEN)|CURSEFORGE_API_KEY|LAUNCHER_PROOF_SECRET|LAUNCHER_INSTALLER_DOWNLOAD_LIMIT|resetAt/i;',
+    '(async () => {',
+    '  const rows = [];',
+    '  for (const spec of specs) {',
+    '    const response = await fetch(new URL(spec.path, base), {',
+    '      method: spec.method,',
+    '      headers: { Accept: "application/json", ...(spec.body ? { "Content-Type": "application/json" } : {}) },',
+    '      body: spec.body',
+    '    });',
+    '    const text = await response.text().catch(() => "");',
+    '    const headers = [...response.headers].map(([key, value]) => `${key}: ${value}`).join("\\n");',
+    '    rows.push({ name: spec.name, status: response.status, expected: spec.statuses.includes(response.status), privateData: forbidden.test(`${headers}\\n${text}`) });',
+    '  }',
+    '  console.log(JSON.stringify({ rows }));',
+    '})().catch((error) => { console.log(JSON.stringify({ error: error.message || String(error), rows: [] })); process.exitCode = 1; });'
+  ].join('\n');
+  const result = spawnSync(process.execPath, ['-e', script, rootUrl, JSON.stringify(required)], {
+    cwd: rootDir,
+    encoding: 'utf8',
+    timeout: 30000
+  });
+  let parsed = null;
+  try {
+    parsed = JSON.parse(result.stdout || '{}');
+  } catch {}
+  const rows = Array.isArray(parsed?.rows) ? parsed.rows : [];
+  const failed = rows.filter((row) => !row.expected || row.privateData);
+  const ok = result.status === 0 && rows.length === required.length && failed.length === 0;
   return {
-    ok: Boolean(response.ok && missing.length === 0),
-    detail: response.ok
-      ? (missing.length ? `Worker is missing ${missing.join(', ')}` : `Worker player-data API ready at ${rootUrl}`)
-      : response.detail
+    ok,
+    detail: ok
+      ? `Worker player-data routes are present and privacy-safe at ${rootUrl}`
+      : `Worker route probes failed: ${failed.map((row) => `${row.name}=${row.status}${row.privateData ? '/private-data' : ''}`).join(', ') || parsed?.error || result.error?.message || 'incomplete response'}`
   };
 }
 
@@ -399,6 +460,55 @@ function resolveHttpReference(baseUrl, reference = '') {
   } catch {
     return value;
   }
+}
+
+function manifestPathValue(manifest = {}, fieldPath = '') {
+  return String(fieldPath || '').split('.').reduce((value, key) => value?.[key], manifest);
+}
+
+function publicManifestArtifactPrivacy(manifest = {}, feedUrl = '', fieldPaths = []) {
+  const serialized = JSON.stringify(manifest || {});
+  if (forbiddenPublicManifestValuePattern.test(serialized)) {
+    return { ok: false, detail: 'manifest contains a private or retired public value' };
+  }
+
+  let feed;
+  try {
+    feed = new URL(String(feedUrl || ''));
+  } catch {
+    return { ok: false, detail: 'manifest feed URL is invalid' };
+  }
+  if (feed.protocol !== 'https:' || feed.origin !== AHT_SERVICE_ORIGIN || feed.username || feed.password || feed.search || feed.hash) {
+    return { ok: false, detail: 'manifest feed is not on the clean branded origin' };
+  }
+
+  const problems = [];
+  let checked = 0;
+  for (const fieldPath of fieldPaths) {
+    const value = String(manifestPathValue(manifest, fieldPath) || '').trim();
+    if (!value) {
+      if (fieldPath === 'zip.url') problems.push(`${fieldPath} missing`);
+      continue;
+    }
+    checked += 1;
+    try {
+      const artifact = new URL(value, feed);
+      if (artifact.protocol !== 'https:'
+        || artifact.origin !== AHT_SERVICE_ORIGIN
+        || artifact.username
+        || artifact.password
+        || artifact.search
+        || artifact.hash) {
+        problems.push(`${fieldPath} is not a clean branded URL`);
+      }
+    } catch {
+      problems.push(`${fieldPath} is invalid`);
+    }
+  }
+  return {
+    ok: problems.length === 0 && checked > 0,
+    detail: problems.join(', ') || `${checked} branded artifact URL${checked === 1 ? '' : 's'}`
+  };
 }
 
 function httpRangeStatus(url) {
@@ -486,8 +596,8 @@ function liveLauncherProofStatus(baseUrl) {
     '    headers: { Accept: "application/json", "User-Agent": "AHT production readiness" }',
     '  });',
     '  const json = await response.json().catch(async () => ({ error: await response.text().catch(() => "") }));',
-    '  const ok = response.ok && json.ok === true && json.protocol === "aht-launcher-attestation-v2" && json.algorithm === "RS256" && json.privateKeyConfigured === true && json.publicKeyConfigured === true && json.keyId === "aht-launcher-attestation-v2" && json.signingVerified === true;',
-    '  console.log(JSON.stringify({ ok, status: response.status, protocol: json.protocol || "", algorithm: json.algorithm || "", privateKeyConfigured: json.privateKeyConfigured === true, publicKeyConfigured: json.publicKeyConfigured === true, keyId: json.keyId || "", signingVerified: json.signingVerified === true, error: json.error || "" }));',
+    '  const ok = response.ok && json.ok === true && json.service === "AHT Proxy" && json.protocol === "aht-launcher-attestation-v2" && json.algorithm === "RS256";',
+    '  console.log(JSON.stringify({ ok, status: response.status, service: json.service || "", protocol: json.protocol || "", algorithm: json.algorithm || "", error: json.error || "" }));',
     '  if (!ok) process.exitCode = 1;',
     '})().catch((error) => { console.log(JSON.stringify({ ok: false, status: 0, error: error.message || String(error) })); process.exitCode = 1; });'
   ].join('\n');
@@ -501,8 +611,8 @@ function liveLauncherProofStatus(baseUrl) {
     return {
       ok: Boolean(parsed.ok),
       detail: parsed.ok
-        ? `external ${parsed.algorithm} key ${parsed.keyId}; in-memory signing verified`
-        : `${parsed.status || 0}: ${parsed.error || (!parsed.privateKeyConfigured ? 'launcher attestation private key is not configured' : (!parsed.publicKeyConfigured ? 'launcher attestation public key is not configured' : 'launcher attestation signing self-test failed'))}`
+        ? `external ${parsed.algorithm} launcher proof self-test passed`
+        : `${parsed.status || 0}: ${parsed.error || 'launcher proof self-test failed'}`
     };
   } catch {
     return { ok: false, detail: commandDetail(`${result.stdout || ''}${result.stderr || ''}`, 'launcher proof request failed') };
@@ -607,7 +717,7 @@ function checkLiveCloudflareState(authOk) {
     'live Worker deployed',
     'blocker',
     worker.ok,
-    worker.ok ? 'aht-curseforge-proxy' : worker.detail
+    worker.ok ? 'AHT Proxy' : worker.detail
   );
 
   const packageJson = readJson(path.join(rootDir, 'package.json'));
@@ -620,6 +730,19 @@ function checkLiveCloudflareState(authOk) {
     releaseFeed.ok ? releaseFeed.detail : `${releaseFeed.detail}; publish the first pack update when ready`
   );
   const latest = releaseFeed.json || null;
+  const ptbReleaseFeed = httpJsonStatus(defaults?.packs?.ptb?.latestUrl || '');
+  const stableManifestPrivacy = releaseFeed.ok
+    ? publicManifestArtifactPrivacy(latest, defaults?.latestUrl || '', ['zip.url', 'clientManifest.url', 'delta.url'])
+    : { ok: false, detail: 'stable release feed unavailable' };
+  const ptbManifestPrivacy = ptbReleaseFeed.ok
+    ? publicManifestArtifactPrivacy(ptbReleaseFeed.json, defaults?.packs?.ptb?.latestUrl || '', ['zip.url', 'clientManifest.url', 'delta.url'])
+    : { ok: false, detail: 'PTB release feed unavailable' };
+  addCheck(
+    'live stable and PTB pack feeds use branded privacy-safe artifact URLs',
+    'blocker',
+    Boolean(stableManifestPrivacy.ok && ptbManifestPrivacy.ok),
+    `stable: ${stableManifestPrivacy.detail}; PTB: ${ptbManifestPrivacy.detail}`
+  );
   const fullClientRelease = latest?.installMode === 'full-client-zip' || latest?.zipFormat === CLIENT_PACK_FORMAT;
   addCheck(
     'live pack release is exact AHT client ZIP',
@@ -740,20 +863,43 @@ function checkPlayerDefaults() {
     const latestUrl = defaults?.latestUrl || '';
     const proxyUrl = defaults?.curseforge?.proxyBaseUrl || '';
     const syncUrl = defaults?.sync?.baseUrl || '';
-    const urls = [latestUrl, proxyUrl, syncUrl].filter(Boolean);
-    const hasLocalOrExample = textIncludesAny(raw, ['127.0.0.1', 'localhost', 'example.workers.dev', 'aht.local']);
+    const urls = [
+      latestUrl,
+      defaults?.packs?.ptb?.latestUrl,
+      proxyUrl,
+      syncUrl,
+      defaults?.launcherUpdate?.latestUrl,
+      defaults?.launcherProof?.baseUrl,
+      defaults?.social?.baseUrl
+    ].filter(Boolean);
+    const brandedServiceUrls = urls.length > 0 && urls.every((value) => {
+      try {
+        return new URL(value).origin === AHT_SERVICE_ORIGIN;
+      } catch {
+        return false;
+      }
+    });
+    const hasLocalOrExample = textIncludesAny(raw, ['127.0.0.1', 'localhost', 'workers.dev', 'aht.local']);
 
     addCheck(`${label} is valid JSON`, 'blocker', Boolean(defaults), label);
     addCheck(`${label} has latestUrl`, 'blocker', /^https?:\/\//i.test(latestUrl), latestUrl || 'missing latestUrl');
     const launcherProof = defaults?.launcherProof || {};
     const proofBaseUrl = launcherProof.baseUrl || syncUrl;
+    const proofUsesBrandedService = (() => {
+      try {
+        return new URL(proofBaseUrl).origin === AHT_SERVICE_ORIGIN;
+      } catch {
+        return false;
+      }
+    })();
     addCheck(`${label} has non-local Worker URLs`, 'blocker', urls.length > 0 && !hasLocalOrExample, urls.join(', ') || 'missing worker URLs');
+    addCheck(`${label} uses branded AHT service URLs`, 'blocker', brandedServiceUrls, urls.join(', ') || 'missing service URLs');
     addCheck(`${label} has neutral install path`, 'blocker', !Object.hasOwn(defaults || {}, 'instanceDir') && !defaults?.minecraftLauncher?.rootDir, 'installer chooses per OS');
     addCheck(`${label} has no developer defaults`, 'blocker', !Object.hasOwn(defaults || {}, 'developer'), Object.hasOwn(defaults || {}, 'developer') ? 'remove developer block from player defaults' : 'player-only defaults');
     addCheck(`${label} default RAM is 4096 MB`, 'blocker', Number(defaults?.minecraftLauncher?.memoryMb) === 4096, String(defaults?.minecraftLauncher?.memoryMb ?? 'missing'));
     addCheck(`${label} launcher proof enabled`, 'blocker', launcherProof.enabled !== false, `enabled=${String(launcherProof.enabled)}`);
     addCheck(`${label} launcher proof required`, 'blocker', launcherProof.required === true, `required=${String(launcherProof.required)}`);
-    addCheck(`${label} launcher proof has Worker URL`, 'blocker', /^https?:\/\//i.test(proofBaseUrl) && !textIncludesAny(proofBaseUrl, ['127.0.0.1', 'localhost', 'example.workers.dev', 'aht.local']), proofBaseUrl || 'missing proof Worker URL');
+    addCheck(`${label} launcher proof has Worker URL`, 'blocker', /^https?:\/\//i.test(proofBaseUrl) && proofUsesBrandedService, proofBaseUrl || 'missing proof Worker URL');
     addCheck(`${label} launcher proof key id`, 'blocker', (launcherProof.keyId || '') === 'aht-launcher-attestation-v2', launcherProof.keyId || 'missing key id');
   }
 }
@@ -937,12 +1083,15 @@ function checkPublicSourceHygiene() {
     'package.json',
     'package-lock.json'
   ]).filter((file) => textExtensions.has(path.extname(file).toLowerCase()) || path.basename(file) === 'package.json' || path.basename(file) === 'package-lock.json');
+  const ignoredPaths = gitIgnoredRelativePaths(files);
   const forbidden = [
     { label: 'local Windows user path', pattern: /C:\\\\Users\\\\evil/i },
     { label: 'real developer password', pattern: new RegExp('@' + '312' + 'Princ', 'i') }
   ];
   const hits = [];
   for (const file of files) {
+    const relativePath = path.relative(rootDir, file).replaceAll('\\', '/');
+    if (ignoredPaths.has(relativePath)) continue;
     let raw = '';
     try {
       raw = fs.readFileSync(file, 'utf8');

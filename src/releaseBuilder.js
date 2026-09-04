@@ -1032,7 +1032,7 @@ function serverLockConfig({ packId }) {
     '    I:timeoutTicks=300',
     '    S:updateRequiredMessage=Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}\\nUpdate A Hard Time Launcher, restart it, and reconnect.',
     '    S:verificationUnavailableMessage=A Hard Time Launcher verification is temporarily unavailable. Please reconnect shortly.',
-    '    S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify',
+    '    S:verificationUrl=https://api.ahardtime.net/api/launcher-proof/verify',
     '}',
     ''
   ].join('\n');
