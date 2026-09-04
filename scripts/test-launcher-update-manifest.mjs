@@ -112,6 +112,17 @@ const legacyAdvance = await checkLauncherReleaseImmutability({
   })
 });
 assert(legacyAdvance.ok && legacyAdvance.candidateVersion === '7.8.9' && legacyAdvance.liveVersion === '7.8.8', 'Immutability checking must compare a strict new candidate against the known legacy live shape');
+const liveManifestPath = path.join(root, 'current-launcher-latest.json');
+await fsp.writeFile(liveManifestPath, JSON.stringify(legacyManifest), 'utf8');
+const authenticatedR2Advance = await checkLauncherReleaseImmutability({
+  candidatePath: result.manifestPath,
+  latestUrl: 'https://example.test/launcher/latest.json',
+  liveManifestPath,
+  fetchImpl: async () => {
+    throw new Error('Authenticated R2 immutability checks must not request the public Worker route');
+  }
+});
+assert(authenticatedR2Advance.ok && authenticatedR2Advance.candidateVersion === '7.8.9' && authenticatedR2Advance.liveVersion === '7.8.8', 'Immutability checking must accept an authenticated R2 copy of the live manifest');
 const requiredDownloadKeys = REQUIRED_DOWNLOAD_KEYS;
 assert(uploadScript.includes("process.platform === 'win32' && /\\.cmd$/i.test(command)"), 'Windows R2 upload must shell-wrap npx.cmd');
 assert(manifest.version === '7.8.9', 'manifest version mismatch');

@@ -754,8 +754,19 @@ jobs:
       - name: Validate generated launcher update manifest
         run: node scripts/validate-launcher-update-manifest.mjs ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"
 
+      - name: Read current launcher manifest from authenticated R2
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        run: |
+          mkdir -p ci-current-launcher
+          npx --yes wrangler@4.124.0 r2 object get "$AHT_R2_BUCKET/launcher/latest.json" --file=ci-current-launcher/latest.json --remote
+
       - name: Enforce immutable launcher versions
-        run: node scripts/check-launcher-release-immutability.mjs --candidate ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL"
+        run: |
+          live_manifest_args=()
+          if [ -f ci-current-launcher/latest.json ]; then
+            live_manifest_args=(--live-manifest ci-current-launcher/latest.json)
+          fi
+          node scripts/check-launcher-release-immutability.mjs --candidate ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL" "${live_manifest_args[@]}"
 
       - name: Deploy tracked universal-download Worker contract
         if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''

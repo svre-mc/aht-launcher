@@ -860,6 +860,7 @@ assert(
   'Native macOS validation must distinguish the Intel uname machine value from the x64 Electron artifact label.'
 );
 assert(releaseWorkflow.includes('Enforce immutable launcher versions') && releaseWorkflow.includes('check-launcher-release-immutability.mjs') && !releaseWorkflow.includes('--clobber'), 'Public launcher releases must reject an existing version and never clobber release assets.');
+assert(releaseWorkflow.includes('Read current launcher manifest from authenticated R2') && releaseWorkflow.includes('r2 object get "$AHT_R2_BUCKET/launcher/latest.json"') && releaseWorkflow.includes('--live-manifest ci-current-launcher/latest.json'), 'Launcher release immutability must read the current manifest through authenticated R2 instead of depending on the public Worker route from CI.');
 assert(packageJson.dependencies?.['adm-zip'] === '^0.6.0' && packageJson.devDependencies?.electron === '^42.10.1', 'Launcher ZIP/runtime and Electron dependencies must stay on the audited security baselines.');
 assert(releaseWorkflow.includes('"scripts/validate-launcher-update-manifest.mjs"'), 'GitHub workflow path triggers must include the generated-manifest validator.');
 assert(!releaseWorkflow.includes('launcher_version') && !releaseWorkflow.includes('set-package-version.mjs'), 'GitHub launcher workflow must not expose or apply a manual launcher version override.');

@@ -25,7 +25,7 @@ function requireHttps(value = '', label = 'URL') {
   return url.toString();
 }
 
-export async function checkLauncherReleaseImmutability({ candidatePath, latestUrl, fetchImpl = fetch }) {
+export async function checkLauncherReleaseImmutability({ candidatePath, latestUrl, liveManifestPath = '', fetchImpl = fetch }) {
   const requestedCandidate = String(candidatePath || '').trim();
   if (!requestedCandidate) {
     throw new Error('A candidate launcher manifest is required. Pass --candidate <launcher/latest.json>.');
@@ -43,19 +43,29 @@ export async function checkLauncherReleaseImmutability({ candidatePath, latestUr
   }
 
   const publicLatestUrl = requireHttps(latestUrl, 'Launcher latest URL');
-  const response = await fetchImpl(`${publicLatestUrl}${publicLatestUrl.includes('?') ? '&' : '?'}immutability=${Date.now()}`, {
-    headers: { Accept: 'application/json' },
-    cache: 'no-store',
-    redirect: 'error',
-    signal: AbortSignal.timeout(20_000)
-  });
-  if (response.status === 404) {
-    return { ok: true, firstRelease: true, candidateVersion: candidate.version, liveVersion: null };
+  let live;
+  const requestedLiveManifest = String(liveManifestPath || '').trim();
+  if (requestedLiveManifest) {
+    const resolvedLiveManifest = path.resolve(requestedLiveManifest);
+    live = JSON.parse(await fsp.readFile(resolvedLiveManifest, 'utf8'));
+  } else {
+    const response = await fetchImpl(`${publicLatestUrl}${publicLatestUrl.includes('?') ? '&' : '?'}immutability=${Date.now()}`, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'AHT-Launcher-Publisher'
+      },
+      cache: 'no-store',
+      redirect: 'error',
+      signal: AbortSignal.timeout(20_000)
+    });
+    if (response.status === 404) {
+      return { ok: true, firstRelease: true, candidateVersion: candidate.version, liveVersion: null };
+    }
+    if (!response.ok) {
+      throw new Error(`Could not prove launcher release immutability: ${response.status} ${response.statusText}`);
+    }
+    live = await response.json();
   }
-  if (!response.ok) {
-    throw new Error(`Could not prove launcher release immutability: ${response.status} ${response.statusText}`);
-  }
-  const live = await response.json();
   const liveValidation = validateLauncherUpdateManifest(live, {
     latestUrl: publicLatestUrl,
     requireStagedWindows: true,
@@ -73,7 +83,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = parseArgs();
   checkLauncherReleaseImmutability({
     candidatePath: args.candidate,
-    latestUrl: args['latest-url'] || process.env.AHT_LAUNCHER_UPDATE_URL || ''
+    latestUrl: args['latest-url'] || process.env.AHT_LAUNCHER_UPDATE_URL || '',
+    liveManifestPath: args['live-manifest'] || ''
   }).then((result) => {
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
