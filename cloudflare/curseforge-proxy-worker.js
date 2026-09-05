@@ -147,6 +147,9 @@ function legacyWorkersDevRedirect(request, env) {
   if (!configuredOrigin) return null;
   try {
     const source = new URL(request.url);
+    // Java 8's HttpURLConnection does not follow HTTP 308. Existing server
+    // verifiers must receive the authenticated JSON response at this address.
+    if (source.pathname === '/api/launcher-proof/verify') return null;
     const targetOrigin = new URL(configuredOrigin);
     if (!source.hostname.toLowerCase().endsWith('.workers.dev')
         || targetOrigin.protocol !== 'https:'

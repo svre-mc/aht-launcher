@@ -8764,15 +8764,7 @@ async function cloudSetupSecrets({
 }
 
 async function fetchRemoteJson(url) {
-  const response = await fetch(cacheBustUrl(url), {
-    headers: { Accept: 'application/json' },
-    cache: 'no-store'
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
-  }
-  return response.json();
+  return readJsonFromSource(url);
 }
 
 async function cloudPreflight({ publicLatestUrl = '', bucket = '' }) {
@@ -11880,6 +11872,8 @@ ipcMain.handle('status:get', async (_event, payload = {}) => {
   });
 });
 ipcMain.handle('news:refresh', async (_event, payload = {}) => refreshNewsStatus(payload?.packKey || payload || 'stable'));
+// Launcher updates must not wait for pack preparation or the optional News feed.
+ipcMain.handle('launcher:checkUpdate', async () => launcherUpdateForRenderer(await readLauncherUpdate(await loadConfig())));
 ipcMain.handle('settings:save', async (_event, payload = {}) => {
   if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'config')) {
     return saveSettings(payload.config || {}, payload.packKey || 'stable');

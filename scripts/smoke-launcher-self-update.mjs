@@ -211,6 +211,7 @@ const artifactRequestStarted = new Promise((resolve) => { markArtifactRequestSta
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/latest.json') {
+    if (process.argv.includes('--stalled-pack-feed')) return;
     const body = JSON.stringify({ packId: 'a-hard-time-dregora', name: 'A Hard Time', version: '1.0.0', required: false, zip: { url: 'packs/a-hard-time-1.0.0.zip' } });
     response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
     response.end(body);

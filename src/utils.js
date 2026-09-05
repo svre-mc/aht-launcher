@@ -194,39 +194,44 @@ export function cacheBustHttpUrl(value, paramName = 'aht_cache_bust') {
 
 export async function readJsonFromSource(source, headers = {}) {
   if (isHttpUrl(source)) {
-    const response = await fetch(cacheBustHttpUrl(source), {
+    return fetchJson(source, headers);
+  }
+  const localPath = isFileUrl(source) ? fileURLToPath(source) : source;
+  return readJsonFile(localPath);
+}
+
+export async function fetchJson(source, headers = {}, { timeoutMs = 15_000 } = {}) {
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`The download service did not respond within ${Math.ceil(timeoutMs / 1000)} seconds. Check your connection and retry.`);
+      reject(error);
+      controller.abort(error);
+    }, timeoutMs);
+  });
+  const request = (async () => {
+    const response = await fetch(isHttpUrl(source) ? cacheBustHttpUrl(source) : source, {
       headers: {
         Accept: 'application/json',
         'Cache-Control': 'no-cache',
         Pragma: 'no-cache',
         ...headers
       },
-      cache: 'no-store'
+      cache: 'no-store',
+      signal: controller.signal
     });
     if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
       throw new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}`);
     }
     return response.json();
+  })();
+  try {
+    return await Promise.race([request, deadline]);
+  } finally {
+    clearTimeout(timer);
   }
-  const localPath = isFileUrl(source) ? fileURLToPath(source) : source;
-  return readJsonFile(localPath);
-}
-
-export async function fetchJson(source, headers = {}) {
-  const response = await fetch(isHttpUrl(source) ? cacheBustHttpUrl(source) : source, {
-    headers: {
-      Accept: 'application/json',
-      'Cache-Control': 'no-cache',
-      Pragma: 'no-cache',
-      ...headers
-    },
-    cache: 'no-store'
-  });
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}`);
-  }
-  return response.json();
 }
 
 function sleep(ms) {

@@ -243,9 +243,11 @@ await writeJson(defaultsPath, {
   }
 });
 
+let holdReleaseFeed = false;
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/latest.json') {
+    if (holdReleaseFeed) return;
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(latest));
@@ -366,6 +368,43 @@ try {
       appliedSetup
     })}`);
   }
+  if (process.argv.includes('--install-recovery')) {
+    // The platform default may contain the operator's real pack. Exercise
+    // install recovery only against an empty, isolated fixture directory.
+    await fsp.mkdir(path.join(root, 'recovery-instance'), { recursive: true });
+    await fsp.writeFile(path.join(root, 'recovery-instance', 'options.txt'), 'music:0.5\n');
+    await evaluate(client, `window.aht.saveSettings({ ...currentStatus.config, instanceDir: ${JSON.stringify(path.join(root, 'recovery-instance'))}, playCommand: { command: '', args: [], cwd: ${JSON.stringify(path.join(root, 'recovery-instance'))} } })`);
+    await evaluate(client, `(async () => {
+      const legal = await window.aht.legalStatus();
+      if (legal.required) await window.aht.legalAccept({ termsVersion: legal.termsVersion, privacyVersion: legal.privacyVersion, affirmed: true });
+      await loadLegalGate();
+      revealLauncher();
+    })()`);
+    holdReleaseFeed = true;
+    const started = Date.now();
+    await evaluate(client, 'refresh()', 'timed out release feed');
+    const failure = await evaluate(client, `({
+      latest: currentStatus.latest,
+      error: currentStatus.latestError,
+      disabled: isUnavailable(els.playButton),
+      message: document.querySelector('#launchActionStatus')?.textContent,
+      visible: !document.querySelector('#launchActionStatus')?.hidden
+    })`);
+    if (failure.latest || !failure.error || failure.disabled || !failure.visible || Date.now() - started > 25_000) {
+      throw new Error('Install did not recover from a stalled feed: ' + JSON.stringify(failure));
+    }
+    holdReleaseFeed = false;
+    await evaluate(client, 'els.playButton.click()');
+    await waitFor(client, '!playBusy && !els.updateOptionsOverlay.hidden', 'Install retry opens download options');
+    await evaluate(client, 'closeUpdateOptions(); renderInitialStatusError(new Error("Startup fixture failure"))');
+    const retry = await evaluate(client, '({ mode: els.playButton.dataset.actionMode, disabled: isUnavailable(els.playButton), message: document.querySelector("#launchActionStatus").textContent })');
+    if (retry.mode !== 'retry' || retry.disabled || !retry.message.includes('Click Retry')) {
+      throw new Error('Startup error did not provide a visible Retry action: ' + JSON.stringify(retry));
+    }
+    await evaluate(client, 'els.playButton.click()');
+    await waitFor(client, '!playBusy && !els.updateOptionsOverlay.hidden', 'startup retry recovers installation');
+    console.log(JSON.stringify({ installRecovery: true, stalledFeedElapsedMs: Date.now() - started, failure, retry }));
+  }
   console.log(JSON.stringify({
     ok: true,
     userData,
@@ -380,8 +419,17 @@ try {
     }
   }, null, 2));
 } catch (error) {
+  console.error(error.stack || String(error));
+  if (client) console.error(JSON.stringify(await evaluate(client, `({
+    action: els.playButton.dataset.actionMode, unavailable: isUnavailable(els.playButton), busy: playBusy,
+    latest: currentStatus?.latest?.version, installed: currentStatus?.installed?.version,
+    preparation: currentStatus?.launchPreparationState, error: currentStatus?.latestError,
+    blocked: currentStatus?.updateBlockedReason, instanceDir: currentStatus?.config?.instanceDir,
+    message: document.querySelector('#launchActionStatus')?.textContent,
+    optionsHidden: els.updateOptionsOverlay.hidden
+  })`).catch(() => ({}))));
   const startupProbe = await fsp.readFile(startupProbePath, 'utf8').catch(() => 'No startup probe was written.');
-  console.error(`AHT startup probe:\n${startupProbe.trim()}`);
+  console.error(`AHT startup probe (tail):\n${startupProbe.trim().split('\n').slice(-8).join('\n')}`);
   throw error;
 } finally {
   if (client) {

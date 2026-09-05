@@ -867,6 +867,8 @@ const els = {
 };
 
 let currentStatus = null;
+let lastLauncherUpdateCheck = null;
+let launcherUpdateCheckInFlight = null;
 let updatePoll = null;
 let launcherUpdatePoll = null;
 let launcherDeployPoll = null;
@@ -3280,9 +3282,17 @@ function renderPrimaryAction(status = currentStatus) {
   els.playButton.setAttribute("aria-busy", actionBusy ? "true" : "false");
   els.playButton.innerHTML = `<span class="button-icon ${iconClass}" aria-hidden="true"></span><span class="primary-action-label">${label}</span>`;
   const unavailable = packageActionMode
-    ? (launcherUpdateRequired || Boolean(status?.updateBlockedReason) || !status?.latest || actionBusy)
+    ? (launcherUpdateRequired || actionBusy)
     : actionBusy;
   setUnavailable(els.playButton, unavailable);
+  const retryReason = !updateRunning
+    ? (status?.updateBlockedReason || (!status?.latest
+      ? `The ${installMode ? "install" : "update"} check has not completed. Click ${installMode ? "Install" : "Play"} to retry.`
+      : ""))
+    : "";
+  setLaunchActionStatus(launcherUpdateRequired
+    ? "Update the launcher to continue. The launcher update is starting automatically."
+    : retryReason);
   els.playButton.title = installMode
     ? (status?.updateBlockedReason || (updateRunning ? "Installing the selected AHT pack" : "Install the selected AHT pack"))
     : (updateMode
@@ -3290,6 +3300,51 @@ function renderPrimaryAction(status = currentStatus) {
       : (playBusy
         ? "Opening Minecraft Launcher"
         : (status?.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing."))));
+}
+
+function setLaunchActionStatus(message = "") {
+  const element = $("#launchActionStatus");
+  if (!element) return;
+  element.textContent = message;
+  element.hidden = !message;
+}
+
+async function checkLauncherUpdateQuietly() {
+  if (typeof window.aht.checkLauncherUpdate !== "function") return null;
+  if (launcherUpdateCheckInFlight) return launcherUpdateCheckInFlight;
+  launcherUpdateCheckInFlight = (async () => {
+    const update = await window.aht.checkLauncherUpdate();
+    if (!update.error || !lastLauncherUpdateCheck?.updateRequired) lastLauncherUpdateCheck = update;
+    if (currentStatus) renderStatus({ ...currentStatus, launcherUpdate: lastLauncherUpdateCheck });
+    else renderLauncherUpdateOverlay({ launcherUpdate: lastLauncherUpdateCheck });
+    return lastLauncherUpdateCheck;
+  })().catch((error) => {
+    console.warn("Launcher update check failed", error);
+    return null;
+  }).finally(() => { launcherUpdateCheckInFlight = null; });
+  return launcherUpdateCheckInFlight;
+}
+
+async function retryInstallCheck() {
+  setPlayBusy(true);
+  setLaunchActionStatus("Checking the installation and launcher version...");
+  let retryMessage = "";
+  try {
+    await checkLauncherUpdateQuietly();
+    const status = await refresh(activeSidebarPack);
+    if (status.launcherUpdate?.updateRequired) return;
+    if (!status.latest || status.updateBlockedReason) {
+      retryMessage = status.updateBlockedReason || "The download service could not be reached. Check your connection and click Install to retry.";
+      return;
+    }
+    if (!status.installed?.version || status.updateRequired) openUpdateOptions();
+  } catch (error) {
+    renderInitialStatusError(error);
+  } finally {
+    playBusy = false;
+    if (currentStatus && els.playButton.dataset.actionMode !== "retry") renderPrimaryAction(currentStatus);
+    if (retryMessage) setLaunchActionStatus(retryMessage);
+  }
 }
 
 function setPlayBusy(busy) {
@@ -4159,6 +4214,10 @@ function fillSettings(status) {
 }
 
 function renderStatus(status) {
+  if (status.launcherUpdate && (!status.launcherUpdate.error || !lastLauncherUpdateCheck?.updateRequired)) {
+    lastLauncherUpdateCheck = status.launcherUpdate;
+  }
+  if (lastLauncherUpdateCheck) status = { ...status, launcherUpdate: lastLauncherUpdateCheck };
   currentStatus = status;
   const statusPack = status.activePack || activeSidebarPack || "aht";
   activeSidebarPack = statusPack;
@@ -4613,7 +4672,10 @@ function renderInitialStatusError(error) {
   setBadge("Error", "bad");
   setLog(message);
   setUnavailable(els.playButton, false);
-  els.playButton.title = "Run the launch checks and create a support report if anything fails.";
+  els.playButton.dataset.actionMode = "retry";
+  els.playButton.innerHTML = '<span class="button-icon icon-sync" aria-hidden="true"></span><span class="primary-action-label">Retry</span>';
+  els.playButton.title = "Retry loading the launcher";
+  setLaunchActionStatus(`The launcher could not finish loading. Click Retry. ${message}`);
   showToast("Launcher error", message, "error", {
     context: "play:start",
     packKey: activeSidebarPack,
@@ -5295,6 +5357,10 @@ if (els.downloadsUpdateIconButton) {
 }
 els.playButton.addEventListener("click", async () => {
   if (playBusy || isUnavailable(els.playButton)) return;
+  if (els.playButton.dataset.actionMode === "retry" || !currentStatus?.latest || currentStatus?.updateBlockedReason) {
+    await retryInstallCheck();
+    return;
+  }
   if (els.playButton.dataset.actionMode === "install" || currentStatus?.updateRequired) {
     openUpdateOptions();
     return;
@@ -6076,11 +6142,18 @@ els.bucketInput.addEventListener("input", () => {
   updateReleaseUploadState();
 });
 
+void checkLauncherUpdateQuietly();
+const startupWatchdog = window.setTimeout(() => {
+  if (!document.body.classList.contains("is-booting")) return;
+  if (!currentStatus) renderInitialStatusError(new Error("A startup check is taking too long."));
+  else setLaunchActionStatus("A startup check is taking too long. You can retry the installation check.");
+  revealLauncher();
+}, 20_000);
 void bootstrapLauncher().catch((error) => {
   console.warn("Launcher startup gate failed", error);
   if (!currentStatus) renderInitialStatusError(error);
   revealLauncher();
-});
+}).finally(() => window.clearTimeout(startupWatchdog));
 
 window.addEventListener("focus", () => {
   if (Date.now() - lastStatusRefreshAt > 5000) {
@@ -6089,5 +6162,6 @@ window.addEventListener("focus", () => {
 });
 
 window.setInterval(() => {
+  void checkLauncherUpdateQuietly();
   refreshQuietly();
 }, 60_000);

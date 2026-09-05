@@ -23,6 +23,7 @@ const playerApi = {
   startLauncherUpdate: () => ipcRenderer.invoke('launcher:updateStart'),
   restartLauncherUpdate: () => ipcRenderer.invoke('launcher:updateRestart'),
   getLauncherUpdateState: () => ipcRenderer.invoke('launcher:updateState'),
+  checkLauncherUpdate: () => ipcRenderer.invoke('launcher:checkUpdate'),
   scanFiles: (packKey = 'aht') => ipcRenderer.invoke('files:scan', { packKey }),
   scanChanges: (packKey = 'aht') => ipcRenderer.invoke('changes:scan', { packKey }),
   syncChanges: (packKey = 'aht') => ipcRenderer.invoke('changes:sync', { packKey }),
