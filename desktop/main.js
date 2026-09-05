@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeStorage, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { linuxMinecraftLauncherPaths, isLinuxMinecraftLauncherExecutable } from '../src/linuxMinecraftLauncher.js';
+import { restorePlayerReleaseFeeds } from '../src/playerReleaseConfig.js';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
@@ -461,7 +462,7 @@ function errorForDiagnostic(error = null) {
   return {
     name: String(error.name || 'Error'),
     message: String(error.message || error),
-    code: error.code || '',
+    code: error.code || error.cause?.code || (Array.isArray(error.cause?.errors) ? error.cause.errors.map((item) => item.code).filter(Boolean).join(', ') : ''),
     stack: String(error.stack || '')
   };
 }
@@ -1115,6 +1116,26 @@ async function buildErrorDiagnosticReport(payload = {}) {
   }
 
   const config = await loadConfig().catch(() => null);
+  const serviceLines = [];
+  if (payload.context === 'install:check') {
+    const packConfig = config ? configForPack(config, target.id) : null;
+    let endpoint = 'Not configured';
+    try {
+      const url = new URL(packConfig?.latestUrl || '');
+      endpoint = `${url.origin}${url.pathname}`;
+    } catch {}
+    serviceLines.push('DOWNLOAD SERVICE CHECK', `  Address: ${sanitizeDiagnosticText(endpoint, 500)}`);
+    try {
+      if (!packConfig?.latestUrl) throw new Error('No modpack download address is configured.');
+      const latest = await readLatest(packConfig);
+      serviceLines.push(`  Result: Available; pack ${latest?.packId || 'unknown'}, version ${latest?.version || 'unknown'}`);
+    } catch (error) {
+      recordErrorDiagnostic('install:check', error);
+      const details = errorForDiagnostic(error);
+      serviceLines.push(`  Result: ${sanitizeDiagnosticText(details.message, 1200)}`, `  Error code: ${sanitizeDiagnosticText(details.code || details.name, 180)}`);
+    }
+    serviceLines.push('');
+  }
   const system = await launchSystemSnapshot(config || {}).catch(() => ({}));
   const error = errorForDiagnostic(lastErrorDiagnostic?.error || payload.message || payload.detail || 'Unknown error');
   const lines = [
@@ -1131,7 +1152,9 @@ async function buildErrorDiagnosticReport(payload = {}) {
     `  Channel: ${sanitizeDiagnosticText(lastErrorDiagnostic?.channel || 'Not recorded', 120)}`,
     `  Time: ${lastErrorDiagnostic?.at || 'Not recorded'}`,
     `  Message: ${sanitizeDiagnosticText(lastErrorDiagnostic?.error?.message || 'Not recorded', 1200)}`,
+    `  Error code: ${sanitizeDiagnosticText(lastErrorDiagnostic?.error?.code || 'Not recorded', 180)}`,
     '',
+    ...serviceLines,
     'PC',
     `  Operating system: ${sanitizeDiagnosticText(system.osName || 'Unknown', 240)}`,
     `  Architecture: ${sanitizeDiagnosticText(system.arch || process.arch, 80)}`,
@@ -2998,6 +3021,9 @@ async function loadConfig() {
   const normalizedWorkerConfig = normalizedWorkerControlConfig(config);
   config = normalizedWorkerConfig.config;
   let changed = normalizedWorkerConfig.changed;
+  if (!isDeveloperMode() && (process.env.AHT_TEST_HOOKS !== '1' || process.env.AHT_TEST_RESTORE_PACKAGED_FEEDS === '1')) {
+    changed = restorePlayerReleaseFeeds(config, defaults) || changed;
+  }
   const storedRootSelection = String(stored.minecraftLauncher?.rootSelection || '').trim().toLowerCase();
   if (!['default', 'automatic', 'manual'].includes(storedRootSelection)) {
     config.minecraftLauncher.rootSelection = !String(stored.minecraftLauncher?.rootDir || '').trim() || samePath(

@@ -108,6 +108,9 @@ jobs:
       - name: Test Linux launcher discovery and profile selection
         run: node scripts/test-linux-minecraft-handoff.mjs && npm run test:profile
 
+      - name: Test player release address recovery
+        run: node scripts/test-player-release-config.mjs
+
       - name: Confirm unsigned macOS distribution mode
         if: matrix.id == 'macos'
         shell: bash

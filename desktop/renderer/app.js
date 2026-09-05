@@ -3310,6 +3310,8 @@ function setLaunchActionStatus(message = "") {
   if (!element) return;
   element.textContent = message;
   element.hidden = !message;
+  const reportButton = $("#installErrorReportButton");
+  if (reportButton) reportButton.hidden = !message || playBusy || Boolean(currentStatus?.latest && !currentStatus?.latestError && !currentStatus?.updateBlockedReason);
 }
 
 async function checkLauncherUpdateQuietly() {
@@ -5298,6 +5300,12 @@ els.setupSettingsButton.addEventListener("click", () => activateTab("settings"))
 els.setupAutoButton.addEventListener("click", applyRecommendedSetup);
 els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
 els.downloadsButton.addEventListener("click", openDownloads);
+$("#installErrorReportButton").addEventListener("click", () => copyErrorReportFromToast({
+  title: "Installation service check",
+  message: currentStatus?.latestError || currentStatus?.updateBlockedReason || "The download service could not be read.",
+  context: "install:check",
+  packKey: activeSidebarPack
+}));
 if (els.downloadsBackButton) els.downloadsBackButton.addEventListener("click", closeDownloads);
 if (els.downloadsErrorReportButton) {
   els.downloadsErrorReportButton.addEventListener("click", () => copyErrorReportFromToast({

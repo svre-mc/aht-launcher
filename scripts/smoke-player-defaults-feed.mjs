@@ -244,10 +244,16 @@ await writeJson(defaultsPath, {
 });
 
 let holdReleaseFeed = false;
+let releaseFeedFailureStatus = 0;
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/latest.json') {
     if (holdReleaseFeed) return;
+    if (releaseFeedFailureStatus) {
+      response.writeHead(releaseFeedFailureStatus, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: 'Fixture service failure' }));
+      return;
+    }
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(latest));
@@ -265,6 +271,9 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
+if (process.argv.includes('--install-recovery')) {
+  await writeJson(path.join(userData, 'launcher.config.json'), { latestUrl: '' });
+}
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
@@ -276,6 +285,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_RESTORE_PACKAGED_FEEDS: process.argv.includes('--install-recovery') ? '1' : '',
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile,
@@ -388,12 +398,20 @@ try {
       error: currentStatus.latestError,
       disabled: isUnavailable(els.playButton),
       message: document.querySelector('#launchActionStatus')?.textContent,
-      visible: !document.querySelector('#launchActionStatus')?.hidden
+      visible: !document.querySelector('#launchActionStatus')?.hidden,
+      reportVisible: !document.querySelector('#installErrorReportButton')?.hidden
     })`);
-    if (failure.latest || !failure.error || failure.disabled || !failure.visible || Date.now() - started > 25_000) {
+    if (failure.latest || !failure.error || failure.disabled || !failure.visible || !failure.reportVisible || Date.now() - started > 25_000) {
       throw new Error('Install did not recover from a stalled feed: ' + JSON.stringify(failure));
     }
     holdReleaseFeed = false;
+    releaseFeedFailureStatus = 503;
+    const report = await evaluate(client, `window.aht.copyErrorReport({ context: 'install:check', packKey: 'stable', message: 'Fixture install service failure' })`);
+    const reportText = await fsp.readFile(report.filePath, 'utf8');
+    if (!reportText.includes('DOWNLOAD SERVICE CHECK') || !reportText.includes('503') || !reportText.includes('Error code:')) {
+      throw new Error('Install failure report did not include the fresh service failure and code.');
+    }
+    releaseFeedFailureStatus = 0;
     await evaluate(client, 'els.playButton.click()');
     await waitFor(client, '!playBusy && !els.updateOptionsOverlay.hidden', 'Install retry opens download options');
     await evaluate(client, 'closeUpdateOptions(); renderInitialStatusError(new Error("Startup fixture failure"))');
@@ -403,7 +421,7 @@ try {
     }
     await evaluate(client, 'els.playButton.click()');
     await waitFor(client, '!playBusy && !els.updateOptionsOverlay.hidden', 'startup retry recovers installation');
-    console.log(JSON.stringify({ installRecovery: true, stalledFeedElapsedMs: Date.now() - started, failure, retry }));
+    console.log(JSON.stringify({ installRecovery: true, blankSavedFeedRepaired: true, installServiceReport: true, stalledFeedElapsedMs: Date.now() - started, failure, retry }));
   }
   console.log(JSON.stringify({
     ok: true,
