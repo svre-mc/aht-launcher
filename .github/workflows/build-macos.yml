@@ -110,7 +110,9 @@ jobs:
 
       - name: Test native desktop networking on Windows
         if: matrix.id == 'windows'
-        run: node scripts/test-desktop-http.mjs
+        run: |
+          node node_modules/electron/install.js
+          node scripts/test-desktop-http.mjs
 
       - name: Test updater handoff and refreshed account state
         run: node scripts/test-launcher-restart-state.mjs && node scripts/test-live-account-status.mjs && node scripts/test-mod-director-icon.mjs
