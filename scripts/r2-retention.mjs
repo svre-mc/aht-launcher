@@ -47,6 +47,9 @@ function cleanObjectKey(value) {
   let key = String(value || '').replaceAll('\\', '/').replace(/^\/+/, '');
   if (key.startsWith('releases/')) key = key.slice('releases/'.length);
   if (!key || key.includes('\0') || key.split('/').includes('..')) return '';
+  // The Worker resolves these public download routes to files in the manifest.
+  // They are HTTP handlers, not R2 objects; the artifact path/url protects the file.
+  if (key.startsWith('launcher/download/')) return '';
   return RELEASE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix)) || MANIFEST_PATHS.includes(key)
     ? key
     : '';

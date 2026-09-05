@@ -9,6 +9,7 @@ function developerApiAllowed() {
 }
 
 const playerApi = {
+  selectMinecraftExecutable: () => ipcRenderer.invoke('dialog:minecraftExecutable'),
   getStatus: (packKey = 'aht', options = {}) => ipcRenderer.invoke('status:get', {
     packKey,
     preferCache: Boolean(options.preferCache),

@@ -61,6 +61,15 @@ assert(refs.has('ptb/packs/a-hard-time-ptb-2.8.6.zip'));
 assert(refs.has('ptb/manifests/a-hard-time-ptb-2.8.6.json'));
 assert(refs.has('server/aht_version_lock.cfg'));
 
+const routedManifest = manifests();
+routedManifest['launcher/latest.json'].downloads.windows.downloadUrl = `${baseUrl}/launcher/download/windows-x64`;
+routedManifest['launcher/latest.json'].downloads.ubuntu.downloadUrl = 'launcher/download/ubuntu-x64-appimage';
+const routedRefs = extractReferencedKeys(routedManifest, baseUrl);
+assert(!routedRefs.has('launcher/download/windows-x64'));
+assert(!routedRefs.has('launcher/download/ubuntu-x64-appimage'));
+assert(routedRefs.has(routedManifest['launcher/latest.json'].downloads.windows.path));
+assert.doesNotThrow(() => planR2Retention({ inventory: inventory(), manifests: routedManifest, baseUrl }));
+
 const plan = planR2Retention({ inventory: inventory(), manifests: manifests(), baseUrl });
 const deleted = new Set(plan.deleteObjects.map((item) => item.key));
 assert(deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.85.exe'));

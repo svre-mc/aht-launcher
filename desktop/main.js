@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeStorage, shell } from 'electron';
 import { spawn } from 'node:child_process';
+import { linuxMinecraftLauncherPaths, isLinuxMinecraftLauncherExecutable } from '../src/linuxMinecraftLauncher.js';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
@@ -4668,6 +4669,7 @@ function launchPreparationConfigSignature(config = {}) {
     packId: config.packId || '',
     instanceDir: path.resolve(config.instanceDir || defaultInstanceDir()),
     rootDir: minecraft.rootDir || '',
+    executablePath: process.platform === 'linux' ? String(minecraft.executablePath || '') : '',
     profileId: minecraft.profileId || '',
     profileName: minecraft.profileName || '',
     javaPath: minecraft.javaPath || '',
@@ -11239,14 +11241,14 @@ function windowsDesktopMinecraftLauncherCandidates() {
   ].filter(Boolean).map((candidate) => path.resolve(candidate));
 }
 
-function linuxMinecraftLauncherCandidates() {
-  return uniqueCurrentPlatformPaths([
-    commandOnPath('minecraft-launcher'),
-    '/usr/bin/minecraft-launcher',
-    '/usr/local/bin/minecraft-launcher',
-    '/opt/minecraft-launcher/minecraft-launcher',
-    '/snap/bin/minecraft-launcher'
-  ]);
+function linuxMinecraftLauncherCandidates(config = {}) {
+  return linuxMinecraftLauncherPaths({
+    rootDir: config.minecraftLauncher?.rootDir || '',
+    executablePath: config.minecraftLauncher?.executablePath || '',
+    home: app.getPath('home'),
+    downloadsDir: app.getPath('downloads'),
+    pathCommand: commandOnPath('minecraft-launcher')
+  });
 }
 
 function minecraftNotInstalledError() {
@@ -11335,8 +11337,14 @@ async function resolveMinecraftLauncherRoute(config = {}) {
     throw minecraftNotInstalledError();
   }
   if (process.platform === 'linux') {
-    for (const executablePath of linuxMinecraftLauncherCandidates()) {
-      if (await pathExists(executablePath)) {
+    const selected = String(config.minecraftLauncher?.executablePath || '').trim();
+    if (selected && !(await isLinuxMinecraftLauncherExecutable(selected))) {
+      const error = new Error('The selected Minecraft Launcher cannot run. In Settings, browse to the extracted minecraft-launcher executable.');
+      error.code = 'AHT_MINECRAFT_NOT_INSTALLED';
+      throw error;
+    }
+    for (const executablePath of linuxMinecraftLauncherCandidates(config)) {
+      if (await isLinuxMinecraftLauncherExecutable(executablePath)) {
         return {
           kind: 'linux',
           targetKind: 'desktop',
@@ -11347,7 +11355,9 @@ async function resolveMinecraftLauncherRoute(config = {}) {
         };
       }
     }
-    throw minecraftNotInstalledError();
+    const error = minecraftNotInstalledError();
+    error.message = 'Minecraft Launcher was not found. In Settings, select the minecraft-launcher executable from your extracted Minecraft download.';
+    throw error;
   }
 
   platformKey(process.platform);
@@ -12692,6 +12702,7 @@ function launcherConfigFromPreparedPaths(config = {}, cached = null) {
 async function preparedLauncherRouteAvailable(route = null) {
   if (!route || typeof route !== 'object' || !String(route.kind || '').trim()) return false;
   if (route.cwd && !(await pathExists(route.cwd))) return false;
+  if (route.kind === 'linux') return isLinuxMinecraftLauncherExecutable(route.executablePath);
   if (route.executablePath) return pathExists(route.executablePath);
   if (route.appPath) return pathExists(route.appPath);
   if (route.kind === 'custom') return Boolean(String(route.command || '').trim());
@@ -13819,6 +13830,9 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     runtimeFilesChecked: 0,
     ...finalPrerequisites
   };
+  // CurseForge or Minecraft Launcher can change selection after AHT startup.
+  // Refresh the owned Linux profile immediately before the actual handoff.
+  if (process.platform === 'linux' && prepared.minecraftProfile) prepared.minecraftProfile.selectionPrepared = false;
   if (prepared.minecraftProfile?.selectionPrepared !== true) {
     const profileWasMissing = prepared.minecraftProfile?.profileExists !== true;
     prepared.minecraftProfile = await runLaunchStep(
@@ -13937,6 +13951,20 @@ ipcMain.handle('dialog:folder', async (_event, defaultPath = '') => {
   if (startingPath) options.defaultPath = startingPath;
   const result = await dialog.showOpenDialog(mainWindow, options);
   return result.canceled ? '' : result.filePaths[0];
+});
+ipcMain.handle('dialog:minecraftExecutable', async () => {
+  if (process.platform !== 'linux') return '';
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select the extracted minecraft-launcher executable',
+    defaultPath: app.getPath('downloads'),
+    properties: ['openFile']
+  });
+  if (result.canceled) return '';
+  const file = result.filePaths[0];
+  if (!(await isLinuxMinecraftLauncherExecutable(file))) {
+    throw new Error('Select the executable named minecraft-launcher inside the extracted download, not the archive or folder.');
+  }
+  return file;
 });
 ipcMain.handle('shell:openPath', async (_event, target) => {
   const requested = String(target || '').trim();

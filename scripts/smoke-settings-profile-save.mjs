@@ -309,6 +309,28 @@ try {
     throw new Error(`Java 8 runtime details leaked back into Game Settings: ${JSON.stringify({ java8SettingsProof, java8Runtime: status.java8Runtime })}`);
   }
 
+  const executableSettings = await evaluate(client, `
+    window.aht.getStatus().then((status) => {
+      const executablePath = '/home/Test Player/Downloads/minecraft-launcher/minecraft-launcher';
+      fillSettings({ ...status, platformProfile: { key: 'linux' }, config: {
+        ...status.config, minecraftLauncher: { ...status.config.minecraftLauncher, executablePath }
+      }});
+      const result = {
+        visible: !document.querySelector('#minecraftExecutableField').hidden,
+        executablePath: serializeSettings().minecraftLauncher.executablePath,
+        pickerAvailable: typeof window.aht.selectMinecraftExecutable === 'function'
+      };
+      fillSettings({ ...status, platformProfile: { key: 'windows' } });
+      result.hiddenOnWindows = document.querySelector('#minecraftExecutableField').hidden;
+      fillSettings(status);
+      return result;
+    })
+  `);
+  if (!executableSettings.visible || !executableSettings.hiddenOnWindows || !executableSettings.pickerAvailable
+      || executableSettings.executablePath !== '/home/Test Player/Downloads/minecraft-launcher/minecraft-launcher') {
+    throw new Error(`Linux Minecraft executable settings failed: ${JSON.stringify(executableSettings)}`);
+  }
+
   const saveResult = await evaluate(client, `
     window.aht.getStatus().then((status) => window.aht.saveSettings({
       ...status.config,

@@ -105,6 +105,9 @@ jobs:
       - name: Test professional launch diagnostics
         run: npm run test:launch-diagnostics
 
+      - name: Test Linux launcher discovery and profile selection
+        run: node scripts/test-linux-minecraft-handoff.mjs && npm run test:profile
+
       - name: Confirm unsigned macOS distribution mode
         if: matrix.id == 'macos'
         shell: bash

@@ -693,6 +693,9 @@ const els = {
   syncUrlInput: $("#syncUrlInput"),
   instanceInput: $("#instanceInput"),
   minecraftRootInput: $("#minecraftRootInput"),
+  minecraftExecutableField: $("#minecraftExecutableField"),
+  minecraftExecutableInput: $("#minecraftExecutableInput"),
+  pickMinecraftExecutableButton: $("#pickMinecraftExecutableButton"),
   openInstancePathButton: $("#openInstancePathButton"),
   openMinecraftRootPathButton: $("#openMinecraftRootPathButton"),
   minecraftProfileNameInput: $("#minecraftProfileNameInput"),
@@ -4089,6 +4092,7 @@ function serializeSettings() {
       enabled: true,
       closeLauncherWhenGameStarts: els.closeLauncherWhenGameStartsInput.checked,
       rootDir: els.minecraftRootInput.value.trim(),
+      executablePath: els.minecraftExecutableInput.value.trim(),
       profileName: els.minecraftProfileNameInput.value.trim(),
       memoryMb: Number(els.minecraftMemoryInput.value || DEFAULT_MEMORY_MB)
     },
@@ -4133,6 +4137,8 @@ function fillSettings(status) {
   setInputValue(els.syncUrlInput, config.sync?.baseUrl || "");
   setInputValue(els.instanceInput, config.instanceDir || "");
   setInputValue(els.minecraftRootInput, config.minecraftLauncher?.rootDir || status.minecraftProfile?.rootDir || "");
+  els.minecraftExecutableField.hidden = status.platformProfile?.key !== 'linux';
+  setInputValue(els.minecraftExecutableInput, config.minecraftLauncher?.executablePath || "");
   setInputValue(els.minecraftProfileNameInput, config.minecraftLauncher?.profileName || status.minecraftProfile?.profileName || "");
   setMemoryValue(config.minecraftLauncher?.memoryMb || DEFAULT_MEMORY_MB);
   setInputValue(els.playCommandInput, config.playCommand?.command || "");
@@ -5478,6 +5484,14 @@ if (els.openMinecraftRootPathButton) {
 els.pickMinecraftRootButton.addEventListener("click", async () => {
   const folder = await window.aht.selectFolder(els.minecraftRootInput.value.trim() || currentStatus?.config?.minecraftLauncher?.rootDir || "");
   if (folder) els.minecraftRootInput.value = folder;
+});
+els.pickMinecraftExecutableButton.addEventListener("click", async () => {
+  try {
+    const file = await window.aht.selectMinecraftExecutable();
+    if (file) els.minecraftExecutableInput.value = file;
+  } catch (error) {
+    showToast("Select Minecraft Launcher", error.message || String(error), "error");
+  }
 });
 if (els.minecraftMemoryInput) {
   els.minecraftMemoryInput.addEventListener("input", () => setMemoryValue(els.minecraftMemoryInput.value));
