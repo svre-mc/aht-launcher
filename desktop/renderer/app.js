@@ -4257,9 +4257,18 @@ function renderStatus(status) {
   }
   if (els.installId) els.installId.textContent = shortId(status.identity.installId);
   els.playerLabelView.textContent = accountUsername(status) || "Player";
-  if (els.profileFriendsButton) els.profileFriendsButton.hidden = !accountUsername(status);
+  const detectedAccount = status.identity?.minecraftLauncherDetectedUsername || "";
+  const accountPending = Boolean(detectedAccount && !accountUsername(status));
+  if (accountPending) els.playerLabelView.textContent = detectedAccount;
+  if (els.profileFriendsButton) {
+    els.profileFriendsButton.hidden = !accountUsername(status) && !detectedAccount;
+    els.profileFriendsButton.disabled = accountPending;
+    els.profileFriendsButton.title = accountPending
+      ? status.identity?.minecraftUsernameSyncWarning || "Minecraft account detected; account sync is pending."
+      : "Open friends";
+  }
   renderFriendsNotification(friendsSocialState);
-  setSyncLine(status.config.sync?.enabled === false ? "Offline" : "Online");
+  setSyncLine(accountPending ? "Account sync pending" : status.config.sync?.enabled === false ? "Offline" : "Online");
   els.developerTab.hidden = !status.developerMode;
   els.developerTileButton.hidden = !status.developerMode;
   syncSetupNotice();
@@ -5346,6 +5355,20 @@ if (els.launcherUpdateNowButton) {
     startLauncherSelfUpdate();
   });
 }
+$("#launcherUpdateErrorReportButton")?.addEventListener("click", async () => {
+  const button = $("#launcherUpdateErrorReportButton");
+  button.disabled = true;
+  try {
+    await window.aht.copyErrorReport({
+      title: "Launcher update handoff",
+      context: "launcher:updateRestart",
+      message: lastLauncherUpdateState?.error || "Launcher update is waiting to restart."
+    });
+    button.textContent = "Report copied — paste to attach it";
+  } catch {
+    button.textContent = "Copy failed — click to retry";
+  } finally { button.disabled = false; }
+});
 els.downloadsOverlay.addEventListener("click", (event) => {
   if (event.target === els.downloadsOverlay) closeDownloads();
 });

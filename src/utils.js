@@ -200,6 +200,29 @@ export async function readJsonFromSource(source, headers = {}) {
   return readJsonFile(localPath);
 }
 
+export async function httpResponseError(response, source) {
+  // Read only a small prefix; error pages can be large and can contain private
+  // request details. Retain only the edge error number and request identifier.
+  let prefix = '';
+  const reader = response.body?.getReader();
+  if (reader) {
+    try {
+      while (prefix.length < 8192) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        prefix += new TextDecoder().decode(value).slice(0, 8192 - prefix.length);
+      }
+    } catch {} finally { void reader.cancel().catch(() => {}); }
+  }
+  const edgeCode = prefix.match(/(?:error\s*(?:code)?\s*:?\s*|error-code[^>]*>\s*)(1\d{3})\b/i)?.[1] || '';
+  const ray = String(response.headers.get('cf-ray') || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 80);
+  const challenge = response.headers.get('cf-mitigated') === 'challenge';
+  const detail = [edgeCode && `Cloudflare ${edgeCode}`, challenge && 'browser verification required', ray && `request ${ray}`].filter(Boolean).join('; ');
+  const error = new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}${detail ? ` (${detail})` : ''}`);
+  error.code = edgeCode ? `CLOUDFLARE_${edgeCode}` : `HTTP_${response.status}`;
+  return error;
+}
+
 export async function fetchJson(source, headers = {}, { timeoutMs = 15_000 } = {}) {
   const controller = new AbortController();
   let timer;
@@ -222,8 +245,7 @@ export async function fetchJson(source, headers = {}, { timeoutMs = 15_000 } = {
       signal: controller.signal
     });
     if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
-      throw new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}`);
+      throw await httpResponseError(response, source);
     }
     return response.json();
   })();

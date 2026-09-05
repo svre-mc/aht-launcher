@@ -197,5 +197,6 @@ try {
   assert(leftovers.length === 0, `temporary download files were left behind: ${leftovers.join(', ')}`);
   console.log(JSON.stringify({ ok: true, root, hits, forbiddenHits, rangeHits, ignoredRangeHits, brokenRangeHits, brokenRangeStreamHits, content }, null, 2));
 } finally {
+  server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
 }

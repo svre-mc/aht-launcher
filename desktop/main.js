@@ -1,6 +1,8 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, net, powerSaveBlocker, safeStorage, shell } from 'electron';
+import { installDesktopHttp } from '../src/desktopHttp.js';
 import { spawn } from 'node:child_process';
 import { linuxMinecraftLauncherPaths, isLinuxMinecraftLauncherExecutable } from '../src/linuxMinecraftLauncher.js';
+import { ensureModDirectorIcon } from '../src/modDirectorIcon.js';
 import { restorePlayerReleaseFeeds } from '../src/playerReleaseConfig.js';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
@@ -365,7 +367,7 @@ const STARTUP_PREPARATION_CACHE_SCHEMA = 'aht-launcher-startup-preparation-cache
 const STARTUP_PREPARATION_LEGACY_CACHE_SCHEMA = 'aht-launcher-startup-preparation-cache/v1';
 const STARTUP_PREPARATION_ENVELOPE_SCHEMA = 'aht-launcher-startup-preparation-envelope/v1';
 const STARTUP_PREPARATION_KEY_SCHEMA = 'aht-launcher-startup-preparation-key/v1';
-const STARTUP_PREREQUISITE_POLICY = 'java8-and-minecraft-launcher-paths/v2';
+const STARTUP_PREREQUISITE_POLICY = 'java8-and-minecraft-launcher-paths/v3';
 const LAUNCH_PREPARATION_MANAGED_POLICY = 'launch-critical-managed-files/v1';
 const LAUNCH_PREPARATION_RUNTIME_POLICY = 'minecraft-forge-runtime-content/v2';
 const STARTUP_PREPARATION_PACKS = Object.freeze(['stable', 'ptb']);
@@ -1133,6 +1135,23 @@ async function buildErrorDiagnosticReport(payload = {}) {
       recordErrorDiagnostic('install:check', error);
       const details = errorForDiagnostic(error);
       serviceLines.push(`  Result: ${sanitizeDiagnosticText(details.message, 1200)}`, `  Error code: ${sanitizeDiagnosticText(details.code || details.name, 180)}`);
+    }
+    serviceLines.push('');
+  }
+  if (payload.context === 'launcher:updateRestart') {
+    const state = launcherUpdateState;
+    const prepared = state.lastResult?.preparedRestart || {};
+    serviceLines.push('LAUNCHER UPDATE HANDOFF',
+      `  Target version: ${state.lastResult?.version || 'Not staged'}`,
+      `  Running: ${Boolean(state.running)}`,
+      `  Phase: ${sanitizeDiagnosticText(state.progress?.phase || 'Not recorded', 180)}`,
+      `  Strategy: ${prepared.strategy || 'Not prepared'}`,
+      `  Error: ${sanitizeDiagnosticText(state.error || 'None recorded', 1200)}`,
+      ...state.lines.slice(-12).map((line) => `  ${sanitizeDiagnosticText(line, 600)}`));
+    for (const [label, file] of [['Helper', prepared.logPath], ['Bootstrap', prepared.bootstrapLogPath]]) {
+      if (!file) continue;
+      const log = await fs.readFile(file, 'utf8').catch(() => 'No startup log was written.');
+      serviceLines.push(`${label} log:`, sanitizeDiagnosticText(log.slice(-5000), 5000));
     }
     serviceLines.push('');
   }
@@ -2656,6 +2675,21 @@ async function minecraftLauncherRuntimeConfig(config = {}) {
       }
     }
     : config;
+  if (process.platform === 'linux') {
+    // The standalone Linux launcher owns ~/.minecraft. An unrelated CurseForge
+    // installation must not redirect its profiles or signed-in account lookup.
+    const minecraft = safeConfig.minecraftLauncher || {};
+    return {
+      ...safeConfig,
+      launcherProof: { ...(safeConfig.launcherProof || {}), proofDir: stableProofDir },
+      minecraftLauncher: {
+        ...minecraft,
+        rootDir: minecraft.rootSelection === 'manual' && minecraft.rootDir ? minecraft.rootDir : defaultMinecraftRoot(),
+        runtimeCurseForgeRoot: '',
+        syncDefaultRoots: true
+      }
+    };
+  }
   const curseForgeRoot = await firstExistingCurseForgeMinecraftRoot(safeConfig);
   if (!curseForgeRoot) {
     return {
@@ -3083,7 +3117,13 @@ async function loadConfig() {
     config.minecraftLauncher.rootSelection = defaults.minecraftLauncher.rootSelection || 'automatic';
     changed = true;
   }
-  const preferredCurseForgeRoot = await firstExistingCurseForgeMinecraftRoot(config);
+  if (process.platform === 'linux' && config.minecraftLauncher?.rootSelection !== 'manual'
+      && !samePath(config.minecraftLauncher?.rootDir, defaultMinecraftRoot())) {
+    config.minecraftLauncher.rootDir = defaultMinecraftRoot();
+    config.minecraftLauncher.rootSelection = 'default';
+    changed = true;
+  }
+  const preferredCurseForgeRoot = process.platform === 'linux' ? '' : await firstExistingCurseForgeMinecraftRoot(config);
   if (
     preferredCurseForgeRoot
     && config.minecraftLauncher?.rootSelection !== 'manual'
@@ -3728,11 +3768,11 @@ async function identityPayload(config = null, options = {}) {
   let nextIdentity = identity;
   if (config?.minecraftLauncher?.rootDir && config.minecraftLauncher?.autoImportAccount !== false) {
     const auth = await inspectMinecraftLauncherAuth(config.minecraftLauncher.rootDir, {
-      extraRoots: minecraftRootCandidates(process.platform, {
+      extraRoots: [...(config.minecraftLauncher.syncRoots || []), ...minecraftRootCandidates(process.platform, {
         ...process.env,
         HOME: process.env.HOME || app.getPath('home'),
         USERPROFILE: process.env.USERPROFILE || app.getPath('home')
-      }).filter((root) => !samePath(root, config.minecraftLauncher.rootDir))
+      })].filter((root) => !samePath(root, config.minecraftLauncher.rootDir))
     });
     const detectedUsername = normalizeMinecraftUsername(auth.preferredUsername);
     const detectedMinecraftUuid = normalizeMinecraftUuid(auth.preferredMinecraftUuid);
@@ -5492,6 +5532,19 @@ function minecraftLaunchResultForRenderer(result = {}) {
   };
 }
 
+async function identityForStatus(launcherConfig, prepared, allowProtectedStorage) {
+  const identity = await identityPayload(launcherConfig, { allowProtectedStorage });
+  if (prepared?.state === 'ready') {
+    const before = prepared.identity || {};
+    if (before.minecraftUsername !== identity.minecraftUsername || before.minecraftUuid !== identity.minecraftUuid) {
+      prepared.launcherProof = null;
+      prepared.proofPreparedThisSession = false;
+    }
+    prepared.identity = identity;
+  }
+  return identity;
+}
+
 function identityForRenderer(identity = {}) {
   const { devicePublicKey: _devicePublicKey, ...safeIdentity } = identity;
   return safeIdentity;
@@ -5524,9 +5577,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
     ? prepared.launcherConfig
     : await minecraftLauncherRuntimeConfig(config);
   statusProbe('runtime-config-ready');
-  const identity = usePreparedPrerequisites && prepared.identity
-    ? prepared.identity
-    : await identityPayload(launcherConfig, { allowProtectedStorage });
+  const identity = await identityForStatus(launcherConfig, usePreparedPrerequisites ? prepared : null, allowProtectedStorage);
   statusProbe('identity-ready');
   if (allowProtectedStorage) queueCurrentLauncherVersionReport(config, identity);
   let latest = null;
@@ -6550,7 +6601,9 @@ async function validatePendingLauncherUpdate(pending = {}) {
 }
 
 async function hydratePendingLauncherUpdateState() {
+  if (launcherUpdateState.running) return null;
   const pending = await readPendingLauncherUpdate();
+  if (launcherUpdateState.running) return null;
   if (!pending?.version) return null;
   if (pending.purpose === 'developer-reinstall' && !isDeveloperMode()) return null;
   if (pending.purpose === LOCAL_REINSTALL_PURPOSE && isDeveloperMode()) return null;
@@ -6570,6 +6623,9 @@ async function hydratePendingLauncherUpdateState() {
   try {
     await validatePendingLauncherUpdate(pending);
   } catch (error) {
+    // Restart re-signs the handoff payload. A poll that started earlier can
+    // still hold its old hash; it must not discard or reset the active update.
+    if (launcherUpdateState.running) return null;
     await clearPendingLauncherUpdate();
     const localReinstallTest = pending.purpose === LOCAL_REINSTALL_PURPOSE;
     launcherUpdateState = {
@@ -6590,6 +6646,7 @@ async function hydratePendingLauncherUpdateState() {
     };
     return null;
   }
+  if (launcherUpdateState.running) return null;
   const lastResult = launcherUpdateResultFromPending(pending);
   if (!lastResult) return null;
   if (!launcherUpdateState.lastResult
@@ -7973,16 +8030,12 @@ async function restartLauncherUpdate() {
   }
   const externalPackageInstall = staged.preparedRestart.strategy === 'linux-package-installer';
   const portableLinuxUpdate = staged.preparedRestart.strategy === 'linux-appimage-helper';
-  const pendingMetadata = await readPendingLauncherUpdate();
   const stagedPurpose = staged.developerReinstall
     ? 'developer-reinstall'
     : staged.localReinstallTest
       ? LOCAL_REINSTALL_PURPOSE
       : '';
-  const localReinstallRequestNonce = stagedPurpose === LOCAL_REINSTALL_PURPOSE
-    && /^[a-f0-9]{32}$/.test(String(pendingMetadata?.localReinstallRequestNonce || ''))
-    ? String(pendingMetadata.localReinstallRequestNonce)
-    : '';
+  let localReinstallRequestNonce = '';
   launcherUpdateState.running = true;
   launcherUpdateState.error = null;
   launcherUpdateState.progress = { phase: 'Restarting launcher', completed: 4, total: 4, percent: 100 };
@@ -7995,6 +8048,10 @@ async function restartLauncherUpdate() {
       : 'Install and restart requested. Starting the legacy launcher update helper.');
   let preparedRestart = staged.preparedRestart;
   try {
+    const pendingMetadata = await readPendingLauncherUpdate();
+    localReinstallRequestNonce = stagedPurpose === LOCAL_REINSTALL_PURPOSE
+      && /^[a-f0-9]{32}$/.test(String(pendingMetadata?.localReinstallRequestNonce || ''))
+      ? String(pendingMetadata.localReinstallRequestNonce) : '';
     if (staged.preparedRestart.strategy === 'windows-staged-helper') {
       const receipt = await readJsonFile(staged.preparedRestart.receiptPath);
       await validateStagedWindowsLauncherUpdate({
@@ -13023,6 +13080,17 @@ async function refreshPreparedLauncherProof(key, expectedEntry) {
   if (current !== expectedEntry || current?.state !== 'ready') return null;
   if (current.proofRefreshInFlight) return current.proofRefreshInFlight;
   const refresh = (async () => {
+    current.identity = await identityPayload(current.launcherConfig);
+    if (current.identity?.minecraftUsernameSyncWarning
+        && (/UUID does not match/i.test(current.identity.minecraftUsernameSyncWarning)
+          || (current.identity.minecraftLauncherDetectedUsername
+            && String(current.identity.minecraftLauncherDetectedUsername).toLowerCase() !== String(current.identity.minecraftUsername || '').toLowerCase()))) {
+      throw new Error(current.identity.minecraftUsernameSyncWarning);
+    }
+    if (!/^[A-Za-z0-9_]{3,16}$/.test(String(current.identity?.minecraftUsername || ''))) {
+      throw new Error(current.identity?.minecraftUsernameSyncWarning
+        || 'Sign in to your Minecraft account in Minecraft Launcher, then return to A Hard Time and click Play again.');
+    }
     const launcherProof = await writeSerializedRegisteredLauncherProof({
       config: current.launcherConfig,
       identity: current.identity,
@@ -13320,7 +13388,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
     const legacyGameDir = String(cached?.minecraftProfile?.gameDir || '').trim();
     const legacyCacheMatches = cached?.prerequisitePolicy !== STARTUP_PREREQUISITE_POLICY
       && (!legacyGameDir || samePath(legacyGameDir, config.instanceDir));
-    const reusable = targetMatches && (
+    const reusable = targetMatches && (process.platform !== 'linux' || cached?.prerequisitePolicy === STARTUP_PREREQUISITE_POLICY) && (
       cached?.configSignature === currentSignature || legacyCacheMatches
     ) ? cached : null;
     let cacheNeedsPersist = !reusable || reusable.prerequisitePolicy !== STARTUP_PREREQUISITE_POLICY;
@@ -13357,7 +13425,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
     let minecraftProfile = cachedInstalledVersionMatches
       ? preparedProfileForSnapshot(reusable?.minecraftProfile)
       : null;
-    if (!minecraftProfile?.profileExists || !minecraftProfile?.profileId || !minecraftProfile?.versionId) {
+    if (process.platform === 'linux' || !minecraftProfile?.profileExists || !minecraftProfile?.profileId || !minecraftProfile?.versionId) {
       minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
       cacheNeedsPersist = true;
     }
@@ -13814,6 +13882,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     );
   }
   attempt.instanceDir = prepared.config.instanceDir;
+  if (process.platform === 'linux') await ensureModDirectorIcon(prepared.config.instanceDir);
   attempt.minecraftRoot = prepared.launcherConfig.minecraftLauncher?.rootDir || '';
   attempt.runtimeConfig = prepared.launcherConfig;
   attempt.pack.installedVersion = String(prepared.installed?.version || '');
@@ -13856,6 +13925,27 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     runtimeFilesChecked: 0,
     ...finalPrerequisites
   };
+  if (process.platform === 'linux' && prepared.minecraftProfile
+      && (prepared.minecraftProfile.syncedProfiles || [prepared.minecraftProfile]).some((profile) => !profile.loaderInstalled)) {
+    prepared.minecraftProfile = await runLaunchStep(
+      attempt,
+      'linux-profile-runtime',
+      'Prepare the published Minecraft and Forge version in the Linux launcher folder',
+      async () => {
+        const profile = await ensureMinecraftLauncherProfile({
+          config: prepared.launcherConfig, latest: prepared.latest, installed: prepared.installed
+        });
+        prepared.minecraftAssets = await ensureMinecraftLauncherAssets({
+          config: prepared.launcherConfig, latest: prepared.latest, installed: prepared.installed, profile
+        });
+        return installMinecraftProfileLoaders(profile, {
+          config: prepared.launcherConfig, latest: prepared.latest, installed: prepared.installed
+        });
+      },
+      'The AHT installation has a usable Minecraft and Forge version in the selected launcher folder.'
+    );
+    await persistPreparedLaunchEntry(key, prepared);
+  }
   // CurseForge or Minecraft Launcher can change selection after AHT startup.
   // Refresh the owned Linux profile immediately before the actual handoff.
   if (process.platform === 'linux' && prepared.minecraftProfile) prepared.minecraftProfile.selectionPrepared = false;
@@ -14349,6 +14439,7 @@ if (!singleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    installDesktopHttp({ net });
     writeTestStartupProbe('app-ready', { userData: app.getPath('userData') });
     if (await shouldExitForPendingLauncherInstall()) {
       writeTestStartupProbe('launcher-update-install-pending-exit', { version: launcherVersion() });

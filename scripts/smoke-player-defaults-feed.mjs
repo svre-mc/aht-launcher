@@ -383,6 +383,7 @@ try {
     // install recovery only against an empty, isolated fixture directory.
     await fsp.mkdir(path.join(root, 'recovery-instance'), { recursive: true });
     await fsp.writeFile(path.join(root, 'recovery-instance', 'options.txt'), 'music:0.5\n');
+    await waitFor(client, 'Boolean(currentStatus?.config)', 'renderer startup configuration');
     await evaluate(client, `window.aht.saveSettings({ ...currentStatus.config, instanceDir: ${JSON.stringify(path.join(root, 'recovery-instance'))}, playCommand: { command: '', args: [], cwd: ${JSON.stringify(path.join(root, 'recovery-instance'))} } })`);
     await evaluate(client, `(async () => {
       const legal = await window.aht.legalStatus();

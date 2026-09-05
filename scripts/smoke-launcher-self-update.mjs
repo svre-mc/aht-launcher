@@ -376,7 +376,22 @@ try {
   if ((process.platform === 'win32' ? stagedPending.status !== 'ready-to-relaunch' : stagedPending.status !== 'staged') || stagedPending.version !== '9.9.9' || !stagedPending.preparedRestart) {
     throw new Error(`Pending launcher update was not staged correctly: ${JSON.stringify(stagedPending)}`);
   }
-  await evaluate(client, `document.querySelector('#launcherUpdateNowButton').click(); true`);
+  const updateReport = await evaluate(client, `window.aht.copyErrorReport({ context: 'launcher:updateRestart', message: 'Testing the staged update report' })`);
+  const updateReportText = await fsp.readFile(updateReport.filePath, 'utf8');
+  if (!updateReportText.includes('LAUNCHER UPDATE HANDOFF') || !updateReportText.includes('9.9.9')) {
+    throw new Error('Update report omitted the staged version and handoff state.');
+  }
+  await evaluate(client, `document.querySelector('#launcherUpdateErrorReportButton').click()`);
+  await waitFor(client, `document.querySelector('#launcherUpdateErrorReportButton').textContent.includes('Report copied')`, 'update report copy confirmation');
+  const restartPoint = await evaluate(client, `(() => {
+    const button = document.querySelector('#launcherUpdateNowButton');
+    const bounds = button.getBoundingClientRect();
+    const x = bounds.x + bounds.width / 2, y = bounds.y + bounds.height / 2;
+    return { x, y, hit: document.elementFromPoint(x, y)?.closest('button')?.id || '', disabled: button.disabled };
+  })()`);
+  if (restartPoint.hit !== 'launcherUpdateNowButton' || restartPoint.disabled) throw new Error('Restart button cannot receive a pointer click: ' + JSON.stringify(restartPoint));
+  await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: restartPoint.x, y: restartPoint.y, button: 'left', clickCount: 1 });
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: restartPoint.x, y: restartPoint.y, button: 'left', clickCount: 1 });
   await sleep(1500);
   const clickProof = await evaluate(client, `(async () => ({
     button: document.querySelector('#launcherUpdateNowButton').textContent,
