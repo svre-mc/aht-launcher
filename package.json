@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.7",
-  "ahtLauncherVersion": "0.2.07",
+  "version": "0.2.8",
+  "ahtLauncherVersion": "0.2.08",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -13,6 +13,8 @@
     "email": "launcher@aht.local"
   },
   "scripts": {
+    "test:asset-recovery": "node scripts/test-asset-recovery.mjs",
+    "test:account-migration": "node scripts/test-account-migration.mjs",
     "start": "electron .",
     "test:platforms": "node scripts/test-platform-profiles.mjs",
     "test:platform-builds": "node scripts/test-platform-build-configs.mjs",

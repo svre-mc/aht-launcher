@@ -962,6 +962,18 @@ function setSyncLine(text) {
 
 function syncSetupNotice() {
   els.setupNotice.hidden = true;
+  const notice = document.getElementById("accountSyncNotice");
+  if (!notice) return;
+  const warning = currentStatus?.identity?.minecraftUsernameSyncWarning || "";
+  notice.hidden = !warning;
+  document.getElementById("accountSyncMessage").textContent = warning;
+  const retry = document.getElementById("accountSyncRetry");
+  retry.onclick = async () => {
+    retry.disabled = true;
+    try { await refresh(); }
+    catch { document.getElementById("accountSyncMessage").textContent = "Account sync could not connect. Please try again shortly."; }
+    finally { retry.disabled = false; }
+  };
 }
 
 function currentLogText() {

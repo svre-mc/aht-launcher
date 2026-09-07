@@ -184,6 +184,7 @@ function forgeLibraryLauncherCompatible(library = null, plan = {}) {
 
 function validForgeVersionJson(value = null, versionId = '', plan = {}) {
   if (!isPlainObject(value)) return false;
+  if (plan.minecraftVersion === '1.12.2' && ('assets' in value || 'assetIndex' in value)) return false;
   const id = String(value.id || '').trim();
   const inheritsFrom = String(value.inheritsFrom || '').trim();
   const minecraftArguments = String(value.minecraftArguments || '').trim();
@@ -282,6 +283,11 @@ async function inspectForgeVersionJson(jsonPath = '', versionId = '', plan = {},
     };
   }
   const sanitized = sanitizeForgeLauncherMetadata(parsed);
+  if (plan.minecraftVersion === '1.12.2' && sanitized?.inheritsFrom === '1.12.2') {
+    // The validated vanilla parent owns the 1.12 asset index.
+    delete sanitized.assets;
+    delete sanitized.assetIndex;
+  }
   const repairedMetadata = JSON.stringify(sanitized) !== JSON.stringify(parsed);
   if (repairedMetadata && options.repairMetadata !== false && validForgeVersionJson(sanitized, versionId, plan)) {
     // Any code path that elects to rewrite launcher metadata must preserve the

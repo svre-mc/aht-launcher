@@ -1,3 +1,5 @@
+import { isLegacyMinecraftAccount, recoverLegacyMinecraftAccount } from './minecraft-account-recovery.js';
+
 const CURSEFORGE_BASE = 'https://api.curseforge.com/v1';
 const RELEASE_PATHS = new Set([
   'latest.json',
@@ -1915,11 +1917,21 @@ async function registerUser(request, env, origin) {
     && accountRecoveryVerifier
     && await secureStringEqual(storedRecoveryVerifier, accountRecoveryVerifier)
   );
-  const recovered = Boolean(installChanged && recoveryRequested && secureRecoveryMatched);
-  if (installChanged && recoveryRequested && !secureRecoveryMatched) {
+  let legacyRecovery = null;
+  if (installChanged && recoveryRequested && !secureRecoveryMatched
+      && isLegacyMinecraftAccount(existingRecord) && device.ok && accountRecoveryVerifier) {
+    if (!body.supportsMinecraftSessionRecovery) {
+      return privateJson({ error: 'This older AHT account needs Minecraft ownership verification. Update AHT Launcher and sign in to Minecraft Launcher.', code: 'LEGACY_ACCOUNT_UPGRADE_REQUIRED' }, 409, origin);
+    }
+    legacyRecovery = await recoverLegacyMinecraftAccount({ env, record: existingRecord, body,
+      username, minecraftUuid, deviceId: device.deviceId, installId });
+    if (!legacyRecovery.verified) return privateJson(legacyRecovery, legacyRecovery.status, origin);
+  }
+  const recovered = Boolean(installChanged && recoveryRequested && (secureRecoveryMatched || legacyRecovery?.verified));
+  if (installChanged && recoveryRequested && !recovered) {
     return json({ error: 'Secure launcher recovery could not be verified for this username.' }, 409, origin);
   }
-  if (recovered && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)) {
+  if (recovered && !legacyRecovery?.verified && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)) {
     return json({ error: 'Minecraft UUID is required and must match this registered player before launcher recovery.' }, 409, origin);
   }
   if (installChanged && !recovered) {
@@ -1981,7 +1993,7 @@ async function registerUser(request, env, origin) {
     createdAt: existingRecord?.createdAt || now,
     updatedAt: now,
     recoveredAt: recovered ? now : existingRecord?.recoveredAt || '',
-    recoveryReason: recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
+    recoveryReason: legacyRecovery?.verified ? 'mojang-verified-legacy-migration' : recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
     previousInstallIds: recovered ? [...new Set([...previousInstallIds, existingRecord.installId].filter(Boolean))].slice(-10) : previousInstallIds,
     ipv4: clientIp.available ? clientIp.ipv4 : cleanString(existingRecord?.ipv4 || '', 80),
     ip: clientIp.available ? clientIp.ip : normalizedConnectionIp(existingRecord?.ip || existingRecord?.ipv4),
@@ -2001,6 +2013,7 @@ async function registerUser(request, env, origin) {
   });
   await indexAccountIpv4(env, record);
   await indexAccountIdentity(env, record);
+  if (legacyRecovery?.verified) await env.AHT_DATA.delete(legacyRecovery.key);
   await notifyLauncherServerState(env, recovered ? 'account-recovered' : 'account-registered');
   return privateJson({
     ok: true,

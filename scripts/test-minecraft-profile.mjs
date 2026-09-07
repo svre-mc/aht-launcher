@@ -1104,6 +1104,7 @@ const fakeFetchJson = async (url) => {
 };
 const assetProfile = { rootDir: assetRoot, syncedProfiles: [{ rootDir: assetRoot }], minecraftVersion: '1.12.2' };
 const firstAssetRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
   latest,
   installed: null,
@@ -1153,6 +1154,7 @@ await fs.writeFile(assetIndexPath, Buffer.alloc(assetIndexBytes.length, 0x7a));
 await fs.writeFile(clientJarPath, Buffer.alloc(clientBytes.length, 0x78));
 await fs.writeFile(baseLibraryPath, Buffer.alloc(libraryBytes.length, 0x79));
 const secondAssetRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
   latest,
   installed: null,
@@ -1198,6 +1200,7 @@ const nullableBaseVersion = {
 await fs.writeFile(path.join(baseVersionDir, '1.12.2.json'), `${JSON.stringify(nullableBaseVersion, null, 2)}\n`, 'utf8');
 const fetchCountBeforeNullableBaseRepair = fakeFetches.length;
 const nullableBaseRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
   latest,
   installed: null,
@@ -1224,6 +1227,7 @@ const incompleteOfficialRoot = path.join(root, 'incomplete-official-root');
 let incompleteOfficialError = null;
 try {
   await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: incompleteOfficialRoot, syncDefaultRoots: false } },
     latest,
     installed: null,
@@ -1245,6 +1249,7 @@ const unsafeAssetRoot = path.join(root, 'unsafe-asset-root');
 let unsafeAssetError = null;
 try {
   await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: unsafeAssetRoot, syncDefaultRoots: false } },
     latest,
     installed: null,
@@ -1266,6 +1271,7 @@ const unsafeVersionRoot = path.join(root, 'unsafe-version-root');
 let unsafeVersionError = null;
 try {
   await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: unsafeVersionRoot, syncDefaultRoots: false } },
     latest: { ...latest, minecraft: { ...latest.minecraft, version: '../escape' } },
     installed: null,
@@ -1306,6 +1312,7 @@ try {
   process.env.AHT_TEST_HOOKS = '1';
   process.env.AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR = hookFixtureDir;
   hookAssetRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: hookMinecraftRoot, syncDefaultRoots: false } },
     latest,
     installed: null,

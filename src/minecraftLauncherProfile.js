@@ -13,6 +13,7 @@ import {
 } from './utils.js';
 import { launcherProofJavaArgs, launcherProofPath } from './launcherProof.js';
 import { findInstalledForgeVersion } from './forgeInstaller.js';
+import { repairMinecraftAssetObjects } from './minecraftAssets.js';
 
 const MIN_MINECRAFT_MEMORY_MB = 4096;
 
@@ -570,6 +571,10 @@ function minecraftBaseVersionMetadataProblem(value = null, minecraftVersion = ''
   ) {
     return 'asset index metadata is incomplete';
   }
+  if (minecraftVersion === '1.12.2' && (value.assetIndex.id !== '1.12'
+      || ('assets' in value && value.assets !== '1.12'))) {
+    return 'Minecraft 1.12.2 must use the 1.12 asset index';
+  }
   if (!validMinecraftDownloadDescriptor(value?.downloads?.client)) {
     return 'client download metadata is incomplete';
   }
@@ -734,7 +739,7 @@ async function ensureMinecraftBaseFile({ file = '', descriptor = null, label = '
   return { file, downloaded: true };
 }
 
-async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null, includeObjects = false, onProgress = null } = {}) {
   if (!rootDir || !minecraftVersion) {
     return { ok: false, skipped: true, reason: 'missing root or Minecraft version', rootDir, minecraftVersion };
   }
@@ -799,6 +804,10 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
     throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
   }
 
+  const assetObjects = includeObjects
+    ? await repairMinecraftAssetObjects({ rootDir, index: assetIndex, logger, onProgress })
+    : null;
+
   return {
     ok: true,
     rootDir,
@@ -807,14 +816,15 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
     clientJarPath,
     assetIndexPath,
     assetId,
+    assetObjects,
     baseLibraryCount: libraryDownloads.length,
     downloadedLibraryCount,
-    repaired: actions.length > 0,
+    repaired: actions.length > 0 || Number(assetObjects?.downloaded || 0) > 0,
     actions
   };
 }
 
-export async function ensureMinecraftLauncherAssets({ config = {}, latest = null, installed = null, profile = null, manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+export async function ensureMinecraftLauncherAssets({ config = {}, latest = null, installed = null, profile = null, manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null, includeObjects = true, onProgress = null } = {}) {
   const minecraft = minecraftMetadata(latest, installed);
   const minecraftVersion = minecraft?.version || profile?.minecraftVersion || '';
   if (!minecraftVersion) {
@@ -826,7 +836,7 @@ export async function ensureMinecraftLauncherAssets({ config = {}, latest = null
   const roots = uniqueLauncherRoots(profileRoots);
   const results = [];
   for (const rootDir of roots) {
-    results.push(await ensureMinecraftRootAssets({ rootDir, minecraftVersion, manifestUrl, fetchJsonImpl, logger }));
+    results.push(await ensureMinecraftRootAssets({ rootDir, minecraftVersion, manifestUrl, fetchJsonImpl, logger, includeObjects, onProgress }));
   }
   return {
     ok: true,
@@ -834,6 +844,39 @@ export async function ensureMinecraftLauncherAssets({ config = {}, latest = null
     roots: results,
     repaired: results.some((item) => item.repaired)
   };
+}
+
+export async function inspectMinecraftLauncherRuntime({ config = {}, latest = null, installed = null, profile = null } = {}) {
+  const minecraftVersion = minecraftMetadata(latest, installed)?.version || '';
+  if (!safeMinecraftIdentifier(minecraftVersion)) return { usable: false, reason: 'Minecraft version is missing or invalid.' };
+  const roots = uniqueLauncherRoots(profile?.syncedProfiles?.length
+    ? profile.syncedProfiles.map((item) => item.rootDir) : [profile?.rootDir || minecraftRoot(config)]);
+  try {
+    for (const rootDir of roots) {
+      const version = await readJsonFile(safeJoin(path.join(rootDir, 'versions'), `${minecraftVersion}/${minecraftVersion}.json`));
+      if (!validBaseVersionJson(version, minecraftVersion)) throw new Error('Minecraft version metadata needs repair.');
+      const indexFile = safeJoin(path.join(rootDir, 'assets', 'indexes'), `${version.assetIndex.id}.json`);
+      const files = [
+        [safeJoin(path.join(rootDir, 'versions'), `${minecraftVersion}/${minecraftVersion}.jar`), version.downloads.client],
+        [indexFile, version.assetIndex],
+        ...minecraftBaseLibraryDownloads(version).map((item) => [safeJoin(path.join(rootDir, 'libraries'), item.descriptor.path), item.descriptor])
+      ];
+      for (const [file, descriptor] of files) {
+        if (!(await inspectMinecraftBaseFile(file, descriptor)).ok) throw new Error(`Minecraft runtime file needs repair: ${path.basename(file)}`);
+      }
+      const index = await readJsonFile(indexFile);
+      if (!validAssetIndexJson(index)) throw new Error('Minecraft asset index needs repair.');
+      // Reuse hashes only while size and modification time are unchanged.
+      for (const item of Object.values(index.objects)) {
+        if (!/^[a-f0-9]{40}$/i.test(String(item?.hash || ''))) throw new Error('Minecraft asset hash is invalid.');
+        const file = safeJoin(path.join(rootDir, 'assets', 'objects'), `${item.hash.slice(0, 2)}/${item.hash}`);
+        if (!(await inspectMinecraftBaseFile(file, { sha1: item.hash, size: item.size })).ok) {
+          throw new Error(`Minecraft asset ${item.hash} needs repair.`);
+        }
+      }
+    }
+    return { usable: true };
+  } catch (error) { return { usable: false, reason: error.message }; }
 }
 
 async function readProfiles(file) {

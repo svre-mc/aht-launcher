@@ -1,3 +1,4 @@
+import { proveMinecraftAccountOwnership } from '../src/minecraftAccountRecovery.js';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, net, powerSaveBlocker, safeStorage, shell } from 'electron';
 import { installDesktopHttp } from '../src/desktopHttp.js';
 import { spawn } from 'node:child_process';
@@ -37,6 +38,7 @@ import {
   ensureMinecraftLauncherProfile,
   inspectMinecraftLauncherAuth,
   inspectMinecraftLauncherProfile,
+  inspectMinecraftLauncherRuntime,
   minecraftLibraryAllowed,
   minecraftRootCandidates,
   selectPreparedMinecraftLauncherProfile,
@@ -367,7 +369,7 @@ const STARTUP_PREPARATION_CACHE_SCHEMA = 'aht-launcher-startup-preparation-cache
 const STARTUP_PREPARATION_LEGACY_CACHE_SCHEMA = 'aht-launcher-startup-preparation-cache/v1';
 const STARTUP_PREPARATION_ENVELOPE_SCHEMA = 'aht-launcher-startup-preparation-envelope/v1';
 const STARTUP_PREPARATION_KEY_SCHEMA = 'aht-launcher-startup-preparation-key/v1';
-const STARTUP_PREREQUISITE_POLICY = 'java8-and-minecraft-launcher-paths/v3';
+const STARTUP_PREREQUISITE_POLICY = 'java8-and-minecraft-launcher-paths/v5-assets';
 const LAUNCH_PREPARATION_MANAGED_POLICY = 'launch-critical-managed-files/v1';
 const LAUNCH_PREPARATION_RUNTIME_POLICY = 'minecraft-forge-runtime-content/v2';
 const STARTUP_PREPARATION_PACKS = Object.freeze(['stable', 'ptb']);
@@ -3469,7 +3471,15 @@ async function applyRecommendedSetup() {
   return getStatus(nextConfig);
 }
 
-async function loadIdentity() {
+let identityLoadInFlight = null;
+function loadIdentity() {
+  if (!identityLoadInFlight) {
+    identityLoadInFlight = loadIdentityFromDisk().finally(() => { identityLoadInFlight = null; });
+  }
+  return identityLoadInFlight;
+}
+
+async function loadIdentityFromDisk() {
   const file = identityPath();
   const readIdentityCandidate = async (candidate) => {
     if (!candidate || samePath(candidate, file) || !(await pathExists(candidate))) return null;
@@ -3941,7 +3951,10 @@ async function refreshRemoteMinecraftRegistration(config = {}, identity = {}) {
   const username = normalizeMinecraftUsername(identity.minecraftUsername);
   const key = remoteRegistrationKey(config, identity, username);
   const running = remoteRegistrationRefreshes.get(key);
-  if (running) return running;
+  if (running) {
+    await running;
+    return loadIdentity();
+  }
 
   const refresh = (async () => {
     const attemptedAt = new Date().toISOString();
@@ -3962,12 +3975,7 @@ async function refreshRemoteMinecraftRegistration(config = {}, identity = {}) {
       await writeJsonFile(identityPath(), nextIdentity);
       return nextIdentity;
     }
-  })().finally(() => {
-    if (remoteRegistrationRefreshes.get(key) === refresh) {
-      remoteRegistrationRefreshes.delete(key);
-    }
-  });
-  remoteRegistrationRefreshes.set(key, refresh);
+  })();
   return refresh;
 }
 
@@ -4162,20 +4170,35 @@ async function registerMinecraftUsername(username, options = {}) {
       if (!isUsernameUnavailableError(message) || !(await canRecoverMinecraftUsernameFromLauncher(normalizedUsername, config, options))) {
         throw new Error(message);
       }
-      const recoveryResponse = await fetch(url, {
+      const recoveryPayload = {
+        ...registrationPayload,
+        recoverExistingUsername: true,
+        minecraftAccountMatched: true,
+        supportsMinecraftSessionRecovery: true,
+        recoveryReason: 'minecraft-launcher-account-match'
+      };
+      const requestRecovery = () => fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-AHT-Launcher-Recovery': recoverySecret
         },
-        body: JSON.stringify({
-          ...registrationPayload,
-          recoverExistingUsername: true,
-          minecraftAccountMatched: true,
-          recoveryReason: 'minecraft-launcher-account-match'
-        })
+        body: JSON.stringify(recoveryPayload),
+        signal: AbortSignal.timeout(20_000)
       });
-      const recoveryBody = await recoveryResponse.json().catch(() => ({}));
+      let recoveryResponse = await requestRecovery();
+      let recoveryBody = await recoveryResponse.json().catch(() => ({}));
+      if (recoveryResponse.status === 409 && recoveryBody.code === 'MINECRAFT_OWNERSHIP_REQUIRED') {
+        await proveMinecraftAccountOwnership({
+          roots: [config.minecraftLauncher?.rootDir, ...(config.minecraftLauncher?.syncRoots || []),
+            ...minecraftRootCandidates(process.platform, { ...process.env,
+              HOME: process.env.HOME || app.getPath('home'), USERPROFILE: process.env.USERPROFILE || app.getPath('home') })],
+          username: normalizedUsername, minecraftUuid, serverId: recoveryBody.minecraftSessionChallenge
+        });
+        recoveryPayload.minecraftSessionChallenge = recoveryBody.minecraftSessionChallenge;
+        recoveryResponse = await requestRecovery();
+        recoveryBody = await recoveryResponse.json().catch(() => ({}));
+      }
       if (!recoveryResponse.ok) {
         throw new Error(recoveryBody.error || message);
       }
@@ -5418,6 +5441,21 @@ function managedJavaPath(javaPath = '') {
 
 function java8InstallSupported() {
   return process.platform === 'win32' && process.arch === 'x64';
+}
+
+let minecraftRuntimeRepairQueue = Promise.resolve();
+function repairMinecraftRuntime({ config, latest, installed, operationState = null, onProgress = null }) {
+  const operation = minecraftRuntimeRepairQueue.then(async () => {
+    const logger = { log: (line) => operationState && appendOperationLine(operationState, line) };
+    let profile = await ensureMinecraftLauncherProfile({ config, latest, installed });
+    const minecraftAssets = await ensureMinecraftLauncherAssets({
+      config, latest, installed, profile, includeObjects: true, logger, onProgress
+    });
+    profile = await installMinecraftProfileLoaders(profile, { config, latest, installed, operationState });
+    return { profile, minecraftAssets };
+  });
+  minecraftRuntimeRepairQueue = operation.catch(() => {});
+  return operation;
 }
 
 async function java8RuntimeStatus(config = {}, options = {}) {
@@ -13388,7 +13426,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
     const legacyGameDir = String(cached?.minecraftProfile?.gameDir || '').trim();
     const legacyCacheMatches = cached?.prerequisitePolicy !== STARTUP_PREREQUISITE_POLICY
       && (!legacyGameDir || samePath(legacyGameDir, config.instanceDir));
-    const reusable = targetMatches && (process.platform !== 'linux' || cached?.prerequisitePolicy === STARTUP_PREREQUISITE_POLICY) && (
+    const reusable = targetMatches && (!['linux', 'win32'].includes(process.platform) || cached?.prerequisitePolicy === STARTUP_PREREQUISITE_POLICY) && (
       cached?.configSignature === currentSignature || legacyCacheMatches
     ) ? cached : null;
     let cacheNeedsPersist = !reusable || reusable.prerequisitePolicy !== STARTUP_PREREQUISITE_POLICY;
@@ -13425,9 +13463,24 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
     let minecraftProfile = cachedInstalledVersionMatches
       ? preparedProfileForSnapshot(reusable?.minecraftProfile)
       : null;
-    if (process.platform === 'linux' || !minecraftProfile?.profileExists || !minecraftProfile?.profileId || !minecraftProfile?.versionId) {
+    if (['linux', 'win32'].includes(process.platform) || !minecraftProfile?.profileExists || !minecraftProfile?.profileId || !minecraftProfile?.versionId) {
+      const previousProfile = JSON.stringify(preparedProfileForSnapshot(minecraftProfile));
       minecraftProfile = await inspectMinecraftLauncherProfile({ config: launcherConfig, latest, installed });
-      cacheNeedsPersist = true;
+      cacheNeedsPersist ||= process.platform !== 'win32'
+        || previousProfile !== JSON.stringify(preparedProfileForSnapshot(minecraftProfile));
+    }
+    let minecraftAssets = reusable?.minecraftAssets || null;
+    if (process.platform === 'win32') {
+      reportProgress('Checking Minecraft runtime', 70);
+      const runtime = await inspectMinecraftLauncherRuntime({ config: launcherConfig, latest, installed, profile: minecraftProfile });
+      if (!runtime.usable || !minecraftProfile?.loaderInstalled) {
+        reportProgress('Repairing Minecraft runtime', 80);
+        const repaired = await repairMinecraftRuntime({ config: launcherConfig, latest, installed,
+          onProgress: ({ checked, total }) => reportProgress(`Preparing Minecraft assets (${checked}/${total})`, 85) });
+        minecraftProfile = repaired.profile;
+        minecraftAssets = repaired.minecraftAssets;
+        cacheNeedsPersist = true;
+      }
     }
     if (!minecraftProfile?.profileId || !minecraftProfile?.versionId) {
       throw new Error(`${target.name} Minecraft Launcher profile metadata is incomplete. Run Repair once.`);
@@ -13443,7 +13496,9 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
     setLaunchRequirement(attempt, 'instance', 'PASS', config.instanceDir);
     setLaunchRequirement(attempt, 'installed', 'PASS', `Installed version ${installed.version || 'unknown'}.`);
     setLaunchRequirement(attempt, 'integrity', 'NOT CHECKED', 'Startup does not rescan the modpack. Use Scan, Update, or Repair for file verification.');
-    setLaunchRequirement(attempt, 'minecraftRuntime', 'NOT CHECKED', 'Startup reuses the installation prepared by Update or Repair.');
+    setLaunchRequirement(attempt, 'minecraftRuntime', process.platform === 'win32' ? 'PASS' : 'NOT CHECKED', process.platform === 'win32'
+      ? 'Minecraft, Forge and asset checksums passed validation.'
+      : 'Startup reuses the installation prepared by Update or Repair.');
     setLaunchRequirement(attempt, 'minecraftLauncher', 'PASS', `${launcherRoute.kind || 'Minecraft Launcher'} at ${launcherRoute.executablePath || launcherRoute.appPath || launcherRoute.rootDir || launcherRoute.cwd || 'the saved launcher route'}.`);
     setLaunchRequirement(attempt, 'java8', 'PASS', `${java8Runtime.vendor || 'Java'} ${java8Runtime.version || '8'} at ${java8Runtime.path}.`);
     setLaunchRequirement(
@@ -13476,7 +13531,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       launcherProof: null,
       proofPreparedThisSession: false,
       proofRefreshError: '',
-      minecraftAssets: reusable?.minecraftAssets || null,
+      minecraftAssets,
       startedAt: options.startedAt || new Date().toISOString(),
       completedAt: new Date().toISOString(),
       quickStartup: true,
