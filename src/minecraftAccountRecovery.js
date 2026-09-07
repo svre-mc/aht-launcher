@@ -43,6 +43,7 @@ export async function proveMinecraftAccountOwnership({ roots, username, minecraf
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identityToken: `XBL3.0 x=${credential.userHash};${credential.token}`, ensureLegacyEnabled: true })
       });
+      if (response.status >= 500 || response.status === 429) throw new Error('Minecraft service is temporarily unavailable.');
       if (!response.ok) continue;
       const login = await response.json();
       if (typeof login.access_token !== 'string' || login.access_token.length > 32_768) continue;
@@ -50,6 +51,7 @@ export async function proveMinecraftAccountOwnership({ roots, username, minecraf
         redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(15_000),
         headers: { Authorization: `Bearer ${login.access_token}` }
       });
+      if (profileResponse.status >= 500 || profileResponse.status === 429) throw new Error('Minecraft service is temporarily unavailable.');
       if (!profileResponse.ok) continue;
       const profile = await profileResponse.json();
       if (String(profile.name || '').toLowerCase() === username.toLowerCase() && uuid(profile.id) === uuid(minecraftUuid)) {

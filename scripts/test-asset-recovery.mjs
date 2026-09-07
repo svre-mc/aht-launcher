@@ -69,7 +69,7 @@ try {
   assert.equal('assets' in fixed, false);
   assert.equal('assetIndex' in fixed, false);
 
-  const source = await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8');
+  const source = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   const startup = source.slice(source.indexOf('async function prepareStartupPrerequisiteEntry('), source.indexOf('async function hydrateLaunchPreparationFromSnapshot('));
   const policy = source.match(/const STARTUP_PREREQUISITE_POLICY = '([^']+)'/)[1];
   for (const fail of [false, true]) {

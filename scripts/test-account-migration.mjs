@@ -123,6 +123,7 @@ try {
   } };
   assert.equal((await proveMinecraftAccountOwnership(protectedOptions)).verified, true);
   assert.equal(protectedRequests.length, 3);
+  await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async () => new Response(null, { status: 503 }) }), /Try account sync again shortly/);
   await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async url =>
     new Response(JSON.stringify(url.endsWith('/minecraft/profile') ? { name: 'WrongOwner', id: minecraftUuid } : { access_token: 'fixture' })) }), /fresh Minecraft session/);
   if (process.platform === 'win32') {
@@ -140,7 +141,7 @@ try {
     assert.equal(await readWindowsMinecraftSession({ file: cacheFile, remoteId: 'other-account' }), null);
   }
 
-  const source = await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8');
+  const source = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   let diskIdentity = null;
   let writes = 0;
   const context = vm.createContext({ path, crypto: { randomUUID },
