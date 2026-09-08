@@ -23,5 +23,7 @@ identity={installId:'fixture',minecraftLauncherDetectedUsername:'LinuxPlayer',mi
 result=await context.identityForStatus({},null,true);
 assert.equal(result.minecraftUsername,undefined,'A local account hint must not fabricate remote registration');
 assert.equal(result.minecraftLauncherDetectedUsername,'LinuxPlayer');
-assert(source.includes('await identityForStatus(launcherConfig, usePreparedPrerequisites ? prepared : null, allowProtectedStorage)'));
+await context.identityForStatus({}, null, true, { forceAccountSync: true });
+assert.equal(options.forceAccountSync, true, 'Explicit account refresh must reach account synchronization');
+assert.match(source, /await identityForStatus\(\s*launcherConfig,\s*usePreparedPrerequisites \? prepared : null,\s*allowProtectedStorage,\s*options\s*\)/);
 console.log('Live account refresh, proof invalidation and pending registration checks passed.');

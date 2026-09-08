@@ -11,6 +11,7 @@ const context = vm.createContext({
   launcherUpdateState: { running: true, lastResult: { version: '0.2.07', restartRequired: true } },
   readPendingLauncherUpdate: async () => { reads++; return pending; },
   isDeveloperMode: () => false, LOCAL_REINSTALL_PURPOSE: 'local-reinstall',
+  currentProcessIsLauncherUpdateCandidate: () => false,
   launcherVersion: () => '0.2.06', compareVersions: () => -1,
   validatePendingLauncherUpdate: () => new Promise((_resolve, reject) => { finishValidation = () => reject(new Error('payload hash changed during arm')); validationStarted(); }),
   clearPendingLauncherUpdate: async () => { clears++; }
