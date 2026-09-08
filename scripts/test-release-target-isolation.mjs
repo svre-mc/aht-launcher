@@ -123,6 +123,8 @@ assert(ptb.outDir === path.join(baseOutDir, 'ptb'), `PTB output was not isolated
 assert(stable.outDir === baseOutDir, `Stable output path changed: ${stable.outDir}`);
 assert(stable.feedUrl === 'https://launcher.example/latest.json', `Stable feed changed: ${stable.feedUrl}`);
 assert(ptb.feedUrl === 'https://launcher.example/ptb/latest.json', `PTB feed is not isolated: ${ptb.feedUrl}`);
+assert(releaseTargetFeedUrl('https://launcher.example/ptb/latest.json', 'stable') === 'https://launcher.example/latest.json', 'Stable publication reused a stale PTB feed URL.');
+assert(releaseTargetFeedUrl('https://launcher.example/ptb/latest.json', 'ptb') === 'https://launcher.example/ptb/latest.json', 'PTB publication changed its isolated feed URL.');
 assert(workerServiceBaseUrl(stable.feedUrl) === 'https://launcher.example/', 'Stable feed did not resolve to the Worker service root.');
 assert(workerServiceBaseUrl(ptb.feedUrl) === 'https://launcher.example/', 'PTB feed incorrectly resolved APIs under the PTB release prefix.');
 assert(workerServiceBaseUrl('https://launcher.example/ptb/') === 'https://launcher.example/', 'Poisoned PTB API base was not repaired.');
@@ -151,7 +153,7 @@ assert(ptbCreate?.jsonBody?.tag_name === ptbPlan.tagName, 'PTB GitHub creation u
 assert(stableCreate?.jsonBody?.prerelease === false, 'Stable GitHub creation was marked prerelease.');
 assert(ptbCreate?.jsonBody?.prerelease === true, 'PTB GitHub creation was not marked prerelease.');
 assert(stableCreate?.jsonBody?.make_latest === 'false' && ptbCreate?.jsonBody?.make_latest === 'false', 'Modpack releases must not replace launcher latest releases.');
-assert(stableUploads.length === 2 && ptbUploads.length === 2, 'Each GitHub channel must upload exactly its ZIP and latest manifest.');
+assert(stableUploads.length === 2 && ptbUploads.length === 2, 'An initial GitHub mirror must upload only the client manifest and latest metadata.');
 assert(stableUploads.every((call) => !call.url.includes('a-hard-time-ptb')), 'Stable publication used a PTB asset name.');
 assert(ptbUploads.every((call) => call.url.includes('a-hard-time-ptb')), 'PTB publication used a stable asset name.');
 assert(stablePublish.result.tagName !== ptbPublish.result.tagName, 'Published GitHub release tags collide.');

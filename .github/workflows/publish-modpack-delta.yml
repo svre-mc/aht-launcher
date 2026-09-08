@@ -1,0 +1,128 @@
+name: Rebuild Modpack From Changes
+run-name: Rebuild ${{ inputs.release_target }} ${{ inputs.version }} (${{ inputs.candidate_id }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_target:
+        description: Stable or PTB release target
+        required: true
+        type: choice
+        options:
+          - stable
+          - ptb
+      version:
+        description: Candidate modpack version
+        required: true
+        type: string
+      candidate_id:
+        description: Content-bound transaction id
+        required: true
+        type: string
+      candidate_key:
+        description: Private R2 candidate manifest key
+        required: true
+        type: string
+      result_key:
+        description: Private R2 rebuild result key
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aht-modpack-rebuild-${{ inputs.release_target }}
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
+      INPUT_RELEASE_TARGET: ${{ inputs.release_target }}
+      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_CANDIDATE_ID: ${{ inputs.candidate_id }}
+      INPUT_CANDIDATE_KEY: ${{ inputs.candidate_key }}
+      INPUT_RESULT_KEY: ${{ inputs.result_key }}
+    steps:
+      - name: Checkout trusted publisher
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install publisher dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Require Cloudflare publisher credentials
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+
+      - name: Download private candidate and live channel pointer
+        shell: bash
+        run: |
+          npx --yes wrangler@4.124.0 r2 object get "$AHT_R2_BUCKET/$INPUT_CANDIDATE_KEY" --file=candidate.json --remote
+          if [ "$INPUT_RELEASE_TARGET" = "ptb" ]; then
+            live_key="ptb/latest.json"
+          else
+            live_key="latest.json"
+          fi
+          npx --yes wrangler@4.124.0 r2 object get "$AHT_R2_BUCKET/$live_key" --file=baseline-latest.json --remote
+
+      - name: Validate transaction and plan exact R2 objects
+        id: plan
+        run: >-
+          node scripts/remote-modpack-rebuild-plan.mjs
+          --target "$INPUT_RELEASE_TARGET"
+          --candidate candidate.json
+          --baseline baseline-latest.json
+          --candidate-id "$INPUT_CANDIDATE_ID"
+          --candidate-key "$INPUT_CANDIDATE_KEY"
+          --result-key "$INPUT_RESULT_KEY"
+          --output rebuild-plan.json
+
+      - name: Download live full ZIP and changed release files
+        shell: bash
+        run: |
+          npx --yes wrangler@4.124.0 r2 object get "$AHT_R2_BUCKET/${{ steps.plan.outputs.baseline_zip_key }}" --file=baseline.zip --remote
+          npx --yes wrangler@4.124.0 r2 object get "$AHT_R2_BUCKET/${{ steps.plan.outputs.delta_key }}" --file=changes.zip --remote
+          npx --yes wrangler@4.124.0 r2 object get "$AHT_R2_BUCKET/${{ steps.plan.outputs.manifest_key }}" --file=client-manifest.json --remote
+
+      - name: Rebuild and verify the full first-install ZIP
+        run: >-
+          node scripts/rebuild-modpack-from-delta.mjs
+          --baseline-latest baseline-latest.json
+          --baseline-zip baseline.zip
+          --candidate-latest candidate.json
+          --manifest client-manifest.json
+          --delta changes.zip
+          --output "${{ steps.plan.outputs.output_zip }}"
+          --result rebuild-result.json
+          --candidate-id "$INPUT_CANDIDATE_ID"
+
+      - name: Upload rebuilt immutable ZIP
+        shell: bash
+        run: >-
+          npx --yes wrangler@4.124.0 r2 object put
+          "$AHT_R2_BUCKET/${{ steps.plan.outputs.zip_key }}"
+          --file="${{ steps.plan.outputs.output_zip }}"
+          --content-type=application/zip
+          --remote
+
+      - name: Publish private verified result for commit
+        shell: bash
+        run: >-
+          npx --yes wrangler@4.124.0 r2 object put
+          "$AHT_R2_BUCKET/$INPUT_RESULT_KEY"
+          --file=rebuild-result.json
+          --content-type=application/json
+          --remote

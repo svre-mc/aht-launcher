@@ -16,13 +16,16 @@ const userData = path.join(root, 'userData');
 const appDefaultsPath = path.join(root, 'app.defaults.json');
 const pendingUpdatePath = path.join(userData, 'launcher-updates', 'pending-launcher-update.json');
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
+const screenshotDir = String(process.env.AHT_SMOKE_SCREENSHOT_DIR || '').trim();
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
+const publicUpdateVersion = '9.9.09';
+const packageUpdateVersion = '9.9.9';
 const artifactName = process.platform === 'win32'
-  ? 'AHT-Launcher-Windows-10-11-9.9.9.zip'
+  ? `AHT-Launcher-Windows-10-11-${publicUpdateVersion}.zip`
   : process.platform === 'darwin'
-    ? 'AHT-Launcher-macOS-universal-9.9.9.zip'
+    ? `AHT-Launcher-macOS-universal-${publicUpdateVersion}.zip`
     : process.platform === 'linux'
-      ? 'AHT-Launcher-Linux-x64-9.9.9.AppImage'
+      ? `AHT-Launcher-Linux-x64-${publicUpdateVersion}.AppImage`
       : '';
 if (!artifactName) {
   throw new Error(`Launcher self-update smoke only supports Windows, macOS, and Linux artifacts, got ${process.platform}.`);
@@ -38,10 +41,8 @@ if (process.platform === 'linux') {
   fs.writeFileSync(linuxTargetAppImage, 'old launcher fixture\n');
   fs.chmodSync(linuxTargetAppImage, 0o755);
 }
-const readyTitle = process.platform === 'win32' ? 'Update finished' : 'Ready to Install';
-const readyButton = process.platform === 'win32'
-  ? 'Restart Launcher'
-  : 'Install and Restart';
+const readyTitle = 'Ready to restart';
+const readyButton = 'Restart now';
 const fixtureAsarPath = smokeExe
   ? path.join(path.dirname(smokeExe), 'resources', 'app.asar')
   : path.resolve('node_modules', 'electron', 'dist', 'resources', 'default_app.asar');
@@ -54,10 +55,23 @@ const artifactBytes = process.platform === 'win32'
       zip.addFile('locales/en-US.pak', Buffer.from('locale fixture\n'));
       return zip.toBuffer();
     })()
-  : Buffer.from('fake launcher installer\n');
+  : process.platform === 'darwin'
+    ? (() => {
+        const zip = new AdmZip();
+        zip.addFile('A Hard Time Launcher macOS.app/Contents/Info.plist', Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>A Hard Time Launcher macOS</string>
+<key>CFBundleShortVersionString</key><string>${packageUpdateVersion}</string>
+<key>CFBundleVersion</key><string>${packageUpdateVersion}</string>
+</dict></plist>\n`));
+        zip.addFile('A Hard Time Launcher macOS.app/Contents/MacOS/A Hard Time Launcher macOS', Buffer.from('#!/bin/sh\nexit 0\n'));
+        return zip.toBuffer();
+      })()
+    : Buffer.from('fake launcher installer\n');
 const artifactHash = crypto.createHash('sha256').update(artifactBytes).digest('hex');
-const legacyWindowsArtifactName = 'AHT-Launcher-Windows-10-11-9.9.9.exe';
-const legacyLinuxArtifactName = 'AHT-Launcher-Linux-x64-9.9.9.deb';
+const legacyWindowsArtifactName = `AHT-Launcher-Windows-10-11-${publicUpdateVersion}.exe`;
+const legacyLinuxArtifactName = `AHT-Launcher-Linux-x64-${publicUpdateVersion}.deb`;
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
@@ -171,6 +185,15 @@ async function evaluate(client, expression) {
   return result.result?.value;
 }
 
+async function captureScreenshot(client, fileName) {
+  if (!screenshotDir) return '';
+  await fsp.mkdir(screenshotDir, { recursive: true });
+  const shot = await client.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  const outputPath = path.join(screenshotDir, fileName);
+  await fsp.writeFile(outputPath, Buffer.from(shot.data, 'base64'));
+  return outputPath;
+}
+
 async function waitFor(client, expression, label, attempts = 180) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const value = await evaluate(client, expression);
@@ -205,6 +228,7 @@ await writeJson(path.join(userData, 'identity.json'), {
 
 let releaseArtifactDownload = () => {};
 let markArtifactRequestStarted = () => {};
+let launcherUpdatePublished = false;
 const artifactDownloadGate = new Promise((resolve) => { releaseArtifactDownload = resolve; });
 const artifactRequestStarted = new Promise((resolve) => { markArtifactRequestStarted = resolve; });
 
@@ -218,6 +242,20 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url.pathname === '/launcher/latest.json') {
+    if (!launcherUpdatePublished) {
+      const body = JSON.stringify({
+        schemaVersion: 1,
+        product: 'aht-launcher',
+        name: 'A Hard Time Launcher',
+        version: '0.2.08',
+        required: false,
+        platforms: {},
+        stagedPlatforms: {}
+      });
+      response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+      response.end(body);
+      return;
+    }
     const artifactPath = `launcher/files/${process.platform}-${process.arch}/${artifactName}`;
     const legacyArtifactName = process.platform === 'linux' ? legacyLinuxArtifactName : legacyWindowsArtifactName;
     const legacyArtifactPath = `launcher/files/${process.platform}-${process.arch}/${legacyArtifactName}`;
@@ -269,7 +307,7 @@ const server = http.createServer((request, response) => {
       schemaVersion: 1,
       product: 'aht-launcher',
       name: 'A Hard Time Launcher',
-      version: '9.9.9',
+      version: publicUpdateVersion,
       required: true,
       platforms: {
         [`${process.platform}-${process.arch}`]: legacyEntry,
@@ -311,7 +349,7 @@ let child = spawn(electronBin, electronArgs, {
     AHT_TEST_LAUNCHER_UPDATE_HELPER_START_ONLY: '1',
     ...(process.platform === 'win32' ? {
       AHT_TEST_LAUNCHER_UPDATE_TARGET_EXE: windowsTargetExe,
-      AHT_TEST_LAUNCHER_UPDATE_PRODUCT_VERSION: '9.9.9.0'
+      AHT_TEST_LAUNCHER_UPDATE_PRODUCT_VERSION: `${packageUpdateVersion}.0`
     } : process.platform === 'linux' ? {
       AHT_TEST_LAUNCHER_UPDATE_TARGET_APPIMAGE: linuxTargetAppImage
     } : {}),
@@ -328,15 +366,39 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && document.querySelector('#launcherUpdateOverlay')", 'launcher update DOM');
+  const beforePublish = await evaluate(client, 'window.aht.checkLauncherUpdate()');
+  if (beforePublish?.updateRequired) {
+    throw new Error(`Launcher reported the unpublished update: ${JSON.stringify(beforePublish)}`);
+  }
+  const initiallyHidden = await evaluate(client, "document.querySelector('#launcherUpdateOverlay').hidden");
+  if (!initiallyHidden) throw new Error('Launcher update overlay opened before the update was published.');
+  const publishedAt = Date.now();
+  launcherUpdatePublished = true;
   await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false", 'launcher update overlay visible');
+  const liveDetectionMs = Date.now() - publishedAt;
+  if (liveDetectionMs > 12_000) {
+    throw new Error(`Open launcher took ${liveDetectionMs}ms to detect the published update.`);
+  }
   await Promise.race([
     artifactRequestStarted,
     sleep(30_000).then(() => { throw new Error('launcher update artifact request did not start'); })
   ]);
+  await waitFor(
+    client,
+    "(async () => Number((await window.aht.getLauncherUpdateState()).progress?.percent) > 0)()",
+    'byte-derived launcher download progress',
+    40
+  );
   const partialDownloadState = await evaluate(client, 'window.aht.getLauncherUpdateState()');
   if (partialDownloadState.lastResult?.restartRequired || !partialDownloadState.running) {
     throw new Error(`Restart became available before the final update byte and staging validation: ${JSON.stringify(partialDownloadState)}`);
   }
+  if (!(Number(partialDownloadState.progress?.percent) > 0 && Number(partialDownloadState.progress?.percent) < 72)) {
+    throw new Error(`Download progress was not derived from transferred bytes: ${JSON.stringify(partialDownloadState.progress)}`);
+  }
+  await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false && document.querySelector('#launcherUpdateTitle').textContent === 'Updating launcher'", 'visible launcher download progress');
+  await sleep(200);
+  await captureScreenshot(client, 'launcher-update-downloading.png');
   releaseArtifactDownload();
   try {
     await waitFor(client, `document.querySelector('#launcherUpdateTitle').textContent.includes(${JSON.stringify(readyTitle)})`, 'launcher update fully staged', 240);
@@ -345,6 +407,8 @@ try {
     throw new Error(`${error.message}: ${JSON.stringify(failedState)}`);
   }
   await waitFor(client, `document.querySelector('#launcherUpdateNowButton').textContent.includes(${JSON.stringify(readyButton)})`, 'launcher update action button');
+  await sleep(200);
+  await captureScreenshot(client, 'launcher-update-ready.png');
   const stagedProof = await evaluate(client, `(async () => ({
     hidden: document.querySelector('#launcherUpdateOverlay').hidden,
     title: document.querySelector('#launcherUpdateTitle').textContent,
@@ -355,7 +419,7 @@ try {
     status: await window.aht.getStatus(),
     state: await window.aht.getLauncherUpdateState()
   }))()`);
-  if (!stagedProof.state.lastResult?.restartRequired || (process.platform === 'win32' && !stagedProof.state.lastResult?.instantRestartReady) || !stagedProof.state.lastResult?.preparedRestart) {
+  if (!stagedProof.state.lastResult?.restartRequired || !stagedProof.state.lastResult?.instantRestartReady || !stagedProof.state.lastResult?.preparedRestart?.primed) {
     throw new Error(`Launcher update was not staged for explicit restart: ${JSON.stringify(stagedProof.state)}`);
   }
   if (stagedProof.log.trim() !== 'Launcher update verified and ready.'
@@ -373,16 +437,16 @@ try {
     throw new Error(`Launcher update did not write pending handoff state at ${pendingUpdatePath}`);
   }
   const stagedPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
-  if ((process.platform === 'win32' ? stagedPending.status !== 'ready-to-relaunch' : stagedPending.status !== 'staged') || stagedPending.version !== '9.9.9' || !stagedPending.preparedRestart) {
+  if (stagedPending.status !== 'ready-to-relaunch' || stagedPending.version !== publicUpdateVersion || !stagedPending.preparedRestart?.primed) {
     throw new Error(`Pending launcher update was not staged correctly: ${JSON.stringify(stagedPending)}`);
   }
   const updateReport = await evaluate(client, `window.aht.copyErrorReport({ context: 'launcher:updateRestart', message: 'Testing the staged update report' })`);
   const updateReportText = await fsp.readFile(updateReport.filePath, 'utf8');
-  if (!updateReportText.includes('LAUNCHER UPDATE HANDOFF') || !updateReportText.includes('9.9.9')) {
+  if (!updateReportText.includes('LAUNCHER UPDATE HANDOFF') || !updateReportText.includes(publicUpdateVersion)) {
     throw new Error('Update report omitted the staged version and handoff state.');
   }
-  await evaluate(client, `document.querySelector('#launcherUpdateErrorReportButton').click()`);
-  await waitFor(client, `document.querySelector('#launcherUpdateErrorReportButton').textContent.includes('Report copied')`, 'update report copy confirmation');
+  const readyReportHidden = await evaluate(client, `document.querySelector('#launcherUpdateErrorReportButton').hidden`);
+  if (!readyReportHidden) throw new Error('The compact ready state exposed an unnecessary error-report action.');
   const restartPoint = await evaluate(client, `(() => {
     const button = document.querySelector('#launcherUpdateNowButton');
     const bounds = button.getBoundingClientRect();
@@ -400,11 +464,7 @@ try {
     state: await window.aht.getLauncherUpdateState(),
     hasRestartApi: typeof window.aht.restartLauncherUpdate === 'function'
   }))()`);
-  const expectedHandoffLine = process.platform === 'win32'
-    ? 'Restart requested.'
-    : process.platform === 'linux'
-      ? 'Installing the portable Linux AppImage update.'
-      : 'Install and restart requested.';
+  const expectedHandoffLine = 'Restart requested.';
   const internalClickLines = Array.isArray(clickProof.state?.lines) ? clickProof.state.lines.join('\n') : '';
   if (!internalClickLines.includes(expectedHandoffLine) && !internalClickLines.includes('Test mode verified the restart helper')) {
     throw new Error(`Launcher update action did not start the prepared handoff: ${JSON.stringify(clickProof)}`);
@@ -413,10 +473,13 @@ try {
     throw new Error(`Player launcher update action exposed a raw update log: ${JSON.stringify(clickProof.log)}`);
   }
   const installingPending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
-  const expectedPendingStatus = process.platform === 'win32' ? 'swapping' : 'installing';
+  const expectedPendingStatus = 'swapping';
   const installingTimestampValid = Boolean(installingPending.installingStartedAt);
-  if (installingPending.status !== expectedPendingStatus || installingPending.version !== '9.9.9' || !installingTimestampValid) {
+  if (installingPending.status !== expectedPendingStatus || installingPending.version !== publicUpdateVersion || !installingTimestampValid) {
     throw new Error(`Pending launcher update was not marked as an active restart handoff before quit: ${JSON.stringify(installingPending)}`);
+  }
+  if (Number(clickProof.state.lastResult?.restartDispatchMs) >= 1000) {
+    throw new Error(`Prepared restart dispatch exceeded one second: ${JSON.stringify(clickProof.state.lastResult?.restartDispatchMs)}`);
   }
   try {
     await waitFor(client, "(async () => (await window.aht.getLauncherUpdateState()).lines.some((line) => line.includes('Test mode verified the restart helper')))()", 'launcher restart helper verified', 80);
@@ -496,7 +559,7 @@ try {
   if (process.platform === 'darwin') {
     const launched = proof.state.lastResult.launched || {};
     const prepared = proof.state.lastResult.preparedRestart || {};
-    if (launched.strategy !== 'macos-helper') {
+    if (launched.strategy !== 'macos-staged-helper' || !prepared.primed || !prepared.stagedCandidatePath) {
       throw new Error(`macOS launcher update did not use the restart helper: ${JSON.stringify(launched)}`);
     }
     for (const file of [prepared.payloadPath, prepared.scriptPath, launched.logPath]) {
@@ -505,7 +568,7 @@ try {
       }
     }
     const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
-    if (payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app') || !payload.pendingFailurePath || payload.testStartOnly !== true) {
+    if (payload.mode !== 'app-bundle-swap' || payload.installerPath !== proof.state.lastResult.downloadedPath || !payload.targetApp?.endsWith('.app') || !payload.pendingPath || !payload.pendingFailurePath || payload.testStartOnly !== true) {
       throw new Error(`macOS helper payload is missing update details: ${JSON.stringify(payload)}`);
     }
     const helperLog = fs.readFileSync(launched.logPath, 'utf8');
@@ -513,7 +576,7 @@ try {
       throw new Error(`Helper did not write startup confirmation: ${helperLog}`);
     }
     const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
-    for (const required of ['/usr/bin/ditto -x -k', '/usr/bin/open "$target_app"', 'pending_failure_path', 'fallback_app', 'AppTranslocation', 'Primary install target failed', 'No .app bundle was found in update ZIP']) {
+    for (const required of ['/usr/bin/ditto -x -k', 'requested_candidate="$requested_target.next-update"', 'write_log "Ready to quit"', '/usr/bin/open "$target_app"', 'pending_failure_path', 'fallback_app', 'AppTranslocation', 'No .app bundle was found in update ZIP']) {
       if (!scriptText.includes(required)) {
         throw new Error(`macOS helper script is missing ${required}: ${scriptText}`);
       }
@@ -522,7 +585,7 @@ try {
   if (process.platform === 'linux') {
     const launched = proof.state.lastResult.launched || {};
     const prepared = proof.state.lastResult.preparedRestart || {};
-    if (launched.strategy !== 'linux-appimage-helper' || prepared.strategy !== 'linux-appimage-helper') {
+    if (launched.strategy !== 'linux-appimage-helper' || prepared.strategy !== 'linux-appimage-helper' || !prepared.primed || !prepared.stagedCandidatePath) {
       throw new Error(`Linux launcher update did not use the AppImage swap helper: ${JSON.stringify({ prepared, launched })}`);
     }
     for (const file of [prepared.payloadPath, prepared.scriptPath, launched.logPath]) {
@@ -531,7 +594,7 @@ try {
       }
     }
     const payload = JSON.parse(fs.readFileSync(prepared.payloadPath, 'utf8'));
-    if (payload.mode !== 'appimage-swap' || payload.installerPath !== proof.state.lastResult.downloadedPath || payload.targetAppImage !== linuxTargetAppImage || !payload.fallbackAppImage?.endsWith('.AppImage') || payload.testStartOnly !== true) {
+    if (payload.mode !== 'appimage-swap' || payload.installerPath !== proof.state.lastResult.downloadedPath || payload.targetAppImage !== linuxTargetAppImage || !payload.fallbackAppImage?.endsWith('.AppImage') || !payload.pendingPath || payload.testStartOnly !== true) {
       throw new Error(`Linux AppImage helper payload is missing update details: ${JSON.stringify(payload)}`);
     }
     if (!prepared.payloadSha256 || !prepared.scriptSha256) {
@@ -542,7 +605,7 @@ try {
       throw new Error(`Linux AppImage helper did not write startup confirmation: ${helperLog}`);
     }
     const scriptText = fs.readFileSync(prepared.scriptPath, 'utf8');
-    for (const required of ['target_appimage.next-update', 'target_appimage.previous-update', 'chmod 755', 'nohup "$target_appimage"', 'fallback_appimage', 'pending_failure_path']) {
+    for (const required of ['requested_candidate="$requested_target.next-update"', 'target_appimage.previous-update', 'write_log "Ready to quit"', 'chmod 755', 'nohup "$target_appimage"', 'fallback_appimage', 'pending_failure_path']) {
       if (!scriptText.includes(required)) {
         throw new Error(`Linux AppImage helper script is missing ${required}: ${scriptText}`);
       }
@@ -598,6 +661,8 @@ try {
       progress: proof.progress,
       downloadedPath: proof.state.lastResult.downloadedPath,
       latestVersion: proof.status.launcherUpdate.latestVersion,
+      liveDetectionMs,
+      restartDispatchMs: proof.state.lastResult.restartDispatchMs,
       launcherStrategy: proof.state.lastResult.launched?.strategy || 'direct',
       pendingInstallReopenExit: guardExit
     }

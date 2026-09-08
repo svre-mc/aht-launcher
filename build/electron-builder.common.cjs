@@ -4,6 +4,7 @@ const developerOnlySourceFiles = [
   'src/serverTransfer.js',
   'src/githubActions.js',
   'src/githubModpackRelease.js',
+  'src/githubPublishRequest.js',
   'src/r2DirectUpload.js'
 ];
 const developerOnlyNodeModules = [

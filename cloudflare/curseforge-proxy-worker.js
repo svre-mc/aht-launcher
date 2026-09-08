@@ -2112,6 +2112,7 @@ async function createLauncherProof(request, env, origin) {
   const requestedMinecraftUuid = normalizeMinecraftUuid(body.minecraftUuid);
   const requestedDeviceId = cleanString(body.deviceId || '', 80).toLowerCase();
   const device = await verifyDeviceAssertion(body, 'launcher-proof', {
+    ...(body.nativeGuardKeyHash ? { nativeGuardKeyHash: cleanString(body.nativeGuardKeyHash,64) } : {}),
     protocol: requestedProtocol || LEGACY_LAUNCHER_PROOF_PROTOCOL,
     launchId: cleanString(body.launchId || '', 80),
     minecraftUsername: minecraftUsername.toLowerCase(),
@@ -2241,6 +2242,10 @@ async function createLauncherProof(request, env, origin) {
     launcherVersion: currentLauncherVersion,
     launcherVersionAuthority: v2Requested && device.ok
       ? 'worker-policy-matched-device-assertion' : 'legacy-client-claim',
+    ...(v2Requested && device.ok && /^[a-f0-9]{64}$/.test(body.nativeGuardKeyHash || '')
+      ? { nativeGuardKeyHash: body.nativeGuardKeyHash, nativeGuardProtocol: 'AHT-GUARD-1' } : {}),
+    nativeGuardRequired: Boolean(v2Requested && cleanString(body.platform,32) === 'win32'
+      && compareLauncherVersions(currentLauncherVersion, '0.2.09') >= 0),
     platform: cleanString(body.platform, 32),
     arch: cleanString(body.arch, 32),
     launcherChannel: developerAuthorized ? 'developer' : 'player',

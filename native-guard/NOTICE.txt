@@ -1,0 +1,19 @@
+AHT Runtime Guard
+
+The Windows launcher starts this separate, read-only helper for a game session.
+It identifies the matching Java game process using its game directory and Windows
+session, and compares protected native code in jvm.dll, java.dll and LWJGL against
+the modules' files. Normal Java JIT memory is outside those comparisons. Two
+successive differing measurements are required for a native code-change result.
+
+The server receives a fresh signed status, process identifier/start time, scan
+sequence, coverage counts and, on a difference, bounded module names, relative
+code offsets and module file hashes. The helper does not send memory contents,
+personal documents, or unrelated process lists. Its temporary signing key stays
+in its process. It requests query/read access; it does not inject code, modify the
+game's memory, install a driver or alter antivirus settings. It exits with the
+game, or after 30 minutes if no matching game starts.
+
+The launcher also disables the game's standard Java attach mechanism. This
+protection complements server-authoritative gameplay checks. A client machine
+controlled by an attacker cannot provide universal proof that no cheat exists.

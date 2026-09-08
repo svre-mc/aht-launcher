@@ -232,6 +232,8 @@ function javaArgsFor({ config = {}, latest = null, installed = null, rootDir = '
   const ram = memoryMbFor(config, latest, installed);
   const args = [];
   args.push(`-Xmx${ram}m`, '-Xms512m');
+  // Prevent the standard JVM attach path from loading agents into a running player session.
+  args.push('-XX:+DisableAttachMechanism');
   if (config.launcherProof?.enabled !== false && gameDir) {
     args.push(...launcherProofJavaArgs(launcherProofPath(
       gameDir,

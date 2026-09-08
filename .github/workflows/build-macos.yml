@@ -134,6 +134,10 @@ jobs:
       - name: Build ${{ matrix.label }} launcher
         run: npm run ${{ matrix.build_script }}
 
+      - name: Verify packaged Windows runtime guard
+        if: matrix.id == 'windows'
+        run: node scripts/verify-packaged-native-guard.mjs
+
       - name: Verify Windows Authenticode signatures
         if: matrix.id == 'windows'
         shell: pwsh
@@ -806,6 +810,9 @@ jobs:
             echo "Launcher update feed: $AHT_LAUNCHER_UPDATE_URL"
             echo "Source commit: $GITHUB_SHA"
           } > "$NOTES_FILE"
+          if [ -f "release-notes/launcher-$VERSION.md" ]; then
+            cat "release-notes/launcher-$VERSION.md" >> "$NOTES_FILE"
+          fi
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists. Published launcher versions are immutable; bump package.json." >&2

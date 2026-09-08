@@ -176,7 +176,7 @@
         </div>
 
         <section class="quick-actions">
-          <button id="scanButton" class="ghost-button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
+          <button id="scanButton" class="ghost-button" title="Check and repair the modpack, Java, Minecraft, Forge, and assets"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
           <button class="ghost-button tab" data-tab="settings"><span class="button-icon icon-settings" aria-hidden="true"></span>Game Settings</button>
         </section>
 
@@ -370,7 +370,7 @@
                 <span id="releaseCheckState">Ready</span>
                 <strong id="releaseCheckTitle">Choose a ZIP</strong>
               </div>
-              <p id="releaseCheckDetail">Pick an exact AHT client ZIP from Modpack ZIP, then publish it to the stable R2 feed and stable GitHub release track.</p>
+              <p id="releaseCheckDetail">Pick an exact AHT client ZIP from Modpack ZIP, then publish the update for players.</p>
             </div>
             <div id="releaseUploadProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="releaseUploadProgressLabel">Preparing upload</span><span id="releaseUploadProgressCount">0%</span></div>
@@ -425,7 +425,7 @@
             <div class="dev-section-head">
               <h2>Launcher Updates</h2>
               <div class="dev-actions">
-                <button id="testLauncherReinstallButton" class="button compact" type="button"><span class="button-icon icon-sync" aria-hidden="true"></span>Test Local Reinstall</button>
+                <button id="testLauncherReinstallButton" class="button compact" type="button"><span class="button-icon icon-sync" aria-hidden="true"></span>Test Player Update</button>
                 <button id="scanLauncherBuildsButton" class="button compact"><span class="button-icon icon-scan" aria-hidden="true"></span>Check GitHub</button>
                 <button id="publishLauncherUpdateButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Deploy Latest Launcher</button>
               </div>
@@ -445,10 +445,10 @@
             </div>
             <div id="launcherReinstallStatus" class="release-check-card warn">
               <div>
-                <span>Regular launcher update test</span>
-                <strong>Open the installed player launcher</strong>
+                <span>Local update test</span>
+                <strong>Ready</strong>
               </div>
-              <p>Uses the exact current-version Windows ZIP as a one-time local update. The installed regular AHT Launcher opens with its normal update window, runs the real copy, hash, staging, Restart Launcher, swap, relaunch, and acknowledgement flow, and never publishes or downloads live update data.</p>
+              <p>Tests the installed player launcher with the current local Windows ZIP. Nothing is uploaded or published.</p>
             </div>
             <div id="launcherDeployProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="launcherDeployProgressLabel">Preparing public deploy</span><span id="launcherDeployProgressCount">0%</span></div>
@@ -748,19 +748,25 @@
     </section>
   </div>
   <div id="launcherUpdateOverlay" class="overlay launcher-update-overlay" hidden>
-    <section class="launcher-update-dialog" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle">
-      <div>
-        <p class="eyebrow">Launcher Update</p>
-        <h2 id="launcherUpdateTitle">Update required</h2>
-        <span id="launcherUpdateSummary" class="account-copy">A newer launcher is required before you can continue.</span>
-      </div>
-      <div class="progress-wrap launcher-update-progress">
+    <section class="launcher-update-dialog" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle" aria-describedby="launcherUpdateSummary" data-state="available">
+      <header class="launcher-update-header">
+        <span class="launcher-update-mark" aria-hidden="true"><span class="button-icon icon-download"></span></span>
+        <div class="launcher-update-heading">
+          <p class="launcher-update-kicker">AHT Launcher <span id="launcherUpdateVersion"></span></p>
+          <h2 id="launcherUpdateTitle">Launcher update</h2>
+        </div>
+      </header>
+      <p id="launcherUpdateSummary" class="launcher-update-summary">Preparing the latest launcher.</p>
+      <div id="launcherUpdateProgress" class="progress-wrap launcher-update-progress" role="progressbar" aria-label="Launcher update progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div class="progress-meta"><span id="launcherUpdateProgressLabel">Preparing</span><span id="launcherUpdateProgressCount">0%</span></div>
         <div class="progress-track"><div id="launcherUpdateProgressBar" class="progress-bar"></div></div>
       </div>
-      <pre id="launcherUpdateLog" class="log launcher-update-log"></pre>
-      <button id="launcherUpdateNowButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update Launcher</button>
-      <button id="launcherUpdateErrorReportButton" class="button compact" type="button">Copy Update Error Report</button>
+      <p id="launcherUpdateError" class="launcher-update-error" role="alert" hidden>The update could not be completed. Your current launcher was not changed.</p>
+      <div class="launcher-update-actions">
+        <button id="launcherUpdateNowButton" class="button primary launcher-update-action" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update now</button>
+        <button id="launcherUpdateErrorReportButton" class="launcher-update-report" type="button" hidden>Copy error report</button>
+      </div>
+      <pre id="launcherUpdateLog" class="launcher-update-log" hidden aria-hidden="true"></pre>
     </section>
   </div>
   <div id="updateLogVideoOverlay" class="overlay update-log-video-overlay" hidden>

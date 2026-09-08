@@ -289,6 +289,7 @@ function createByteProgressEmitter(options = {}, total = 0) {
   const startedAt = Date.now();
   const meta = options.progressMeta && typeof options.progressMeta === 'object' ? options.progressMeta : {};
   let lastEmitAt = 0;
+  let lastReportedLoaded = -1;
   if (!onProgress) {
     return () => {};
   }
@@ -296,10 +297,12 @@ function createByteProgressEmitter(options = {}, total = 0) {
     const now = Date.now();
     const normalizedLoaded = Math.max(0, Number(loaded) || 0);
     const normalizedTotal = Math.max(0, Number(total) || 0);
-    if (!force && now - lastEmitAt < progressIntervalMs && (!normalizedTotal || normalizedLoaded < normalizedTotal)) {
+    const firstPositiveProgress = normalizedLoaded > 0 && lastReportedLoaded <= 0;
+    if (!force && !firstPositiveProgress && now - lastEmitAt < progressIntervalMs && (!normalizedTotal || normalizedLoaded < normalizedTotal)) {
       return;
     }
     lastEmitAt = now;
+    lastReportedLoaded = normalizedLoaded;
     const elapsedSeconds = Math.max(0.001, (now - startedAt) / 1000);
     onProgress({
       ...meta,

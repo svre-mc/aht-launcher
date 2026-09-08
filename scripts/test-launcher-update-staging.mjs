@@ -51,6 +51,7 @@ try {
   let releaseVersionRead;
   const versionGate = new Promise((resolve) => { releaseVersionRead = resolve; });
   let stageResolved = false;
+  const extractionProgress = [];
   const stagingPromise = stageWindowsLauncherUpdate({
     archivePath,
     installDir,
@@ -59,6 +60,7 @@ try {
     targetExeName,
     expectedVersion: '7.8.9',
     archiveSha256: 'a'.repeat(64),
+    onProgress: (progress) => extractionProgress.push({ ...progress }),
     readProductVersion: async () => {
       await versionGate;
       return '7.8.9.0';
@@ -71,6 +73,10 @@ try {
   assert(!stageResolved, 'launcher update became ready before executable version validation finished');
   releaseVersionRead();
   const staged = await stagingPromise;
+  assert(extractionProgress.length > 0, 'staging did not report extraction byte progress');
+  assert(new Set(extractionProgress.map((progress) => progress.total)).size === 1, 'staging progress changed its total while extracting the ZIP');
+  assert(extractionProgress.every((progress, index) => index === 0 || progress.completed >= extractionProgress[index - 1].completed), 'staging progress moved backwards');
+  assert(extractionProgress.at(-1).completed === extractionProgress.at(-1).total, 'staging progress did not finish at the complete extracted byte count');
   assert(staged.receipt.expectedVersion === '7.8.9', 'staging receipt version mismatch');
   assert(staged.receipt.files.some((entry) => entry.path === 'resources/app.asar'), 'staging receipt omitted app.asar');
   assert(staged.receipt.files.some((entry) => entry.path === 'Uninstall A Hard Time Launcher Windows.exe'), 'staging did not preserve installer-owned uninstaller');

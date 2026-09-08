@@ -301,7 +301,14 @@ const server = http.createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = Buffer.concat(chunks);
-    githubCalls.push({ method: request.method, path: url.pathname, search: url.search, body: body.toString('utf8') });
+    githubCalls.push({
+      method: request.method,
+      path: url.pathname,
+      search: url.search,
+      body: body.toString('utf8'),
+      size: body.length,
+      contentLength: String(request.headers['content-length'] || '')
+    });
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     if (request.method === 'GET' && url.pathname.includes('/releases/tags/')) {
       response.statusCode = 404;
@@ -421,7 +428,7 @@ try {
   await evaluate(client, "document.querySelector('#publishReleaseButton').click()");
   await waitFor(client, `(() => {
     const state = document.querySelector('#releaseCheckState')?.textContent || '';
-    return ['Upload complete', 'Upload failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
+    return ['Upload complete', 'Update published', 'Upload failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
   })()`, 'release publish terminal state', 360);
   const uiProof = await evaluate(client, `
     ({
@@ -479,7 +486,7 @@ try {
   await evaluate(client, "document.querySelector('#buildPtbClientZipButton').click()");
   await waitFor(client, `(() => {
     const state = document.querySelector('#ptbReleaseCheckState')?.textContent || '';
-    return ['PTB published', 'GitHub mirror failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
+    return ['PTB published', 'Update published', 'GitHub mirror failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
   })()`, 'PTB publish terminal state', 360);
   const ptbUiProof = await evaluate(client, `({
     state: document.querySelector('#ptbReleaseCheckState').textContent,
@@ -541,6 +548,12 @@ try {
     .map((call) => new URLSearchParams(call.search).get('name'));
   if (!githubAssetNames.some((name) => name?.startsWith('a-hard-time-stable-')) || !githubAssetNames.some((name) => name?.startsWith('a-hard-time-ptb-'))) {
     throw new Error(`UI publication did not upload separate stable/PTB GitHub assets: ${JSON.stringify(githubAssetNames)}`);
+  }
+  const invalidLength = githubCalls
+    .filter((call) => call.method === 'POST' && call.path.includes('/assets'))
+    .find((call) => Number(call.contentLength) !== call.size);
+  if (invalidLength) {
+    throw new Error(`Electron did not send the exact GitHub asset Content-Length: ${JSON.stringify(invalidLength)}`);
   }
   const defaults = JSON.parse(fs.readFileSync(path.join(defaultsDir, 'app.defaults.json'), 'utf8'));
   if (defaults.latestUrl !== `${workerEndpoint}/latest.json`) {

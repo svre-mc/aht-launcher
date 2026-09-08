@@ -239,6 +239,33 @@ if (!allowedProof.response.ok || allowedProof.body.payload?.deviceId !== device.
     || !allowedProof.body.payload?.reconnectExpiresAt) {
   throw new Error(`Restored device could not obtain proof: ${allowedProof.response.status} ${JSON.stringify(allowedProof.body)}`);
 }
+const guardedRequest = proofRequestPayload();
+guardedRequest.nativeGuardKeyHash = 'a'.repeat(64);
+guardedRequest.deviceAssertion = createDeviceAssertion(device, { purpose: 'launcher-proof', binding: launcherProofDeviceBinding(guardedRequest) });
+const guardedProof = await workerJson('/api/launcher-proof', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' },
+  body: JSON.stringify(guardedRequest)
+}, { asn: 64512, asOrganization: 'Test VPN Network', country: 'US', colo: 'LAX' });
+if (!guardedProof.response.ok || guardedProof.body.payload?.nativeGuardKeyHash !== guardedRequest.nativeGuardKeyHash || guardedProof.body.payload?.nativeGuardProtocol !== 'AHT-GUARD-1') {
+  throw new Error('Worker did not bind the signed native guard key');
+}
+const replacedGuard = await workerJson('/api/launcher-proof', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' },
+  body: JSON.stringify({ ...guardedRequest, nativeGuardKeyHash: 'b'.repeat(64) })
+}, { asn: 64512, asOrganization: 'Test VPN Network', country: 'US', colo: 'LAX' });
+if (replacedGuard.response.status !== 403) throw new Error('Worker accepted replacement of the device-signed guard key');
+if (allowedProof.body.payload.nativeGuardRequired !== false) throw new Error('The existing release was forced into an unavailable guard rollout');
+const previousGuardTestVersion = env.AHT_REQUIRED_LAUNCHER_VERSION;
+try {
+  env.AHT_REQUIRED_LAUNCHER_VERSION = '0.2.09';
+  const requiredRequest = { ...proofRequestPayload(), launcherVersion: '0.2.09', appVersion: '0.2.09', platform: 'win32', nativeGuardKeyHash: 'c'.repeat(64), nativeGuardRequired: false };
+  requiredRequest.deviceAssertion = createDeviceAssertion(device, { purpose: 'launcher-proof', binding: launcherProofDeviceBinding(requiredRequest) });
+  const requiredProof = await workerJson('/api/launcher-proof', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' }, body: JSON.stringify(requiredRequest)
+  });
+  if (!requiredProof.response.ok || requiredProof.body.payload?.nativeGuardRequired !== true || requiredProof.body.payload?.nativeGuardKeyHash !== requiredRequest.nativeGuardKeyHash) throw new Error('New Windows releases must carry the Worker-authorized guard requirement');
+} finally { env.AHT_REQUIRED_LAUNCHER_VERSION = previousGuardTestVersion; }
+
 const verifiedSession = await workerJson('/api/launcher-proof/verify', {
   headers: { Authorization: `Bearer ${allowedProof.body.token}` }
 });

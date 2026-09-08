@@ -677,6 +677,28 @@ try {
     throw new Error(`Synced Minecraft Launcher profile did not pin Java 8: ${JSON.stringify(syncedProfile)}`);
   }
 
+  // A clean modpack must still get a real runtime repair from the Repair button.
+  // No pack ZIP request or managed mod rewrite is needed to recover base metadata.
+  const packRequestsBeforeRuntimeRepair = packRequests.length;
+  const preservedModFile = path.join(instanceDir, 'mods/aht-required.jar');
+  const preservedModMtime = fs.statSync(preservedModFile).mtimeMs;
+  const baseMetadataFile = path.join(mcRoot, 'versions/1.12.2/1.12.2.json');
+  fs.writeFileSync(baseMetadataFile, JSON.stringify({ id: '1.12.2', assets: 'legacy', libraries: [] }));
+  await evaluate(client, 'refresh().then(() => true)');
+  await waitFor(client, `!updatePoll && !lastUpdateState?.running`, 'completed install UI before runtime repair');
+  await evaluate(client, `document.querySelector('#scanButton').click(); true`);
+  await waitFor(client, `window.aht.getUpdateState().then((state) => {
+    if (state.error) throw new Error(state.error);
+    return !state.running && state.lastResult?.runtimeOnly === true ? state.lastResult : false;
+  })`, 'Repair button runtime repair with clean modpack', 180);
+  if (packRequests.length !== packRequestsBeforeRuntimeRepair || fs.statSync(preservedModFile).mtimeMs !== preservedModMtime) {
+    throw new Error('Runtime-only Repair downloaded the modpack or rewrote an unchanged mod.');
+  }
+  if (!JSON.parse(fs.readFileSync(baseMetadataFile, 'utf8')).downloads?.client) {
+    throw new Error('Repair button did not restore complete Minecraft base metadata.');
+  }
+  checkpoint('clean modpack runtime repair passed without pack download');
+
   const stableProfileId = 'a-hard-time-dregora';
   for (const rootDir of [mcRoot, syncedMcRoot]) {
     const profilesPath = path.join(rootDir, 'launcher_profiles.json');
@@ -743,7 +765,7 @@ try {
     throw new Error(`Legacy security state remained in the player-visible game instance: ${JSON.stringify({ legacyManagedState, legacyIntegrityState })}`);
   }
 
-  await evaluate(client, `document.querySelector('#scanButton')?.click(); true`);
+  await evaluate(client, `window.aht.scanFiles().then(() => refresh()).then(() => true)`);
   const cleanScanUi = await waitForCleanScanUiReset(client, 60);
   checkpoint('clean scan UI reset');
 

@@ -4,6 +4,7 @@ import {
   directR2CredentialsReady,
   missingDirectR2CredentialLabels,
   r2Endpoint,
+  getR2JsonDirect,
   uploadR2JsonDirect
 } from '../src/r2DirectUpload.js';
 
@@ -27,5 +28,6 @@ assert.deepEqual(missingDirectR2CredentialLabels({
   secretAccessKey: ''
 }), ['R2 Account ID', 'R2 Access Key ID', 'R2 Secret Access Key']);
 assert.equal(typeof uploadR2JsonDirect, 'function');
+assert.equal(typeof getR2JsonDirect, 'function');
 
 console.log(JSON.stringify({ ok: true }, null, 2));

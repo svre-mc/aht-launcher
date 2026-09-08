@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import { HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024;
@@ -85,6 +85,36 @@ export async function headR2ObjectDirect({
     const status = Number(error?.$metadata?.httpStatusCode || 0);
     if (status === 404 || error?.name === 'NotFound' || error?.name === 'NoSuchKey') {
       return { exists: false, size: 0, etag: '', metadata: {}, sha256: '' };
+    }
+    throw error;
+  }
+}
+
+export async function getR2JsonDirect({
+  accountId,
+  accessKeyId,
+  secretAccessKey,
+  bucket,
+  key,
+  maxBytes = 8 * 1024 * 1024
+} = {}) {
+  const client = r2Client({ accountId, accessKeyId, secretAccessKey });
+  try {
+    const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    const size = Number(result.ContentLength || 0);
+    if (size > maxBytes) throw new Error(`R2 JSON object ${key} is larger than ${maxBytes} bytes.`);
+    const body = await result.Body?.transformToString('utf8');
+    if (!body) throw new Error(`R2 JSON object ${key} is empty.`);
+    return {
+      exists: true,
+      size: size || Buffer.byteLength(body, 'utf8'),
+      etag: String(result.ETag || '').replace(/^"|"$/g, ''),
+      value: JSON.parse(body)
+    };
+  } catch (error) {
+    const status = Number(error?.$metadata?.httpStatusCode || 0);
+    if (status === 404 || error?.name === 'NotFound' || error?.name === 'NoSuchKey') {
+      return { exists: false, size: 0, etag: '', value: null };
     }
     throw error;
   }

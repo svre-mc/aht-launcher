@@ -221,6 +221,8 @@ try {
   assert.equal(runtimeSameByteRewrite.fingerprint.digest, runtimeInitial.fingerprint.digest, 'Same-byte runtime rewrite altered the content fingerprint.');
 
   await fs.writeFile(runtimeJar, 'changed-minecraft-bytes', 'utf8');
+  const runtimeChangedTime = new Date(runtimeTouchedTime.getTime() + 8_000);
+  await fs.utimes(runtimeJar, runtimeChangedTime, runtimeChangedTime);
   const runtimeChanged = await verifyPreparedRuntimeSnapshot(runtimeFiles, {
     previousFileStates: runtimeSameByteRewrite.fileStates
   });

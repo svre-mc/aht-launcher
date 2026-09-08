@@ -277,6 +277,7 @@ try {
     stagingDir,
     backupDir,
     failedCandidateDir,
+    targetExe: path.join(installDir, targetExeName),
     targetRelativePath: targetExeName,
     receiptPath,
     receiptSha256,
@@ -353,6 +354,8 @@ try {
   }
 
   const windowReadyAt = Date.parse(String(ack.windowReadyAt || ''));
+  const processStartedLine = logText.split(/\r?\n/).find((line) => line.includes('Started updated launcher PID '));
+  const processStartedAt = Date.parse(String(processStartedLine || '').split(' ')[0]);
   const closeToWindowReadyMs = Number.isFinite(readyAt) && Number.isFinite(windowReadyAt)
     ? Math.max(0, windowReadyAt - readyAt)
     : null;
@@ -367,6 +370,12 @@ try {
     stagedFileCount: staged.receipt.fileCount,
     stagedTreeSha256: staged.receipt.treeSha256,
     helperPreflightMs: Number.isFinite(readyAt) ? Math.max(0, readyAt - helperStartedAt) : null,
+    readyToProcessStartMs: Number.isFinite(readyAt) && Number.isFinite(processStartedAt)
+      ? Math.max(0, processStartedAt - readyAt)
+      : null,
+    processStartToWindowReadyMs: Number.isFinite(processStartedAt) && Number.isFinite(windowReadyAt)
+      ? Math.max(0, windowReadyAt - processStartedAt)
+      : null,
     closeToWindowReadyMs,
     updatedProcessId: ack.processId,
     visibleWindow: windowProof,

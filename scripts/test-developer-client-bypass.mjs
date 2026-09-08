@@ -214,6 +214,21 @@ try {
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.developerMode && status.installed?.version === '2.8.51' ? status : false)
   `, 'developer status');
+  const modeProof = await evaluate(client, `(async () => {
+    renderStatus(await window.aht.getStatus());
+    const initial = { active: activeTabName, developerStyled: document.body.classList.contains('dev-mode'), splashHidden: document.querySelector('#startupLoader').hidden };
+    await transitionSidebarSelection(document.querySelector('#developerTileButton'));
+    const locked = { active: activeTabName, sidebarVisible: getComputedStyle(document.querySelector('.sidebar')).display !== 'none', loginVisible: !document.querySelector('#developerLoginScreen').hidden, consoleHidden: document.querySelector('#developerConsole').hidden };
+    let denied = '';
+    try { await window.aht.devBuildRelease({}); } catch (error) { denied = error.message; }
+    await transitionSidebarSelection(document.querySelector('#gameTileButton'));
+    return { initial, locked, denied, returned: activeTabName, developerStyled: document.body.classList.contains('dev-mode'), animated: document.getAnimations().length };
+  })()`);
+  if (modeProof.initial.active === 'developer' || modeProof.initial.developerStyled || !modeProof.initial.splashHidden
+      || modeProof.locked.active !== 'developer' || !modeProof.locked.sidebarVisible || !modeProof.locked.loginVisible || !modeProof.locked.consoleHidden
+      || !/Developer login is required/.test(modeProof.denied) || modeProof.returned !== 'player' || modeProof.developerStyled || modeProof.animated !== 0) {
+    throw new Error(`Developer player/tool mode separation regressed: ${JSON.stringify(modeProof)}`);
+  }
   if (!status.developerClientBypass) {
     throw new Error(`Developer client bypass was not enabled: ${JSON.stringify(status)}`);
   }
@@ -277,6 +292,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     root,
+    modeProof,
     badge,
     latestError: status.latestError,
     integrity: status.integrity.counts,

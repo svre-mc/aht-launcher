@@ -192,6 +192,7 @@ function launcherProofFiles(config = {}, identity = {}) {
 
 export function launcherProofDeviceBinding(payload = {}) {
   return {
+    ...(payload.nativeGuardKeyHash ? { nativeGuardKeyHash: cleanString(payload.nativeGuardKeyHash, 64) } : {}),
     protocol: cleanString(payload.protocol || '', 80),
     launchId: cleanString(payload.launchId || '', 80),
     minecraftUsername: cleanString(payload.minecraftUsername || '', 16).toLowerCase(),
@@ -267,6 +268,11 @@ export async function inspectLauncherProof({
   const expectedModIntegrityBypass = Boolean(identity.modIntegrityBypass);
   const expectedProofServiceBaseUrl = proofBaseUrl(config);
   const reasons = launcherProofDocumentReasons(proof, { minValidityMs, now });
+  if (identity.requireNativeGuard && (!/^[a-f0-9]{64}$/.test(payload.nativeGuardKeyHash || '')
+      || proof.nativeGuard?.protocol !== 'AHT-GUARD-1' || proof.nativeGuard?.keyHash !== payload.nativeGuardKeyHash
+      || !Number.isInteger(proof.nativeGuard?.port) || proof.nativeGuard.port < 1 || proof.nativeGuard.port > 65535)) {
+    reasons.push('fresh runtime protection session required');
+  }
   if (expectedPackId && cleanString(payload.packId || '', 80) !== expectedPackId) reasons.push('pack mismatch');
   if (expectedInstalledVersion && cleanString(payload.installedVersion || payload.packVersion || '', 80) !== expectedInstalledVersion) reasons.push('installed version mismatch');
   if (expectedLatestVersion && cleanString(payload.latestVersion || '', 80) !== expectedLatestVersion) reasons.push('latest version mismatch');
@@ -326,6 +332,7 @@ export function buildLauncherProofPayload({ config = {}, identity = {}, latest =
     developerClientBypass: Boolean(identity.developerClientBypass),
     modIntegrityBypass: Boolean(identity.modIntegrityBypass),
     instanceDirHash: sha256Hex(path.resolve(config.instanceDir || '')),
+    ...(identity.nativeGuardKeyHash ? { nativeGuardKeyHash: cleanString(identity.nativeGuardKeyHash,64) } : {}),
     minecraft: minecraft ? {
       version: cleanString(minecraft.version || '', 40),
       modLoaders: Array.isArray(minecraft.modLoaders)
@@ -393,6 +400,7 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
   compareString('installId', 120);
   if (payload?.deviceId) compareString('deviceId', 80);
   compareString('instanceDirHash', 80);
+  if (payload.nativeGuardKeyHash) compareString('nativeGuardKeyHash', 64);
   compareString('launcherChannel', 32);
   for (const field of ['developerClient', 'developerClientBypass', 'modIntegrityBypass']) {
     if (responsePayload?.[field] !== payload?.[field]) {
@@ -469,6 +477,7 @@ export async function writeLauncherProof({ config = {}, identity = {}, latest = 
 
   const fileProof = {
     ...proof,
+    ...(identity.nativeGuard ? { nativeGuard: identity.nativeGuard } : {}),
     proofServiceBaseUrl: proof.source === 'worker' ? proofBaseUrl(config) : '',
     proofFile: path.resolve(proofFile),
     javaProperties: launcherProofJavaArgs(proofFile),

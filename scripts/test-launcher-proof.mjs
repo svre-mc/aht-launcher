@@ -78,6 +78,8 @@ const proofFile = launcherProofPath(instanceDir);
 const reusable = await inspectLauncherProof({ config, identity, latest, installed, minValidityMs: 30_000 });
 assert.equal(reusable.usable, true, reusable.reason);
 assert.equal(reusable.proofFile, path.resolve(proofFile));
+const missingGuard = await inspectLauncherProof({ config, identity: { ...identity, requireNativeGuard: true }, latest, installed, minValidityMs: 30_000 });
+assert.equal(missingGuard.usable, false, 'An old cached Windows proof must refresh to acquire runtime coverage');
 assert.match(launcherProofJavaArgs(proofFile).join(' '), /aht\.launcher\.protocol=aht-launcher-attestation-v2/);
 
 const privateInstanceDir = path.join(root, 'Private Proof Instance');
@@ -240,6 +242,16 @@ assert.equal(localSourceInspection.usable, false);
 assert.match(localSourceInspection.reason, /source is not trusted/i);
 
 const desktopMain = await fs.readFile(path.resolve('desktop', 'main.js'), 'utf8');
+const guardIdentity = { ...identity, nativeGuardKeyHash: 'a'.repeat(64), nativeGuard: { protocol: 'AHT-GUARD-1', port: 34567, keyHash: 'a'.repeat(64) } };
+const guardProof = await writeLauncherProof({ config, identity: guardIdentity, latest, installed,
+  fetchImpl: async (_url, options) => ({ ok: true, json: async () => workerLauncherProofFixture(JSON.parse(options.body)) }) });
+assert.equal(guardProof.payload.nativeGuardKeyHash, guardIdentity.nativeGuardKeyHash);
+assert.equal(guardProof.nativeGuard.port, 34567);
+await assert.rejects(() => writeLauncherProof({ config, identity: guardIdentity, latest, installed,
+  fetchImpl: async (_url, options) => {
+    const payload=JSON.parse(options.body);delete payload.nativeGuardKeyHash;
+    return { ok: true, json: async () => workerLauncherProofFixture(payload) };
+  } }), /nativeGuardKeyHash/);
 assert.match(desktopMain, /X-AHT-Launcher-Recovery|recoverySecret/);
 assert.match(desktopMain, /writeSerializedRegisteredLauncherProof[\s\S]*?writeRegisteredLauncherProof/);
 assert.doesNotMatch(await fs.readFile(path.resolve('src', 'launcherProof.js'), 'utf8'), /source:\s*['"]local-hmac['"]|createHmac|AHT_LAUNCHER_PROOF_SECRET/);

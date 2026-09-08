@@ -62,18 +62,25 @@ export function releaseTargetObjectKey(relativePath, value = 'stable') {
 export function releaseTargetFeedUrl(stableFeedUrl = '', value = 'stable') {
   const target = releaseTarget(value);
   const raw = String(stableFeedUrl || '').trim();
-  if (!raw || target.id === 'stable') return raw;
+  if (!raw) return raw;
 
   try {
     const url = new URL(raw);
     const stablePath = url.pathname
       .replace(/\/ptb\/latest\.json$/i, '/latest.json')
       .replace(/\/+$/, '');
+    if (target.id === 'stable') {
+      url.pathname = stablePath;
+      return url.toString();
+    }
     const rootPath = stablePath.replace(/\/latest\.json$/i, '/');
     url.pathname = `${rootPath.replace(/\/+$/, '')}/${target.feedPath}`.replace(/\/{2,}/g, '/');
     return url.toString();
   } catch {
-    const stablePath = path.resolve(raw);
+    const stablePath = path.resolve(raw).replace(/[\\/]ptb[\\/]latest\.json$/i, `${path.sep}latest.json`);
+    if (target.id === 'stable') {
+      return stablePath;
+    }
     return path.join(path.dirname(stablePath), target.feedPath);
   }
 }

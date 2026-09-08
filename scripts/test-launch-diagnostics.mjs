@@ -19,6 +19,12 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-launch-diagnostics-'))
 const instanceDir = path.join(root, 'A Hard Time');
 
 try {
+  const recoveryAttempt = createLaunchAttempt({ mode: 'player', appVersion: '0.2.07', instanceDir });
+  await assert.rejects(runLaunchStep(recoveryAttempt, 'prepared-play-attestation', 'Use initialized Play authorization', async () => {
+    throw new Error('Secure launcher recovery could not be verified for this username.');
+  }), /Secure launcher recovery/);
+  completeLaunchAttempt(recoveryAttempt, 'FAILED', new Error('Secure launcher recovery could not be verified for this username.'));
+  assert.match(formatLaunchReport(recoveryAttempt), /player service could not verify this installation against the account/);
   const adversarialSecrets = [
     'Authorization: Basic dXNlcjpwYXNzd29yZA==',
     'api_key = exposed-api-key',
@@ -46,6 +52,7 @@ try {
     startedAt: '2026-08-04T03:15:20.123Z',
     appName: 'A Hard Time Launcher',
     appVersion: '0.1.82',
+    buildLabel: 'Runtime Repair 2',
     mode: 'player',
     packaged: true,
     packId: 'a-hard-time-dregora',
@@ -55,6 +62,7 @@ try {
     minecraftRoot: path.join(root, 'Minecraft')
   });
   setLaunchRequirement(attempt, 'instance', 'PASS', instanceDir);
+  assert.match(formatLaunchReport(attempt), /Build: Runtime Repair 2/);
   setLaunchRequirement(attempt, 'installed', 'PASS', 'Installed version 2.8.2.');
   setLaunchRequirement(attempt, 'integrity', 'FAIL', 'One managed mod is missing.');
   setLaunchRequirement(attempt, 'java8', 'PASS', 'Temurin 1.8.0_462 amd64.');
@@ -169,6 +177,10 @@ try {
     channel: 'stable',
     instanceDir
   });
+  const assetFailure = createLaunchAttempt({ instanceDir, mode: 'player' });
+  assetFailure.minecraftSignals = ['Unable to prepare assets for download', 'Error preparing asset index'];
+  completeLaunchAttempt(assetFailure, 'HANDOFF CONFIRMED');
+  assert.match(formatLaunchReport(assetFailure), /Minecraft could not prepare its asset index or runtime files/);
   setLaunchRequirement(missingJavaSnapshot, 'java8', 'FAIL', 'No usable runtime detected.');
   completeLaunchAttempt(missingJavaSnapshot, 'DIAGNOSTIC');
   assert(

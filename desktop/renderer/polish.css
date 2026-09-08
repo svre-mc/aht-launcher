@@ -50,6 +50,20 @@ textarea {
 
 body { color: var(--bsg-muted); }
 
+/* Keep the local developer shell still; player distributions retain their UI. */
+body.developer-launcher *,
+body.developer-launcher *::before,
+body.developer-launcher *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+
+body.developer-launcher .startup-loader,
+body.developer-launcher .sidebar-switch-loader {
+  display: none !important;
+}
+
 .app-frame {
   opacity: 1;
   transition: none;

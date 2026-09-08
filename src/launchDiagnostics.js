@@ -71,6 +71,7 @@ export function createLaunchAttempt(options = {}) {
     app: {
       name: bounded(options.appName || 'A Hard Time Launcher', 80),
       version: bounded(options.appVersion || '', 40),
+      buildLabel: bounded(options.buildLabel || '', 80),
       mode: bounded(options.mode || 'player', 20),
       packaged: Boolean(options.packaged)
     },
@@ -184,7 +185,7 @@ function diagnoseFailedRequirement(attempt) {
     releaseFeed: ['The AHT release service is not configured or could not be checked.', ['Check the internet connection and try again.', 'Allow A Hard Time Launcher through firewall or security software if needed.']],
     integrity: ['One or more managed AHT files are missing or damaged.', ['Run Repair in the AHT Launcher.', 'Do not manually delete saves, playerdata, or configuration folders.']],
     launcherVersion: ['This AHT Launcher version is out of date.', ['Install the available AHT Launcher update.', 'Restart AHT Launcher, then try Play again.']],
-    java8: ['A usable 64-bit Java 8 runtime was not detected.', ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']],
+    java8: ['A usable 64-bit Java 8 runtime was not detected.', ['Close Minecraft and Minecraft Launcher, then run Repair in AHT Launcher.', 'If Repair fails, save its error report before trying Play again.']],
     minecraftProfile: ['The exact AHT Minecraft Launcher profile is missing or incomplete.', ['Close Minecraft Launcher.', 'Run Update or Repair in the AHT Launcher.']],
     minecraftRuntime: ['Required Minecraft 1.12.2 or Forge files are missing or incomplete.', ['Close Minecraft Launcher.', 'Run Update or Repair in the AHT Launcher.']],
     launcherProof: ['A valid AHT launcher session proof is not available.', ['Check the internet connection and Minecraft username.', 'Try Play again to request a fresh proof.']],
@@ -197,6 +198,12 @@ function diagnoseFailedRequirement(attempt) {
 function diagnoseMinecraftSignals(attempt) {
   const signals = (Array.isArray(attempt?.minecraftSignals) ? attempt.minecraftSignals : []).join('\n');
   if (!signals.trim()) return null;
+  if (/Unable to prepare assets for download|Error preparing asset index|assets[\\/]indexes[\\/]legacy\.json/i.test(signals)) {
+    return {
+      cause: 'Minecraft could not prepare its asset index or runtime files.',
+      actions: ['Close Minecraft Launcher.', 'Click Repair in AHT Launcher to verify Java, Minecraft, Forge, and assets, then try Play again.']
+    };
+  }
   if (/No libraries\?!|NoClassDefFoundError|ClassNotFoundException|missing librar/i.test(signals)) {
     return {
       cause: 'Minecraft or Forge stopped because a required library or class is missing.',
@@ -292,7 +299,13 @@ export function diagnoseLaunchFailure(attempt) {
       actions: ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']
     };
   }
-  if (key === 'launcher-proof' || /proof|registered to this launcher/i.test(message)) {
+  if (/Secure launcher recovery|recovery credential/i.test(message)) {
+    return {
+      cause: 'The player service could not verify this installation against the account’s saved launcher credentials.',
+      actions: ['Keep the existing launcher data and recovery files.', 'Ask AHT support to check the account registration and device identity.']
+    };
+  }
+  if (['launcher-proof', 'prepared-play-attestation'].includes(key) || /proof|registered to this launcher/i.test(message)) {
     return {
       cause: 'The launcher could not create a valid AHT session proof for this installation.',
       actions: ['Confirm the Minecraft username in the AHT Launcher matches the signed-in Minecraft account.', 'Check the internet connection and try again.']
@@ -360,6 +373,7 @@ export function formatLaunchReport(attempt) {
   lines.push('================================================================');
   lines.push(`Result: ${attempt.result}`);
   lines.push(`Launcher: ${attempt.app.name} ${attempt.app.version || 'Unknown'} (${attempt.app.mode})`);
+  if (attempt.app.buildLabel) lines.push(`Build: ${attempt.app.buildLabel}`);
   lines.push(`Pack: ${attempt.pack.name}${attempt.pack.latestVersion ? ` ${attempt.pack.latestVersion}` : ''} (${attempt.pack.channel})`);
   lines.push(`Instance: ${attempt.instanceDir || 'Not resolved'}`);
   lines.push(`Minecraft root: ${attempt.minecraftRoot || 'Not resolved'}`);

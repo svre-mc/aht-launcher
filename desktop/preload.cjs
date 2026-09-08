@@ -15,6 +15,7 @@ const playerApi = {
     preferCache: Boolean(options.preferCache),
     includeUpdateLogs: Boolean(options.includeUpdateLogs)
   }),
+  retryAccountSync: (packKey = 'aht') => ipcRenderer.invoke('account:retrySync', { packKey }),
   refreshNews: (packKey = 'aht') => ipcRenderer.invoke('news:refresh', { packKey }),
   copyErrorReport: (payload) => ipcRenderer.invoke('diagnostics:copyErrorReport', payload || {}),
   saveSettings: (config, packKey = 'aht') => ipcRenderer.invoke('settings:save', { config, packKey }),
@@ -25,6 +26,12 @@ const playerApi = {
   restartLauncherUpdate: () => ipcRenderer.invoke('launcher:updateRestart'),
   getLauncherUpdateState: () => ipcRenderer.invoke('launcher:updateState'),
   checkLauncherUpdate: () => ipcRenderer.invoke('launcher:checkUpdate'),
+  onLauncherUpdateAvailable: (listener) => {
+    if (typeof listener !== 'function') return () => {};
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on('launcher:update-available', handler);
+    return () => ipcRenderer.removeListener('launcher:update-available', handler);
+  },
   scanFiles: (packKey = 'aht') => ipcRenderer.invoke('files:scan', { packKey }),
   scanChanges: (packKey = 'aht') => ipcRenderer.invoke('changes:scan', { packKey }),
   syncChanges: (packKey = 'aht') => ipcRenderer.invoke('changes:sync', { packKey }),
