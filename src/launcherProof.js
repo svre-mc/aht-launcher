@@ -475,9 +475,14 @@ export async function writeLauncherProof({ config = {}, identity = {}, latest = 
     throw new Error(`Launcher proof signing failed: ${proof.error || 'the Worker signing endpoint did not return a trusted attestation'}`);
   }
 
+  const persistedNativeGuard = identity.nativeGuard ? {
+    protocol: cleanString(identity.nativeGuard.protocol || '', 40),
+    port: Number(identity.nativeGuard.port || 0),
+    keyHash: cleanString(identity.nativeGuard.keyHash || '', 64)
+  } : null;
   const fileProof = {
     ...proof,
-    ...(identity.nativeGuard ? { nativeGuard: identity.nativeGuard } : {}),
+    ...(persistedNativeGuard ? { nativeGuard: persistedNativeGuard } : {}),
     proofServiceBaseUrl: proof.source === 'worker' ? proofBaseUrl(config) : '',
     proofFile: path.resolve(proofFile),
     javaProperties: launcherProofJavaArgs(proofFile),

@@ -356,6 +356,28 @@ const server = http.createServer(async (request, response) => {
     });
     return;
   }
+  if (url.pathname === '/admin/session-reports') {
+    if (request.headers.authorization !== 'Bearer fresh-token') {
+      sendJson(401, { error: 'Unauthorized' });
+      return;
+    }
+    sendJson(200, {
+      detections: [{
+        detectionId: 'd'.repeat(64),
+        receivedAt: '2026-09-08T15:00:00.000Z',
+        scannedAt: '2026-09-08T14:59:58.000Z',
+        minecraftUsername: 'PlayerOne',
+        process: { name: 'javaw.exe', pid: 4242 },
+        findings: [{ module: 'jvm.dll', rva: '0x1a2b', imageSha256: 'e'.repeat(64) }],
+        launcherVersion: '0.2.10',
+        antiCheatVersion: '1.1.0'
+      }],
+      cursor: '',
+      hasMore: false,
+      appendOnly: true
+    });
+    return;
+  }
   if (url.pathname === '/admin/access-decisions') {
     if (request.headers.authorization !== 'Bearer fresh-token') {
       sendJson(401, { error: 'Unauthorized' });
@@ -585,19 +607,23 @@ try {
     (() => {
       const downloadRows = [...document.querySelectorAll('#playerDownloadsList .event')];
       const playerRows = [...document.querySelectorAll('#playerRecordsList .event')];
+      const susRows = [...document.querySelectorAll('#playerSusList .event')];
       const updateRows = [...document.querySelectorAll('#playerLauncherUpdatesList .event')];
-      if (downloadRows.length !== 2 || playerRows.length !== 2 || updateRows.length !== 1) return false;
+      if (downloadRows.length !== 2 || playerRows.length !== 2 || susRows.length !== 1 || updateRows.length !== 1) return false;
       document.querySelector('#playerLauncherUpdatesTab').click();
       const sectionText = document.querySelector('#playerDataTools').textContent;
       return {
         downloadHeaders: [...document.querySelectorAll('#playerDownloadsPanel .event-table-head span')].map((item) => item.textContent.trim()),
         playerHeaders: [...document.querySelectorAll('#playerRecordsPanel .event-table-head span')].map((item) => item.textContent.trim()),
+        susHeaders: [...document.querySelectorAll('#playerSusPanel .event-table-head span')].map((item) => item.textContent.trim()),
         updateHeaders: [...document.querySelectorAll('#playerLauncherUpdatesPanel .event-table-head span')].map((item) => item.textContent.trim()),
         downloadRows: downloadRows.map((row) => [...row.children].map((item) => item.textContent.trim())),
         playerRows: playerRows.map((row) => [...row.children].map((item) => item.textContent.trim())),
+        susRows: susRows.map((row) => [...row.children].map((item) => ({ text: item.textContent.trim(), title: item.title || '' }))),
         updateRows: updateRows.map((row) => [...row.children].map((item) => item.textContent.trim())),
         downloadsHidden: document.querySelector('#playerDownloadsPanel').hidden,
         playersHidden: document.querySelector('#playerRecordsPanel').hidden,
+        susHidden: document.querySelector('#playerSusPanel').hidden,
         updatesHidden: document.querySelector('#playerLauncherUpdatesPanel').hidden,
         hasSelectedDownload: /Selected Download|Raw data|Shared IPv4|IPv4 source|platform key/i.test(sectionText)
       };
@@ -609,6 +635,7 @@ try {
   if (
     JSON.stringify(playerDataUi.downloadHeaders) !== JSON.stringify(expectedDownloadHeaders)
     || JSON.stringify(playerDataUi.playerHeaders) !== JSON.stringify(expectedRegisteredHeaders)
+    || JSON.stringify(playerDataUi.susHeaders) !== JSON.stringify(['Detected', 'Player', 'Process', 'Exact finding', 'Launcher', 'Phoenix'])
     || JSON.stringify(playerDataUi.updateHeaders) !== JSON.stringify([...expectedPlayerHeaders, 'Version'])
     || playerDataUi.downloadRows[0]?.[1] !== 'PlayerOne'
     || !playerDataUi.downloadRows[0]?.[2]
@@ -621,9 +648,16 @@ try {
     || playerDataUi.playerRows[0]?.[6] !== 'Allowed'
     || playerDataUi.playerRows[0]?.[7] !== 'Manage'
     || playerDataUi.playerRows[1]?.[6] !== 'Allowed'
+    || playerDataUi.susRows[0]?.[1]?.text !== 'PlayerOne'
+    || playerDataUi.susRows[0]?.[2]?.text !== 'javaw.exe · PID 4242'
+    || !playerDataUi.susRows[0]?.[3]?.text.includes('jvm.dll @ 0x1a2b')
+    || !playerDataUi.susRows[0]?.[3]?.title.includes('e'.repeat(64))
+    || playerDataUi.susRows[0]?.[4]?.text !== '0.2.10'
+    || playerDataUi.susRows[0]?.[5]?.text !== '1.1.0'
     || playerDataUi.updateRows[0]?.[5] !== '0.1.83'
     || !playerDataUi.downloadsHidden
     || !playerDataUi.playersHidden
+    || !playerDataUi.susHidden
     || playerDataUi.updatesHidden
     || playerDataUi.hasSelectedDownload
   ) {
@@ -648,6 +682,10 @@ try {
   const playerRecordsScreenshotPath = path.join(root, 'player-records.png');
   const playerRecordsScreenshot = await client.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
   await fsp.writeFile(playerRecordsScreenshotPath, Buffer.from(playerRecordsScreenshot.data, 'base64'));
+  await evaluate(client, "document.querySelector('#playerSusTab').click()");
+  const playerSusScreenshotPath = path.join(root, 'player-sus.png');
+  const playerSusScreenshot = await client.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  await fsp.writeFile(playerSusScreenshotPath, Buffer.from(playerSusScreenshot.data, 'base64'));
   const badControlRoutes = requestPaths.filter((item) => /\/ptb\/(?:admin|api)\//.test(item));
   if (badControlRoutes.length) {
     throw new Error(`Developer requests still used PTB-prefixed Worker control routes: ${JSON.stringify(badControlRoutes)}`);
@@ -778,6 +816,7 @@ try {
     playerdataPreserved: true,
     playerDataUi,
     playerDataScreenshotPath,
+    playerSusScreenshotPath,
     playerRecordsScreenshotPath,
     title: proof.updateLogs.logs[0].title,
     media: proof.updateLogs.logs[0].media?.type || '',

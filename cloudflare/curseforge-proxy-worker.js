@@ -21,6 +21,7 @@ const RELEASE_PREFIXES = [
   'ptb/cache/',
   'ptb/server/',
   'launcher/files/',
+  'launcher/anticheat/',
   'update-media/'
 ];
 const LEGACY_LAUNCHER_WORKER_NAME = 'aht-curseforge-proxy';
@@ -57,6 +58,8 @@ const LAUNCHER_INSTALLER_ID_COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
 const RELEASE_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
 const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/';
+const PHOENIX_DETECTION_PREFIX = 'phoenix-detections/';
+const PHOENIX_ANTI_CHEAT_PROTOCOL = 'AHT-GUARD-1';
 const ACCOUNT_USERNAME_PREFIX = 'accounts/usernames/';
 const ACCOUNT_IPV4_PREFIX = 'accounts/ipv4/';
 const ACCOUNT_UUID_PREFIX = 'accounts/uuids/';
@@ -530,7 +533,7 @@ function releaseHeaders(key, origin, object, range = null) {
   if (SITE_DOCUMENT_PATH_PATTERN.test(key)) {
     const documentNumber = key.slice(3).padStart(3, '0');
     headers['Content-Disposition'] = `inline; filename="A Hard Time Update Log ${documentNumber}.pdf"`;
-  } else if (key.startsWith('launcher/files/')) {
+  } else if (key.startsWith('launcher/files/') || key.startsWith('launcher/anticheat/')) {
     const fileName = key.split('/').pop().replace(/["\\\r\n]/g, '');
     headers['Content-Disposition'] = `attachment; filename="${fileName}"`;
   } else if (object.httpMetadata?.contentDisposition) {
@@ -2244,7 +2247,7 @@ async function createLauncherProof(request, env, origin) {
       ? 'worker-policy-matched-device-assertion' : 'legacy-client-claim',
     ...(v2Requested && device.ok && /^[a-f0-9]{64}$/.test(body.nativeGuardKeyHash || '')
       ? { nativeGuardKeyHash: body.nativeGuardKeyHash, nativeGuardProtocol: 'AHT-GUARD-1' } : {}),
-    nativeGuardRequired: Boolean(v2Requested && cleanString(body.platform,32) === 'win32'
+    nativeGuardRequired: Boolean(!developerAuthorized && v2Requested && cleanString(body.platform,32) === 'win32'
       && compareLauncherVersions(currentLauncherVersion, '0.2.09') >= 0),
     platform: cleanString(body.platform, 32),
     arch: cleanString(body.arch, 32),
@@ -2457,6 +2460,176 @@ async function verifyLauncherProofRequest(request, env, options = {}) {
       source: versionPolicy.source
     }
   };
+}
+
+function boundedPhoenixInteger(value, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
+  if (!/^\d+$/.test(String(value || ''))) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
+}
+
+async function verifiedPhoenixProbe(probe = {}, expectedKeyHash = '') {
+  const payloadText = cleanString(probe.payload || '', 8192);
+  const signatureText = cleanString(probe.signature || '', 512);
+  const modulus = cleanString(probe.modulus || '', 512);
+  const exponent = cleanString(probe.exponent || '', 16);
+  if (!/^[A-Za-z0-9_-]{1,8192}$/.test(payloadText)
+      || !/^[A-Za-z0-9_-]{342}$/.test(signatureText)
+      || !/^[A-Za-z0-9_-]{342}$/.test(modulus)
+      || exponent !== 'AQAB'
+      || !/^[a-f0-9]{64}$/.test(expectedKeyHash)
+      || await sha256Hex(`${modulus}.${exponent}`) !== expectedKeyHash) {
+    return { ok: false, error: 'Phoenix detection evidence is invalid.' };
+  }
+  let payloadBytes;
+  let payload;
+  let signatureValid = false;
+  try {
+    payloadBytes = decodeBase64UrlBytes(payloadText);
+    if (!payloadBytes.length || payloadBytes.length > 6144) throw new Error('payload size');
+    const key = await crypto.subtle.importKey(
+      'jwk',
+      { kty: 'RSA', n: modulus, e: exponent, alg: 'RS256', ext: true, key_ops: ['verify'] },
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+    signatureValid = await crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      decodeBase64UrlBytes(signatureText),
+      payloadBytes
+    );
+    payload = new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes);
+  } catch {
+    return { ok: false, error: 'Phoenix detection evidence is invalid.' };
+  }
+  if (!signatureValid) return { ok: false, error: 'Phoenix detection evidence signature is invalid.' };
+  const fields = payload.split('\n');
+  const gamePid = boundedPhoenixInteger(fields[3], 1, 0x7fffffff);
+  const sequence = boundedPhoenixInteger(fields[5]);
+  const scannedAt = boundedPhoenixInteger(fields[6]);
+  const checkedModules = boundedPhoenixInteger(fields[8], 1, 8);
+  const checkedBytes = boundedPhoenixInteger(fields[9], 1, 96 * 1024 * 1024);
+  if (fields.length !== 11
+      || fields[0] !== PHOENIX_ANTI_CHEAT_PROTOCOL
+      || !/^[a-f0-9]{48}$/.test(fields[1] || '')
+      || fields[2] !== expectedKeyHash
+      || gamePid === null
+      || !/^\d{10,20}$/.test(fields[4] || '')
+      || sequence === null
+      || scannedAt === null
+      || Math.abs(Date.now() - scannedAt) > 60_000
+      || fields[7] !== 'tampered'
+      || checkedModules === null
+      || checkedBytes === null
+      || !/^[A-Za-z0-9_-]{1,6144}$/.test(fields[10] || '')) {
+    return { ok: false, error: 'Phoenix detection evidence is not a current confirmed flag.' };
+  }
+  let detail;
+  try {
+    const detailBytes = decodeBase64UrlBytes(fields[10]);
+    if (!detailBytes.length || detailBytes.length > 4096) throw new Error('detail size');
+    detail = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(detailBytes));
+  } catch {
+    return { ok: false, error: 'Phoenix detection detail is invalid.' };
+  }
+  const processName = cleanString(detail?.process || '', 40).toLowerCase();
+  if (!['java.exe', 'javaw.exe'].includes(processName)
+      || boundedPhoenixInteger(detail?.processId, 1, 0x7fffffff) !== gamePid
+      || !Array.isArray(detail?.findings)
+      || detail.findings.length < 1
+      || detail.findings.length > 4) {
+    return { ok: false, error: 'Phoenix detection process evidence is invalid.' };
+  }
+  const findings = [];
+  for (const value of detail.findings) {
+    const match = String(value || '').match(/^(jvm\.dll|java\.dll|lwjgl(?:64)?\.dll):rva=([a-f0-9]{1,16}):image=([a-f0-9]{64})$/i);
+    if (!match) return { ok: false, error: 'Phoenix detection module evidence is invalid.' };
+    findings.push({ module: match[1].toLowerCase(), rva: `0x${match[2].toLowerCase()}`, imageSha256: match[3].toLowerCase() });
+  }
+  return {
+    ok: true,
+    keyHash: expectedKeyHash,
+    processBirth: fields[4],
+    sequence,
+    scannedAt,
+    checkedModules,
+    checkedBytes,
+    process: { name: processName, pid: gamePid },
+    findings,
+    signedProbe: { payload: payloadText, signature: signatureText, modulus, exponent }
+  };
+}
+
+async function recordPhoenixDetection(request, env, origin) {
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
+  const rateLimited = await enforcePlayerApiRateLimit(request, env, 'session-report', origin);
+  if (rateLimited) return rateLimited;
+  const verifiedSession = await verifyLauncherProofRequest(request, env);
+  if (!verifiedSession.ok) return privateJson({ error: 'Session report rejected.' }, verifiedSession.status, origin);
+  const session = verifiedSession.payload;
+  const keyHash = cleanString(session.nativeGuardKeyHash || '', 64).toLowerCase();
+  if (session.launcherChannel !== 'player'
+      || session.developerClient
+      || session.developerClientBypass
+      || session.nativeGuardProtocol !== PHOENIX_ANTI_CHEAT_PROTOCOL
+      || !/^[a-f0-9]{64}$/.test(keyHash)) {
+    return privateJson({ error: 'Session report rejected.' }, 403, origin);
+  }
+  let body;
+  try {
+    body = await readBody(request, 16_384);
+  } catch {
+    return privateJson({ error: 'Session report rejected.' }, 400, origin);
+  }
+  const evidence = await verifiedPhoenixProbe(body.probe, keyHash);
+  if (!evidence.ok) return privateJson({ error: 'Session report rejected.' }, 400, origin);
+  const antiCheatVersion = cleanString(body.antiCheatVersion || '', 80);
+  if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(antiCheatVersion)) {
+    return privateJson({ error: 'Session report rejected.' }, 400, origin);
+  }
+  const detectionId = await sha256Hex([
+    evidence.keyHash,
+    evidence.processBirth,
+    evidence.process.name,
+    evidence.findings.map((item) => `${item.module}:${item.rva}:${item.imageSha256}`).join('|')
+  ].join('\0'));
+  const key = `${PHOENIX_DETECTION_PREFIX}${detectionId}.json`;
+  const previousItem = await env.AHT_DATA.get(key);
+  const previous = previousItem ? await previousItem.json().catch(() => null) : null;
+  const receivedAt = new Date().toISOString();
+  const clientIp = requestIpv4(request);
+  const record = {
+    schemaVersion: 1,
+    type: 'phoenix_detection',
+    detectionId,
+    receivedAt: previous?.receivedAt || receivedAt,
+    lastReceivedAt: receivedAt,
+    minecraftUsername: session.minecraftUsername,
+    minecraftUuid: normalizeMinecraftUuid(session.minecraftUuid),
+    installId: cleanString(session.installId || '', 200),
+    deviceId: cleanString(session.deviceId || '', 80),
+    ip: clientIp.ip,
+    ipv4: clientIp.ipv4,
+    platform: normalizePlatform(session.platform || 'Windows'),
+    packId: cleanString(session.packId || '', 80),
+    launcherVersion: cleanString(session.launcherVersion || session.appVersion || '', 80),
+    antiCheatVersion,
+    protocol: PHOENIX_ANTI_CHEAT_PROTOCOL,
+    guardKeyHash: evidence.keyHash,
+    processBirth: evidence.processBirth,
+    probeSequence: evidence.sequence,
+    scannedAt: new Date(evidence.scannedAt).toISOString(),
+    checkedModules: evidence.checkedModules,
+    checkedBytes: evidence.checkedBytes,
+    process: evidence.process,
+    findings: evidence.findings,
+    confidence: 'confirmed-memory-code-mismatch',
+    signedProbe: evidence.signedProbe
+  };
+  await env.AHT_DATA.put(key, JSON.stringify(record), { httpMetadata: { contentType: 'application/json' } });
+  return privateJson({ ok: true }, 200, origin);
 }
 
 async function verifyLauncherProofEndpoint(request, env, origin) {
@@ -3216,6 +3389,37 @@ function launcherUpdateAdminRecord(item = {}) {
   };
 }
 
+function phoenixDetectionAdminRecord(item = {}) {
+  const processName = cleanString(item.process?.name || '', 40).toLowerCase();
+  const processId = boundedPhoenixInteger(item.process?.pid, 1, 0x7fffffff);
+  const findings = Array.isArray(item.findings) ? item.findings.slice(0, 4).map((finding) => ({
+    module: cleanString(finding?.module || '', 40).toLowerCase(),
+    rva: cleanString(finding?.rva || '', 24).toLowerCase(),
+    imageSha256: cleanString(finding?.imageSha256 || '', 64).toLowerCase()
+  })).filter((finding) => /^(?:jvm\.dll|java\.dll|lwjgl(?:64)?\.dll)$/.test(finding.module)
+    && /^0x[a-f0-9]{1,16}$/.test(finding.rva)
+    && /^[a-f0-9]{64}$/.test(finding.imageSha256)) : [];
+  return {
+    type: 'phoenix_detection',
+    detectionId: cleanString(item.detectionId || '', 80),
+    receivedAt: cleanString(item.receivedAt || item.lastReceivedAt || '', 80),
+    scannedAt: cleanString(item.scannedAt || '', 80),
+    minecraftUsername: cleanString(item.minecraftUsername || '', 16),
+    minecraftUuid: normalizeMinecraftUuid(item.minecraftUuid),
+    process: {
+      name: ['java.exe', 'javaw.exe'].includes(processName) ? processName : '',
+      pid: processId || 0
+    },
+    findings,
+    checkedModules: boundedPhoenixInteger(item.checkedModules, 1, 8) || 0,
+    checkedBytes: boundedPhoenixInteger(item.checkedBytes, 1, 96 * 1024 * 1024) || 0,
+    packId: cleanString(item.packId || '', 80),
+    launcherVersion: cleanString(item.launcherVersion || '', 80),
+    antiCheatVersion: cleanString(item.antiCheatVersion || '', 80),
+    confidence: item.confidence === 'confirmed-memory-code-mismatch' ? item.confidence : ''
+  };
+}
+
 function launcherUpdateIdentity(item = {}) {
   const username = normalizeMinecraftUsername(item.minecraftUsername || item.username).toLowerCase();
   const version = cleanString(item.launcherVersion || item.appVersion || '', 80);
@@ -3450,6 +3654,33 @@ async function listLauncherUpdates(env, request, origin) {
   const hasMore = nextOffset < ordered.length;
   return privateJson({
     updates,
+    cursor: hasMore ? String(nextOffset) : '',
+    hasMore,
+    appendOnly: true
+  }, 200, origin);
+}
+
+async function listPhoenixDetections(env, request, origin) {
+  if (!(await verifyToken(request, env))) {
+    return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
+  }
+  const url = new URL(request.url);
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
+  const cursorText = cleanString(url.searchParams.get('cursor') || '', 40);
+  const offset = /^\d+$/.test(cursorText) ? Number(cursorText) : 0;
+  const ordered = (await readAllR2JsonObjects(env, PHOENIX_DETECTION_PREFIX))
+    .filter((item) => item.type === 'phoenix_detection')
+    .map(phoenixDetectionAdminRecord)
+    .filter((item) => item.minecraftUsername && item.process.name && item.findings.length)
+    .sort((left, right) => String(right.receivedAt || '').localeCompare(String(left.receivedAt || '')));
+  const detections = ordered.slice(offset, offset + limit);
+  const nextOffset = offset + detections.length;
+  const hasMore = nextOffset < ordered.length;
+  return privateJson({
+    detections,
     cursor: hasMore ? String(nextOffset) : '',
     hasMore,
     appendOnly: true
@@ -3829,6 +4060,9 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/events') {
         return await writeEvent(request, env, origin);
       }
+      if (request.method === 'POST' && url.pathname === '/api/session/report') {
+        return await recordPhoenixDetection(request, env, origin);
+      }
       if (request.method === 'POST' && url.pathname === '/api/users/register') {
         return await registerUser(request, env, origin);
       }
@@ -3877,6 +4111,9 @@ export default {
       }
       if (request.method === 'GET' && url.pathname === '/admin/launcher-updates') {
         return await listLauncherUpdates(env, request, origin);
+      }
+      if (request.method === 'GET' && url.pathname === '/admin/session-reports') {
+        return await listPhoenixDetections(env, request, origin);
       }
       if (request.method === 'GET' && url.pathname === '/admin/player-records') {
         return await listPlayerRecords(env, request, origin);

@@ -162,6 +162,35 @@ function validateWindowsSilentInstall(errors, entry, key) {
   }
 }
 
+function validatePhoenixAntiCheat(errors, entry, expectedRootUrl = '', options = {}) {
+  const key = 'antiCheat';
+  if (!isObject(entry)) {
+    errors.push(`${key} entry is missing or not an object`);
+    return;
+  }
+  if (entry.product !== 'phoenix-anticheat') errors.push(`${key} product must be phoenix-anticheat`);
+  if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(String(entry.version || ''))) errors.push(`${key} version is invalid`);
+  if (entry.protocol !== 'AHT-GUARD-1') errors.push(`${key} protocol must be AHT-GUARD-1`);
+  if (entry.platform !== 'win32-x64') errors.push(`${key} platform must be win32-x64`);
+  if (!/^Phoenix-Anti-cheat-Windows-x64-\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?\.exe$/i.test(String(entry.fileName || ''))) {
+    errors.push(`${key} fileName is invalid`);
+  }
+  if (!String(entry.path || '').startsWith('launcher/anticheat/win32-x64/')) errors.push(`${key} path must be under launcher/anticheat/win32-x64/`);
+  if (entry.fileName && entry.path && path.posix.basename(String(entry.path).replaceAll('\\', '/')) !== entry.fileName) {
+    errors.push(`${key} path basename must match fileName`);
+  }
+  if (!isAllowedArtifactUrl(entry.url || '', options)) {
+    errors.push(`${key} url must use HTTPS`);
+  } else {
+    const url = new URL(entry.url);
+    if (!url.pathname.includes('/launcher/anticheat/win32-x64/')
+        || (expectedRootUrl && !entry.url.startsWith(expectedRootUrl))) errors.push(`${key} url must point at the launcher anti-cheat path`);
+    if (entry.fileName && path.posix.basename(url.pathname) !== entry.fileName) errors.push(`${key} url basename must match fileName`);
+  }
+  if (!/^[a-f0-9]{64}$/i.test(String(entry.sha256 || ''))) errors.push(`${key} sha256 must be a 64-character hex digest`);
+  if (!(Number(entry.size) > 0 && Number(entry.size) <= 16 * 1024 * 1024)) errors.push(`${key} size must be between 1 byte and 16 MiB`);
+}
+
 function validateKnownEntryShape(errors, entry, key) {
   if (!isObject(entry)) return;
   const collection = String(key || '').split('.')[0];
@@ -233,6 +262,7 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
     errors.push('stagedPlatforms must be an object when present');
   }
   if (requireDownloads && !isObject(manifest.downloads)) errors.push('downloads must be an object');
+  if (options.requireAntiCheat && !isObject(manifest.antiCheat)) errors.push('antiCheat must be an object');
 
   const platforms = isObject(manifest.platforms) ? manifest.platforms : {};
   const stagedPlatforms = isObject(manifest.stagedPlatforms) ? manifest.stagedPlatforms : {};
@@ -279,6 +309,7 @@ export function validateLauncherUpdateManifest(manifest = {}, options = {}) {
     validateCommonEntry(errors, entry, `stagedPlatforms.${key}`, expectedRootUrl, manifestVersion, options);
     validateKnownEntryShape(errors, entry, `stagedPlatforms.${key}`);
   }
+  if (manifest.antiCheat !== undefined) validatePhoenixAntiCheat(errors, manifest.antiCheat, expectedRootUrl, options);
 
   return { ok: errors.length === 0, errors };
 }

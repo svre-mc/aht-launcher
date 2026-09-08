@@ -2787,6 +2787,20 @@ body.dev-mode.dev-locked #developerLoginScreen {
   grid-template-columns: 145px minmax(130px, 0.9fr) 138px minmax(245px, 1.35fr) 90px 92px;
 }
 
+.event-table-head.player-sus-table,
+.data-events.player-sus-table .event {
+  grid-template-columns: 145px minmax(110px, 0.75fr) minmax(150px, 0.85fr) minmax(320px, 2fr) 92px 92px;
+}
+
+.phoenix-detection-row {
+  box-shadow: inset 3px 0 #d66b56;
+}
+
+.phoenix-detection-evidence {
+  color: #f0b1a5;
+  font-family: var(--mono);
+}
+
 .event-table-head.player-access-table,
 .data-events.player-access-table .event {
   grid-template-columns: 145px 120px minmax(210px, 1fr) 90px minmax(220px, 1.25fr) 120px;
@@ -3625,6 +3639,417 @@ body.dev-mode .button.strong.is-disabled {
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.phoenix-anticheat-overlay {
+  z-index: 96;
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(9px);
+}
+
+.phoenix-anticheat-dialog {
+  width: min(850px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+  gap: 0;
+  overflow: hidden;
+  border-color: rgba(225, 238, 244, 0.34);
+  border-radius: 2px;
+  padding: 0;
+  background: #040606;
+  box-shadow: 0 38px 110px rgba(0, 0, 0, 0.78), inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.phoenix-anticheat-dialog::before {
+  content: none;
+}
+
+.phoenix-anticheat-dialog::after {
+  background: radial-gradient(ellipse at 76% 108%, rgba(223, 179, 106, 0.045), transparent 46%);
+}
+
+.phoenix-anticheat-layout {
+  display: grid;
+  grid-template-columns: 284px minmax(0, 1fr);
+  min-height: 392px;
+}
+
+.phoenix-anticheat-brand {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 19px;
+  overflow: hidden;
+  border-right: 1px solid rgba(225, 238, 244, 0.12);
+  padding: 27px 20px 23px;
+  background:
+    radial-gradient(ellipse 72% 52% at 48% 39%, rgba(225, 238, 244, 0.025), transparent 66%),
+    linear-gradient(154deg, #0b0f0f 0%, #050707 48%, #020303 100%);
+}
+
+.phoenix-anticheat-brand::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.phoenix-anticheat-brand::after {
+  inset: auto 38px 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(223, 179, 106, 0.7), transparent);
+  box-shadow: 0 -1px 22px rgba(223, 179, 106, 0.24);
+}
+
+.phoenix-anticheat-visual {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 226px;
+  height: 226px;
+  flex: 0 0 auto;
+  isolation: isolate;
+}
+
+.phoenix-anticheat-visual::before {
+  content: "";
+  position: absolute;
+  inset: 16px 12px 10px;
+  z-index: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(ellipse 66% 62% at 37% 30%, rgba(235, 194, 119, 0.15) 0%, rgba(202, 145, 73, 0.065) 42%, transparent 74%),
+    radial-gradient(ellipse 60% 48% at 65% 75%, rgba(116, 65, 38, 0.07) 0%, transparent 72%);
+  filter: blur(14px);
+  opacity: 0.78;
+  transform: scale(1.08);
+  pointer-events: none;
+}
+
+.phoenix-anticheat-badge {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 196px;
+  height: 196px;
+  z-index: 1;
+  overflow: hidden;
+  border: 1px solid rgba(224, 193, 132, 0.36);
+  border-radius: 50%;
+  background:
+    radial-gradient(ellipse 68% 52% at 36% 25%, rgba(232, 193, 125, 0.09) 0%, rgba(151, 105, 55, 0.025) 45%, transparent 70%),
+    linear-gradient(145deg, #151b1b 0%, #080b0c 46%, #020303 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 -22px 36px rgba(0, 0, 0, 0.48),
+    0 13px 28px rgba(0, 0, 0, 0.38);
+  animation: phoenix-badge-float 7.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  isolation: isolate;
+}
+
+.phoenix-anticheat-badge::before,
+.phoenix-anticheat-badge::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.phoenix-anticheat-badge::before {
+  content: none;
+}
+
+.phoenix-anticheat-badge::after {
+  z-index: 0;
+  inset: 1px;
+  border-radius: inherit;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.025) 0%, transparent 31%, transparent 68%, rgba(0, 0, 0, 0.2) 100%);
+}
+
+.phoenix-anticheat-badge-ring {
+  position: absolute;
+  inset: 5px;
+  z-index: 4;
+  border: 0;
+  border-radius: 50%;
+  animation: phoenix-badge-ring-spin 7.2s linear infinite;
+  will-change: transform;
+}
+
+.phoenix-anticheat-badge-ring::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: conic-gradient(from 214deg, transparent 0deg 258deg, rgba(223, 179, 106, 0.025) 272deg, rgba(242, 205, 132, 0.18) 294deg, rgba(248, 220, 159, 0.68) 321deg, #fff9e8 339deg, rgba(230, 184, 103, 0.36) 352deg, transparent 360deg);
+  filter: drop-shadow(0 0 3px rgba(255, 229, 172, 0.56)) drop-shadow(0 0 9px rgba(223, 158, 75, 0.22));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 2px));
+}
+
+.phoenix-anticheat-badge-ring::after {
+  content: none;
+}
+
+.phoenix-anticheat-badge-ring-inner {
+  inset: 14px;
+  z-index: 2;
+  animation-duration: 12s;
+  animation-direction: reverse;
+}
+
+.phoenix-anticheat-badge-ring-inner::before {
+  inset: -2px;
+  background: conic-gradient(from 34deg, transparent 0deg 270deg, rgba(225, 238, 244, 0.018) 285deg, rgba(223, 179, 106, 0.12) 305deg, rgba(240, 210, 148, 0.5) 329deg, rgba(255, 247, 224, 0.78) 344deg, rgba(223, 179, 106, 0.18) 355deg, transparent 360deg);
+  filter: drop-shadow(0 0 4px rgba(255, 225, 164, 0.32));
+  opacity: 0.82;
+}
+
+.phoenix-anticheat-badge-sheen {
+  position: absolute;
+  inset: -45%;
+  z-index: 3;
+  width: 35%;
+  background: linear-gradient(90deg, transparent, rgba(255, 246, 219, 0.14), rgba(255, 219, 144, 0.24), transparent);
+  filter: blur(2px);
+  mix-blend-mode: screen;
+  transform: rotate(18deg) translateX(-280%);
+  animation: phoenix-badge-sheen 5.4s cubic-bezier(0.3, 0.6, 0.2, 1) infinite;
+}
+
+.phoenix-anticheat-mark {
+  position: relative;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 92px;
+  height: 116px;
+  isolation: isolate;
+  animation: phoenix-emblem-alive 6.8s cubic-bezier(0.42, 0, 0.58, 1) infinite;
+  will-change: transform;
+}
+
+.phoenix-anticheat-mark::before {
+  content: "";
+  position: absolute;
+  inset: 18px 5px 8px;
+  z-index: 0;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(218, 132, 66, 0.18) 0%, rgba(168, 84, 43, 0.075) 38%, transparent 72%);
+  filter: blur(8px);
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.phoenix-anticheat-flame {
+  position: relative;
+  z-index: 1;
+  width: 68px;
+  height: 91px;
+  border-radius: 70% 26% 62% 44%;
+  background:
+    linear-gradient(156deg, #f3d99f 1%, #dfad67 22%, #bd7140 58%, #74351f 100%);
+  box-shadow:
+    inset 6px 7px 10px rgba(255, 255, 255, 0.1),
+    inset -9px -12px 18px rgba(55, 19, 8, 0.3),
+    0 6px 12px rgba(0, 0, 0, 0.34);
+  transform: rotate(11deg);
+}
+
+.phoenix-anticheat-flame::before,
+.phoenix-anticheat-flame::after {
+  content: "";
+  position: absolute;
+}
+
+.phoenix-anticheat-flame::before {
+  width: 21px;
+  height: 39px;
+  left: 13px;
+  top: 9px;
+  border-radius: 55% 38% 52% 42%;
+  background: linear-gradient(150deg, rgba(255, 255, 255, 0.46), rgba(255, 239, 195, 0.01) 74%);
+  filter: blur(1px);
+  opacity: 0.4;
+}
+
+.phoenix-anticheat-flame::after {
+  width: 29px;
+  height: 49px;
+  left: 18px;
+  top: 31px;
+  border-radius: 60% 30% 60% 45%;
+  background: radial-gradient(circle at 42% 38%, #161b1a, #090b0c 72%);
+  box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.68), 0 0 0 1px rgba(255, 237, 190, 0.07);
+}
+
+.phoenix-anticheat-wordmark {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  text-transform: uppercase;
+}
+
+.phoenix-anticheat-wordmark strong {
+  background: linear-gradient(180deg, #fffdf2 0%, #e8ddc2 72%, #bda678 100%);
+  color: #f8f2df;
+  font-family: "AHT Source Serif", "Times New Roman", serif;
+  font-size: 31px;
+  font-weight: 600;
+  line-height: 0.95;
+  letter-spacing: 0.16em;
+  text-shadow: 0 0 24px rgba(223, 179, 106, 0.14);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.phoenix-anticheat-wordmark span {
+  color: #ddb16d;
+  font: 700 10px/1.2 var(--aht-ui, "AHT Bender", sans-serif);
+  letter-spacing: 0.34em;
+}
+
+.phoenix-anticheat-content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 34px 34px 27px;
+  background:
+    radial-gradient(ellipse 115% 76% at -18% 46%, rgba(223, 179, 106, 0.045) 0%, rgba(98, 70, 42, 0.018) 32%, transparent 58%),
+    radial-gradient(ellipse 82% 55% at 84% 8%, rgba(135, 184, 216, 0.032) 0%, transparent 62%),
+    linear-gradient(180deg, #090c0c 0%, #060808 52%, #030404 100%);
+}
+
+.phoenix-anticheat-header h2 {
+  margin: 0;
+  color: var(--text);
+  font-family: "AHT Source Serif", "Times New Roman", serif;
+  font-size: 31px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.015em;
+}
+
+.phoenix-anticheat-header .account-copy {
+  max-width: 480px;
+  margin-top: 9px;
+  color: rgba(244, 240, 230, 0.66);
+  font-size: 13px;
+}
+
+.phoenix-anticheat-explanation {
+  display: grid;
+  gap: 14px;
+  margin-top: 28px;
+}
+
+.phoenix-anticheat-explanation p,
+.phoenix-anticheat-requirement {
+  margin: 0;
+  color: rgba(244, 240, 230, 0.72);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.phoenix-anticheat-requirement {
+  margin-top: 24px;
+  border-left: 2px solid rgba(223, 179, 106, 0.72);
+  padding: 10px 0 10px 13px;
+  background: linear-gradient(90deg, rgba(223, 179, 106, 0.055), transparent 76%);
+  color: rgba(255, 253, 243, 0.9);
+}
+
+.phoenix-anticheat-progress {
+  margin: 14px 0 0;
+}
+
+.phoenix-anticheat-progress[hidden] {
+  display: none;
+}
+
+.phoenix-anticheat-actions {
+  margin-top: auto;
+  padding-top: 24px;
+}
+
+.phoenix-anticheat-actions .button {
+  min-width: 126px;
+  min-height: 36px;
+  justify-content: center;
+}
+
+.phoenix-anticheat-dialog.is-installing .phoenix-anticheat-explanation,
+.phoenix-anticheat-dialog.is-installing .phoenix-anticheat-requirement {
+  opacity: 0.62;
+}
+
+.phoenix-anticheat-dialog.is-installing .phoenix-anticheat-badge-ring {
+  animation-duration: 2.4s;
+}
+
+@keyframes phoenix-badge-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.5px); }
+}
+
+@keyframes phoenix-badge-ring-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes phoenix-badge-sheen {
+  0%, 18% { transform: rotate(18deg) translateX(-280%); opacity: 0; }
+  30% { opacity: 0.8; }
+  48% { transform: rotate(18deg) translateX(560%); opacity: 0; }
+  100% { transform: rotate(18deg) translateX(560%); opacity: 0; }
+}
+
+@keyframes phoenix-emblem-alive {
+  0%, 100% { transform: translateY(0.5px) scale(0.996); }
+  50% { transform: translateY(-0.5px) scale(1.006); }
+}
+
+@media (max-width: 760px) {
+  .phoenix-anticheat-dialog {
+    width: min(620px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    padding: 12px;
+    overflow: auto;
+  }
+
+  .phoenix-anticheat-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .phoenix-anticheat-brand {
+    min-height: 172px;
+    flex-direction: row;
+    gap: 16px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(223, 179, 106, 0.2);
+    padding: 12px 20px;
+  }
+
+  .phoenix-anticheat-visual {
+    width: 154px;
+    height: 144px;
+    transform: scale(0.66);
+    transform-origin: center;
+    margin: 0 -25px;
+  }
+
+  .phoenix-anticheat-content {
+    padding: 22px 20px 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phoenix-anticheat-badge,
+  .phoenix-anticheat-badge-ring,
+  .phoenix-anticheat-badge-sheen,
+  .phoenix-anticheat-mark { animation: none; }
 }
 
 .repair-prompt-dialog h2,

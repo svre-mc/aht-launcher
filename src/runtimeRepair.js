@@ -1,8 +1,6 @@
 import path from 'node:path';
 import { readJsonFile } from './utils.js';
 
-export const RUNTIME_REPAIR_BUILD = 'Runtime Repair 2';
-
 // A profile's earlier javaRuntime result is not proof that its executable still
 // exists. The final Repair gate must execute the selected Java again.
 export async function verifyRepairedJava({ runtime, profile, memoryMb, probe }) {

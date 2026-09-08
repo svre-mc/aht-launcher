@@ -8,6 +8,7 @@ import path from 'node:path';
 import { writeForgeInstallationFixture } from './helpers/forge-fixture.mjs';
 import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
+import { installPhoenixTestFixture } from './helpers/phoenix-fixture.mjs';
 import { launcherProofPath, launcherProofStorageDir } from '../src/launcherProof.js';
 
 const port = Number(process.argv[2] || 10010);
@@ -59,6 +60,7 @@ await Promise.all([
   fsp.mkdir(fakeLocalAppData, { recursive: true }),
   fsp.mkdir(userData, { recursive: true })
 ]);
+await installPhoenixTestFixture(userData);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

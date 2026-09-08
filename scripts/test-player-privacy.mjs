@@ -356,6 +356,16 @@ try {
     throw new Error(`Player settings save persisted unsafe config: ${JSON.stringify(storedAfterSave)}`);
   }
 
+  // Warm startup intentionally reveals cached local state before its remote news/feed
+  // refresh finishes. Wait for that background refresh so this assertion measures
+  // the rendered public feed, not the placeholder used during the short handoff.
+  await waitFor(client, `
+    (() => {
+      const title = document.querySelector('#settingsFeedTitle')?.textContent || '';
+      return title.includes('A Hard Time 9.9.9');
+    })()
+  `, 'rendered player release feed');
+
   await evaluate(client, `document.querySelector('.nav [data-tab="settings"]')?.click(); true`);
   const settingsProof = await waitFor(client, `
     (() => {

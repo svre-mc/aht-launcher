@@ -154,11 +154,15 @@ export async function prepareLauncherUpdate(options = {}) {
   const artifactsDir = path.resolve(options.artifactsDir || 'ci-artifacts');
   const outDir = path.resolve(options.outDir || 'ci-launcher-update');
   const version = String(options.version || process.env.AHT_LAUNCHER_VERSION || launcherReleaseVersionFromPackage(packageJson)).trim();
+  const phoenixAntiCheatVersion = String(packageJson.phoenixAntiCheatVersion || '').trim();
   const latestUrl = requireHttpsLatestUrl(migrateLegacyAhtServiceUrl(
     String(options.latestUrl || defaultLatestUrl(config)).trim()
   ));
 
   if (!version) throw new Error('Launcher version is required.');
+  if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(phoenixAntiCheatVersion)) {
+    throw new Error('Phoenix Anti-cheat version is required.');
+  }
   if (!latestUrl) throw new Error('Launcher update latest URL is required.');
   if (!fs.existsSync(artifactsDir)) throw new Error(`Artifacts directory does not exist: ${artifactsDir}`);
 
@@ -171,6 +175,11 @@ export async function prepareLauncherUpdate(options = {}) {
   const macUniversalInstallerFile = requireArtifact(files, new RegExp(`^AHT-Launcher-macOS-universal-${artifactVersion}\\.dmg$`, 'i'), 'universal macOS DMG');
   const linuxCompatibilityDebFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Linux-x64-${artifactVersion}\\.deb$`, 'i'), 'Linux x64 compatibility DEB');
   const linuxAppImageFile = requireArtifact(files, new RegExp(`^AHT-Launcher-Linux-x64-${artifactVersion}\\.AppImage$`, 'i'), 'universal Linux x64 AppImage');
+  const phoenixAntiCheatFile = requireArtifact(
+    files,
+    new RegExp(`^Phoenix-Anti-cheat-Windows-x64-${escapeRegExp(phoenixAntiCheatVersion)}\\.exe$`, 'i'),
+    'Phoenix Anti-cheat Windows x64 executable'
+  );
 
   const platforms = {};
   const stagedPlatforms = {};
@@ -242,6 +251,28 @@ export async function prepareLauncherUpdate(options = {}) {
     'ubuntu-x64-appimage': { ...linuxAppImage.entry, downloadUrl: trackedInstallerUrl(rootUrl, 'ubuntu-x64-appimage') }
   };
 
+  const phoenixStat = await fsp.stat(phoenixAntiCheatFile);
+  const phoenixFileName = path.basename(phoenixAntiCheatFile);
+  const phoenixPath = `launcher/anticheat/win32-x64/${phoenixFileName}`;
+  const antiCheat = {
+    product: 'phoenix-anticheat',
+    version: phoenixAntiCheatVersion,
+    protocol: 'AHT-GUARD-1',
+    platform: 'win32-x64',
+    fileName: phoenixFileName,
+    path: phoenixPath,
+    url: new URL(phoenixPath, rootUrl).toString(),
+    sha256: await hashFile(phoenixAntiCheatFile, 'sha256'),
+    size: phoenixStat.size
+  };
+  uploads.push({
+    rel: phoenixPath,
+    file: phoenixAntiCheatFile,
+    label: 'Phoenix Anti-cheat Windows x64',
+    size: phoenixStat.size,
+    contentType: contentType(phoenixAntiCheatFile)
+  });
+
   const manifest = {
     schemaVersion: 1,
     product: 'aht-launcher',
@@ -257,7 +288,8 @@ export async function prepareLauncherUpdate(options = {}) {
     },
     platforms,
     stagedPlatforms,
-    downloads
+    downloads,
+    antiCheat
   };
 
   const manifestPath = path.join(outDir, 'launcher', 'latest.json');

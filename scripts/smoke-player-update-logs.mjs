@@ -285,7 +285,14 @@ async function waitForFeaturedNewsPointerHover(client, label, attempts = 40) {
   let proof = null;
   await client.call('Page.bringToFront');
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    point = await movePointer(client, '.news-carousel-media');
+    try {
+      point = await movePointer(client, '.news-carousel-media');
+    } catch {
+      // A quiet background News refresh can replace the carousel between the
+      // layout assertion and this pointer sample. Wait for the committed card.
+      await sleep(100);
+      continue;
+    }
     proof = await featuredNewsInteractionProof(client);
     if (
       proof.hovered

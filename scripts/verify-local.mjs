@@ -23,6 +23,7 @@ const pureChecks = [
   ['test:github-mirror'],
   ['test:release-targets'],
   ['test:r2-direct-upload'],
+  ['test:phoenix-anticheat'],
   ['test:server-transfer-plan'],
   ['test:mod-only-changes'],
   ['test:managed-security'],

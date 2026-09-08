@@ -368,21 +368,31 @@ function httpJsonStatus(url) {
 
 function windowsAuthenticodeStatus(filePath) {
   if (process.platform !== 'win32' || !existsNonEmpty(filePath)) return { status: 'Unavailable', detail: 'Windows artifact or Windows host unavailable' };
-  const powerShell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const script = [
+    "$ErrorActionPreference = 'Stop'",
+    'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop',
     '$signature = Get-AuthenticodeSignature -LiteralPath $env:AHT_SIGNATURE_TARGET',
     '[Console]::Out.Write([string]$signature.Status)'
   ].join('; ');
-  const result = spawnSync(powerShell, ['-NoProfile', '-NonInteractive', '-Command', script], {
-    cwd: path.dirname(filePath),
-    env: { ...process.env, AHT_SIGNATURE_TARGET: filePath },
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 20_000
-  });
-  const status = String(result.stdout || '').trim() || 'Unknown';
-  const detail = result.status === 0 ? status : String(result.stderr || result.error?.message || `exit ${result.status}`).trim();
-  return { status, detail };
+  const candidates = [
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'PowerShell', '7', 'pwsh.exe'),
+    'pwsh.exe',
+    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  ];
+  const failures = [];
+  for (const powerShell of [...new Set(candidates)]) {
+    const result = spawnSync(powerShell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      cwd: path.dirname(filePath),
+      env: { ...process.env, AHT_SIGNATURE_TARGET: filePath },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 20_000
+    });
+    const status = String(result.stdout || '').trim();
+    if (result.status === 0 && status) return { status, detail: status };
+    failures.push(String(result.stderr || result.error?.message || `exit ${result.status}`).trim());
+  }
+  return { status: 'Unknown', detail: failures.filter(Boolean).join('; ') || 'Authenticode status unavailable' };
 }
 
 function liveWorkerPlayerDataCapabilities(baseUrl = '') {
@@ -408,10 +418,12 @@ function liveWorkerPlayerDataCapabilities(baseUrl = '') {
   const required = [
     { name: 'player registration', path: ['api', 'users', 'register'].join('/'), method: 'POST', body: '{', statuses: [400] },
     { name: 'launcher events', path: ['api', 'events'].join('/'), method: 'POST', body: '{', statuses: [400] },
+    { name: 'player session report', path: ['api', 'session', 'report'].join('/'), method: 'POST', body: '{}', statuses: [401] },
     { name: 'proof verification', path: ['api', 'launcher-proof', 'verify'].join('/'), method: 'GET', statuses: [401] },
     { name: 'access decisions', path: '/admin/access-decisions', method: 'GET', statuses: [401] },
     { name: 'player records', path: '/admin/player-records', method: 'GET', statuses: [401] },
-    { name: 'launcher updates', path: '/admin/launcher-updates', method: 'GET', statuses: [401] }
+    { name: 'launcher updates', path: '/admin/launcher-updates', method: 'GET', statuses: [401] },
+    { name: 'Session reports admin', path: '/admin/session-reports', method: 'GET', statuses: [401] }
   ];
   const script = [
     'const base = process.argv[1];',
@@ -579,8 +591,20 @@ function localWindowsLauncherArtifact(version = '', extension = 'exe') {
   }
 }
 
+function localPhoenixAntiCheatArtifact(version = '') {
+  if (!version) return null;
+  const filePath = path.join(releaseDir, 'phoenix-anticheat', `Phoenix-Anti-cheat-Windows-x64-${version}.exe`);
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    return { filePath, size: stat.size, sha256: sha256FileSync(filePath) };
+  } catch {
+    return null;
+  }
+}
+
 function validateLauncherDownloads(manifest = {}, latestUrl = '') {
-  const result = validateLauncherUpdateManifest(manifest, { latestUrl, requireStagedWindows: true, requireStagedLinux: true });
+  const result = validateLauncherUpdateManifest(manifest, { latestUrl, requireStagedWindows: true, requireStagedLinux: true, requireAntiCheat: true });
   return result.ok ? [] : result.errors;
 }
 
@@ -833,6 +857,23 @@ function checkLiveCloudflareState(authOk) {
       ? `${path.basename(localWindowsUpdateArtifact.filePath)} ${localWindowsUpdateSha}`
       : `live sha=${liveWindowsUpdateSha || 'missing'} size=${liveWindowsUpdateSize || 'missing'}, local sha=${localWindowsUpdateSha || 'missing'} size=${localWindowsUpdateSize || 'missing'}`
   );
+  const localAntiCheatArtifact = localPhoenixAntiCheatArtifact(String(packageJson?.phoenixAntiCheatVersion || ''));
+  const liveAntiCheatArtifact = launcherFeed.json?.antiCheat || null;
+  const antiCheatMatches = Boolean(
+    launcherFeed.ok
+    && localAntiCheatArtifact
+    && liveAntiCheatArtifact
+    && String(liveAntiCheatArtifact.sha256 || '').toLowerCase() === localAntiCheatArtifact.sha256
+    && Number(liveAntiCheatArtifact.size || 0) === localAntiCheatArtifact.size
+  );
+  addCheck(
+    'live Phoenix Anti-cheat matches separate local artifact',
+    'blocker',
+    antiCheatMatches,
+    antiCheatMatches
+      ? `${path.basename(localAntiCheatArtifact.filePath)} ${localAntiCheatArtifact.sha256}`
+      : 'the live Phoenix version, SHA-256, or byte size does not match the separate local artifact'
+  );
   const proofBaseUrl = defaults?.launcherProof?.baseUrl || defaults?.sync?.baseUrl || '';
   const proofStatus = liveLauncherProofStatus(proofBaseUrl);
   addCheck(
@@ -915,7 +956,6 @@ function checkArtifacts() {
   const artifacts = [
     path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.exe`),
     path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.zip`),
-    path.join(releaseDir, 'windows', `AHT-Launcher-Windows-10-11-${version}.exe.blockmap`),
     path.join(releaseDir, 'windows', 'win-unpacked', 'A Hard Time Launcher Windows.exe')
   ];
 
@@ -928,7 +968,7 @@ function checkArtifacts() {
   if (process.platform === 'win32') {
     for (const [label, artifact] of [
       ['installer', artifacts[0]],
-      ['packaged application', artifacts[3]]
+      ['packaged application', artifacts[2]]
     ]) {
       const signature = windowsAuthenticodeStatus(artifact);
       if (signature.status === 'Valid') {
@@ -941,7 +981,7 @@ function checkArtifacts() {
     }
   }
 
-  const sourceFiles = collectFiles([
+  const sourceCandidates = collectFiles([
     'build',
     'cloudflare',
     'config',
@@ -951,6 +991,8 @@ function checkArtifacts() {
     'package.json',
     'package-lock.json'
   ]);
+  const ignoredSourcePaths = gitIgnoredRelativePaths(sourceCandidates);
+  const sourceFiles = sourceCandidates.filter((file) => !ignoredSourcePaths.has(path.relative(rootDir, file).replaceAll('\\', '/')));
   const newestSource = newestFile(sourceFiles);
   const primaryArtifact = artifacts[0];
   let artifactFresh = false;

@@ -30,6 +30,7 @@ await writeArtifact('AHT-Launcher-macOS-universal-7.8.9.zip', 'mac-universal-upd
 await writeArtifact('AHT-Launcher-macOS-universal-7.8.9.dmg', 'mac-universal-installer');
 await writeArtifact('AHT-Launcher-Linux-x64-7.8.9.deb', 'linux-compatibility-deb');
 await writeArtifact('AHT-Launcher-Linux-x64-7.8.9.AppImage', 'linux-appimage');
+await writeArtifact('Phoenix-Anti-cheat-Windows-x64-1.1.0.exe', 'phoenix-anticheat');
 
 const result = await prepareLauncherUpdate({
   artifactsDir: artifacts,
@@ -48,7 +49,8 @@ const validation = validateLauncherUpdateManifest(manifest, {
   latestUrl: 'https://example.test/launcher/latest.json',
   requireTrackedDownloads: true,
   requireStagedWindows: true,
-  requireStagedLinux: true
+  requireStagedLinux: true,
+  requireAntiCheat: true
 });
 assert(validation.ok, `generated launcher manifest failed reusable validation: ${validation.errors.join('; ')}`);
 assert(compareLauncherReleaseVersions('7.8.10', '7.8.9') === 1, 'launcher version comparison must be numeric, not lexical');
@@ -170,6 +172,12 @@ assert(manifest.downloads['ubuntu-x64-appimage']?.fileName?.endsWith('.AppImage'
 assert(result.plan.uploads.some((item) => item.rel.endsWith('.dmg')), 'DMG installers must still be uploaded for website/manual downloads');
 assert(result.plan.uploads.some((item) => item.rel.endsWith('.deb')), 'Linux compatibility DEB must be uploaded for pre-0.2.02 clients');
 assert(result.plan.uploads.some((item) => item.rel.endsWith('.AppImage')), 'Portable Linux AppImage must be uploaded');
+assert(manifest.antiCheat?.product === 'phoenix-anticheat', 'launcher manifest must publish the separately installed Phoenix Anti-cheat');
+assert(manifest.antiCheat?.version === '1.1.0', 'Phoenix Anti-cheat release version must come from package metadata');
+assert(manifest.antiCheat?.protocol === 'AHT-GUARD-1', 'Phoenix Anti-cheat protocol must remain bound to launcher proof verification');
+assert(manifest.antiCheat?.path === 'launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.1.0.exe', 'Phoenix Anti-cheat must use its isolated R2 namespace');
+assert(/^[a-f0-9]{64}$/i.test(manifest.antiCheat?.sha256 || '') && manifest.antiCheat?.size > 0, 'Phoenix Anti-cheat must be hash and size pinned');
+assert(result.plan.uploads.some((item) => item.rel === manifest.antiCheat.path), 'Phoenix Anti-cheat must upload before launcher/latest.json');
 assert(['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'].every((key) => manifest.platforms[key]?.kind === 'deb'), 'manifest must retain every legacy Linux runtime alias');
 assert(['portable-linux-x64', 'portable-linux'].every((key) => manifest.stagedPlatforms[key]?.kind === 'appimage'), 'manifest must publish every portable Linux runtime alias');
 assert(result.plan.uploads.at(-1)?.rel === 'launcher/latest.json', 'launcher/latest.json must upload last');
@@ -193,9 +201,12 @@ badManifest.stagedPlatforms['win32-x64'].kind = 'nsis';
 badManifest.platforms['darwin-arm64'].kind = 'dmg';
 badManifest.platforms['linux-x64'].kind = 'appimage';
 badManifest.stagedPlatforms['portable-linux-x64'].kind = 'deb';
+badManifest.antiCheat.url = 'http://example.test/launcher/anticheat/win32-x64/wrong.exe';
+badManifest.antiCheat.sha256 = 'invalid';
 const badValidation = validateLauncherUpdateManifest(badManifest, {
   latestUrl: 'https://example.test/launcher/latest.json',
-  requireTrackedDownloads: true
+  requireTrackedDownloads: true,
+  requireAntiCheat: true
 });
 assert(!badValidation.ok && badValidation.errors.some((error) => error.includes('fileName must include launcher version 7.8.9')), 'manifest validator must reject stale launcher artifact filenames');
 assert(badValidation.errors.some((error) => error.includes('path basename must match fileName')), 'manifest validator must reject artifact paths that point at a different fileName');
@@ -206,6 +217,8 @@ assert(badValidation.errors.some((error) => error.includes('stagedPlatforms.win3
 assert(badValidation.errors.some((error) => error.includes('platforms.darwin-arm64 kind must be zip')), 'manifest validator must reject macOS self-update platform artifacts that are not ZIPs');
 assert(badValidation.errors.some((error) => error.includes('platforms.linux-x64 kind must be deb')), 'manifest validator must reject a malformed legacy Linux compatibility bridge');
 assert(badValidation.errors.some((error) => error.includes('stagedPlatforms.portable-linux-x64 kind must be appimage')), 'manifest validator must reject portable Linux updates that are not AppImages');
+assert(badValidation.errors.some((error) => error.includes('antiCheat url must use HTTPS')), 'manifest validator must reject an insecure Phoenix Anti-cheat download');
+assert(badValidation.errors.some((error) => error.includes('antiCheat sha256')), 'manifest validator must reject an unpinned Phoenix Anti-cheat release');
 
 const staleArtifacts = path.join(root, 'stale-artifacts');
 await writeArtifact(path.join('..', path.basename(staleArtifacts), 'AHT-Launcher-Windows-10-11-7.8.8.exe'), 'stale-windows');

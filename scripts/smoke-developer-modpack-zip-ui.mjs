@@ -174,17 +174,19 @@ try {
   await client.call('Page.enable');
   await waitFor(
     client,
-    "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm')",
+    "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm') && document.querySelector('#developerTileButton') && !document.querySelector('#developerTileButton').hidden",
     'hydrated developer login DOM'
   );
+  await evaluate(client, "document.querySelector('#developerTileButton').click()");
+  await waitFor(client, "document.body.classList.contains('dev-mode') && document.body.classList.contains('dev-locked')", 'locked developer console');
   await evaluate(client, `
     (() => {
       document.querySelector('#adminPasswordInput').value = 'test-dev-password';
       document.querySelector('#developerLoginForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     })()
   `);
-  await waitFor(client, "document.body.classList.contains('dev-locked') === false", 'developer unlock');
-  await waitFor(client, "document.querySelector('#clientModpackDirInput') && document.querySelector('#clientZipVersionInput')", 'modpack zip fields');
+  await waitFor(client, "document.body.classList.contains('dev-mode') && document.body.classList.contains('dev-locked') === false && !document.querySelector('#developerConsole').hidden", 'developer unlock');
+  await waitFor(client, "document.querySelector('#clientModpackDirInput') && document.querySelector('#clientZipVersionInput') && !document.querySelector('#buildClientZipButton').classList.contains('is-disabled')", 'ready modpack zip fields');
   const proof = await evaluate(client, `
     (async () => {
       const setValue = (selector, value) => {

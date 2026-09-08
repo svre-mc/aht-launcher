@@ -25,6 +25,7 @@ const store = new Map([
   ['manifests/aht-client.json', { value: JSON.stringify({ format: 'aht-client-manifest-v1' }), contentType: '' }],
   ['launcher/latest.json', { value: JSON.stringify({ product: 'aht-launcher', version: '0.1.1' }), contentType: 'application/json; charset=utf-8' }],
   ['launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.1.exe', { value: new Uint8Array([7, 8, 9]), contentType: '' }],
+  ['launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.0.0.exe', { value: new Uint8Array([31, 32, 33, 34]), contentType: '' }],
   ['cache/files/test.jar', { value: new Uint8Array([1, 2, 3]), contentType: '' }],
   ['packs/range-test.zip', { value: new Uint8Array([10, 11, 12, 13, 14]), contentType: '' }],
   ['packs/multipart-rate-test.zip', { value: Uint8Array.from({ length: 140 }, (_, index) => index), contentType: '' }],
@@ -164,6 +165,13 @@ results.push(await check('launcher installer', new Request('https://worker.test/
   cacheControl: 'public, max-age=31536000, immutable',
   contentDisposition: 'attachment; filename="AHT-Launcher-Windows-10-11-0.1.1.exe"',
   length: '3'
+}));
+results.push(await check('separate Phoenix Anti-cheat', new Request('https://worker.test/launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.0.0.exe'), {
+  status: 200,
+  contentType: 'application/vnd.microsoft.portable-executable',
+  cacheControl: 'public, max-age=31536000, immutable',
+  contentDisposition: 'attachment; filename="Phoenix-Anti-cheat-Windows-x64-1.0.0.exe"',
+  length: '4'
 }));
 const opaqueLimitedDownload = await worker.fetch(new Request('https://worker.test/packs/range-test.zip'), {
   ...env,

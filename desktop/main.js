@@ -51,9 +51,15 @@ import {
   preflightJava8Runtime
 } from '../src/forgeInstaller.js';
 import { ensureBundledJava8 } from '../src/bundledJava8.js';
-import { prepareRuntimeOnlyRepair, verifyRepairedJava, RUNTIME_REPAIR_BUILD } from '../src/runtimeRepair.js';
+import { prepareRuntimeOnlyRepair, verifyRepairedJava } from '../src/runtimeRepair.js';
 import { cleanJavaEnvironment } from '../src/javaEnvironment.js';
-import { ensureNativeGuard } from '../src/nativeGuard.js';
+import {
+  ensureNativeGuard,
+  installPhoenixAntiCheat,
+  phoenixAntiCheatStatus,
+  probeNativeGuard,
+  validatePhoenixAntiCheatRelease
+} from '../src/nativeGuard.js';
 import { proveMinecraftAccountOwnership } from '../src/minecraftAccountRecovery.js';
 import { sendLauncherEvent } from '../src/syncClient.js';
 import {
@@ -305,11 +311,16 @@ function loadR2DirectUploadModule() {
   return r2DirectUploadModulePromise;
 }
 let mainWindow = null;
+let applicationQuitting = false;
 let testRendererActivityBlockerId = null;
 let closeOnGameStartWatchGeneration = 0;
 let updateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateCheckPromise = null;
+let phoenixAntiCheatInstallPromise = null;
+const phoenixDetectionMonitors = new Map();
+const phoenixDetectionReported = new Set();
+const PHOENIX_DETECTION_POLL_MS = 2500;
 let launcherUpdateMonitorTimer = null;
 let launcherUpdateMonitorSignature = '';
 let validatedPendingLauncherUpdateKey = '';
@@ -319,6 +330,7 @@ const LOCAL_REINSTALL_PURPOSE = 'local-reinstall-test';
 const LOCAL_REINSTALL_REQUEST_TTL_MS = 5 * 60 * 1000;
 const LOCAL_REINSTALL_MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024;
 const LAUNCHER_UPDATE_HANDOFF_NONCE_ENV = 'AHT_LAUNCHER_UPDATE_HANDOFF_NONCE';
+const launcherProcessSessionId = crypto.randomBytes(16).toString('hex');
 let activeLocalReinstallRequest = null;
 let localReinstallConsumePromise = null;
 let developerLocalReinstallPromise = null;
@@ -667,6 +679,9 @@ function playerPublicErrorMessage(error = null, channel = '') {
   if (code === 'AHT_MINECRAFT_NOT_INSTALLED' || /Minecraft not installed/i.test(message)) {
     return 'Minecraft Launcher is required to play.';
   }
+  if (code.startsWith('PHOENIX_') || /Phoenix Anti-cheat/i.test(message)) {
+    return 'Phoenix Anti-cheat is required to play on Windows.';
+  }
   if (/Review and accept the current Terms|Terms and Privacy/i.test(message)) {
     return 'Review and accept the Terms and Privacy notice to continue.';
   }
@@ -745,7 +760,6 @@ function createLaunchDiagnosticAttempt(target = releaseTarget('stable')) {
   return createLaunchAttempt({
       appName: app.getName(),
       appVersion: launcherVersion(),
-      buildLabel: RUNTIME_REPAIR_BUILD,
       mode: isDeveloperMode() ? 'developer' : 'player',
       packaged: app.isPackaged,
       packId: target.packId,
@@ -1177,7 +1191,6 @@ async function buildErrorDiagnosticReport(payload = {}) {
     '================================================================',
     `Created: ${new Date().toISOString()}`,
     `Launcher: ${app.getName()} ${launcherVersion()} (${isDeveloperMode() ? 'developer' : 'player'})`,
-    `Build: ${RUNTIME_REPAIR_BUILD}`,
     `Context: ${sanitizeDiagnosticText(payload.context || lastErrorDiagnostic?.channel || 'launcher', 120)}`,
     '',
     'ERROR',
@@ -3546,12 +3559,12 @@ function developerAdminSessionAllowed() {
   return isDeveloperMode() && isDeveloperAuthenticated();
 }
 
-function launcherProofIdentity(identity = {}) {
+function launcherProofIdentity(identity = {}, options = {}) {
   const developerClient = isDeveloperMode();
   const bypass = developerClientBypassAllowed();
   return {
     ...identity,
-    requireNativeGuard: process.platform === 'win32',
+    requireNativeGuard: process.platform === 'win32' && options.requireNativeGuard === true,
     launcherChannel: developerClient ? 'developer' : 'player',
     developerClient,
     developerClientBypass: bypass,
@@ -3582,19 +3595,163 @@ function isLauncherProofAuthenticationError(error) {
 }
 
 async function launcherNativeGuard(config) {
-  if (process.platform !== 'win32' || config.launcherProof?.enabled === false) return null;
+  if (isDeveloperMode() || process.platform !== 'win32' || config.launcherProof?.enabled === false) return null;
   return ensureNativeGuard({
     gameDir: config.instanceDir,
-    runtimeDir: app.isPackaged ? path.join(process.resourcesPath, 'native-guard') : path.join(app.getAppPath(), 'build/native-guard')
+    javaPath: config.minecraftLauncher?.javaPath || '',
+    installDir: path.join(app.getPath('userData'), 'Phoenix Anti-cheat'),
+    developmentRuntimeDir: path.join(app.getAppPath(), 'build', 'native-guard'),
+    developerMode: isDeveloperMode(),
+    requiredVersion: String(launcherPackageMetadata.phoenixAntiCheatVersion || ''),
+    launcherSessionId: launcherProcessSessionId,
+    launcherPid: process.pid
   });
 }
 
-async function writeLauncherProofWithDeveloperAuth({ config = {}, ...options } = {}) {
+function phoenixDetectionFingerprint(nativeGuard = {}, measurement = {}) {
+  return crypto.createHash('sha256').update([
+    String(nativeGuard.keyHash || ''),
+    String(measurement.processBirth || ''),
+    String(measurement.detail || '')
+  ].join('\0')).digest('hex');
+}
+
+async function reportPhoenixDetection(config = {}, launcherProof = {}, nativeGuard = {}, probe = {}) {
+  const token = String(launcherProof?.token || '').trim();
+  const base = workerServiceBaseUrl(
+    config.launcherProof?.baseUrl || config.sync?.baseUrl || config.developer?.adminBaseUrl
+  );
+  if (!token || !base || !probe?.signedProbe || probe?.measurement?.state !== 'tampered') {
+    throw new Error('Phoenix detection reporting is not available for this Play session.');
+  }
+  const url = new URL('api/session/report', base.endsWith('/') ? base : `${base}/`);
+  const response = await fetch(url, {
+    method: 'POST',
+    redirect: 'error',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      antiCheatVersion: String(launcherPackageMetadata.phoenixAntiCheatVersion || ''),
+      probe: probe.signedProbe
+    }),
+    signal: globalThis.AbortSignal?.timeout?.(10_000)
+  });
+  if (!response.ok) throw new Error('Session report was rejected.');
+  const result = await response.json().catch(() => ({}));
+  if (!result?.ok) {
+    throw new Error('Phoenix detection reporting returned an invalid acknowledgement.');
+  }
+  return result;
+}
+
+function queuePhoenixDetectionMonitor({ config = {}, launcherProof = {}, nativeGuard = null } = {}) {
+  if (isDeveloperMode() || process.platform !== 'win32' || !nativeGuard?.keyHash || !launcherProof?.token) return null;
+  const key = String(nativeGuard.keyHash);
+  if (phoenixDetectionMonitors.has(key)) return phoenixDetectionMonitors.get(key);
+  const operation = (async () => {
+    let consecutiveProbeFailures = 0;
+    while (!applicationQuitting) {
+      let probe;
+      try {
+        probe = await probeNativeGuard(nativeGuard);
+        consecutiveProbeFailures = 0;
+      } catch {
+        consecutiveProbeFailures += 1;
+        if (consecutiveProbeFailures >= 3) break;
+      }
+      if (probe?.measurement?.state === 'tampered' && probe.signedProbe) {
+        const fingerprint = phoenixDetectionFingerprint(nativeGuard, probe.measurement);
+        if (!phoenixDetectionReported.has(fingerprint)) {
+          try {
+            await reportPhoenixDetection(config, launcherProof, nativeGuard, probe);
+            phoenixDetectionReported.add(fingerprint);
+          } catch {}
+        }
+      }
+      await sleep(PHOENIX_DETECTION_POLL_MS);
+    }
+  })().catch(() => {}).finally(() => {
+    if (phoenixDetectionMonitors.get(key) === operation) phoenixDetectionMonitors.delete(key);
+  });
+  phoenixDetectionMonitors.set(key, operation);
+  return operation;
+}
+
+function phoenixAntiCheatInstallDir() {
+  return path.join(app.getPath('userData'), 'Phoenix Anti-cheat');
+}
+
+async function currentPhoenixAntiCheatStatus() {
+  return phoenixAntiCheatStatus({
+    installDir: phoenixAntiCheatInstallDir(),
+    developmentRuntimeDir: path.join(app.getAppPath(), 'build', 'native-guard'),
+    developerMode: isDeveloperMode(),
+    requiredVersion: String(launcherPackageMetadata.phoenixAntiCheatVersion || ''),
+    platform: process.platform
+  });
+}
+
+function phoenixAntiCheatForRenderer(status = {}) {
+  return {
+    required: Boolean(status.required),
+    supported: Boolean(status.supported),
+    installed: Boolean(status.installed),
+    valid: Boolean(status.valid),
+    state: String(status.state || ''),
+    version: String(status.version || ''),
+    installedAt: String(status.installedAt || ''),
+    error: String(status.error || '')
+  };
+}
+
+async function phoenixAntiCheatRelease(config = {}) {
+  const update = await readLauncherUpdate(config);
+  if (update.error && !update.manifest) {
+    throw new Error('Phoenix Anti-cheat download is temporarily unavailable.');
+  }
+  const release = validatePhoenixAntiCheatRelease(update.manifest?.antiCheat, {
+    allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1',
+    expectedOrigin: new URL(update.latestUrl).origin
+  });
+  if (release.version !== String(launcherPackageMetadata.phoenixAntiCheatVersion || '')) {
+    throw new Error('Phoenix Anti-cheat download does not match this launcher version.');
+  }
+  return release;
+}
+
+async function installCurrentPhoenixAntiCheat(sender) {
+  if (phoenixAntiCheatInstallPromise) return phoenixAntiCheatInstallPromise;
+  phoenixAntiCheatInstallPromise = (async () => {
+    if (process.platform !== 'win32') return phoenixAntiCheatForRenderer(await currentPhoenixAntiCheatStatus());
+    const config = await loadConfig();
+    const descriptor = await phoenixAntiCheatRelease(config);
+    const status = await installPhoenixAntiCheat({
+      installDir: phoenixAntiCheatInstallDir(),
+      descriptor,
+      allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1',
+      onProgress: (progress) => {
+        try {
+          if (sender && !sender.isDestroyed()) sender.send('anticheat:install-progress', progress);
+        } catch {}
+      }
+    });
+    return phoenixAntiCheatForRenderer(status);
+  })();
+  try {
+    return await phoenixAntiCheatInstallPromise;
+  } finally {
+    phoenixAntiCheatInstallPromise = null;
+  }
+}
+
+async function writeLauncherProofWithDeveloperAuth({ config = {}, nativeGuard = null, ...options } = {}) {
   if (config.launcherProof?.enabled === false) {
     return writeLauncherProof({ config, ...options });
   }
-  if (process.platform === 'win32') {
-    const nativeGuard = await launcherNativeGuard(config);
+  if (nativeGuard) {
     options.identity = { ...options.identity, nativeGuard, nativeGuardKeyHash: nativeGuard.keyHash };
   }
   const developerAuthRequired = developerAdminSessionAllowed();
@@ -3654,13 +3811,13 @@ async function clearUnavailableMinecraftUsername(username = '', message = 'That 
   });
 }
 
-async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null } = {}) {
+async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null, nativeGuard = null } = {}) {
   const deviceCredential = await loadDeviceCredential();
   const proofIdentity = launcherProofIdentity(runtimeIdentity({
     ...identity,
     deviceId: deviceCredential.deviceId,
     devicePublicKey: deviceCredential.publicKey
-  }));
+  }), { requireNativeGuard: Boolean(nativeGuard) });
   const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
   const recoverySecret = developerAdminSessionAllowed() || !username
     ? ''
@@ -3672,7 +3829,8 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
       latest,
       installed,
       recoverySecret,
-      deviceCredential
+      deviceCredential,
+      nativeGuard
     });
   } catch (error) {
     if (!isLauncherProofRegistrationError(error)) {
@@ -3712,11 +3870,12 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
         ...refreshedIdentity,
         deviceId: deviceCredential.deviceId,
         devicePublicKey: deviceCredential.publicKey
-      }),
+      }, { requireNativeGuard: Boolean(nativeGuard) }),
       latest,
       installed,
       recoverySecret: refreshedRecoverySecret,
-      deviceCredential
+      deviceCredential,
+      nativeGuard
     });
   }
 }
@@ -3726,9 +3885,13 @@ async function writeSerializedRegisteredLauncherProof({
   identity = {},
   latest = null,
   installed = null,
+  nativeGuard = null,
   minValidityMs = 2 * 60 * 1000
 } = {}) {
-  const expectedIdentity = launcherProofIdentity(runtimeIdentity(identity));
+  const expectedIdentity = launcherProofIdentity(runtimeIdentity({
+    ...identity,
+    ...(nativeGuard ? { nativeGuard, nativeGuardKeyHash: nativeGuard.keyHash } : {})
+  }), { requireNativeGuard: Boolean(nativeGuard) });
   const inspectExpectedProof = () => inspectLauncherProof({
     config,
     identity: expectedIdentity,
@@ -3744,7 +3907,7 @@ async function writeSerializedRegisteredLauncherProof({
   const previous = launcherProofRefreshes.get(key);
   const refresh = (async () => {
     if (previous) await previous.catch(() => {});
-    return writeRegisteredLauncherProof({ config, identity, latest, installed });
+    return writeRegisteredLauncherProof({ config, identity, latest, installed, nativeGuard });
   })().finally(() => {
     if (launcherProofRefreshes.get(key) === refresh) launcherProofRefreshes.delete(key);
   });
@@ -5932,7 +6095,6 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
     developerMode: isDeveloperMode(),
     developerClientBypass,
     appVersion: launcherVersion(),
-    buildLabel: RUNTIME_REPAIR_BUILD,
     platformProfile: platformProfileForRenderer(platformProfile(process.platform, {
       ...process.env,
       HOME: process.env.HOME || app.getPath('home'),
@@ -6086,13 +6248,9 @@ async function runUpdate(forceRepair = false, options = {}) {
       const profile = repairedRuntime.profile;
       result.minecraftProfile = profile;
       preparedMinecraftProfile = profile;
-      const launcherProof = await writeSerializedRegisteredLauncherProof({
-        config: launcherConfig, latest: latestAfterInstall, installed: result.installed, identity
-      });
-      result.launcherProof = {
-        proofFile: launcherProof.proofFile || '', trusted: Boolean(launcherProof.trusted), source: launcherProof.source || ''
-      };
-      preparedLauncherProof = launcherProof;
+      // Play authorization is intentionally launch-scoped. Updating the pack
+      // must never start Phoenix Anti-cheat or leave a reusable Play token.
+      result.launcherProof = null;
     } catch (error) {
       throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
     }
@@ -10143,6 +10301,13 @@ function launcherArtifactDescriptors(payload = {}) {
       platform: false,
       stagedPlatform: true,
       file: payload.linuxAppImagePath || payload.ubuntuAppImagePath || ''
+    },
+    {
+      key: 'win32-x64',
+      label: 'Phoenix Anti-cheat Windows x64',
+      antiCheat: true,
+      platform: false,
+      file: payload.phoenixAntiCheatPath || payload.antiCheatPath || ''
     }
   ].filter((item) => String(item.file || '').trim());
 }
@@ -10158,6 +10323,7 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
   const stagedPlatforms = {};
   const downloads = {};
   const uploads = [];
+  let antiCheat = null;
   for (const descriptor of artifacts) {
     const file = path.resolve(descriptor.file);
     if (!(await pathExists(file))) {
@@ -10169,6 +10335,27 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     }
     const sha256 = await hashFile(file, 'sha256');
     const fileName = path.basename(file);
+    if (descriptor.antiCheat === true) {
+      const antiCheatVersion = String(launcherPackageMetadata.phoenixAntiCheatVersion || '').trim();
+      const expectedFileName = `Phoenix-Anti-cheat-Windows-x64-${antiCheatVersion}.exe`;
+      if (!antiCheatVersion || fileName.toLowerCase() !== expectedFileName.toLowerCase()) {
+        throw new Error(`Phoenix Anti-cheat artifact must be ${expectedFileName}.`);
+      }
+      const rel = `launcher/anticheat/win32-x64/${fileName}`;
+      antiCheat = {
+        product: 'phoenix-anticheat',
+        version: antiCheatVersion,
+        protocol: 'AHT-GUARD-1',
+        platform: 'win32-x64',
+        fileName,
+        path: rel,
+        url: new URL(rel, rootUrl).toString(),
+        sha256,
+        size: stat.size
+      };
+      uploads.push({ rel, file, label: descriptor.label, size: stat.size });
+      continue;
+    }
     const rel = `launcher/files/${descriptor.key}/${fileName}`;
     const entry = {
       label: descriptor.label,
@@ -10205,6 +10392,9 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
   if (!uploads.length) {
     throw new Error('Add at least one launcher artifact before publishing.');
   }
+  if (!antiCheat) {
+    throw new Error('Add the separately built Phoenix Anti-cheat artifact before publishing.');
+  }
   const manifest = {
     schemaVersion: 1,
     product: 'aht-launcher',
@@ -10215,14 +10405,16 @@ async function buildLauncherUpdateManifest({ version, publicLatestUrl = '', arti
     currentVersion: launcherVersion(),
     platforms,
     stagedPlatforms,
-    downloads
+    downloads,
+    antiCheat
   };
   const validation = validateLauncherUpdateManifest(manifest, {
     latestUrl: launcherLatestUrlFromInput(publicLatestUrl || config.launcherUpdate?.latestUrl || config.latestUrl || ''),
     allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1',
     requireTrackedDownloads: true,
     requireStagedWindows: true,
-    requireStagedLinux: true
+    requireStagedLinux: true,
+    requireAntiCheat: true
   });
   if (!validation.ok) {
     throw new Error(`Launcher update manifest is invalid: ${validation.errors.join('; ')}`);
@@ -10257,7 +10449,7 @@ async function findLauncherBuilds() {
     windowsPath: await findNewestFile([
       path.join(appRoot, 'release-builds', 'windows'),
       path.join(appRoot, 'release-builds')
-    ], /\.exe$/i),
+    ], /AHT-Launcher-Windows-10-11-.*\.exe$/i),
     windowsZipPath: await findNewestFile([
       path.join(appRoot, 'release-builds', 'windows'),
       path.join(appRoot, 'release-builds')
@@ -10265,7 +10457,10 @@ async function findLauncherBuilds() {
     macosUniversalZipPath: await findNewestFile(macosRoots, /AHT-Launcher-macOS-universal-.*\.zip$/i),
     macosUniversalDmgPath: await findNewestFile(macosRoots, /AHT-Launcher-macOS-universal-.*\.dmg$/i),
     linuxCompatibilityDebPath: await findNewestFile(linuxRoots, /AHT-Launcher-Linux-x64-.*\.deb$/i),
-    linuxAppImagePath: await findNewestFile(linuxRoots, /AHT-Launcher-Linux-x64-.*\.AppImage$/i)
+    linuxAppImagePath: await findNewestFile(linuxRoots, /AHT-Launcher-Linux-x64-.*\.AppImage$/i),
+    phoenixAntiCheatPath: await findNewestFile([
+      path.join(appRoot, 'release-builds', 'phoenix-anticheat')
+    ], /Phoenix-Anti-cheat-Windows-x64-.*\.exe$/i)
   };
 }
 
@@ -10543,6 +10738,7 @@ async function verifyRemoteLauncherUpdate({ publicLatestUrl, localManifest }) {
     latestUrl,
     requireStagedWindows: true,
     requireStagedLinux: true,
+    requireAntiCheat: true,
     allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1'
   });
   if (!validation.ok) {
@@ -12009,6 +12205,7 @@ async function adminFetch(config, route, options = {}) {
       'admin/launcher-downloads',
       'admin/player-records',
       'admin/launcher-updates',
+      'admin/session-reports',
       'admin/player-ipv4-groups',
       'admin/access-decisions'
     ]);
@@ -12866,6 +13063,8 @@ ipcMain.handle('account:retrySync', async (_event, payload = {}) => getStatus(
 ipcMain.handle('news:refresh', async (_event, payload = {}) => refreshNewsStatus(payload?.packKey || payload || 'stable'));
 // Launcher updates must not wait for pack preparation or the optional News feed.
 ipcMain.handle('launcher:checkUpdate', async () => launcherUpdateForRenderer(await checkLauncherUpdateNow()));
+ipcMain.handle('anticheat:status', async () => phoenixAntiCheatForRenderer(await currentPhoenixAntiCheatStatus()));
+ipcMain.handle('anticheat:install', diagnosticIpc('anticheat:install', async (event) => installCurrentPhoenixAntiCheat(event.sender)));
 ipcMain.handle('settings:save', async (_event, payload = {}) => {
   if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'config')) {
     return saveSettings(payload.config || {}, payload.packKey || 'stable');
@@ -13269,18 +13468,8 @@ async function performLaunchPreparation(payload = {}, attempt, options = {}) {
     async () => identityPayload(launcherConfig),
     'Local launcher identity is ready.'
   );
-  const launcherProofPromise = runLaunchStep(
-    attempt,
-    'launcher-proof',
-    'Create a fresh signed AHT launch proof',
-    async () => writeSerializedRegisteredLauncherProof({
-      config: launcherConfig,
-      latest: launchLatest,
-      installed,
-      identity
-    }),
-    (value) => `Trusted proof created by ${value?.source || 'the configured signer'}; no token is written to this report.`
-  );
+  setLaunchRequirement(attempt, 'launcherProof', 'NOT CHECKED', 'Play authorization and Phoenix Anti-cheat start only when Play is clicked.');
+  const launcherProofPromise = Promise.resolve(null);
   const runtimeRepairPromise = (async () => {
     reportProgress('Preparing Minecraft profile', 70);
     let repairedProfile = await runLaunchStep(
@@ -13312,7 +13501,7 @@ async function performLaunchPreparation(payload = {}, attempt, options = {}) {
     return { profile: repairedProfile, minecraftAssets: repairedAssets };
   })();
   const [launcherProofOutcome, runtimeRepairOutcome] = await Promise.allSettled([launcherProofPromise, runtimeRepairPromise]);
-  if (launcherProofOutcome.status === 'fulfilled') {
+  if (launcherProofOutcome.status === 'fulfilled' && launcherProofOutcome.value) {
     setLaunchRequirement(attempt, 'launcherProof', 'PASS', `Fresh trusted proof from ${launcherProofOutcome.value?.source || 'the configured signer'}.`);
   }
   if (runtimeRepairOutcome.status === 'fulfilled') {
@@ -13389,7 +13578,7 @@ async function performLaunchPreparation(payload = {}, attempt, options = {}) {
     java8Runtime: profile.javaRuntime ? { ...java8Runtime, usable: true } : java8Runtime,
     minecraftProfile: selectedProfile,
     launcherProof,
-    proofPreparedThisSession: true,
+    proofPreparedThisSession: false,
     minecraftAssets,
     managedMutationMonitor
   };
@@ -13822,7 +14011,7 @@ async function publishCompletedUpdatePreparation({
   launcherProof,
   minecraftAssets
 } = {}) {
-  if (!target || !config || !launcherConfig || !latest || !installed || !minecraftProfile || !launcherProof) return null;
+  if (!target || !config || !launcherConfig || !latest || !installed || !minecraftProfile) return null;
   const corrupted = Number(integrity?.counts?.corrupted || 0);
   if (integrity?.valid !== true || corrupted > 0) {
     throw new Error(`Update verification found ${Math.max(1, corrupted)} managed file issue${corrupted === 1 ? '' : 's'}; the quick startup snapshot was not authorized.`);
@@ -13845,7 +14034,7 @@ async function publishCompletedUpdatePreparation({
   setLaunchRequirement(attempt, 'minecraftProfile', 'PASS', `${minecraftProfile.profileName || target.name} is prepared.`);
   setLaunchRequirement(attempt, 'minecraftRuntime', 'PASS', 'Minecraft assets, Forge, and Java were prepared during Update.');
   setLaunchRequirement(attempt, 'java8', 'PASS', `${java8Runtime.vendor || 'Java'} ${java8Runtime.version || '8'} executed successfully at ${java8Runtime.path}.`);
-  setLaunchRequirement(attempt, 'launcherProof', 'PASS', `Fresh trusted proof from ${launcherProof.source || 'the configured signer'}.`);
+  setLaunchRequirement(attempt, 'launcherProof', 'NOT CHECKED', 'Play authorization and Phoenix Anti-cheat start only when Play is clicked.');
   attempt.instanceDir = config.instanceDir;
   attempt.minecraftRoot = launcherConfig.minecraftLauncher?.rootDir || '';
   attempt.runtimeConfig = launcherConfig;
@@ -13866,7 +14055,7 @@ async function publishCompletedUpdatePreparation({
     java8Runtime,
     minecraftProfile,
     launcherProof,
-    proofPreparedThisSession: true,
+    proofPreparedThisSession: false,
     minecraftAssets,
     managedMutationMonitor,
     startedAt: new Date().toISOString(),
@@ -13882,7 +14071,6 @@ async function publishCompletedUpdatePreparation({
     await persistPreparedLaunchEntry(key, entry);
     managedMutationMonitor?.close?.();
     entry.managedMutationMonitor = null;
-    scheduleLaunchPreparationProofRefresh(key, entry);
   } catch (error) {
     managedMutationMonitor?.close?.();
     invalidateLaunchPreparation(key);
@@ -13981,7 +14169,7 @@ function startupPackPreparationForRenderer(descriptor, entry = null) {
   };
 }
 
-async function refreshPreparedLauncherProof(key, expectedEntry) {
+async function refreshPreparedLauncherProof(key, expectedEntry, nativeGuard = null) {
   const current = launchPreparationCache.get(key);
   if (current !== expectedEntry || current?.state !== 'ready') return null;
   if (current.proofRefreshInFlight) return current.proofRefreshInFlight;
@@ -14002,6 +14190,7 @@ async function refreshPreparedLauncherProof(key, expectedEntry) {
       identity: current.identity,
       latest: current.latest,
       installed: current.installed,
+      nativeGuard,
       minValidityMs: LAUNCH_PREPARATION_PROOF_MIN_VALIDITY_MS
     });
     if (launchPreparationCache.get(key) !== current) return null;
@@ -14009,7 +14198,6 @@ async function refreshPreparedLauncherProof(key, expectedEntry) {
     current.proofPreparedThisSession = true;
     current.proofRefreshError = '';
     current.proofRefreshedAt = new Date().toISOString();
-    scheduleLaunchPreparationProofRefresh(key, current);
     return launcherProof;
   })().finally(() => {
     if (current.proofRefreshInFlight === refresh) current.proofRefreshInFlight = null;
@@ -14914,6 +15102,15 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       });
     }
   }
+  const nativeGuard = await runLaunchStep(
+    attempt,
+    'phoenix-anticheat',
+    'Start the launch-scoped Phoenix Anti-cheat session',
+    async () => launcherNativeGuard(prepared.launcherConfig),
+    (value) => value
+      ? 'Phoenix Anti-cheat is verified and bound to this Play session.'
+      : { status: 'NOT CHECKED', detail: 'Phoenix Anti-cheat is not required on this platform.' }
+  );
   const launcherOpening = openMinecraftLauncher(prepared.launcherConfig, { route: prepared.launcherRoute }).then(
     (value) => ({ ok: true, value }),
     (error) => ({ ok: false, error })
@@ -14924,11 +15121,13 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       'prepared-play-attestation',
       'Use initialized Play authorization',
       async () => {
-        const nativeGuard = await launcherNativeGuard(prepared.launcherConfig);
         let proof = prepared.proofPreparedThisSession === true
           ? await inspectLauncherProof({
               config: prepared.launcherConfig,
-              identity: launcherProofIdentity(runtimeIdentity(prepared.identity)),
+              identity: launcherProofIdentity(runtimeIdentity({
+                ...prepared.identity,
+                ...(nativeGuard ? { nativeGuard, nativeGuardKeyHash: nativeGuard.keyHash } : {})
+              }), { requireNativeGuard: Boolean(nativeGuard) }),
               latest: prepared.latest,
               installed: prepared.installed,
               minValidityMs: LAUNCH_PREPARATION_PROOF_MIN_VALIDITY_MS
@@ -14938,7 +15137,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
             || !proof?.trusted
             || (nativeGuard && proof?.payload?.nativeGuardKeyHash !== nativeGuard.keyHash)
             || (proof?.payload?.launchId && proof.payload.launchId === prepared.lastUsedLauncherProofId)) {
-          proof = await refreshPreparedLauncherProof(key, prepared);
+          proof = await refreshPreparedLauncherProof(key, prepared, nativeGuard);
         }
         if (!proof?.usable || !proof?.trusted || launchPreparationCache.get(key) !== prepared) {
           throw new Error(`The initialized launcher session is no longer usable${proof?.reason ? `: ${proof.reason}` : '.'} Restart A Hard Time Launcher.`);
@@ -14954,6 +15153,11 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     await launcherOpening;
     throw error;
   }
+  queuePhoenixDetectionMonitor({
+    config: prepared.launcherConfig,
+    launcherProof: prepared.launcherProof,
+    nativeGuard
+  });
   const launchResult = await runLaunchStep(
     attempt,
     'open-launcher',
@@ -14971,7 +15175,6 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     }
   );
   setLaunchRequirement(attempt, 'minecraftLauncher', 'PASS', 'A visible, responsive Minecraft Launcher window was confirmed.');
-  scheduleLaunchPreparationProofRefresh(key, prepared, 250);
   return {
     ...minecraftLaunchResultForRenderer(launchResult),
     minecraftProfile: minecraftProfileForRenderer(prepared.minecraftProfile),
@@ -15348,6 +15551,13 @@ ipcMain.handle('dev:launcherUpdates', async (_event, payload = {}) => {
   if (payload.cursor) params.set('cursor', String(payload.cursor));
   return adminFetch(await loadConfig(), `admin/launcher-updates?${params.toString()}`);
 });
+ipcMain.handle('dev:phoenixDetections', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const limit = Math.max(1, Math.min(Number(payload.limit || 250), 250));
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (payload.cursor) params.set('cursor', String(payload.cursor));
+  return adminFetch(await loadConfig(), `admin/session-reports?${params.toString()}`);
+});
 ipcMain.handle('dev:accessDecisions', async (_event, payload = {}) => {
   assertDeveloperAuthenticated();
   const params = new URLSearchParams();
@@ -15425,6 +15635,7 @@ if (!singleInstanceLock) {
     }
   });
   app.on('before-quit', () => {
+    applicationQuitting = true;
     stopLauncherUpdateMonitor();
     invalidateAllLaunchPreparations();
     if (Number.isInteger(testRendererActivityBlockerId)) {

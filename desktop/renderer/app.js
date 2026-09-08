@@ -252,13 +252,16 @@ if (!window.aht) {
       progress: { phase: "Ready", completed: 0, total: 0, percent: 0 }
     }),
     checkLauncherUpdate: async () => ({ enabled: true, currentVersion: "0.1.1", latestVersion: "0.1.1", updateRequired: false, error: "" }),
+    getPhoenixAntiCheatStatus: async () => ({ required: true, supported: true, installed: true, valid: true, state: "ready", version: "1.1.0" }),
+    installPhoenixAntiCheat: async () => ({ required: true, supported: true, installed: true, valid: true, state: "ready", version: "1.1.0" }),
+    onPhoenixAntiCheatInstallProgress: () => () => {},
     onLauncherUpdateAvailable: () => () => {},
     legalStatus: async () => ({
       required: false,
       accepted: true,
       reason: "accepted",
       termsVersion: "2026-07-14.1",
-      privacyVersion: "2026-08-23.1",
+      privacyVersion: "2026-09-08.1",
       termsText: "A HARD TIME TERMS OF SERVICE",
       privacyText: "A HARD TIME PRIVACY POLICY"
     }),
@@ -578,6 +581,20 @@ if (!window.aht) {
       ],
       cursor: "",
       hasMore: false
+    }),
+    devPhoenixDetections: async () => ({
+      detections: [
+        {
+          receivedAt: "2026-09-08T18:20:12Z",
+          minecraftUsername: "auSavant",
+          process: { name: "javaw.exe", pid: 4242 },
+          findings: [{ module: "verified runtime", rva: "0x1a2b", imageSha256: "d".repeat(64) }],
+          launcherVersion: "0.2.10",
+          antiCheatVersion: "1.1.0"
+        }
+      ],
+      cursor: "",
+      hasMore: false
     })
   };
   if (!bootDeveloperMode) {
@@ -698,6 +715,16 @@ const els = {
   replaceGameSettingsInput: $("#replaceGameSettingsInput"),
   updateOptionsBackButton: $("#updateOptionsBackButton"),
   updateOptionsUpdateButton: $("#updateOptionsUpdateButton"),
+  phoenixAntiCheatOverlay: $("#phoenixAntiCheatOverlay"),
+  phoenixAntiCheatDialog: $(".phoenix-anticheat-dialog"),
+  phoenixAntiCheatSummary: $("#phoenixAntiCheatSummary"),
+  phoenixAntiCheatProgress: $("#phoenixAntiCheatProgress"),
+  phoenixAntiCheatProgressLabel: $("#phoenixAntiCheatProgressLabel"),
+  phoenixAntiCheatProgressCount: $("#phoenixAntiCheatProgressCount"),
+  phoenixAntiCheatProgressBar: $("#phoenixAntiCheatProgressBar"),
+  phoenixAntiCheatError: $("#phoenixAntiCheatError"),
+  phoenixAntiCheatCancelButton: $("#phoenixAntiCheatCancelButton"),
+  phoenixAntiCheatInstallButton: $("#phoenixAntiCheatInstallButton"),
   openInstanceFromPlayerButton: $("#openInstanceFromPlayerButton"),
   latestUrlInput: $("#latestUrlInput"),
   pickLatestButton: $("#pickLatestButton"),
@@ -862,10 +889,12 @@ const els = {
   playerDataTabs: [...document.querySelectorAll(".player-data-tab[data-player-data-view]")],
   playerDownloadsPanel: $("#playerDownloadsPanel"),
   playerRecordsPanel: $("#playerRecordsPanel"),
+  playerSusPanel: $("#playerSusPanel"),
   playerLauncherUpdatesPanel: $("#playerLauncherUpdatesPanel"),
   playerAccessPanel: $("#playerAccessPanel"),
   playerDownloadsList: $("#playerDownloadsList"),
   playerRecordsList: $("#playerRecordsList"),
+  playerSusList: $("#playerSusList"),
   playerLauncherUpdatesList: $("#playerLauncherUpdatesList"),
   playerAccessList: $("#playerAccessList"),
   accessDecisionDialog: $("#accessDecisionDialog"),
@@ -886,6 +915,7 @@ let lastLauncherUpdateCheck = null;
 let launcherUpdateCheckInFlight = null;
 let updatePoll = null;
 let launcherUpdatePoll = null;
+let launcherUpdateRequestPending = false;
 let launcherDeployPoll = null;
 let serverTransferPoll = null;
 let lastUpdateState = null;
@@ -900,11 +930,14 @@ let activeSidebarPack = "aht";
 let sidebarSwitching = false;
 let queuedSidebarTile = null;
 let playBusy = false;
+let phoenixAntiCheatInstalling = false;
+let phoenixAntiCheatPromptResolve = null;
 const packStatusCache = new Map();
 const releaseValidationByTarget = new Map();
 let developerAuthenticated = false;
 let playerDownloadRecords = [];
 let canonicalPlayerRecords = [];
+let phoenixDetectionRecords = [];
 let launcherUpdateRecords = [];
 let accessDecisionRecords = [];
 let selectedAccessPlayer = null;
@@ -2618,6 +2651,11 @@ function cacheOnlyValidationBlockReason(validation) {
 function updateReleaseUploadState() {
   const reason = publishBlockReason("stable");
   const setupReason = setupCloudBlockReason();
+  const clientCreateReason = !currentStatus?.config
+    ? "Launcher settings are still loading."
+    : !developerAuthenticated
+      ? "Developer login is required before creating AHT releases."
+      : "";
   const defaultsReason = !currentStatus?.config
     ? "Launcher settings are still loading."
     : !developerAuthenticated
@@ -2626,7 +2664,12 @@ function updateReleaseUploadState() {
         ? "Enter the public Player Feed URL first."
         : "";
   setUnavailable(els.publishReleaseButton, releaseBusy || Boolean(reason));
-  const ptbCreateReason = developerAuthenticated ? "" : "Developer login is required before creating PTB releases.";
+  setUnavailable(els.buildClientZipButton, releaseBusy || Boolean(clientCreateReason));
+  const ptbCreateReason = !currentStatus?.config
+    ? "Launcher settings are still loading."
+    : developerAuthenticated
+      ? ""
+      : "Developer login is required before creating PTB releases.";
   setUnavailable(els.buildPtbClientZipButton, releaseBusy || Boolean(ptbCreateReason));
   setUnavailable(els.setupCloudButton, releaseBusy || Boolean(setupReason));
   setUnavailable(els.writeDefaultsButton, releaseBusy || Boolean(defaultsReason));
@@ -2635,6 +2678,9 @@ function updateReleaseUploadState() {
   }
   if (els.publishReleaseButton) {
     els.publishReleaseButton.title = reason || "Make the update available to AHT players";
+  }
+  if (els.buildClientZipButton) {
+    els.buildClientZipButton.title = clientCreateReason || "Create an exact AHT client ZIP";
   }
   if (els.buildPtbClientZipButton) {
     els.buildPtbClientZipButton.title = ptbCreateReason || "Create and upload a ZIP to the isolated PTB release track";
@@ -3245,7 +3291,7 @@ async function pollLauncherUpdate() {
   }
   lastLauncherUpdateState = state;
   renderLauncherUpdateOverlay(currentStatus, state);
-  if (!state.running) {
+  if (!state.running && !launcherUpdateRequestPending) {
     clearInterval(launcherUpdatePoll);
     launcherUpdatePoll = null;
   }
@@ -3265,8 +3311,10 @@ async function startLauncherSelfUpdate() {
     lastResult: null
   };
   renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
+  launcherUpdateRequestPending = true;
   window.aht.startLauncherUpdate()
     .then(async () => {
+      launcherUpdateRequestPending = false;
       const state = await window.aht.getLauncherUpdateState().catch(() => lastLauncherUpdateState);
       lastLauncherUpdateState = state;
       renderLauncherUpdateOverlay(currentStatus, state);
@@ -3276,6 +3324,7 @@ async function startLauncherSelfUpdate() {
       }
     })
     .catch((error) => {
+      launcherUpdateRequestPending = false;
       lastLauncherUpdateState = {
         running: false,
         lines: [],
@@ -3322,8 +3371,10 @@ async function restartLauncherSelfUpdate() {
     error: null
   };
   renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
+  launcherUpdateRequestPending = true;
   window.aht.restartLauncherUpdate()
     .then(async () => {
+      launcherUpdateRequestPending = false;
       const state = await window.aht.getLauncherUpdateState().catch(() => lastLauncherUpdateState);
       lastLauncherUpdateState = state;
       renderLauncherUpdateOverlay(currentStatus, state);
@@ -3333,6 +3384,7 @@ async function restartLauncherSelfUpdate() {
       }
     })
     .catch((error) => {
+      launcherUpdateRequestPending = false;
       lastLauncherUpdateState = {
         ...lastLauncherUpdateState,
         running: false,
@@ -3527,6 +3579,24 @@ function playerDataRecord(item = {}) {
   };
 }
 
+function phoenixDetectionRecord(item = {}) {
+  const processName = String(item.process?.name || "").trim().toLowerCase();
+  const processId = Number(item.process?.pid || 0);
+  const findings = Array.isArray(item.findings) ? item.findings.slice(0, 4).map((finding) => ({
+    module: String(finding?.module || "").trim().toLowerCase(),
+    rva: String(finding?.rva || "").trim().toLowerCase(),
+    imageSha256: String(finding?.imageSha256 || "").trim().toLowerCase()
+  })).filter((finding) => finding.module && finding.rva && finding.imageSha256) : [];
+  return {
+    receivedAt: String(item.scannedAt || item.receivedAt || ""),
+    username: String(item.minecraftUsername || "").trim() || "—",
+    process: [processName || "unknown", Number.isInteger(processId) && processId > 0 ? `PID ${processId}` : ""].filter(Boolean).join(" · "),
+    findings,
+    launcherVersion: String(item.launcherVersion || "").trim() || "—",
+    antiCheatVersion: String(item.antiCheatVersion || "").trim() || "—"
+  };
+}
+
 function shortDeviceId(value = "") {
   const text = String(value || "").trim();
   if (!text) return "—";
@@ -3643,6 +3713,33 @@ function renderAccessDecisionRows(list, records = []) {
   list.appendChild(fragment);
 }
 
+function renderPhoenixDetectionRows(list, records = []) {
+  if (!list) return;
+  list.innerHTML = "";
+  if (!records.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No confirmed Phoenix flags found.";
+    list.appendChild(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const record of records) {
+    const row = document.createElement("div");
+    row.className = "event phoenix-detection-row";
+    const exactFindings = record.findings.map((finding) => `${finding.module} @ ${finding.rva} · disk ${finding.imageSha256}`).join(" | ");
+    const compactFindings = record.findings.map((finding) => `${finding.module} @ ${finding.rva} · ${finding.imageSha256.slice(0, 12)}…`).join(" | ");
+    appendPlayerDataCell(row, shortDateTime(record.receivedAt));
+    appendPlayerDataCell(row, record.username);
+    appendPlayerDataCell(row, record.process, record.process);
+    appendPlayerDataCell(row, compactFindings || "Confirmed code mismatch", exactFindings, "phoenix-detection-evidence");
+    appendPlayerDataCell(row, record.launcherVersion);
+    appendPlayerDataCell(row, record.antiCheatVersion);
+    fragment.appendChild(row);
+  }
+  list.appendChild(fragment);
+}
+
 function renderPlayerDataRows(list, records = [], kind = "players", emptyText = "No records found.") {
   if (kind === "players") {
     renderPlayerRows(list, records);
@@ -3674,7 +3771,7 @@ function renderPlayerDataRows(list, records = [], kind = "players", emptyText = 
 }
 
 function playerDataFailureSummary(results = []) {
-  const labels = ["Downloads", "Players", "Launcher updates", "Access control"];
+  const labels = ["Downloads", "Players", "Sus", "Launcher updates", "Access control"];
   return results
     .map((result, index) => {
       if (result.status !== "rejected") return "";
@@ -3686,10 +3783,11 @@ function playerDataFailureSummary(results = []) {
 }
 
 function activatePlayerDataView(view = "downloads") {
-  activePlayerDataView = ["downloads", "players", "updates", "access"].includes(view) ? view : "downloads";
+  activePlayerDataView = ["downloads", "players", "sus", "updates", "access"].includes(view) ? view : "downloads";
   els.playerDataTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.playerDataView === activePlayerDataView));
   if (els.playerDownloadsPanel) els.playerDownloadsPanel.hidden = activePlayerDataView !== "downloads";
   if (els.playerRecordsPanel) els.playerRecordsPanel.hidden = activePlayerDataView !== "players";
+  if (els.playerSusPanel) els.playerSusPanel.hidden = activePlayerDataView !== "sus";
   if (els.playerLauncherUpdatesPanel) els.playerLauncherUpdatesPanel.hidden = activePlayerDataView !== "updates";
   if (els.playerAccessPanel) els.playerAccessPanel.hidden = activePlayerDataView !== "access";
 }
@@ -3718,13 +3816,14 @@ async function loadPlayerDownloadHistory() {
   const originalMarkup = els.loadDashboardButton.innerHTML;
   try {
     els.loadDashboardButton.textContent = "Loading";
-    const [downloadsResult, playersResult, updatesResult, accessResult] = await Promise.allSettled([
+    const [downloadsResult, playersResult, phoenixResult, updatesResult, accessResult] = await Promise.allSettled([
       loadAllPlayerDataPages((payload) => window.aht.devLauncherDownloads(payload), "downloads"),
       loadAllPlayerDataPages((payload) => window.aht.devPlayerRecords(payload), "players"),
+      loadAllPlayerDataPages((payload) => window.aht.devPhoenixDetections(payload), "detections"),
       loadAllPlayerDataPages((payload) => window.aht.devLauncherUpdates(payload), "updates"),
       window.aht.devAccessDecisions({ active: false, history: true })
     ]);
-    const historyResults = [downloadsResult, playersResult, updatesResult, accessResult];
+    const historyResults = [downloadsResult, playersResult, phoenixResult, updatesResult, accessResult];
     const failureSummary = playerDataFailureSummary(historyResults);
     if (historyResults.every((result) => result.status === "rejected")) throw new Error(failureSummary);
     playerDownloadRecords = (downloadsResult.status === "fulfilled" ? downloadsResult.value : [])
@@ -3732,6 +3831,9 @@ async function loadPlayerDownloadHistory() {
       .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
     canonicalPlayerRecords = (playersResult.status === "fulfilled" ? playersResult.value : [])
       .map(playerDataRecord)
+      .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
+    phoenixDetectionRecords = (phoenixResult.status === "fulfilled" ? phoenixResult.value : [])
+      .map(phoenixDetectionRecord)
       .sort((left, right) => String(right.receivedAt || "").localeCompare(String(left.receivedAt || "")));
     launcherUpdateRecords = (updatesResult.status === "fulfilled" ? updatesResult.value : [])
       .map(playerDataRecord)
@@ -3744,6 +3846,7 @@ async function loadPlayerDownloadHistory() {
       .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
     renderPlayerDataRows(els.playerDownloadsList, playerDownloadRecords, "downloads", "No installer downloads found.");
     renderPlayerDataRows(els.playerRecordsList, canonicalPlayerRecords, "players", "No players found.");
+    renderPhoenixDetectionRows(els.playerSusList, phoenixDetectionRecords);
     renderPlayerDataRows(els.playerLauncherUpdatesList, launcherUpdateRecords, "updates", "No launcher updates found.");
     renderAccessDecisionRows(els.playerAccessList, accessDecisionRecords);
     playerDataLoaded = true;
@@ -3752,7 +3855,7 @@ async function loadPlayerDownloadHistory() {
       setDevLog(failureSummary);
       showToast("Player data partially loaded", failureSummary, "warn");
     } else {
-      showToast("Player data loaded", `${playerDownloadRecords.length} downloads, ${canonicalPlayerRecords.length} players, ${launcherUpdateRecords.length} launcher updates, ${accessDecisionRecords.length} access decisions.`, "success");
+      showToast("Player data loaded", `${playerDownloadRecords.length} downloads, ${canonicalPlayerRecords.length} players, ${phoenixDetectionRecords.length} Phoenix flags, ${launcherUpdateRecords.length} launcher updates, ${accessDecisionRecords.length} access decisions.`, "success");
     }
   } catch (error) {
     const message = cleanErrorMessage(error);
@@ -5339,6 +5442,95 @@ function closeRepairPrompt() {
   if (els.repairPromptOverlay) els.repairPromptOverlay.hidden = true;
 }
 
+function renderPhoenixAntiCheatProgress(progress = {}) {
+  if (!els.phoenixAntiCheatProgress) return;
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const completed = Math.max(0, Number(progress.completedBytes) || 0);
+  const total = Math.max(0, Number(progress.totalBytes) || 0);
+  els.phoenixAntiCheatProgress.hidden = false;
+  els.phoenixAntiCheatProgress.setAttribute('aria-valuenow', String(Math.round(percent)));
+  els.phoenixAntiCheatProgressLabel.textContent = String(progress.phase || 'Installing');
+  els.phoenixAntiCheatProgressCount.textContent = total
+    ? `${Math.round(percent)}% · ${formatBytes(completed)} / ${formatBytes(total)}`
+    : `${Math.round(percent)}%`;
+  els.phoenixAntiCheatProgressBar.style.width = `${percent}%`;
+}
+
+function finishPhoenixAntiCheatPrompt(continuePlay = false) {
+  if (phoenixAntiCheatInstalling && !continuePlay) return;
+  if (els.phoenixAntiCheatOverlay) els.phoenixAntiCheatOverlay.hidden = true;
+  const resolve = phoenixAntiCheatPromptResolve;
+  phoenixAntiCheatPromptResolve = null;
+  if (resolve) resolve(Boolean(continuePlay));
+}
+
+function openPhoenixAntiCheatPrompt(status = {}) {
+  if (!els.phoenixAntiCheatOverlay) return Promise.resolve(false);
+  phoenixAntiCheatInstalling = false;
+  els.phoenixAntiCheatDialog?.classList.remove('is-installing');
+  els.phoenixAntiCheatProgress.hidden = true;
+  els.phoenixAntiCheatProgressBar.style.width = '0%';
+  els.phoenixAntiCheatProgress.setAttribute('aria-valuenow', '0');
+  els.phoenixAntiCheatError.hidden = true;
+  els.phoenixAntiCheatCancelButton.disabled = false;
+  els.phoenixAntiCheatInstallButton.disabled = false;
+  els.phoenixAntiCheatInstallButton.innerHTML = '<span class="button-icon icon-download" aria-hidden="true"></span>Install';
+  if (els.phoenixAntiCheatSummary) {
+    els.phoenixAntiCheatSummary.textContent = status?.state === 'update-required'
+      ? 'Phoenix Anti-cheat needs an update before protected play can continue.'
+      : 'Phoenix Anti-cheat is required for protected A Hard Time online play.';
+  }
+  if (status?.state === 'repair-required') {
+    els.phoenixAntiCheatError.textContent = 'Phoenix Anti-cheat needs repair before Play.';
+    els.phoenixAntiCheatError.hidden = false;
+  } else if (status?.state === 'update-required') {
+    els.phoenixAntiCheatError.textContent = 'Phoenix Anti-cheat needs an update before Play.';
+    els.phoenixAntiCheatError.hidden = false;
+  }
+  els.phoenixAntiCheatOverlay.hidden = false;
+  els.phoenixAntiCheatInstallButton.focus();
+  return new Promise((resolve) => { phoenixAntiCheatPromptResolve = resolve; });
+}
+
+async function ensurePhoenixAntiCheatBeforePlay() {
+  if (bootDeveloperMode || typeof window.aht?.getPhoenixAntiCheatStatus !== 'function') return true;
+  const status = await window.aht.getPhoenixAntiCheatStatus();
+  if (!status?.required || (status.installed && status.valid)) return true;
+  return openPhoenixAntiCheatPrompt(status);
+}
+
+async function installPhoenixAntiCheatFromPrompt() {
+  if (phoenixAntiCheatInstalling) return;
+  phoenixAntiCheatInstalling = true;
+  els.phoenixAntiCheatDialog?.classList.add('is-installing');
+  els.phoenixAntiCheatCancelButton.disabled = true;
+  els.phoenixAntiCheatInstallButton.disabled = true;
+  els.phoenixAntiCheatInstallButton.textContent = 'Installing…';
+  els.phoenixAntiCheatError.hidden = true;
+  renderPhoenixAntiCheatProgress({ phase: 'Connecting', percent: 0 });
+  try {
+    const status = await window.aht.installPhoenixAntiCheat();
+    if (!status?.installed || !status.valid) throw new Error('Phoenix Anti-cheat could not be verified after installation.');
+    renderPhoenixAntiCheatProgress({ phase: 'Ready', percent: 100 });
+    phoenixAntiCheatInstalling = false;
+    els.phoenixAntiCheatDialog?.classList.remove('is-installing');
+    finishPhoenixAntiCheatPrompt(true);
+  } catch (error) {
+    phoenixAntiCheatInstalling = false;
+    els.phoenixAntiCheatDialog?.classList.remove('is-installing');
+    els.phoenixAntiCheatCancelButton.disabled = false;
+    els.phoenixAntiCheatInstallButton.disabled = false;
+    els.phoenixAntiCheatInstallButton.innerHTML = '<span class="button-icon icon-download" aria-hidden="true"></span>Retry install';
+    els.phoenixAntiCheatError.textContent = 'Phoenix Anti-cheat could not be installed. Your launcher was not changed.';
+    els.phoenixAntiCheatError.hidden = false;
+    showToast('Anti-cheat install failed', playerSafeErrorMessage(error), 'error', {
+      context: 'anticheat:install',
+      packKey: activeSidebarPack,
+      copyLabel: 'Click here to copy'
+    });
+  }
+}
+
 async function scanFilesForRepair() {
   const requestedPackKey = activeSidebarPack;
   if (updatePoll || lastUpdateState?.running) {
@@ -5548,6 +5740,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && els.friendsOverlay && !els.friendsOverlay.hidden) closeFriendsPanel();
   if (event.key === "Escape" && els.repairPromptOverlay && !els.repairPromptOverlay.hidden) closeRepairPrompt();
   if (event.key === "Escape" && els.updateOptionsOverlay && !els.updateOptionsOverlay.hidden) closeUpdateOptions();
+  if (event.key === "Escape" && els.phoenixAntiCheatOverlay && !els.phoenixAntiCheatOverlay.hidden) finishPhoenixAntiCheatPrompt(false);
 });
 if (els.downloadsUpdateIconButton) {
   els.downloadsUpdateIconButton.addEventListener("click", () => {
@@ -5568,9 +5761,10 @@ els.playButton.addEventListener("click", async () => {
   const requestedPackName = requestedPackKey === "ptb" ? "A Hard Time PTB" : "A Hard Time";
   if (els.copyLatestLaunchReportButton) els.copyLatestLaunchReportButton.hidden = true;
   setPlayBusy(true);
-  setLog(`Opening Minecraft Launcher for ${requestedPackName}...`);
-  showToast("Opening Minecraft Launcher", `Using the prepared ${requestedPackName} installation.`, "info");
   try {
+    if (!(await ensurePhoenixAntiCheatBeforePlay())) return;
+    setLog(`Opening Minecraft Launcher for ${requestedPackName}...`);
+    showToast("Opening Minecraft Launcher", `Using the prepared ${requestedPackName} installation.`, "info");
     const result = await window.aht.play(requestedPackKey);
     const profileName = result?.minecraftProfile?.profileName || requestedPackName;
     showToast(
@@ -5654,6 +5848,22 @@ if (els.updateOptionsUpdateButton) {
     const replaceGameSettings = Boolean(els.replaceGameSettingsInput?.checked);
     closeUpdateOptions();
     startUpdate(false, { replaceGameSettings });
+  });
+}
+if (typeof window.aht?.onPhoenixAntiCheatInstallProgress === 'function') {
+  window.aht.onPhoenixAntiCheatInstallProgress((progress) => {
+    if (phoenixAntiCheatInstalling) renderPhoenixAntiCheatProgress(progress);
+  });
+}
+if (els.phoenixAntiCheatCancelButton) {
+  els.phoenixAntiCheatCancelButton.addEventListener('click', () => finishPhoenixAntiCheatPrompt(false));
+}
+if (els.phoenixAntiCheatInstallButton) {
+  els.phoenixAntiCheatInstallButton.addEventListener('click', () => installPhoenixAntiCheatFromPrompt());
+}
+if (els.phoenixAntiCheatOverlay) {
+  els.phoenixAntiCheatOverlay.addEventListener('click', (event) => {
+    if (event.target === els.phoenixAntiCheatOverlay) finishPhoenixAntiCheatPrompt(false);
   });
 }
 if (els.pickInstanceButton) {
@@ -5941,6 +6151,7 @@ function setClientZipStatus(state, title, detail = "") {
 }
 
 async function buildClientZipFromSelectedFolder() {
+  if (isUnavailable(els.buildClientZipButton)) return;
   const sourceDir = els.clientModpackDirInput?.value.trim() || "";
   const version = els.clientZipVersionInput?.value.trim() || currentStatus?.latest?.version || currentStatus?.installed?.version || "";
   if (!sourceDir) {
@@ -5976,7 +6187,7 @@ async function buildClientZipFromSelectedFolder() {
     setDevLog(message);
     showToast("ZIP failed", message, "error");
   } finally {
-    setUnavailable(els.buildClientZipButton, false);
+    updateReleaseUploadState();
   }
 }
 

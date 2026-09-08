@@ -204,10 +204,15 @@ try {
     throw new Error(`Test launcher config escaped the isolated user-data directory: ${userData}`);
   }
   const consumedJavaSelection = JSON.parse(await fsp.readFile(path.join(userData, 'installer-java8-selection.json'), 'utf8'));
+  const installerSelectionStillPending = status.config?.minecraftLauncher?.java8InstallOverride === true
+    && status.java8Runtime?.installOverride === true;
+  const installerSelectionCompleted = status.config?.minecraftLauncher?.java8InstallOverride === null
+    && status.java8Runtime?.installOverride === null
+    && status.java8Runtime?.usable === true
+    && path.resolve(status.java8Runtime?.path || '') === path.resolve(javaPath);
   if (
     status.config?.minecraftLauncher?.enabled !== true
-    || status.config?.minecraftLauncher?.java8InstallOverride !== true
-    || status.java8Runtime?.installOverride !== true
+    || (!installerSelectionStillPending && !installerSelectionCompleted)
     || consumedJavaSelection.allowManagedJava8 !== true
     || !consumedJavaSelection.consumedAt
   ) {

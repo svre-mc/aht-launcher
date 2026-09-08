@@ -1,19 +1,20 @@
-AHT Runtime Guard
+Phoenix Anti-cheat
 
-The Windows launcher starts this separate, read-only helper for a game session.
-It identifies the matching Java game process using its game directory and Windows
-session, and compares protected native code in jvm.dll, java.dll and LWJGL against
-the modules' files. Normal Java JIT memory is outside those comparisons. Two
-successive differing measurements are required for a native code-change result.
+Phoenix Anti-cheat is a separate, optional-install Windows component required to
+join A Hard Time servers. The launcher starts it only after the player clicks
+Play. It is not embedded in the launcher installer and it does not add a Windows
+service, startup entry, kernel driver, tray process, or background updater.
+It does not install a service, does not run at system startup, and does not use a kernel driver.
 
-The server receives a fresh signed status, process identifier/start time, scan
-sequence, coverage counts and, on a difference, bounded module names, relative
-code offsets and module file hashes. The helper does not send memory contents,
-personal documents, or unrelated process lists. Its temporary signing key stays
-in its process. It requests query/read access; it does not inject code, modify the
-game's memory, install a driver or alter antivirus settings. It exits with the
-game, or after 30 minutes if no matching game starts.
+The helper uses read-only access for one matching A Hard Time game session. It
+does not send memory contents, absolute paths, personal documents, or unrelated
+process lists. Confirmed flags are signed and submitted through the authenticated
+launcher session for the restricted developer Sus view. The temporary signing
+and local-session keys stay in memory and are never written into the game proof
+file or player logs.
 
-The launcher also disables the game's standard Java attach mechanism. This
-protection complements server-authoritative gameplay checks. A client machine
-controlled by an attacker cannot provide universal proof that no cheat exists.
+It requests query/read access only; it does not inject code, modify game memory,
+install a driver, or alter antivirus settings. It exits with the game. If the
+game has not started, it exits when the launcher closes (or after 30 minutes as a
+final safety limit). Client protection complements server-authoritative checks;
+no software running on a user-controlled computer can promise universal proof.

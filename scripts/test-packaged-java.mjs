@@ -8,7 +8,7 @@ assert(process.versions.electron, 'Run this test with the packaged Electron exec
 const resources = path.join(path.dirname(process.execPath), 'resources');
 const runtimeModule = await import(pathToFileURL(path.join(resources, 'app.asar/src/bundledJava8.js')));
 const { inspectJavaRuntime, preflightJava8Runtime } = await import(pathToFileURL(path.join(resources, 'app.asar/src/forgeInstaller.js')));
-const { verifyRepairedJava, RUNTIME_REPAIR_BUILD } = await import(pathToFileURL(path.join(resources, 'app.asar/src/runtimeRepair.js')));
+const { verifyRepairedJava } = await import(pathToFileURL(path.join(resources, 'app.asar/src/runtimeRepair.js')));
 const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-packaged-java-'));
 try {
   const runtime = await runtimeModule.ensureBundledJava8({
@@ -37,6 +37,6 @@ try {
   assert(finalJava.heapReady && finalJava.usable);
   console.log(JSON.stringify({ ok: true, executable: process.execPath, platform: os.release(),
     java: runtime.version, architecture: runtime.arch, vendor: runtime.vendor,
-    build: RUNTIME_REPAIR_BUILD, bundledArchive: true, downloaded: false,
+    bundledArchive: true, downloaded: false,
     missingJvmLibraryRepaired: true, missingCachedJavaExecutableRepaired: true, finalHeapProbePassed: true }));
 } finally { await fs.rm(cacheDir, { recursive: true, force: true }); }

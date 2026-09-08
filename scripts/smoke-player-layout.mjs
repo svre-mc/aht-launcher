@@ -45,6 +45,7 @@ const screenshotDir = path.join(root, 'screenshots');
 const testEvidenceDir = String(process.env.AHT_TEST_EVIDENCE_DIR || '').trim()
   ? path.resolve(process.env.AHT_TEST_EVIDENCE_DIR)
   : '';
+const interactivePhoenixPreview = process.env.AHT_INTERACTIVE_PHOENIX_PREVIEW === '1';
 const sidebarSelectedLightPath = path.resolve('desktop', 'renderer', 'assets', 'sidebar-selected-light.png');
 const sidebarSelectedLight = fs.readFileSync(sidebarSelectedLightPath);
 const sidebarSelectedLightIdentity = {
@@ -152,6 +153,7 @@ public static class AhtNativeWindowHitTest {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
   public static IntPtr FindLauncherWindow(int[] processIds) {
@@ -162,7 +164,7 @@ public static class AhtNativeWindowHitTest {
       uint processId;
       GetWindowThreadProcessId(hWnd, out processId);
       RECT rect;
-      if (wanted.Contains(processId) && GetWindowRect(hWnd, out rect) && rect.Right - rect.Left >= 1000 && rect.Bottom - rect.Top >= 500) {
+      if (wanted.Contains(processId) && IsWindowVisible(hWnd) && GetWindowRect(hWnd, out rect) && rect.Right - rect.Left >= 1000 && rect.Bottom - rect.Top >= 500) {
         found = hWnd;
         return false;
       }
@@ -741,6 +743,7 @@ async function assertLayout(client, label) {
   if (report.activeView === 'player' && report.launchBottomGap !== null && report.launchBottomGap > 28) failures.push(`launch strip is floating above the workspace bottom: ${report.launchBottomGap}px`);
   if (report.visibleDeveloperText) failures.push('developer console visible in player UI');
   if (/NSIS|DMG app|package target|build -/i.test(report.bodyText)) failures.push('technical package/build wording visible in player UI');
+  if (/Runtime Repair/i.test(report.bodyText)) failures.push('obsolete runtime-repair build label visible in player UI');
   if (/CurseForge|fallback cache|Exact AHT client ZIP/i.test(report.bodyText)) failures.push('technical release-source wording visible in player UI');
   if (failures.length) {
     throw new Error(`Layout check failed for ${label}: ${failures.join('; ')}\n${JSON.stringify(report, null, 2)}`);
@@ -757,6 +760,29 @@ const latest = {
   zipFormat: 'aht-full-client-zip',
   zip: { path: 'packs/a-hard-time-9.9.9.zip', size: 123, sha256: '0'.repeat(64) }
 };
+let phoenixPreviewPackage = null;
+if (interactivePhoenixPreview) {
+  const manifest = JSON.parse(await fsp.readFile(path.resolve('build', 'native-guard', 'manifest.json'), 'utf8'));
+  const fileName = `Phoenix-Anti-cheat-Windows-x64-${manifest.version}.exe`;
+  const binaryPath = path.resolve('release-builds', 'phoenix-anticheat', fileName);
+  const bytes = await fsp.readFile(binaryPath);
+  if (bytes.length !== manifest.bytes || sha256(bytes) !== String(manifest.sha256 || '').toUpperCase()) {
+    throw new Error('The interactive Phoenix preview binary does not match its verified build manifest.');
+  }
+  const releasePath = `launcher/anticheat/win32-x64/${fileName}`;
+  phoenixPreviewPackage = { bytes, releasePath };
+  latest.antiCheat = {
+    product: 'phoenix-anticheat',
+    platform: 'win32-x64',
+    version: manifest.version,
+    protocol: manifest.protocol,
+    fileName,
+    path: releasePath,
+    url: `${workerEndpoint}/${releasePath}`,
+    sha256: manifest.sha256,
+    size: manifest.bytes
+  };
+}
 const ptbLatest = {
   packId: 'a-hard-time-ptb',
   name: 'A Hard Time PTB',
@@ -832,6 +858,13 @@ await writeJson(defaultsPath, {
 
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
+  if (phoenixPreviewPackage && url.pathname === `/${phoenixPreviewPackage.releasePath}`) {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/octet-stream');
+    response.setHeader('Content-Length', String(phoenixPreviewPackage.bytes.length));
+    response.end(phoenixPreviewPackage.bytes);
+    return;
+  }
   if (url.pathname === '/latest.json') {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -902,6 +935,7 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_KEEP_RENDERER_ACTIVE: '1',
     AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
     AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    ...(interactivePhoenixPreview ? { AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE: '1' } : {}),
     AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     ELECTRON_ENABLE_LOGGING: '0'
@@ -1004,11 +1038,23 @@ try {
       closeLabel: close?.getAttribute('aria-label') || ''
     };
   })()`);
-  const nativeWindowControlProof = queryWindowsNativeHitTest(child.pid, [
+  const nativeHitPoints = [
     ...fixedWindowProof.minimizeHitMap.map(({ x, y }) => ({ controlId: 'windowMinimizeButton', x, y, expectedHit: 1 })),
     ...fixedWindowProof.closeHitMap.map(({ x, y }) => ({ controlId: 'windowCloseButton', x, y, expectedHit: 1 })),
     { controlId: 'windowDragRegion', x: 800, y: 14, expectedHit: 2 }
-  ]);
+  ];
+  let nativeWindowControlProof = { supported: false, samples: [] };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await client.call('Page.bringToFront');
+    await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 800, y: 14 });
+    await sleep(250);
+    nativeWindowControlProof = queryWindowsNativeHitTest(child.pid, nativeHitPoints);
+    const matched = !nativeWindowControlProof.supported
+      || (nativeWindowControlProof.samples.length === nativeHitPoints.length
+        && nativeWindowControlProof.samples.every((sample) => sample.hit === sample.expectedHit));
+    if (matched) break;
+  }
   if (
     nativeWindowControlProof.supported
     && (
@@ -2258,6 +2304,143 @@ try {
     await sleep(260);
     reports.push(await assertLayout(client, `${size.name}-player`));
     screenshots.push(await captureScreenshot(client, `${size.name}-player`));
+    const phoenixPromptProof = await evaluate(client, `(() => {
+      void openPhoenixAntiCheatPrompt({ state: 'missing' });
+      const overlay = document.querySelector('#phoenixAntiCheatOverlay');
+      const dialog = document.querySelector('.phoenix-anticheat-dialog');
+      const content = document.querySelector('.phoenix-anticheat-content');
+      const brand = document.querySelector('.phoenix-anticheat-brand');
+      const badgeVisual = document.querySelector('.phoenix-anticheat-visual');
+      const badge = document.querySelector('.phoenix-anticheat-badge');
+      const badgeMark = document.querySelector('.phoenix-anticheat-mark');
+      const badgeFlame = document.querySelector('.phoenix-anticheat-flame');
+      const animatedBadge = document.querySelector('[data-phoenix-badge-animation]');
+      const innerBadgeRing = document.querySelector('.phoenix-anticheat-badge-ring-inner');
+      const rect = dialog?.getBoundingClientRect();
+      const badgeRect = badge?.getBoundingClientRect();
+      const animatedBadgeStyle = animatedBadge ? getComputedStyle(animatedBadge) : null;
+      const hit = (selector) => {
+        const node = document.querySelector(selector);
+        const box = node?.getBoundingClientRect();
+        return box ? document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('button')?.id || '' : '';
+      };
+      return {
+        visible: overlay?.hidden === false && getComputedStyle(overlay).display !== 'none',
+        withinViewport: Boolean(rect) && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+        installHit: hit('#phoenixAntiCheatInstallButton'),
+        cancelHit: hit('#phoenixAntiCheatCancelButton'),
+        installLabel: document.querySelector('#phoenixAntiCheatInstallButton')?.innerText || '',
+        cancelLabel: document.querySelector('#phoenixAntiCheatCancelButton')?.innerText || '',
+        badgeWidth: badgeRect?.width || 0,
+        badgeHeight: badgeRect?.height || 0,
+        badgeEdgeBorder: badge ? getComputedStyle(badge).borderTopWidth : '',
+        badgeBacklightBackground: badgeVisual ? getComputedStyle(badgeVisual, '::before').backgroundImage : '',
+        badgeBacklightFilter: badgeVisual ? getComputedStyle(badgeVisual, '::before').filter : '',
+        badgeBoxShadow: badge ? getComputedStyle(badge).boxShadow : '',
+        badgeSurfaceFilter: badge ? getComputedStyle(badge, '::after').filter : '',
+        badgeMarkFilter: badgeMark ? getComputedStyle(badgeMark).filter : '',
+        emblemBacklightBackground: badgeMark ? getComputedStyle(badgeMark, '::before').backgroundImage : '',
+        emblemBacklightFilter: badgeMark ? getComputedStyle(badgeMark, '::before').filter : '',
+        badgeFlameBoxShadow: badgeFlame ? getComputedStyle(badgeFlame).boxShadow : '',
+        badgeAnimation: animatedBadgeStyle?.animationName || '',
+        badgeTransform: animatedBadgeStyle?.transform || '',
+        outerTrackBorder: animatedBadgeStyle?.borderTopWidth || '',
+        middleRingContent: badge ? getComputedStyle(badge, '::before').content : '',
+        innerBadgeAnimation: innerBadgeRing ? getComputedStyle(innerBadgeRing).animationName : '',
+        innerBadgeDirection: innerBadgeRing ? getComputedStyle(innerBadgeRing).animationDirection : '',
+        innerBadgeTransform: innerBadgeRing ? getComputedStyle(innerBadgeRing).transform : '',
+        innerTrackBorder: innerBadgeRing ? getComputedStyle(innerBadgeRing).borderTopWidth : '',
+        outerLightBackground: animatedBadge ? getComputedStyle(animatedBadge, '::before').backgroundImage : '',
+        outerLightFilter: animatedBadge ? getComputedStyle(animatedBadge, '::before').filter : '',
+        innerLightBackground: innerBadgeRing ? getComputedStyle(innerBadgeRing, '::before').backgroundImage : '',
+        innerLightFilter: innerBadgeRing ? getComputedStyle(innerBadgeRing, '::before').filter : '',
+        outerDotContent: animatedBadge ? getComputedStyle(animatedBadge, '::after').content : '',
+        innerDotContent: innerBadgeRing ? getComputedStyle(innerBadgeRing, '::after').content : '',
+        topAccentContent: dialog ? getComputedStyle(dialog, '::before').content : '',
+        dialogDecoration: dialog ? getComputedStyle(dialog, '::after').backgroundImage : '',
+        contentBackground: content ? getComputedStyle(content).backgroundImage : '',
+        brandBackground: brand ? getComputedStyle(brand).backgroundImage : '',
+        hasCardIncision: Boolean(document.querySelector('.phoenix-anticheat-card-cut, .phoenix-anticheat-card-surface')),
+        badgeZIndex: badge ? getComputedStyle(badge).zIndex : '',
+        text: dialog?.innerText || ''
+      };
+    })()`);
+    await sleep(430);
+    const phoenixMotionProof = await evaluate(client, `(() => {
+      const animatedBadge = document.querySelector('[data-phoenix-badge-animation]');
+      const innerBadgeRing = document.querySelector('.phoenix-anticheat-badge-ring-inner');
+      return {
+        outerTransform: animatedBadge ? getComputedStyle(animatedBadge).transform : '',
+        innerTransform: innerBadgeRing ? getComputedStyle(innerBadgeRing).transform : ''
+      };
+    })()`);
+    const phoenixBadgeAnimated = Boolean(
+      phoenixPromptProof.badgeTransform
+      && phoenixMotionProof.outerTransform
+      && phoenixPromptProof.badgeTransform !== phoenixMotionProof.outerTransform
+      && phoenixPromptProof.innerBadgeTransform
+      && phoenixMotionProof.innerTransform
+      && phoenixPromptProof.innerBadgeTransform !== phoenixMotionProof.innerTransform
+    );
+    const phoenixBadgeEmitsColoredHalo = /223, 179, 106|255, 217, 135|223, 129, 63/i.test(`${phoenixPromptProof.badgeBoxShadow} ${phoenixPromptProof.badgeFlameBoxShadow}`);
+    const phoenixDescriptionLeaksImplementation = /kernel|user mode|Windows service|startup item|injection|process list|memory content|absolute path|interference|verified state|technical evidence|matching AHT game/i.test(phoenixPromptProof.text);
+    if (
+      !phoenixPromptProof.visible
+      || !phoenixPromptProof.withinViewport
+      || phoenixPromptProof.installHit !== 'phoenixAntiCheatInstallButton'
+      || phoenixPromptProof.cancelHit !== 'phoenixAntiCheatCancelButton'
+      || phoenixPromptProof.installLabel.trim() !== 'Install'
+      || phoenixPromptProof.cancelLabel.trim() !== 'Cancel'
+      || !/security checks needed/i.test(phoenixPromptProof.text)
+      || !/Terms of Service and Privacy Policy/i.test(phoenixPromptProof.text)
+      || !/Install Phoenix to continue/i.test(phoenixPromptProof.text)
+      || /Required for Windows Play/i.test(phoenixPromptProof.text)
+      || phoenixDescriptionLeaksImplementation
+      || phoenixPromptProof.badgeWidth < 190
+      || phoenixPromptProof.badgeHeight < 190
+      || phoenixPromptProof.badgeEdgeBorder !== '1px'
+      || !/radial-gradient/i.test(phoenixPromptProof.badgeBacklightBackground)
+      || phoenixPromptProof.badgeBacklightFilter === 'none'
+      || phoenixPromptProof.badgeSurfaceFilter !== 'none'
+      || phoenixPromptProof.badgeMarkFilter !== 'none'
+      || !/radial-gradient/i.test(phoenixPromptProof.emblemBacklightBackground)
+      || phoenixPromptProof.emblemBacklightFilter === 'none'
+      || phoenixBadgeEmitsColoredHalo
+      || phoenixPromptProof.badgeAnimation !== 'phoenix-badge-ring-spin'
+      || phoenixPromptProof.outerTrackBorder !== '0px'
+      || phoenixPromptProof.middleRingContent !== 'none'
+      || phoenixPromptProof.innerBadgeAnimation !== 'phoenix-badge-ring-spin'
+      || phoenixPromptProof.innerBadgeDirection !== 'reverse'
+      || phoenixPromptProof.innerTrackBorder !== '0px'
+      || !/conic-gradient/i.test(phoenixPromptProof.outerLightBackground)
+      || !/drop-shadow/i.test(phoenixPromptProof.outerLightFilter)
+      || !/conic-gradient/i.test(phoenixPromptProof.innerLightBackground)
+      || !/drop-shadow/i.test(phoenixPromptProof.innerLightFilter)
+      || phoenixPromptProof.outerDotContent !== 'none'
+      || phoenixPromptProof.innerDotContent !== 'none'
+      || phoenixPromptProof.topAccentContent !== 'none'
+      || /linear-gradient/i.test(phoenixPromptProof.dialogDecoration)
+      || !/linear-gradient/i.test(phoenixPromptProof.contentBackground)
+      || !/linear-gradient/i.test(phoenixPromptProof.brandBackground)
+      || /repeating-linear-gradient/i.test(phoenixPromptProof.brandBackground)
+      || phoenixPromptProof.hasCardIncision
+      || phoenixPromptProof.badgeZIndex !== '1'
+      || !phoenixBadgeAnimated
+    ) {
+      throw new Error(`Phoenix consent prompt is not concise, interactive, and incision-free: ${JSON.stringify({ phoenixPromptProof, phoenixMotionProof, phoenixBadgeAnimated, phoenixBadgeEmitsColoredHalo, phoenixDescriptionLeaksImplementation })}`);
+    }
+    screenshots.push(await captureScreenshot(client, `${size.name}-phoenix-anticheat-consent`));
+    if (interactivePhoenixPreview) {
+      console.log(JSON.stringify({
+        phoenixPreviewReady: true,
+        launcherVersion: '0.2.10',
+        isolatedUserData: userData,
+        note: 'Close the launcher window when testing is complete.'
+      }));
+      await new Promise((resolve) => child.once('exit', resolve));
+      process.exit(0);
+    }
+    await click(client, '#phoenixAntiCheatCancelButton');
     screenshots.push(await captureScreenshot(client, `${size.name}-nav-game-active`));
     screenshots.push(await captureScreenshot(client, `${size.name}-sidebar-aht-active`));
     const ahtSidebarHoverPoint = await evaluate(client, `(() => {

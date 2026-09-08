@@ -1,4 +1,5 @@
 import worker from '../cloudflare/curseforge-proxy-worker.js';
+import crypto from 'node:crypto';
 import { createDeviceAssertion, createDeviceCredential } from '../src/deviceIdentity.js';
 import { buildLauncherProofPayload, launcherProofDeviceBinding } from '../src/launcherProof.js';
 import {
@@ -240,7 +241,9 @@ if (!allowedProof.response.ok || allowedProof.body.payload?.deviceId !== device.
   throw new Error(`Restored device could not obtain proof: ${allowedProof.response.status} ${JSON.stringify(allowedProof.body)}`);
 }
 const guardedRequest = proofRequestPayload();
-guardedRequest.nativeGuardKeyHash = 'a'.repeat(64);
+const phoenixKeyPair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+const phoenixPublicJwk = phoenixKeyPair.publicKey.export({ format: 'jwk' });
+guardedRequest.nativeGuardKeyHash = crypto.createHash('sha256').update(`${phoenixPublicJwk.n}.${phoenixPublicJwk.e}`).digest('hex');
 guardedRequest.deviceAssertion = createDeviceAssertion(device, { purpose: 'launcher-proof', binding: launcherProofDeviceBinding(guardedRequest) });
 const guardedProof = await workerJson('/api/launcher-proof', {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' },
@@ -249,6 +252,56 @@ const guardedProof = await workerJson('/api/launcher-proof', {
 if (!guardedProof.response.ok || guardedProof.body.payload?.nativeGuardKeyHash !== guardedRequest.nativeGuardKeyHash || guardedProof.body.payload?.nativeGuardProtocol !== 'AHT-GUARD-1') {
   throw new Error('Worker did not bind the signed native guard key');
 }
+const phoenixProcessId = 4242;
+const phoenixDetail = Buffer.from(JSON.stringify({
+  process: 'javaw.exe',
+  processId: phoenixProcessId,
+  findings: [`jvm.dll:rva=1a2b:image=${'d'.repeat(64)}`]
+}), 'utf8').toString('base64url');
+const phoenixPayload = [
+  'AHT-GUARD-1',
+  crypto.randomBytes(24).toString('hex'),
+  guardedRequest.nativeGuardKeyHash,
+  String(phoenixProcessId),
+  '134000000000000000',
+  '9',
+  String(Date.now()),
+  'tampered',
+  '3',
+  '65536',
+  phoenixDetail
+].join('\n');
+const signedPhoenixProbe = {
+  payload: Buffer.from(phoenixPayload, 'utf8').toString('base64url'),
+  signature: crypto.sign('sha256', Buffer.from(phoenixPayload, 'utf8'), phoenixKeyPair.privateKey).toString('base64url'),
+  modulus: phoenixPublicJwk.n,
+  exponent: phoenixPublicJwk.e
+};
+const phoenixDetection = await workerJson('/api/session/report', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${guardedProof.body.token}`, 'CF-Connecting-IP': '203.0.113.77' },
+  body: JSON.stringify({ schemaVersion: 1, antiCheatVersion: '1.1.0', probe: signedPhoenixProbe })
+});
+if (!phoenixDetection.response.ok || phoenixDetection.body.ok !== true || Object.keys(phoenixDetection.body).length !== 1) {
+  throw new Error(`Signed Phoenix detection was not recorded: ${phoenixDetection.response.status} ${JSON.stringify(phoenixDetection.body)}`);
+}
+const phoenixDetections = await workerJson('/admin/session-reports', { headers: auth });
+const phoenixRecord = phoenixDetections.body.detections?.find((item) => item.minecraftUsername === username && item.process?.pid === phoenixProcessId);
+if (!phoenixDetections.response.ok
+    || phoenixRecord?.minecraftUsername !== username
+    || phoenixRecord?.process?.name !== 'javaw.exe'
+    || phoenixRecord?.process?.pid !== phoenixProcessId
+    || phoenixRecord?.findings?.[0]?.module !== 'jvm.dll'
+    || phoenixRecord?.findings?.[0]?.rva !== '0x1a2b'
+    || phoenixRecord?.findings?.[0]?.imageSha256 !== 'd'.repeat(64)) {
+  throw new Error(`Developer Sus data did not preserve exact Phoenix process evidence: ${JSON.stringify(phoenixDetections.body)}`);
+}
+const forgedPhoenixDetection = await workerJson('/api/session/report', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${guardedProof.body.token}` },
+  body: JSON.stringify({ schemaVersion: 1, antiCheatVersion: '1.1.0', probe: { ...signedPhoenixProbe, signature: 'A'.repeat(342) } })
+});
+if (forgedPhoenixDetection.response.status !== 400 || forgedPhoenixDetection.body.error !== 'Session report rejected.') throw new Error('Worker accepted or described forged Phoenix detection evidence');
 const replacedGuard = await workerJson('/api/launcher-proof', {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' },
   body: JSON.stringify({ ...guardedRequest, nativeGuardKeyHash: 'b'.repeat(64) })

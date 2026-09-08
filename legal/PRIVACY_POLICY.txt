@@ -1,7 +1,7 @@
 A HARD TIME PRIVACY POLICY
 
-Effective Date: August 23, 2026
-Privacy Version: 2026-08-23.1
+Effective Date: September 8, 2026
+Privacy Version: 2026-09-08.1
 
 This Privacy Policy explains how SIIS Enterprise LLC ("SIIS," "we," "us," or "our") collects, uses, discloses, and protects information when you use the A Hard Time launcher, official game servers, websites, APIs, update services, community features, and related services (collectively, the "Services"). It also describes your privacy choices.
 
@@ -26,6 +26,7 @@ B. Information collected automatically by the launcher
 - A launcher installation identifier and a separate cryptographic device-install identifier and public key, plus launcher version, operating system, platform, architecture, update channel, and general device/runtime compatibility information. The launcher protects the corresponding private key with the operating system's credential protection when available. This design does not collect motherboard, disk, BIOS, MAC-address, TPM, registry, or other hardware serial numbers.
 - Modpack version, install/update/repair events, download status, error details, and technical diagnostics.
 - Managed-mod integrity results, such as the name or relative path and hash/status of a missing, changed, added, or corrupted managed mod file. The launcher is not intended to inspect personal documents or report user-edited configuration files as unauthorized changes.
+- If Phoenix Anti-cheat confirms an integrity flag during an A Hard Time game session, the launcher reports the Minecraft username and UUID, exact AHT game process name and process ID, signed technical integrity evidence limited to that game session, launcher/Phoenix versions, and timestamps. Phoenix does not send memory contents, absolute file paths, personal documents, or a list of unrelated running processes.
 - Launcher proof and security information, including short-lived signed proof tokens, launch identifiers, pack/version claims, timestamps, and hashes used to bind proof to an installation. SIIS does not receive your Microsoft password through the launcher.
 - Network information such as IPv4 or IPv6 address, autonomous system number and organization, country and Cloudflare data-center code, request time, requested resource, response status, transfer size, user agent, and rate-limit/security events when the launcher communicates with our infrastructure.
 - A network-security assessment that may classify a connection as likely VPN/proxy, no VPN/proxy signal detected, or unknown, together with the source and confidence of that assessment. A classification is a security inference and may be incomplete or incorrect; VPN presence alone is not automatically a Terms violation.

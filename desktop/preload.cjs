@@ -26,6 +26,14 @@ const playerApi = {
   restartLauncherUpdate: () => ipcRenderer.invoke('launcher:updateRestart'),
   getLauncherUpdateState: () => ipcRenderer.invoke('launcher:updateState'),
   checkLauncherUpdate: () => ipcRenderer.invoke('launcher:checkUpdate'),
+  getPhoenixAntiCheatStatus: () => ipcRenderer.invoke('anticheat:status'),
+  installPhoenixAntiCheat: () => ipcRenderer.invoke('anticheat:install'),
+  onPhoenixAntiCheatInstallProgress: (listener) => {
+    if (typeof listener !== 'function') return () => {};
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on('anticheat:install-progress', handler);
+    return () => ipcRenderer.removeListener('anticheat:install-progress', handler);
+  },
   onLauncherUpdateAvailable: (listener) => {
     if (typeof listener !== 'function') return () => {};
     const handler = (_event, payload) => listener(payload);
@@ -99,6 +107,7 @@ const developerApi = {
   devPlayerIpv4Groups: () => ipcRenderer.invoke('dev:playerIpv4Groups'),
   devPlayerRecords: (payload) => ipcRenderer.invoke('dev:playerRecords', payload || {}),
   devLauncherUpdates: (payload) => ipcRenderer.invoke('dev:launcherUpdates', payload || {}),
+  devPhoenixDetections: (payload) => ipcRenderer.invoke('dev:phoenixDetections', payload || {}),
   devAccessDecisions: (payload) => ipcRenderer.invoke('dev:accessDecisions', payload || {}),
   devSetAccessDecision: (payload) => ipcRenderer.invoke('dev:setAccessDecision', payload || {}),
   devUpdateLogs: (limit) => ipcRenderer.invoke('dev:updateLogs', limit),

@@ -230,6 +230,7 @@ async function runDeveloperApp(port, task, targetUserData = userData, targetVaul
       (() => {
         const frame = document.querySelector('.app-frame');
         const controls = document.querySelector('.window-controls');
+        const developerTile = document.querySelector('#developerTileButton');
         return document.readyState === 'complete'
           && document.body.classList.contains('is-launcher-ready')
           && !document.body.classList.contains('is-booting')
@@ -239,10 +240,33 @@ async function runDeveloperApp(port, task, targetUserData = userData, targetVaul
           && controls
           && getComputedStyle(controls).visibility === 'visible'
           && getComputedStyle(controls).pointerEvents !== 'none'
+          && developerTile
+          && !developerTile.hidden
           && document.querySelector('#developerLoginForm');
       })()
     `, 'interactive developer login DOM');
-    await waitFor(client, "document.body.classList.contains('dev-mode') && document.body.classList.contains('dev-locked')", 'locked developer shell');
+    await evaluate(client, `
+      (() => {
+        const developerTile = document.querySelector('#developerTileButton');
+        if (!developerTile || developerTile.hidden) return false;
+        developerTile.click();
+        return true;
+      })()
+    `);
+    try {
+      await waitFor(client, "document.body.classList.contains('dev-mode') && document.body.classList.contains('dev-locked')", 'locked developer shell');
+    } catch (error) {
+      const diagnostics = await evaluate(client, `
+        (async () => ({
+          bodyClasses: document.body.className,
+          launcherReady: document.body.classList.contains('is-launcher-ready'),
+          loginHidden: document.querySelector('#developerLoginScreen')?.hidden,
+          consoleHidden: document.querySelector('#developerConsole')?.hidden,
+          status: window.aht?.getStatus ? await window.aht.getStatus().catch((statusError) => ({ error: statusError?.message || String(statusError) })) : null
+        }))()
+      `);
+      throw new Error(`${error.message}: ${JSON.stringify(diagnostics)}`);
+    }
     assertDeveloperWindowChrome(await readDeveloperWindowChrome(client, '#developerLoginScreen .dev-login-box'), 'locked login');
     await evaluate(client, `
       (() => {
@@ -387,6 +411,12 @@ if (status.config?.developer?.curseforgeApiKey || status.config?.developer?.laun
 await fsp.mkdir(splitUserData, { recursive: true });
 await fsp.copyFile(path.join(userData, 'launcher.config.json'), path.join(splitUserData, 'launcher.config.json'));
 await fsp.copyFile(path.join(userData, 'identity.json'), path.join(splitUserData, 'identity.json'));
+const splitConfig = JSON.parse(await fsp.readFile(path.join(splitUserData, 'launcher.config.json'), 'utf8'));
+splitConfig.sync = {
+  ...(splitConfig.sync || {}),
+  baseUrl: 'http://127.0.0.1:1/'
+};
+await writeJson(path.join(splitUserData, 'launcher.config.json'), splitConfig);
 await writeJson(path.join(splitUserData, 'developer.credentials.json'), {
   schemaVersion: 1,
   username: 'admin',
@@ -396,6 +426,7 @@ await writeJson(path.join(splitUserData, 'developer.credentials.json'), {
 await runDeveloperApp(basePort + 2, async (client) => {
   const initialStatus = await evaluate(client, `window.aht.getStatus().then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
   if (!initialStatus.ok) throw new Error(`Split-profile seed status failed: ${JSON.stringify(initialStatus)}`);
+  await evaluate(client, `window.aht.likeUpdateLog('00000000-0000-4000-8000-000000000001').catch(() => null)`);
 }, splitUserData, splitVaultDir);
 
 const splitLocalStateBefore = await fsp.readFile(path.join(splitUserData, 'Local State'));
@@ -429,6 +460,7 @@ const unreadableSplitDeviceBytes = await fsp.readFile(path.join(splitUserData, '
 const splitRecovery = await runDeveloperApp(basePort + 3, async (client) => {
   const recoveredStatus = await evaluate(client, `window.aht.getStatus().then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
   if (!recoveredStatus.ok) throw new Error(`Split-profile recovered status failed: ${JSON.stringify(recoveredStatus)}`);
+  await evaluate(client, `window.aht.likeUpdateLog('00000000-0000-4000-8000-000000000001').catch(() => null)`);
   const staleSecretRead = await evaluate(client, `window.aht.devGetSecrets().then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error: String(error?.message || error) }))`);
   return {
     configPackId: recoveredStatus.value?.config?.packId || '',

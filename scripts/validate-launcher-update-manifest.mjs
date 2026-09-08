@@ -68,7 +68,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     latestUrl: args['latest-url'] || process.env.AHT_LAUNCHER_UPDATE_URL || '',
     requireTrackedDownloads: true,
     requireStagedWindows: true,
-    requireStagedLinux: true
+    requireStagedLinux: true,
+    requireAntiCheat: true
   }).then((result) => {
     console.log(JSON.stringify({
       ok: true,

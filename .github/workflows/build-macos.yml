@@ -28,10 +28,13 @@ on:
       - "cloudflare/wrangler.toml"
       - "config/**"
       - "desktop/**"
+      - "native-guard/**"
       - "pack-fixes/**"
       - "server-lock-mod/build/libs/aht-version-lock-*.jar"
       - "src/**"
       - "scripts/prepare-launcher-update.mjs"
+      - "scripts/build-native-guard.mjs"
+      - "scripts/verify-packaged-native-guard.mjs"
       - "scripts/check-launcher-release-immutability.mjs"
       - "scripts/upload-r2-plan.mjs"
       - "scripts/test-github-workflow-dispatch.mjs"
@@ -134,7 +137,7 @@ jobs:
       - name: Build ${{ matrix.label }} launcher
         run: npm run ${{ matrix.build_script }}
 
-      - name: Verify packaged Windows runtime guard
+      - name: Verify separated Windows Phoenix Anti-cheat
         if: matrix.id == 'windows'
         run: node scripts/verify-packaged-native-guard.mjs
 
@@ -198,6 +201,14 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+      - name: Upload separate Phoenix Anti-cheat artifact
+        if: matrix.id == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aht-launcher-phoenix-anticheat
+          path: release-builds/phoenix-anticheat/Phoenix-Anti-cheat-Windows-x64-*.exe
           if-no-files-found: error
 
   validate-macos-runtime:
@@ -821,7 +832,7 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES_FILE" --latest
 
           shopt -s nullglob
-          release_assets=(ci-artifacts/*.exe ci-artifacts/*.dmg ci-artifacts/*.AppImage ci-launcher-update/launcher-latest.json)
+          release_assets=(ci-artifacts/AHT-Launcher-Windows-10-11-*.exe ci-artifacts/*.dmg ci-artifacts/*.AppImage ci-launcher-update/launcher-latest.json)
           if [ "${#release_assets[@]}" -eq 0 ]; then
             echo "No public release assets found."
             exit 1

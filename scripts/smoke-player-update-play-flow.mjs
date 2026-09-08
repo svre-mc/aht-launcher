@@ -8,6 +8,7 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
 import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
+import { installPhoenixTestFixture } from './helpers/phoenix-fixture.mjs';
 import { createDeviceCredential } from '../src/deviceIdentity.js';
 import { launcherProofPath, launcherProofStorageDir } from '../src/launcherProof.js';
 
@@ -394,6 +395,7 @@ await writeJson(path.join(userData, 'device-identity.json'), {
   createdAt: fixtureDeviceCredential.createdAt,
   protectedBy: 'explicit-test-fallback'
 });
+await installPhoenixTestFixture(userData);
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), {});
 await writeJson(path.join(syncedMcRoot, 'versions', versionId, `${versionId}.json`), {});
 
@@ -626,8 +628,8 @@ try {
   if (/Restart A Hard Time Launcher/i.test(droppedPreparation.launchBlockedReason || '')) {
     throw new Error(`A missing in-memory launch preparation still instructed the player to restart: ${JSON.stringify(droppedPreparation)}`);
   }
-  if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 1 || proofRequests.length < 2) {
-    throw new Error(`Update did not refresh stale launcher proof registration after Worker rejection: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
+  if (registrationRequests.length !== 0 || proofRequests.length !== 0) {
+    throw new Error(`Installation performed launcher-proof network work before Play: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
   }
   const installedFiles = [
     'mods/aht-required.jar',
@@ -775,13 +777,25 @@ try {
   if (stableProfilesBeforePlay.some((hash, index) => hash !== stableProfilesAfterMissingProfileSelection[index])) {
     throw new Error('Background preparation rewrote launcher profile metadata after the missing stable profile was selected.');
   }
+  const phoenixStatusBeforePlay = await evaluate(client, 'window.aht.getPhoenixAntiCheatStatus()');
+  if (process.platform === 'win32' && (!phoenixStatusBeforePlay?.installed || !phoenixStatusBeforePlay?.valid)) {
+    throw new Error(`The verified Phoenix test installation was not visible before Play: ${JSON.stringify(phoenixStatusBeforePlay)}`);
+  }
   const playResult = await evaluate(client, `
     window.aht.play()
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
   `);
   if (!playResult.ok || !playResult.result?.ok) {
-    throw new Error(`Clean player Play failed: ${JSON.stringify(playResult)}`);
+    let diagnosticText = '';
+    try {
+      const report = await evaluate(client, `window.aht.copyErrorReport({ context: 'play:start', packKey: 'stable', title: 'Launch failed' })`);
+      if (report?.filePath && fs.existsSync(report.filePath)) diagnosticText = fs.readFileSync(report.filePath, 'utf8').slice(-6000);
+    } catch {}
+    throw new Error(`Clean player Play failed: ${JSON.stringify({ playResult, phoenixStatusBeforePlay })}${diagnosticText ? `\n${diagnosticText}` : ''}`);
+  }
+  if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 1 || proofRequests.length < 2) {
+    throw new Error(`Play did not recover stale launcher-proof registration after Worker rejection: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
   }
   const recoveredPreparation = await evaluate(client, 'window.aht.getStatus()');
   if (!recoveredPreparation.launchReady || recoveredPreparation.launchPreparationState !== 'ready') {
@@ -1214,6 +1228,7 @@ try {
     createdAt: missingLauncherCredential.createdAt,
     protectedBy: 'explicit-test-fallback'
   });
+  await installPhoenixTestFixture(missingLauncherUserData);
 
   missingLauncherChild = spawnPlayerLauncher(missingLauncherDebugPort, {
     userData: missingLauncherUserData,

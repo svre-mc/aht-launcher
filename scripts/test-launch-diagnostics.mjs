@@ -52,7 +52,7 @@ try {
     startedAt: '2026-08-04T03:15:20.123Z',
     appName: 'A Hard Time Launcher',
     appVersion: '0.1.82',
-    buildLabel: 'Runtime Repair 2',
+    buildLabel: 'Test Build',
     mode: 'player',
     packaged: true,
     packId: 'a-hard-time-dregora',
@@ -62,7 +62,7 @@ try {
     minecraftRoot: path.join(root, 'Minecraft')
   });
   setLaunchRequirement(attempt, 'instance', 'PASS', instanceDir);
-  assert.match(formatLaunchReport(attempt), /Build: Runtime Repair 2/);
+  assert.match(formatLaunchReport(attempt), /Build: Test Build/);
   setLaunchRequirement(attempt, 'installed', 'PASS', 'Installed version 2.8.2.');
   setLaunchRequirement(attempt, 'integrity', 'FAIL', 'One managed mod is missing.');
   setLaunchRequirement(attempt, 'java8', 'PASS', 'Temurin 1.8.0_462 amd64.');

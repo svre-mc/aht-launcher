@@ -199,10 +199,14 @@ export function planR2Retention({
   }
 
   const launcherVersion = String(manifests['launcher/latest.json']?.version || '').trim();
+  const antiCheatVersion = String(manifests['launcher/latest.json']?.antiCheat?.version || '').trim();
   const stableVersion = String(manifests['latest.json']?.version || '').trim();
   const ptbVersion = String(manifests['ptb/latest.json']?.version || '').trim();
   if (![launcherVersion, stableVersion, ptbVersion].every((version) => /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version))) {
     throw new Error('Every live manifest must contain a valid version.');
+  }
+  if (antiCheatVersion && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(antiCheatVersion)) {
+    throw new Error('The live Phoenix Anti-cheat manifest entry must contain a valid version.');
   }
 
   const deletions = new Map();
@@ -215,6 +219,18 @@ export function planR2Retention({
     if (!version) throw new Error(`Refusing to classify versionless launcher object ${object.key}.`);
     if (!launcherRetainedVersions.has(version)) {
       deletions.set(object.key, { ...object, reason: 'launcher-older-than-rollback-window' });
+    }
+  }
+
+  const antiCheatObjects = objects.filter((object) => object.key.startsWith('launcher/anticheat/'));
+  const antiCheatRollbackVersion = rollbackVersion(antiCheatObjects, antiCheatVersion);
+  const antiCheatRetainedVersions = new Set([antiCheatVersion, antiCheatRollbackVersion].filter(Boolean));
+  for (const object of antiCheatObjects) {
+    if (protectedKeys.has(object.key)) continue;
+    const version = versionFromKey(object.key);
+    if (!version) throw new Error(`Refusing to classify versionless Phoenix Anti-cheat object ${object.key}.`);
+    if (!antiCheatRetainedVersions.has(version)) {
+      deletions.set(object.key, { ...object, reason: 'phoenix-anticheat-older-than-rollback-window' });
     }
   }
 
@@ -268,6 +284,7 @@ export function planR2Retention({
     protectedObjects: [...protectedKeys].sort().map((key) => byKey.get(key)),
     versions: {
       launcher: { current: launcherVersion, rollback: launcherRollbackVersion },
+      antiCheat: { current: antiCheatVersion, rollback: antiCheatRollbackVersion },
       stable: { current: stableVersion, rollback: stableRollbackVersion },
       ptb: { current: ptbVersion, rollback: ptbRollbackVersion }
     }

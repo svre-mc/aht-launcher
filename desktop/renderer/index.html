@@ -382,7 +382,7 @@
             <div class="dev-section-head">
               <h2>Modpack ZIP</h2>
               <div class="dev-actions">
-                <button id="buildClientZipButton" class="button primary compact" type="button"><span class="button-icon icon-save" aria-hidden="true"></span>Create ZIP</button>
+                <button id="buildClientZipButton" class="button primary compact is-disabled" type="button" aria-disabled="true" tabindex="-1" title="Launcher settings are still loading"><span class="button-icon icon-save" aria-hidden="true"></span>Create ZIP</button>
               </div>
             </div>
             <div class="dev-fields">
@@ -546,6 +546,7 @@
                 <nav class="player-data-tabs" aria-label="Player data views">
                   <button id="playerDownloadsTab" class="player-data-tab active" type="button" data-player-data-view="downloads">Downloads</button>
                   <button id="playerRecordsTab" class="player-data-tab" type="button" data-player-data-view="players">Players</button>
+                  <button id="playerSusTab" class="player-data-tab" type="button" data-player-data-view="sus">Sus</button>
                   <button id="playerLauncherUpdatesTab" class="player-data-tab" type="button" data-player-data-view="updates">Launcher Updates</button>
                   <button id="playerAccessTab" class="player-data-tab" type="button" data-player-data-view="access">Access Control</button>
                 </nav>
@@ -566,6 +567,15 @@
               </div>
               <div id="playerRecordsList" class="events data-events player-download-table">
                 <div class="empty-state">No players found.</div>
+              </div>
+            </div>
+            <div id="playerSusPanel" class="player-data-panel" hidden>
+              <p class="player-data-note">Confirmed Phoenix code-integrity flags only. Process evidence is limited to the matching A Hard Time Java session; unrelated running processes are never listed.</p>
+              <div class="event-table-head player-sus-table">
+                <span>Detected</span><span>Player</span><span>Process</span><span>Exact finding</span><span>Launcher</span><span>Phoenix</span>
+              </div>
+              <div id="playerSusList" class="events data-events player-sus-table">
+                <div class="empty-state">No confirmed Phoenix flags found.</div>
               </div>
             </div>
             <div id="playerLauncherUpdatesPanel" class="player-data-panel" hidden>
@@ -721,6 +731,46 @@
       <div class="repair-prompt-actions">
         <button id="updateOptionsBackButton" class="button compact" type="button">Back</button>
         <button id="updateOptionsUpdateButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update</button>
+      </div>
+    </section>
+  </div>
+  <div id="phoenixAntiCheatOverlay" class="overlay phoenix-anticheat-overlay" hidden>
+    <section class="repair-prompt-dialog phoenix-anticheat-dialog" role="dialog" aria-modal="true" aria-labelledby="phoenixAntiCheatTitle" aria-describedby="phoenixAntiCheatSummary">
+      <div class="phoenix-anticheat-layout">
+        <aside class="phoenix-anticheat-brand" aria-hidden="true">
+          <div class="phoenix-anticheat-visual">
+            <span class="phoenix-anticheat-badge">
+              <span class="phoenix-anticheat-badge-ring" data-phoenix-badge-animation></span>
+              <span class="phoenix-anticheat-badge-ring phoenix-anticheat-badge-ring-inner"></span>
+              <span class="phoenix-anticheat-badge-sheen"></span>
+              <span class="phoenix-anticheat-mark"><span class="phoenix-anticheat-flame"></span></span>
+            </span>
+          </div>
+          <div class="phoenix-anticheat-wordmark">
+            <strong>Phoenix</strong>
+            <span>Anti-cheat</span>
+          </div>
+        </aside>
+        <div class="phoenix-anticheat-content">
+          <header class="phoenix-anticheat-header">
+            <h2 id="phoenixAntiCheatTitle">Phoenix Anti-cheat</h2>
+            <p id="phoenixAntiCheatSummary" class="account-copy">Phoenix Anti-cheat is required for protected A Hard Time online play.</p>
+          </header>
+          <div class="phoenix-anticheat-explanation">
+            <p>Phoenix performs the security checks needed to help keep A Hard Time fair and secure for every player.</p>
+            <p>By selecting Install, you consent to Phoenix being used with A Hard Time under the Terms of Service and Privacy Policy.</p>
+          </div>
+          <p class="phoenix-anticheat-requirement">Install Phoenix to continue, or Cancel to return to the launcher.</p>
+          <div id="phoenixAntiCheatProgress" class="progress-wrap phoenix-anticheat-progress" role="progressbar" aria-label="Phoenix Anti-cheat installation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+            <div class="progress-meta"><span id="phoenixAntiCheatProgressLabel">Preparing</span><span id="phoenixAntiCheatProgressCount">0%</span></div>
+            <div class="progress-track"><div id="phoenixAntiCheatProgressBar" class="progress-bar"></div></div>
+          </div>
+          <p id="phoenixAntiCheatError" class="launcher-update-error" role="alert" hidden>Phoenix Anti-cheat could not be installed.</p>
+          <div class="repair-prompt-actions phoenix-anticheat-actions">
+            <button id="phoenixAntiCheatCancelButton" class="button compact" type="button">Cancel</button>
+            <button id="phoenixAntiCheatInstallButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Install</button>
+          </div>
+        </div>
       </div>
     </section>
   </div>

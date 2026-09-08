@@ -21,6 +21,7 @@ const macosUniversalZip = path.join(root, 'AHT-Launcher-macOS-universal-9.9.10.z
 const macosUniversalDmg = path.join(root, 'AHT-Launcher-macOS-universal-9.9.10.dmg');
 const linuxCompatibilityDeb = path.join(root, 'AHT-Launcher-Linux-x64-9.9.10.deb');
 const linuxAppImage = path.join(root, 'AHT-Launcher-Linux-x64-9.9.10.AppImage');
+const phoenixAntiCheat = path.join(root, 'Phoenix-Anti-cheat-Windows-x64-1.1.0.exe');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -134,6 +135,7 @@ await fsp.writeFile(macosUniversalZip, 'fake universal macos update zip\n', 'utf
 await fsp.writeFile(macosUniversalDmg, 'fake universal macos dmg\n', 'utf8');
 await fsp.writeFile(linuxCompatibilityDeb, 'fake linux compatibility deb\n', 'utf8');
 await fsp.writeFile(linuxAppImage, 'fake linux appimage\n', 'utf8');
+await fsp.writeFile(phoenixAntiCheat, 'fake separate phoenix anti-cheat\n', 'utf8');
 
 const fakeWrangler = path.join(fakeBin, 'fake-wrangler.mjs');
 await fsp.writeFile(fakeWrangler, `
@@ -254,7 +256,12 @@ try {
       document.querySelector('#developerLoginForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     })()
   `);
-  await waitFor(client, "document.body.classList.contains('dev-locked') === false", 'developer unlock');
+  await waitFor(client, `
+    document.body.classList.contains('dev-locked') === false
+      && document.querySelector('#developerLoginScreen')?.hidden === true
+      && document.querySelector('#developerConsole')?.hidden === false
+      && /Session active/.test(document.querySelector('#developerSessionStatus')?.textContent || '')
+  `, 'completed developer login');
   const result = await evaluate(client, `window.aht.devSyncLauncherUpdate({
     version: '9.9.10',
     windowsPath: ${JSON.stringify(installer)},
@@ -263,6 +270,7 @@ try {
     macosUniversalDmgPath: ${JSON.stringify(macosUniversalDmg)},
     linuxCompatibilityDebPath: ${JSON.stringify(linuxCompatibilityDeb)},
     linuxAppImagePath: ${JSON.stringify(linuxAppImage)},
+    phoenixAntiCheatPath: ${JSON.stringify(phoenixAntiCheat)},
     bucket: ${JSON.stringify(bucket)},
     publicLatestUrl: ${JSON.stringify(`${workerEndpoint}/latest.json`)}
   })`);
@@ -294,6 +302,10 @@ try {
   }
   if (Object.keys(manifest.downloads || {}).sort().join(',') !== 'macos-universal,ubuntu-x64-appimage,windows-x64') {
     throw new Error(`Published launcher manifest must contain exactly three website download entries: ${JSON.stringify(manifest.downloads)}`);
+  }
+  if (manifest.antiCheat?.path !== 'launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.1.0.exe'
+      || !/^[a-f0-9]{64}$/i.test(manifest.antiCheat?.sha256 || '')) {
+    throw new Error(`Published launcher manifest must independently pin Phoenix Anti-cheat: ${JSON.stringify(manifest.antiCheat)}`);
   }
   const uploadOrder = fs.readFileSync(uploadLog, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line).key);
   console.log(JSON.stringify({
