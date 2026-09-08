@@ -72,12 +72,13 @@ try {
   const source = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   const startup = source.slice(source.indexOf('async function prepareStartupPrerequisiteEntry('), source.indexOf('async function hydrateLaunchPreparationFromSnapshot('));
   const policy = source.match(/const STARTUP_PREREQUISITE_POLICY = '([^']+)'/)[1];
-  for (const fail of [false, true]) {
+  for (const { fail, warm } of [{ fail: false, warm: false }, { fail: true, warm: false }, { fail: false, warm: true }]) {
     let repairs = 0;
     const installed = { version: 'fixture', packId: 'aht' };
     const profile = { profileId: 'aht', versionId: plan.versionId, profileExists: true, loaderInstalled: true };
     const context = {
       process: { platform: 'win32' }, Date, STARTUP_PREREQUISITE_POLICY: policy,
+      developerClientBypassAllowed: () => false,
       createLaunchDiagnosticAttempt: createLaunchAttempt, launcherLegalStatus: async () => ({ required: false }),
       installedPackMatchesReleaseTarget: () => true, launchPreparationConfigSignature: () => 'config',
       samePath: (a, b) => a === b, launcherConfigFromPreparedPaths: () => config,
@@ -96,10 +97,10 @@ try {
     vm.runInContext(`${startup}\nglobalThis.prepare = prepareStartupPrerequisiteEntry;`, context);
     const result = await context.prepare({ target: { id: 'stable', name: 'AHT' }, config, installed }, {
       targetId: 'stable', prerequisitePolicy: policy, configSignature: 'config', installed, latest: installed,
-      launcherRoute: { executablePath: 'MinecraftLauncher.exe' }, minecraftProfile: profile,
+      launcherRoute: { executablePath: 'MinecraftLauncher.exe' }, minecraftProfile: { ...profile, loaderInstalled: warm },
       java8Runtime: { usable: true, path: 'java.exe' }, identity: { installId: 'fixture' }
     });
-    assert.equal(repairs, 1, 'Windows must check cached readiness even without bundled Java');
+    assert.equal(repairs, warm ? 0 : 1, 'Warm verified startup reuses readiness; incomplete startup repairs assets');
     assert.equal(result.state, fail ? 'blocked' : 'ready');
     if (!fail) assert.equal(result.launcherProof, null, 'asset recovery cannot bypass account authorization');
   }
