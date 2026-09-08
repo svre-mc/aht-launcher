@@ -56,13 +56,15 @@ if (changes.counts.managed !== 2 || changes.counts.changed !== 1 || changes.coun
   throw new Error(`Unexpected local-change counts: ${JSON.stringify(changes.counts)}`);
 }
 if (
-  integrity.counts.managed !== 2
-  || integrity.counts.changed !== 1
-  || integrity.counts.missing !== 1
+  integrity.counts.managed !== 4
+  || integrity.counts.changed !== 2
+  || integrity.counts.missing !== 2
   || integrity.counts.added !== 1
-  || integrity.counts.corrupted !== 3
+  || integrity.counts.corrupted !== 5
   || integrity.changed[0]?.path !== 'mods/changed.jar'
+  || integrity.changed[1]?.path !== 'config/changed.cfg'
   || integrity.missing[0]?.path !== 'mods/missing.jar'
+  || integrity.missing[1]?.path !== 'scripts/missing.zs'
   || integrity.added[0]?.path !== 'mods/local-added.jar'
 ) {
   throw new Error(`Unexpected integrity scan: ${JSON.stringify(integrity)}`);

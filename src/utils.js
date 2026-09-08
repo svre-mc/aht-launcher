@@ -161,7 +161,7 @@ export function isUrl(value) {
 }
 
 export function sourceToDisplay(source) {
-  return isFileUrl(source) ? fileURLToPath(source) : source;
+  return isHttpUrl(source) ? 'AHT download service' : 'local file';
 }
 
 export function resolveSource(baseSource, value) {
@@ -194,39 +194,66 @@ export function cacheBustHttpUrl(value, paramName = 'aht_cache_bust') {
 
 export async function readJsonFromSource(source, headers = {}) {
   if (isHttpUrl(source)) {
-    const response = await fetch(cacheBustHttpUrl(source), {
+    return fetchJson(source, headers);
+  }
+  const localPath = isFileUrl(source) ? fileURLToPath(source) : source;
+  return readJsonFile(localPath);
+}
+
+export async function httpResponseError(response, source) {
+  // Read only a small prefix; error pages can be large and can contain private
+  // request details. Retain only the edge error number and request identifier.
+  let prefix = '';
+  const reader = response.body?.getReader();
+  if (reader) {
+    try {
+      while (prefix.length < 8192) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        prefix += new TextDecoder().decode(value).slice(0, 8192 - prefix.length);
+      }
+    } catch {} finally { void reader.cancel().catch(() => {}); }
+  }
+  const edgeCode = prefix.match(/(?:error\s*(?:code)?\s*:?\s*|error-code[^>]*>\s*)(1\d{3})\b/i)?.[1] || '';
+  const ray = String(response.headers.get('cf-ray') || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 80);
+  const challenge = response.headers.get('cf-mitigated') === 'challenge';
+  const detail = [edgeCode && `Cloudflare ${edgeCode}`, challenge && 'browser verification required', ray && `request ${ray}`].filter(Boolean).join('; ');
+  const error = new Error(`GET ${sourceToDisplay(source)} failed: ${response.status} ${response.statusText}${detail ? ` (${detail})` : ''}`);
+  error.code = edgeCode ? `CLOUDFLARE_${edgeCode}` : `HTTP_${response.status}`;
+  return error;
+}
+
+export async function fetchJson(source, headers = {}, { timeoutMs = 15_000 } = {}) {
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`The download service did not respond within ${Math.ceil(timeoutMs / 1000)} seconds. Check your connection and retry.`);
+      reject(error);
+      controller.abort(error);
+    }, timeoutMs);
+  });
+  const request = (async () => {
+    const response = await fetch(isHttpUrl(source) ? cacheBustHttpUrl(source) : source, {
       headers: {
         Accept: 'application/json',
         'Cache-Control': 'no-cache',
         Pragma: 'no-cache',
         ...headers
       },
-      cache: 'no-store'
+      cache: 'no-store',
+      signal: controller.signal
     });
     if (!response.ok) {
-      throw new Error(`GET ${source} failed: ${response.status} ${response.statusText}`);
+      throw await httpResponseError(response, source);
     }
     return response.json();
+  })();
+  try {
+    return await Promise.race([request, deadline]);
+  } finally {
+    clearTimeout(timer);
   }
-  const localPath = isFileUrl(source) ? fileURLToPath(source) : source;
-  return readJsonFile(localPath);
-}
-
-export async function fetchJson(source, headers = {}) {
-  const response = await fetch(isHttpUrl(source) ? cacheBustHttpUrl(source) : source, {
-    headers: {
-      Accept: 'application/json',
-      'Cache-Control': 'no-cache',
-      Pragma: 'no-cache',
-      ...headers
-    },
-    cache: 'no-store'
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`GET ${source} failed: ${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
-  }
-  return response.json();
 }
 
 function sleep(ms) {
@@ -262,6 +289,7 @@ function createByteProgressEmitter(options = {}, total = 0) {
   const startedAt = Date.now();
   const meta = options.progressMeta && typeof options.progressMeta === 'object' ? options.progressMeta : {};
   let lastEmitAt = 0;
+  let lastReportedLoaded = -1;
   if (!onProgress) {
     return () => {};
   }
@@ -269,10 +297,12 @@ function createByteProgressEmitter(options = {}, total = 0) {
     const now = Date.now();
     const normalizedLoaded = Math.max(0, Number(loaded) || 0);
     const normalizedTotal = Math.max(0, Number(total) || 0);
-    if (!force && now - lastEmitAt < progressIntervalMs && (!normalizedTotal || normalizedLoaded < normalizedTotal)) {
+    const firstPositiveProgress = normalizedLoaded > 0 && lastReportedLoaded <= 0;
+    if (!force && !firstPositiveProgress && now - lastEmitAt < progressIntervalMs && (!normalizedTotal || normalizedLoaded < normalizedTotal)) {
       return;
     }
     lastEmitAt = now;
+    lastReportedLoaded = normalizedLoaded;
     const elapsedSeconds = Math.max(0.001, (now - startedAt) / 1000);
     onProgress({
       ...meta,
@@ -323,7 +353,7 @@ async function probeRangeDownload(source, options, timeoutMs) {
     return { supported: true, total: range.total };
   }
   if (!response.ok) {
-    const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+    const error = new Error(`Download failed from ${sourceToDisplay(source)}: ${response.status} ${response.statusText}`);
     error.retryable = retryableHttpStatus(response.status);
     throw error;
   }
@@ -341,16 +371,16 @@ async function downloadRangePart({ source, fileHandle, start, end, total, option
     signal: abortSignal(timeoutMs)
   });
   if (response.status !== 206) {
-    const error = new Error(`Range download failed ${source}: expected 206, got ${response.status} ${response.statusText}`);
+    const error = new Error(`Range download failed from ${sourceToDisplay(source)}: expected 206, got ${response.status} ${response.statusText}`);
     error.retryable = retryableHttpStatus(response.status);
     throw error;
   }
   const range = parseContentRange(response.headers.get('content-range'));
   if (!range || range.start !== start || range.end !== end || range.total !== total) {
-    throw new Error(`Range download returned unexpected Content-Range for ${source}: ${response.headers.get('content-range') || 'missing'}`);
+    throw new Error(`Range download returned unexpected Content-Range from ${sourceToDisplay(source)}: ${response.headers.get('content-range') || 'missing'}`);
   }
   if (!response.body) {
-    throw new Error(`Range download failed ${source}: response body is empty`);
+    throw new Error(`Range download failed from ${sourceToDisplay(source)}: response body is empty`);
   }
   const reader = response.body.getReader();
   let position = start;
@@ -370,13 +400,13 @@ async function downloadRangePart({ source, fileHandle, start, end, total, option
   }
   const expectedBytes = end - start + 1;
   if (bytesRead !== expectedBytes) {
-    throw new Error(`Range download ended early for ${source}: expected ${expectedBytes} bytes, got ${bytesRead}`);
+    throw new Error(`Range download ended early from ${sourceToDisplay(source)}: expected ${expectedBytes} bytes, got ${bytesRead}`);
   }
 }
 
 async function downloadMultipartToFile(source, tmp, options, attempt, timeoutMs) {
   const threshold = positiveInteger(options.multipartThresholdBytes, 16 * 1024 * 1024);
-  const partSize = positiveInteger(options.multipartPartSizeBytes, 8 * 1024 * 1024);
+  const partSize = positiveInteger(options.multipartPartSizeBytes, 64 * 1024 * 1024);
   const concurrency = Math.min(12, positiveInteger(options.multipartConcurrency, 6));
   const probe = await probeRangeDownload(source, options, timeoutMs);
   if (!probe.supported || probe.total < threshold) {
@@ -478,12 +508,12 @@ export async function downloadToFile(source, dest, options = {}) {
             signal: abortSignal(timeoutMs)
           });
           if (!response.ok) {
-            const error = new Error(`Download failed ${source}: ${response.status} ${response.statusText}`);
+            const error = new Error(`Download failed from ${sourceToDisplay(source)}: ${response.status} ${response.statusText}`);
             error.retryable = retryableHttpStatus(response.status);
             throw error;
           }
           if (!response.body) {
-            throw new Error(`Download failed ${source}: response body is empty`);
+            throw new Error(`Download failed from ${sourceToDisplay(source)}: response body is empty`);
           }
           const total = Number(response.headers.get('content-length')) || 0;
           await pipeline(
@@ -508,16 +538,16 @@ export async function downloadToFile(source, dest, options = {}) {
       await fs.rm(tmp, { force: true }).catch(() => {});
       if (error?.retryable === false || attempt >= attempts) {
         const reason = error?.message || String(error);
-        throw new Error(`Download failed after ${attempt} attempt${attempt === 1 ? '' : 's'} for ${source}: ${reason}`);
+        throw new Error(`Download failed after ${attempt} attempt${attempt === 1 ? '' : 's'} from ${sourceToDisplay(source)}: ${reason}`);
       }
       if (options.logger?.log) {
-        options.logger.log(`Download attempt ${attempt} failed for ${source}; retrying. ${error?.message || error}`);
+        options.logger.log(`Download attempt ${attempt} failed from ${sourceToDisplay(source)}; retrying. ${error?.message || error}`);
       }
       await sleep(retryDelayMs * attempt);
     }
   }
 
-  throw lastError || new Error(`Download failed for ${source}`);
+  throw lastError || new Error(`Download failed from ${sourceToDisplay(source)}`);
 }
 
 export async function removeFileIfExists(filePath) {

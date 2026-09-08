@@ -4,18 +4,23 @@ const pureChecks = [
   ['test:platforms'],
   ['test:platform-builds'],
   ['test:profile'],
+  ['test:managed-runtime'],
   ['test:windows-handoff'],
   ['test:worker'],
   ['test:telemetry'],
   ['test:access-control'],
   ['test:social-client'],
   ['test:social-worker'],
+  ['test:social-links'],
   ['test:legal-consent'],
   ['test:launcher-proof'],
   ['test:launch-diagnostics'],
+  ['test:launch-preparation-snapshot'],
   ['test:launcher-update-manifest'],
+  ['test:launcher-version'],
   ['test:launcher-update-staging'],
   ['test:github-workflow'],
+  ['test:github-mirror'],
   ['test:release-targets'],
   ['test:r2-direct-upload'],
   ['test:server-transfer-plan'],
@@ -23,6 +28,7 @@ const pureChecks = [
   ['test:managed-security'],
   ['test:cache-fallback'],
   ['test:full-client-zip'],
+  ['test:modpack-publish-changes'],
   ['test:delta-update'],
   ['test:cache-extra-integrity'],
   ['test:download-retry'],
@@ -34,7 +40,14 @@ const pureChecks = [
   ['test:item-fire-fix-release']
 ];
 
+const linuxExcludedElectronChecks = process.platform === 'linux'
+  ? new Set(['test:developer-secret', 'test:developer-update-log-auth'])
+  : new Set();
+
 const electronChecks = [
+  // Run the least-recently validated cross-platform flows first so native CI
+  // surfaces a new platform assumption without replaying every proven smoke.
+  ['test:update-logs'],
   ['test:player-defaults'],
   ['test:player-layout'],
   ['test:friends-panel'],
@@ -44,9 +57,13 @@ const electronChecks = [
   ['test:write-defaults'],
   ['test:developer-secret'],
   ['test:developer-update-log-auth'],
+  ['test:close-during-update'],
   ['test:developer-client-bypass'],
   ['test:developer-instance-dir'],
   ['test:developer-modpack-zip'],
+  ['test:release-flow'],
+  ['test:release-ui-flow'],
+  ['test:single-instance'],
   ['test:cloud-login'],
   ['test:cache-only-cloud'],
   ['test:launcher-self-update'],
@@ -56,12 +73,7 @@ const electronChecks = [
   ['test:player-update-play'],
   ['test:account-duplicate'],
   ['test:account-switch'],
-  ['test:update-logs'],
-  ['test:release-flow'],
-  ['test:release-ui-flow'],
-  ['test:single-instance'],
-  ['test:close-during-update']
-];
+].filter(([name]) => !linuxExcludedElectronChecks.has(name));
 
 const verbose = process.argv.includes('--verbose') || process.env.AHT_VERIFY_VERBOSE === '1';
 const parallel = Math.max(1, Number(process.env.AHT_VERIFY_PARALLEL || 4));
@@ -98,6 +110,8 @@ function runCheck(args) {
       shell: invocation.shell,
       env: {
         ...process.env,
+        AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
+        AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
         ELECTRON_ENABLE_LOGGING: process.env.ELECTRON_ENABLE_LOGGING || '0'
       }
     });
@@ -153,6 +167,9 @@ const started = Date.now();
 try {
   console.log(`Running ${pureChecks.length} pure checks with concurrency ${parallel}...`);
   const pureResults = await runParallel(pureChecks, parallel);
+  if (linuxExcludedElectronChecks.size) {
+    console.log(`Skipping ${[...linuxExcludedElectronChecks].join(', ')} on Linux: the portable player artifact excludes developer credentials, while these smokes require an interactive desktop OS secret service.`);
+  }
   console.log(`Running ${electronChecks.length} Electron checks serially...`);
   const electronResults = await runSerial(electronChecks);
   const results = [...pureResults, ...electronResults];

@@ -13,8 +13,10 @@
     <div class="startup-loader-content">
       <img class="startup-loader-logo" src="assets/aht-vine-logo.png" alt="A Hard Time">
       <div class="startup-loader-status">
-        <span class="startup-loader-label">Loading launcher</span>
-        <span class="startup-loader-rule" aria-hidden="true"></span>
+        <span id="startupLoaderLabel" class="startup-loader-label">Loading launcher</span>
+        <span id="startupLoaderRule" class="startup-loader-rule" aria-hidden="true" hidden>
+          <span id="startupLoaderProgress" class="startup-loader-progress"></span>
+        </span>
       </div>
     </div>
     <div class="startup-money-system money-loader-system" aria-hidden="true">
@@ -31,7 +33,27 @@
     </div>
   </div>
 
+  <div id="sidebarSwitchLoader" class="sidebar-switch-loader" role="status" aria-live="polite" aria-label="Switching packs" aria-hidden="true" hidden>
+    <div class="money-loader-system" aria-hidden="true">
+      <span class="startup-money-ring"></span>
+      <img class="startup-money-logo" src="assets/aht-bill-transparent.png" alt="">
+      <span class="startup-orbit-star startup-orbit-star-one"></span>
+      <span class="startup-orbit-star startup-orbit-star-two"></span>
+      <span class="startup-orbit-star startup-orbit-star-three"></span>
+      <span class="startup-orbit-star startup-orbit-star-four"></span>
+      <span class="startup-orbit-star startup-orbit-star-five"></span>
+      <span class="startup-orbit-star startup-orbit-star-six"></span>
+      <span class="startup-orbit-star startup-orbit-star-seven"></span>
+      <span class="startup-orbit-star startup-orbit-star-eight"></span>
+    </div>
+  </div>
+
   <main class="app-frame" aria-hidden="true" inert>
+    <div id="developerWindowDragRegion" class="developer-window-drag-region" aria-hidden="true"></div>
+    <div class="window-controls" aria-label="Window controls">
+      <button id="windowMinimizeButton" class="window-control window-minimize" type="button" aria-label="Minimize launcher"><span aria-hidden="true"></span></button>
+      <button id="windowCloseButton" class="window-control window-close" type="button" aria-label="Close launcher"><span aria-hidden="true"></span></button>
+    </div>
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark bill-art"><span>AHT</span></div>
@@ -97,6 +119,23 @@
           <button id="developerTab" class="tab nav-item" type="button" data-tab="developer" hidden>Developer</button>
         </nav>
 
+        <div id="launcherSocialMenu" class="topbar-social" aria-label="A Hard Time community links">
+          <button id="discordSocialLink" class="social-link social-link-discord" type="button" data-external-destination="discord" aria-label="Open A Hard Time Discord" aria-haspopup="menu" aria-controls="launcherSocialDropdown" aria-expanded="false" title="Discord">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.516.08.08 0 0 0-.079.037c-.211.376-.445.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.618-1.25.08.08 0 0 0-.078-.037A19.74 19.74 0 0 0 3.677 4.37.07.07 0 0 0 3.645 4.397C.534 9.046-.319 13.58.099 18.058a.08.08 0 0 0 .031.056 19.9 19.9 0 0 0 5.993 3.03.08.08 0 0 0 .084-.028c.462-.63.873-1.295 1.226-1.994a.08.08 0 0 0-.042-.106 13.1 13.1 0 0 1-1.872-.892.08.08 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.07.07 0 0 1 .078-.011c3.928 1.793 8.18 1.793 12.061 0a.07.07 0 0 1 .079.01c.12.099.246.198.373.292a.08.08 0 0 1-.007.128 12.3 12.3 0 0 1-1.873.891.08.08 0 0 0-.041.107c.36.698.772 1.363 1.225 1.993a.08.08 0 0 0 .084.029 19.84 19.84 0 0 0 6.002-3.03.08.08 0 0 0 .031-.055c.5-5.177-.838-9.674-3.548-13.66a.06.06 0 0 0-.031-.029ZM8.02 15.331c-1.182 0-2.157-1.086-2.157-2.419s.956-2.419 2.157-2.419c1.211 0 2.176 1.095 2.157 2.419 0 1.333-.956 2.419-2.157 2.419Zm7.975 0c-1.183 0-2.157-1.086-2.157-2.419s.955-2.419 2.157-2.419c1.211 0 2.176 1.095 2.157 2.419 0 1.333-.946 2.419-2.157 2.419Z"/></svg>
+          </button>
+          <div id="launcherSocialDropdown" class="social-dropdown" role="menu" aria-label="More community links">
+            <button id="youtubeSocialLink" class="social-link social-link-youtube" type="button" data-external-destination="youtube" role="menuitem" aria-label="Open A Hard Time YouTube" title="YouTube">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23.498 6.186a3.02 3.02 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.02 3.02 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.02 3.02 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.02 3.02 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814ZM9.545 15.754V8.246L15.818 12l-6.273 3.754Z"/></svg>
+            </button>
+            <button id="tiktokSocialLink" class="social-link social-link-tiktok" type="button" data-external-destination="tiktok" role="menuitem" aria-label="Open A Hard Time TikTok" title="TikTok">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.72-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07Z"/></svg>
+            </button>
+            <button id="forumSocialLink" class="social-link social-link-forum" type="button" data-external-destination="forum" role="menuitem" aria-label="Open A Hard Time Forum" title="Forum">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M8.5 17.5H5l-3 3v-14A2.5 2.5 0 0 1 4.5 4h11A2.5 2.5 0 0 1 18 6.5v4"/><path d="M10 12.5A2.5 2.5 0 0 1 12.5 10h7a2.5 2.5 0 0 1 2.5 2.5V22l-3-3h-6.5a2.5 2.5 0 0 1-2.5-2.5v-4Z"/></svg>
+            </button>
+          </div>
+        </div>
+
         <button id="profileFriendsButton" class="profile-card" type="button" aria-haspopup="dialog" aria-controls="friendsOverlay" aria-label="Open friends" hidden>
           <div class="profile-avatar bill-art"><span>AHT</span></div>
           <div class="profile-copy">
@@ -107,10 +146,6 @@
             <span id="profileFriendsBadge" class="notification-badge" aria-live="polite" hidden></span>
           </span>
         </button>
-        <div class="window-controls" aria-label="Window controls">
-          <button id="windowMinimizeButton" class="window-control window-minimize" type="button" aria-label="Minimize launcher"><span aria-hidden="true"></span></button>
-          <button id="windowCloseButton" class="window-control window-close" type="button" aria-label="Close launcher"><span aria-hidden="true"></span></button>
-        </div>
       </header>
 
       <section id="setupNotice" class="setup-notice" hidden>
@@ -122,6 +157,11 @@
           <button id="setupAutoButton" class="button primary compact"><span class="button-icon icon-activity" aria-hidden="true"></span>Auto Setup</button>
           <button id="setupSettingsButton" class="button compact"><span class="button-icon icon-settings" aria-hidden="true"></span>Open Settings</button>
         </div>
+      </section>
+
+      <section id="accountSyncNotice" class="setup-notice" hidden aria-live="polite">
+        <div><h2>Account sync needs attention</h2><p id="accountSyncMessage"></p></div>
+        <button id="accountSyncRetry" class="button compact">Retry account sync</button>
       </section>
 
       <section id="player" class="view active">
@@ -136,7 +176,7 @@
         </div>
 
         <section class="quick-actions">
-          <button id="scanButton" class="ghost-button"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
+          <button id="scanButton" class="ghost-button" title="Check and repair the modpack, Java, Minecraft, Forge, and assets"><span class="button-icon icon-wrench" aria-hidden="true"></span>Repair</button>
           <button class="ghost-button tab" data-tab="settings"><span class="button-icon icon-settings" aria-hidden="true"></span>Game Settings</button>
         </section>
 
@@ -156,6 +196,8 @@
             <button id="playButton" class="button strong is-disabled" data-action-mode="play" aria-disabled="true" tabindex="-1"><span class="button-icon icon-play" aria-hidden="true"></span><span class="primary-action-label">Play</span></button>
             <button id="copyLatestLaunchReportButton" class="launch-report-action" type="button" hidden>Copy latest launch report</button>
           </div>
+          <p id="launchActionStatus" role="status" aria-live="polite" hidden></p>
+          <button id="installErrorReportButton" class="button compact" type="button" hidden>Copy Error Report</button>
         </section>
 
 
@@ -241,6 +283,7 @@
               <label class="player-technical" hidden>Sync URL <input id="syncUrlInput" type="url"></label>
               <label class="span-2">Modpack Folder <span class="browse path-actions"><input id="instanceInput" type="text"><button id="openInstancePathButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Open</button><button id="pickInstanceButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
               <label class="span-2">Minecraft Launcher Folder <span class="browse path-actions"><input id="minecraftRootInput" type="text"><button id="openMinecraftRootPathButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Open</button><button id="pickMinecraftRootButton" class="button compact" type="button"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
+              <label id="minecraftExecutableField" class="span-2" hidden>Minecraft Launcher Executable <span class="browse"><input id="minecraftExecutableInput" type="text" placeholder="Auto-detect minecraft-launcher"><button id="pickMinecraftExecutableButton" class="button compact" type="button">Browse</button></span></label>
               <label>Launcher Profile Name <input id="minecraftProfileNameInput" type="text"></label>
               <label class="memory-slider span-2">
                 <span>Allocated RAM <output id="minecraftMemoryOutput">4 GB</output></span>
@@ -289,6 +332,7 @@
             <button class="dev-tab" type="button" data-dev-target="launcherUpdateTools">Launcher Updates</button>
             <button class="dev-tab" type="button" data-dev-target="serverUploadTools">Server Upload</button>
             <button class="dev-tab" type="button" data-dev-target="updateLogTools">Update Logs</button>
+            <button class="dev-tab" type="button" data-dev-target="socialLinkTools">Social Links</button>
             <button class="dev-tab" type="button" data-dev-target="playerDataTools">Player Data</button>
           </nav>
 
@@ -313,7 +357,7 @@
             <details class="dev-advanced" open>
               <summary>Cloud, cache, and fast upload settings</summary>
               <div class="dev-fields">
-                <label class="span-2">Player Feed URL <input id="playerFeedUrlInput" type="url" placeholder="https://your-worker.workers.dev/latest.json"></label>
+                <label class="span-2">Player Feed URL <input id="playerFeedUrlInput" type="url" placeholder="https://api.ahardtime.net/latest.json"></label>
                 <label class="span-2">Fallback Cache Mods Folder <span class="browse"><input id="cacheModsInput" type="text"><button id="pickCacheModsButton" class="button compact"><span class="button-icon icon-folder" aria-hidden="true"></span>Browse</button></span></label>
                 <label>R2 Bucket <input id="bucketInput" type="text"></label>
                 <label>R2 Account ID <input id="r2AccountIdInput" type="text" autocomplete="off" placeholder="Cloudflare account ID"></label>
@@ -326,7 +370,7 @@
                 <span id="releaseCheckState">Ready</span>
                 <strong id="releaseCheckTitle">Choose a ZIP</strong>
               </div>
-              <p id="releaseCheckDetail">Pick an exact AHT client ZIP from Modpack ZIP, then publish it to the stable R2 feed and stable GitHub release track.</p>
+              <p id="releaseCheckDetail">Pick an exact AHT client ZIP from Modpack ZIP, then publish the update for players.</p>
             </div>
             <div id="releaseUploadProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="releaseUploadProgressLabel">Preparing upload</span><span id="releaseUploadProgressCount">0%</span></div>
@@ -381,7 +425,7 @@
             <div class="dev-section-head">
               <h2>Launcher Updates</h2>
               <div class="dev-actions">
-                <button id="testLauncherReinstallButton" class="button compact" type="button"><span class="button-icon icon-sync" aria-hidden="true"></span>Test Local Reinstall</button>
+                <button id="testLauncherReinstallButton" class="button compact" type="button"><span class="button-icon icon-sync" aria-hidden="true"></span>Test Player Update</button>
                 <button id="scanLauncherBuildsButton" class="button compact"><span class="button-icon icon-scan" aria-hidden="true"></span>Check GitHub</button>
                 <button id="publishLauncherUpdateButton" class="button primary compact"><span class="button-icon icon-upload" aria-hidden="true"></span>Deploy Latest Launcher</button>
               </div>
@@ -397,14 +441,14 @@
                 <span>Launcher updates</span>
                 <strong>GitHub Actions ready</strong>
               </div>
-              <p>Run the GitHub release workflow. Actions builds Windows and macOS, publishes GitHub Releases, uploads R2, then players update from launcher/latest.json.</p>
+              <p>Run the GitHub release workflow. Actions builds Windows, one universal macOS package, and one portable Linux AppImage, publishes GitHub Releases, uploads R2, then players update from launcher/latest.json.</p>
             </div>
             <div id="launcherReinstallStatus" class="release-check-card warn">
               <div>
-                <span>Regular launcher update test</span>
-                <strong>Open the installed player launcher</strong>
+                <span>Local update test</span>
+                <strong>Ready</strong>
               </div>
-              <p>Uses the exact current-version Windows ZIP as a one-time local update. The installed regular AHT Launcher opens with its normal update window, runs the real copy, hash, staging, Restart Launcher, swap, relaunch, and acknowledgement flow, and never publishes or downloads live update data.</p>
+              <p>Tests the installed player launcher with the current local Windows ZIP. Nothing is uploaded or published.</p>
             </div>
             <div id="launcherDeployProgress" class="progress-wrap release-upload-progress" hidden>
               <div class="progress-meta"><span id="launcherDeployProgressLabel">Preparing public deploy</span><span id="launcherDeployProgressCount">0%</span></div>
@@ -469,6 +513,32 @@
             <div id="developerUpdateLogsList" class="developer-update-log-list"></div>
           </section>
 
+          <section id="socialLinkTools" class="dev-section" data-dev-panel hidden>
+            <div class="dev-section-head">
+              <div>
+                <h2>Launcher Social Links</h2>
+                <p>Publish the destinations used by the top-right Discord menu in every launcher.</p>
+              </div>
+              <div class="dev-actions">
+                <button id="loadSocialLinksButton" class="button compact" type="button"><span class="button-icon icon-activity" aria-hidden="true"></span>Load Published</button>
+                <button id="publishSocialLinksButton" class="button primary compact" type="button"><span class="button-icon icon-upload" aria-hidden="true"></span>Publish</button>
+              </div>
+            </div>
+            <div class="dev-fields social-link-fields">
+              <label class="span-2">Discord Invite <input id="discordUrlInput" type="url" value="https://discord.com/invite/AUVMekfNfq" autocomplete="off"></label>
+              <label class="span-2">YouTube <input id="youtubeUrlInput" type="url" value="https://www.youtube.com/@AHardTime" autocomplete="off"></label>
+              <label class="span-2">TikTok <input id="tiktokUrlInput" type="url" value="https://www.tiktok.com/@ahardtimefr" autocomplete="off"></label>
+              <label class="span-2">Forum <input id="forumUrlInput" type="url" value="https://ahardtime.net/forum" autocomplete="off"></label>
+            </div>
+            <div id="socialLinksPublishStatus" class="release-check-card warn">
+              <div>
+                <span>Launcher social menu</span>
+                <strong>Using safe defaults</strong>
+              </div>
+              <p>Load the currently published links or publish these four approved HTTPS destinations.</p>
+            </div>
+          </section>
+
           <section id="playerDataTools" class="dev-section player-data-section" data-dev-panel hidden>
             <div class="dev-section-head player-data-head">
               <div>
@@ -520,18 +590,6 @@
         </section>
       </section>
 
-      <div id="sidebarSwitchLoader" class="sidebar-switch-loader money-loader-system" aria-hidden="true">
-        <span class="startup-money-ring"></span>
-        <img class="startup-money-logo" src="assets/aht-bill-transparent.png" alt="">
-        <span class="startup-orbit-star startup-orbit-star-one"></span>
-        <span class="startup-orbit-star startup-orbit-star-two"></span>
-        <span class="startup-orbit-star startup-orbit-star-three"></span>
-        <span class="startup-orbit-star startup-orbit-star-four"></span>
-        <span class="startup-orbit-star startup-orbit-star-five"></span>
-        <span class="startup-orbit-star startup-orbit-star-six"></span>
-        <span class="startup-orbit-star startup-orbit-star-seven"></span>
-        <span class="startup-orbit-star startup-orbit-star-eight"></span>
-      </div>
     </section>
   </main>
 
@@ -575,9 +633,6 @@
     <section class="downloads-dialog" role="dialog" aria-modal="true" aria-labelledby="downloadsTitle">
       <div class="downloads-head">
         <h2 id="downloadsTitle">DOWNLOADS</h2>
-        <button id="downloadsCloseButton" class="ghost-button compact" type="button" aria-label="Close downloads">
-          <span class="button-icon icon-close" aria-hidden="true"></span>
-        </button>
       </div>
 
       <div class="downloads-list">
@@ -597,8 +652,18 @@
         </article>
       </div>
 
+      <div id="downloadsErrorPanel" class="downloads-error-panel" role="alert" hidden>
+        <strong>Download Failed</strong>
+        <button id="downloadsErrorReportButton" class="downloads-error-report" type="button">Click here to copy error log</button>
+      </div>
       <pre id="downloadsLog" class="downloads-log" hidden></pre>
-      <div class="downloads-footer">Maximum download speed (unlimited)</div>
+      <div class="downloads-footer">
+        <button id="downloadsBackButton" class="downloads-back-button" type="button" aria-label="Exit downloads">
+          <span class="button-icon icon-close" aria-hidden="true"></span>
+          <span>Back to Launcher</span>
+        </button>
+        <span>Maximum download speed (unlimited)</span>
+      </div>
     </section>
   </div>
   <div id="repairPromptOverlay" class="overlay repair-prompt-overlay" hidden>
@@ -683,18 +748,25 @@
     </section>
   </div>
   <div id="launcherUpdateOverlay" class="overlay launcher-update-overlay" hidden>
-    <section class="launcher-update-dialog" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle">
-      <div>
-        <p class="eyebrow">Launcher Update</p>
-        <h2 id="launcherUpdateTitle">Update required</h2>
-        <span id="launcherUpdateSummary" class="account-copy">A newer launcher is required before you can continue.</span>
-      </div>
-      <div class="progress-wrap launcher-update-progress">
+    <section class="launcher-update-dialog" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle" aria-describedby="launcherUpdateSummary" data-state="available">
+      <header class="launcher-update-header">
+        <span class="launcher-update-mark" aria-hidden="true"><span class="button-icon icon-download"></span></span>
+        <div class="launcher-update-heading">
+          <p class="launcher-update-kicker">AHT Launcher <span id="launcherUpdateVersion"></span></p>
+          <h2 id="launcherUpdateTitle">Launcher update</h2>
+        </div>
+      </header>
+      <p id="launcherUpdateSummary" class="launcher-update-summary">Preparing the latest launcher.</p>
+      <div id="launcherUpdateProgress" class="progress-wrap launcher-update-progress" role="progressbar" aria-label="Launcher update progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div class="progress-meta"><span id="launcherUpdateProgressLabel">Preparing</span><span id="launcherUpdateProgressCount">0%</span></div>
         <div class="progress-track"><div id="launcherUpdateProgressBar" class="progress-bar"></div></div>
       </div>
-      <pre id="launcherUpdateLog" class="log launcher-update-log"></pre>
-      <button id="launcherUpdateNowButton" class="button primary compact" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update Launcher</button>
+      <p id="launcherUpdateError" class="launcher-update-error" role="alert" hidden>The update could not be completed. Your current launcher was not changed.</p>
+      <div class="launcher-update-actions">
+        <button id="launcherUpdateNowButton" class="button primary launcher-update-action" type="button"><span class="button-icon icon-download" aria-hidden="true"></span>Update now</button>
+        <button id="launcherUpdateErrorReportButton" class="launcher-update-report" type="button" hidden>Copy error report</button>
+      </div>
+      <pre id="launcherUpdateLog" class="launcher-update-log" hidden aria-hidden="true"></pre>
     </section>
   </div>
   <div id="updateLogVideoOverlay" class="overlay update-log-video-overlay" hidden>

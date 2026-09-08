@@ -1,4 +1,10 @@
 node_modules/
+build/runtime/
+build/native-guard/
+build/native-guard-test/
+cloudflare/build/
+.codex/
+build/codex-*
 dist-r2*/
 launcher.config.json
 config/app.defaults.json

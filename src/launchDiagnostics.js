@@ -4,6 +4,7 @@ import path from 'node:path';
 
 export const LAUNCH_LOG_FOLDER = path.join('logs', 'launcher');
 export const LAUNCH_LOG_FILE_PREFIX = 'AHT-Launch-';
+export const LATEST_LAUNCH_LOG_FILE = 'ahtlatest.log';
 export const LAUNCH_LOG_RETENTION = 30;
 
 const REQUIREMENTS = [
@@ -34,11 +35,15 @@ export function sanitizeDiagnosticText(value = '', max = 500) {
   const secretName = '(?:access[-_]?token|client[-_]?token|identity[-_]?token|refresh[-_]?token|session[-_]?token|api[-_]?key|client[-_]?secret|password|secret|signature|proof|token|key)';
   const secretValue = '(?:"[^"\\r\\n]*(?:"|$)|\'[^\'\\r\\n]*(?:\'|$)|[^\\s,;&}]+)';
   return String(value ?? '').replace(/\0/g, '').trim()
+    .replace(/([?&](?:aht_(?:player|username|uuid)|email|user|username)=)[^&#\s|)]*/gi, '$1<redacted>')
     .replace(new RegExp(`(--${secretName}(?:\\s+|\\s*=\\s*))${secretValue}`, 'gi'), '$1<redacted>')
     .replace(new RegExp(`((?:["']?)${secretName}(?:["']?)\\s*[:=]\\s*)${secretValue}`, 'gi'), '$1<redacted>')
     .replace(/(Authorization\s*:\s*)[^\r\n]*/gi, '$1<redacted>')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<redacted-token>')
     .replace(/:\/\/[^/@\s]+:[^/@\s]+@/g, '://<credentials>@')
+    .replace(/https?:\/\/[A-Za-z0-9.-]*\.workers\.dev(?:\/[^\s|)]*)?/gi, 'AHT Proxy')
+    .replace(/\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.workers\.dev\b/gi, 'AHT Proxy')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '<email>')
     .replace(/\r\n?|\n/g, ' | ')
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
     .replace(/ {2,}/g, ' ')
@@ -66,6 +71,7 @@ export function createLaunchAttempt(options = {}) {
     app: {
       name: bounded(options.appName || 'A Hard Time Launcher', 80),
       version: bounded(options.appVersion || '', 40),
+      buildLabel: bounded(options.buildLabel || '', 80),
       mode: bounded(options.mode || 'player', 20),
       packaged: Boolean(options.packaged)
     },
@@ -82,6 +88,7 @@ export function createLaunchAttempt(options = {}) {
     requirements: newRequirementState(),
     system: null,
     minecraftSignals: [],
+    diagnosticFlags: [],
     error: null,
     reportPath: ''
   };
@@ -143,8 +150,19 @@ export function completeLaunchAttempt(attempt, result, error = null) {
     attempt.error = {
       name: sanitizeDiagnosticText(error.name || 'Error', 80),
       code: sanitizeDiagnosticText(error.code || '', 80),
-      message: sanitizeDiagnosticText(error.message || error, 1200)
+      subsystem: sanitizeDiagnosticText(error.subsystem || '', 120),
+      message: sanitizeDiagnosticText(error.message || error, 1200),
+      trace: sanitizeDiagnosticText(error.stack || '', 3000)
     };
+    attempt.diagnosticFlags = (Array.isArray(error.diagnosticFlags) ? error.diagnosticFlags : [])
+      .slice(0, 32)
+      .map((flag) => ({
+        status: ['FAIL', 'WARN', 'PASS', 'INFO'].includes(String(flag?.status || '').toUpperCase())
+          ? String(flag.status).toUpperCase()
+          : 'INFO',
+        code: sanitizeDiagnosticText(flag?.code || 'DIAGNOSTIC', 100),
+        detail: sanitizeDiagnosticText(flag?.detail || '', 900)
+      }));
   }
   for (const step of attempt.steps) {
     if (step.status === 'RUNNING') finishLaunchStep(step, 'WARN', 'The launch stopped before this step finished.');
@@ -167,7 +185,7 @@ function diagnoseFailedRequirement(attempt) {
     releaseFeed: ['The AHT release service is not configured or could not be checked.', ['Check the internet connection and try again.', 'Allow A Hard Time Launcher through firewall or security software if needed.']],
     integrity: ['One or more managed AHT files are missing or damaged.', ['Run Repair in the AHT Launcher.', 'Do not manually delete saves, playerdata, or configuration folders.']],
     launcherVersion: ['This AHT Launcher version is out of date.', ['Install the available AHT Launcher update.', 'Restart AHT Launcher, then try Play again.']],
-    java8: ['A usable 64-bit Java 8 runtime was not detected.', ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']],
+    java8: ['A usable 64-bit Java 8 runtime was not detected.', ['Close Minecraft and Minecraft Launcher, then run Repair in AHT Launcher.', 'If Repair fails, save its error report before trying Play again.']],
     minecraftProfile: ['The exact AHT Minecraft Launcher profile is missing or incomplete.', ['Close Minecraft Launcher.', 'Run Update or Repair in the AHT Launcher.']],
     minecraftRuntime: ['Required Minecraft 1.12.2 or Forge files are missing or incomplete.', ['Close Minecraft Launcher.', 'Run Update or Repair in the AHT Launcher.']],
     launcherProof: ['A valid AHT launcher session proof is not available.', ['Check the internet connection and Minecraft username.', 'Try Play again to request a fresh proof.']],
@@ -180,6 +198,12 @@ function diagnoseFailedRequirement(attempt) {
 function diagnoseMinecraftSignals(attempt) {
   const signals = (Array.isArray(attempt?.minecraftSignals) ? attempt.minecraftSignals : []).join('\n');
   if (!signals.trim()) return null;
+  if (/Unable to prepare assets for download|Error preparing asset index|assets[\\/]indexes[\\/]legacy\.json/i.test(signals)) {
+    return {
+      cause: 'Minecraft could not prepare its asset index or runtime files.',
+      actions: ['Close Minecraft Launcher.', 'Click Repair in AHT Launcher to verify Java, Minecraft, Forge, and assets, then try Play again.']
+    };
+  }
   if (/No libraries\?!|NoClassDefFoundError|ClassNotFoundException|missing librar/i.test(signals)) {
     return {
       cause: 'Minecraft or Forge stopped because a required library or class is missing.',
@@ -275,7 +299,13 @@ export function diagnoseLaunchFailure(attempt) {
       actions: ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']
     };
   }
-  if (key === 'launcher-proof' || /proof|registered to this launcher/i.test(message)) {
+  if (/Secure launcher recovery|recovery credential/i.test(message)) {
+    return {
+      cause: 'The player service could not verify this installation against the account’s saved launcher credentials.',
+      actions: ['Keep the existing launcher data and recovery files.', 'Ask AHT support to check the account registration and device identity.']
+    };
+  }
+  if (['launcher-proof', 'prepared-play-attestation'].includes(key) || /proof|registered to this launcher/i.test(message)) {
     return {
       cause: 'The launcher could not create a valid AHT session proof for this installation.',
       actions: ['Confirm the Minecraft username in the AHT Launcher matches the signed-in Minecraft account.', 'Check the internet connection and try again.']
@@ -342,10 +372,8 @@ export function formatLaunchReport(attempt) {
   lines.push('A HARD TIME LAUNCH REPORT');
   lines.push('================================================================');
   lines.push(`Result: ${attempt.result}`);
-  lines.push(`Attempt ID: ${attempt.attemptId}`);
-  lines.push(`Started: ${attempt.startedAt}`);
-  lines.push(`Finished: ${attempt.finishedAt || 'Not finished'}`);
   lines.push(`Launcher: ${attempt.app.name} ${attempt.app.version || 'Unknown'} (${attempt.app.mode})`);
+  if (attempt.app.buildLabel) lines.push(`Build: ${attempt.app.buildLabel}`);
   lines.push(`Pack: ${attempt.pack.name}${attempt.pack.latestVersion ? ` ${attempt.pack.latestVersion}` : ''} (${attempt.pack.channel})`);
   lines.push(`Instance: ${attempt.instanceDir || 'Not resolved'}`);
   lines.push(`Minecraft root: ${attempt.minecraftRoot || 'Not resolved'}`);
@@ -353,9 +381,6 @@ export function formatLaunchReport(attempt) {
   lines.push('');
   lines.push('LIKELY CAUSE');
   lines.push(`  ${analysis.cause}`);
-  lines.push('');
-  lines.push('RECOMMENDED ACTION');
-  analysis.actions.forEach((action, index) => lines.push(`  ${index + 1}. ${action}`));
   lines.push('');
   lines.push('LAUNCH PROCESS');
   if (!attempt.steps.length) {
@@ -372,6 +397,22 @@ export function formatLaunchReport(attempt) {
     lines.push(statusLine(item.status, item.label, item.detail));
   }
   lines.push('');
+  lines.push('ERROR FLAGS');
+  const failed = failedStep(attempt);
+  if (!attempt.error) {
+    lines.push(statusLine('INFO', 'NO_LAUNCH_ERROR', 'No AHT Launcher exception was recorded for this report.'));
+  } else {
+    lines.push(statusLine('FAIL', 'FAILED_STEP', failed ? `${failed.key}: ${failed.label}` : 'No failed step was recorded.'));
+    lines.push(statusLine(
+      'FAIL',
+      attempt.error.code || 'UNCLASSIFIED_ERROR',
+      [attempt.error.name, attempt.error.subsystem].filter(Boolean).join(' / ')
+    ));
+    for (const flag of Array.isArray(attempt.diagnosticFlags) ? attempt.diagnosticFlags : []) {
+      lines.push(statusLine(flag.status, flag.code, flag.detail));
+    }
+  }
+  lines.push('');
   pushSystemLines(lines, attempt.system || {});
   const signals = Array.isArray(attempt.minecraftSignals) ? attempt.minecraftSignals.filter(Boolean).slice(-24) : [];
   lines.push('RECENT MINECRAFT LAUNCHER SIGNALS');
@@ -386,13 +427,12 @@ export function formatLaunchReport(attempt) {
     lines.push(`  Failed step: ${failedStep(attempt)?.label || 'Unknown'}`);
     lines.push(`  Error: ${attempt.error.message || 'Unknown error'}`);
     if (attempt.error.code) lines.push(`  Code: ${attempt.error.code}`);
+    if (attempt.error.subsystem) lines.push(`  Subsystem: ${attempt.error.subsystem}`);
+    if (attempt.error.trace) lines.push(`  Trace: ${attempt.error.trace}`);
   } else {
     lines.push('  No AHT Launcher error was recorded.');
   }
   if (attempt.reportWriteError) lines.push(`  Report file: ${sanitizeDiagnosticText(attempt.reportWriteError, 500)}`);
-  lines.push('');
-  lines.push('PRIVACY');
-  lines.push('  Passwords, Microsoft/Minecraft tokens, AHT proof tokens, API keys, and environment secrets are not included.');
   lines.push('================================================================');
   return `${lines.join('\r\n')}\r\n`;
 }
@@ -414,6 +454,10 @@ export function launchReportPath(instanceDir, attempt) {
   );
 }
 
+export function latestLaunchReportPath(instanceDir) {
+  return path.join(launchLogDirectory(instanceDir), LATEST_LAUNCH_LOG_FILE);
+}
+
 async function pruneLaunchReports(directory, retention = LAUNCH_LOG_RETENTION) {
   const entries = await fs.readdir(directory, { withFileTypes: true });
   const reports = entries
@@ -429,14 +473,16 @@ export async function writeLaunchReport(instanceDir, attempt, options = {}) {
   const directory = launchLogDirectory(instanceDir);
   await fs.mkdir(directory, { recursive: true });
   const previousReportPath = attempt.reportPath || '';
-  const reportPath = launchReportPath(instanceDir, attempt);
+  const archivePath = launchReportPath(instanceDir, attempt);
+  const reportPath = latestLaunchReportPath(instanceDir);
   attempt.reportPath = reportPath;
   attempt.reportWriteError = '';
   try {
     const text = formatLaunchReport(attempt);
+    await fs.writeFile(archivePath, text, 'utf8');
     await fs.writeFile(reportPath, text, 'utf8');
     await pruneLaunchReports(directory, Number(options.retention) || LAUNCH_LOG_RETENTION).catch(() => {});
-    return { path: reportPath, directory, text, chars: text.length };
+    return { path: reportPath, archivePath, directory, text, chars: text.length };
   } catch (error) {
     attempt.reportPath = previousReportPath;
     throw error;

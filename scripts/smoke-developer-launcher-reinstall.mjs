@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { loadLegalDocuments } from '../src/legalConsent.js';
+import { launcherVersionsReferToSameRelease } from '../src/launcherVersion.js';
 
 if (process.platform !== 'win32') {
   console.log(JSON.stringify({ ok: true, skipped: true, reason: 'Windows-only developer-to-player reinstall test' }, null, 2));
@@ -14,7 +15,7 @@ if (process.platform !== 'win32') {
 }
 
 const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-const version = String(packageJson.version || '');
+const version = String(packageJson.ahtLauncherVersion || packageJson.version || '');
 const developerPort = Number(process.argv[2] || 10570);
 const playerPort = developerPort + 1;
 if (!Number.isInteger(developerPort) || developerPort < 1024 || playerPort > 65535) {
@@ -45,6 +46,7 @@ const sourceZip = path.join(root, exactArchiveName);
 const smokeExe = path.resolve(String(process.env.AHT_SMOKE_EXE || '').trim() || '.');
 const hasSmokeExe = Boolean(String(process.env.AHT_SMOKE_EXE || '').trim());
 const fullTransaction = process.env.AHT_DEVELOPER_REINSTALL_FULL_TRANSACTION !== '0';
+const preserveSmokeRoot = process.env.AHT_PRESERVE_FAILED_REINSTALL_SMOKE === '1';
 const defaultPackagedDir = path.resolve('release-builds', 'windows', 'win-unpacked');
 const installedSource = path.resolve(String(
   process.env.AHT_DEVELOPER_REINSTALL_INSTALLED_DIR
@@ -484,7 +486,7 @@ async function waitForRequestDirectory(developerClient) {
 async function stopProcessesUnder(processRoot) {
   const script = [
     '$root = [System.IO.Path]::GetFullPath($env:AHT_PROCESS_ROOT).TrimEnd("\\") + "\\"',
-    'Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ([System.IO.Path]::GetFullPath([string]$_.ExecutablePath)).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue }'
+    'Get-CimInstance Win32_Process | Where-Object { ($_.ExecutablePath -and ([System.IO.Path]::GetFullPath([string]$_.ExecutablePath)).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) -or ([string]$_.CommandLine).IndexOf($root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue }'
   ].join('; ');
   await execFileAsync(powershellPath, ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
@@ -654,11 +656,20 @@ try {
     packId: 'a-hard-time-dregora',
     instanceDir: path.join(root, 'instance'),
     latestUrl: '',
+    packs: {
+      ptb: {
+        packId: 'a-hard-time-ptb',
+        name: 'A Hard Time PTB',
+        latestUrl: '',
+        instanceDir: path.join(root, 'ptb-instance')
+      }
+    },
     sync: { enabled: false, sendLocalChanges: false, baseUrl: '', playerLabel: 'LocalReinstallSmoke' },
     minecraftLauncher: {
       enabled: true,
       closeLauncherWhenGameStarts: false,
       rootDir: path.join(root, 'minecraft'),
+      rootSelection: 'manual',
       profileId: 'a-hard-time-dregora',
       profileName: 'A Hard Time',
       memoryMb: 4096
@@ -734,7 +745,7 @@ try {
   const developerTarget = await waitForTarget(developerPort, 'Developer Launcher debugger');
   developerClient = await connect(developerTarget.webSocketDebuggerUrl);
   await developerClient.call('Runtime.enable');
-  await waitFor(developerClient, "document.readyState === 'complete' && document.querySelector('#developerLoginForm') && window.aht", 'developer launcher DOM');
+  await waitFor(developerClient, "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm') && window.aht", 'hydrated developer launcher DOM');
   await installToastProbe(developerClient);
 
   await evaluate(developerClient, `
@@ -767,8 +778,9 @@ try {
     card: document.querySelector('#launcherReinstallStatus')?.textContent || ''
   })`);
   if (developerControl.api !== 'function'
-      || !developerControl.button.includes('Test Local Reinstall')
-      || !developerControl.card.includes('Open the installed player launcher')) {
+      || !developerControl.button.includes('Test Player Update')
+      || !developerControl.card.includes('Tests the installed player launcher')
+      || !developerControl.card.includes('Nothing is uploaded or published')) {
     throw new Error(`Developer local reinstall control is not wired to the regular launcher: ${JSON.stringify(developerControl)}`);
   }
 
@@ -785,7 +797,7 @@ try {
     throw new Error(`The player stored config does not contain the exact forbidden feed fixture: ${JSON.stringify(storedRegularConfig.launcherUpdate)}`);
   }
   const regularConfigIdentityBeforeAction = await snapshotFileIdentity(regularConfigPath);
-  assertNoFeedRequests('Developer bridge before Test Local Reinstall');
+  assertNoFeedRequests('Developer bridge before Test Player Update');
 
   await evaluate(developerClient, `document.querySelector('#testLauncherReinstallButton').click()`);
   const { nonce, requestDir } = await waitForRequestDirectory(developerClient);
@@ -807,7 +819,7 @@ try {
   if (prompt.search.includes('developer')
       || prompt.devApi !== 'undefined'
       || prompt.legalHidden !== true
-      || !/Launcher update required|Update finished/.test(prompt.title)
+      || !/Launcher update|Updating launcher|Ready to restart/.test(prompt.title)
       || /developer/i.test(`${prompt.title} ${prompt.summary}`)) {
     throw new Error(`Regular update prompt crossed the player privacy/mode boundary: ${JSON.stringify(prompt)}`);
   }
@@ -846,16 +858,26 @@ try {
   const staged = await waitFor(playerClient, `(async () => {
     const state = await window.aht.getLauncherUpdateState();
     if (state?.error) return { error: state.error, state };
-    return state?.lastResult?.restartRequired ? { state, title: document.querySelector('#launcherUpdateTitle')?.textContent || '', button: document.querySelector('#launcherUpdateNowButton')?.textContent || '' } : null;
+    const title = document.querySelector('#launcherUpdateTitle')?.textContent || '';
+    const button = document.querySelector('#launcherUpdateNowButton')?.textContent || '';
+    return state?.lastResult?.restartRequired && title.includes('Ready to restart') && button.includes('Restart now')
+      ? { state, title, button }
+      : null;
   })()`, 'regular launcher same-version staging', 1200);
-  if (staged.error) throw new Error(`Regular launcher staging failed: ${JSON.stringify(staged)}`);
+  if (staged.error) {
+    const report = await evaluate(playerClient, `window.aht.copyErrorReport({ context: 'launcher:updateStart', message: 'Developer reinstall staging smoke failed' })`).catch(() => null);
+    const reportText = report?.filePath
+      ? await fsp.readFile(report.filePath, 'utf8').catch(() => '')
+      : '';
+    throw new Error(`Regular launcher staging failed: ${JSON.stringify(staged)}\n${reportText.slice(-6000)}`);
+  }
   if (staged.state?.purpose !== 'local-reinstall-test'
       || staged.state?.lastResult?.purpose !== 'local-reinstall-test'
       || staged.state?.lastResult?.restartRequired !== true
       || staged.state?.lastResult?.instantRestartReady !== true
       || Object.prototype.hasOwnProperty.call(staged.state.lastResult, 'preparedRestart')
-      || !staged.title.includes('Update finished')
-      || !staged.button.includes('Restart Launcher')) {
+      || !staged.title.includes('Ready to restart')
+      || !staged.button.includes('Restart now')) {
     throw new Error(`Regular launcher did not reach the privacy-shaped genuine Restart boundary: ${JSON.stringify(staged)}`);
   }
   assertRendererPrivacyBoundary({
@@ -918,7 +940,7 @@ try {
   const productVersion = String(receipt.productVersion || '');
   if (receiptSha256 !== String(prepared.receiptSha256 || '').toLowerCase()
       || receipt.expectedVersion !== version
-      || !(productVersion === version || productVersion.startsWith(`${version}.`))
+      || !launcherVersionsReferToSameRelease(productVersion, version)
       || receipt.targetExeRelativePath !== path.basename(targetExe)
       || String(receipt.archiveSha256 || '').toLowerCase() !== updateArchiveSha256
       || String(receipt.treeSha256 || '').toLowerCase() !== String(prepared.treeSha256 || '').toLowerCase()
@@ -933,15 +955,15 @@ try {
     throw new Error(`Prepared staging tree hash does not match the pending handoff: ${JSON.stringify(stagedTree)}`);
   }
   if (fs.existsSync(prepared.backupDir)) {
-    throw new Error(`Rollback backup existed before Restart Launcher: ${prepared.backupDir}`);
+    throw new Error(`Rollback backup existed before Restart now: ${prepared.backupDir}`);
   }
   assertNoFeedRequests('Local reinstall staging');
   if (await sha256File(targetExe) !== targetSha256Before
       || await sha256File(uninstallerPath) !== uninstallerSha256Before
       || !fs.existsSync(prepared.stagingDir)) {
-    throw new Error('Installed bytes changed, or the prepared staging tree disappeared, before Restart Launcher.');
+    throw new Error('Installed bytes changed, or the prepared staging tree disappeared, before Restart now.');
   }
-  await assertFileIdentityUnchanged(regularConfigPath, regularConfigIdentityBeforeAction, 'Immediately before Restart Launcher');
+  await assertFileIdentityUnchanged(regularConfigPath, regularConfigIdentityBeforeAction, 'Immediately before Restart now');
 
   if (fullTransaction) {
     swapLifecycleAbortController = new AbortController();
@@ -1075,5 +1097,9 @@ try {
   await stopProcessesUnder(root);
   await closeServer(feedServer);
   await sleep(400);
-  await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
+  if (preserveSmokeRoot) {
+    console.error(`Preserved developer reinstall smoke root: ${root}`);
+  } else {
+    await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
+  }
 }

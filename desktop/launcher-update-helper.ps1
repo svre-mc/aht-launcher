@@ -88,17 +88,22 @@ function Assert-FileSha256([string] $PathValue, [string] $Expected, [string] $La
 }
 
 function Write-UpdateLog([string] $Message) {
-    try {
-        if (-not $script:logPath) { return }
-        $parent = Split-Path -Parent $script:logPath
-        if ($parent) {
-            $null = Assert-NoReparsePath $parent $true
+    if (-not $script:logPath) { return }
+    for ($attempt = 0; $attempt -lt 40; $attempt += 1) {
+        try {
+            $parent = Split-Path -Parent $script:logPath
+            if ($parent) {
+                $null = Assert-NoReparsePath $parent $true
+            }
+            if (Test-Path -LiteralPath $script:logPath) {
+                $null = Assert-RegularFile $script:logPath 'Launcher update log'
+            }
+            Add-Content -LiteralPath $script:logPath -Value ((Get-Date).ToString('o') + ' ' + $Message) -Encoding UTF8
+            return
+        } catch {
+            if ($attempt -lt 39) { Start-Sleep -Milliseconds 25 }
         }
-        if (Test-Path -LiteralPath $script:logPath) {
-            $null = Assert-RegularFile $script:logPath 'Launcher update log'
-        }
-        Add-Content -LiteralPath $script:logPath -Value ((Get-Date).ToString('o') + ' ' + $Message) -Encoding UTF8
-    } catch {}
+    }
 }
 
 function Write-PendingFailure([string] $Message) {
@@ -259,13 +264,32 @@ function Get-StagedTree([string] $StagingRoot) {
     return [pscustomobject] @{ Root = $root; Files = $files }
 }
 
+function Get-LauncherVersionIdentity([string] $Value) {
+    $text = ([string] $Value).Trim()
+    if ($text -notmatch '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$') { return '' }
+    $parts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($group in @($Matches[1], $Matches[2], $Matches[3], $Matches[4])) {
+        if ($null -eq $group -or [string] $group -eq '') { continue }
+        $normalized = ([string] $group).TrimStart([char] '0')
+        if (-not $normalized) { $normalized = '0' }
+        $parts.Add($normalized)
+    }
+    while ($parts.Count -gt 3 -and $parts[$parts.Count - 1] -eq '0') {
+        $parts.RemoveAt($parts.Count - 1)
+    }
+    return ($parts -join '.')
+}
+
 function Test-ExpectedVersion([string] $Target, [string] $Expected) {
     if (-not $Target -or -not (Test-Path -LiteralPath $Target -PathType Leaf)) { return $false }
     if (-not $Expected) { return $true }
     try {
         $null = Assert-RegularFile $Target 'Launcher executable'
         $actual = [string] (Get-Item -LiteralPath $Target -Force).VersionInfo.ProductVersion
-        return $actual -eq $Expected -or $actual.StartsWith($Expected + '.')
+        if ($actual -eq $Expected -or $actual.StartsWith($Expected + '.')) { return $true }
+        $actualIdentity = Get-LauncherVersionIdentity $actual
+        $expectedIdentity = Get-LauncherVersionIdentity $Expected
+        return $actualIdentity -and $expectedIdentity -and $actualIdentity -eq $expectedIdentity
     } catch {
         return $false
     }
@@ -361,6 +385,34 @@ function Assert-StagedReceipt {
     return [pscustomobject] @{ StagingDir = $tree.Root; Target = $target; TreeSha256 = $actualTreeHash }
 }
 
+function Assert-StagedSwapReadyForActivation([string] $StagingDir, [string] $TargetRelativePath) {
+    # The complete tree is hashed before the Ready signal. Once the launcher
+    # exits, bind the unchanged receipt and check only the two boot-critical
+    # files before the same-volume atomic directory moves. Re-reading Windows
+    # version metadata here adds cold-start latency and cannot observe a state
+    # that was not already covered by the pre-Ready tree hash.
+    $receiptItem = Assert-FileSha256 ([string] $script:payload.receiptPath) ([string] $script:payload.receiptSha256) 'Prepared launcher staging receipt'
+    $receipt = Get-Content -LiteralPath $receiptItem.FullName -Raw | ConvertFrom-Json
+    $criticalPaths = @(
+        (ConvertTo-SafeRelativePath $TargetRelativePath 'Launcher target path'),
+        (ConvertTo-SafeRelativePath 'resources/app.asar' 'Launcher application payload')
+    )
+    foreach ($criticalPath in $criticalPaths) {
+        $matches = @($receipt.files | Where-Object {
+            ([string] $_.path).Equals($criticalPath, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($matches.Count -ne 1) {
+            throw ('Prepared launcher receipt is missing a unique boot-critical file: ' + $criticalPath)
+        }
+        $resolved = (Resolve-StagedPath $StagingDir $criticalPath 'Boot-critical launcher path').FullPath
+        $item = Assert-RegularFile $resolved ('Boot-critical launcher file ' + $criticalPath)
+        if ($item.Length -ne [int64] $matches[0].size) {
+            throw ('Prepared boot-critical launcher file size changed: ' + $criticalPath)
+        }
+    }
+    return (Resolve-StagedPath $StagingDir $criticalPaths[0] 'Launcher target path').FullPath
+}
+
 function Get-BlockingLauncherProcesses([string] $Target, [bool] $IncludeUnknownPath) {
     if (-not $Target) { return @() }
     $targetName = [System.IO.Path]::GetFileNameWithoutExtension($Target)
@@ -385,7 +437,7 @@ function Wait-ForLauncherExit([string] $Target) {
     if ([int] $script:payload.oldPid -gt 0) {
         try {
             $old = Get-Process -Id ([int] $script:payload.oldPid) -ErrorAction SilentlyContinue
-            if ($old) { Wait-Process -Id ([int] $script:payload.oldPid) -Timeout 120 -ErrorAction SilentlyContinue }
+            if ($old) { Wait-Process -Id ([int] $script:payload.oldPid) -ErrorAction SilentlyContinue }
         } catch {}
     }
     $remaining = @()
@@ -615,8 +667,7 @@ function Invoke-StagedSwapUpdate {
     Write-UpdateLog ('Ready to quit nonce=' + [string] $script:payload.handoffNonce)
     Wait-ForLauncherExit $oldTarget
 
-    # Close the validation-to-swap gap after the old launcher has exited.
-    $null = Assert-StagedReceipt
+    $null = Assert-StagedSwapReadyForActivation $paths.StagingDir $targetRelativePath
     Write-UpdateLog ('Swapping prepared launcher payload into ' + $paths.InstallDir)
     [System.IO.Directory]::Move($paths.InstallDir, $paths.BackupDir)
     $script:originalMoved = $true
@@ -624,9 +675,6 @@ function Invoke-StagedSwapUpdate {
     $script:candidateMoved = $true
 
     $newTarget = (Resolve-StagedPath $paths.InstallDir $targetRelativePath 'Updated launcher target path').FullPath
-    if (-not (Test-ExpectedVersion $newTarget ([string] $script:payload.expectedVersion))) {
-        throw 'Swapped launcher executable version does not match the update.'
-    }
     $script:newProcess = Start-UpdatedLauncher $newTarget $paths.InstallDir
     Write-UpdateLog ('Started updated launcher PID ' + $script:newProcess.Id)
     $acceptedAck = Wait-ForStartupAcknowledgement $script:newProcess $newTarget

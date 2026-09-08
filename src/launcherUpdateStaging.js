@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import yauzl from 'yauzl';
+import { launcherVersionsReferToSameRelease } from './launcherVersion.js';
 
 const require = createRequire(import.meta.url);
 let fsSync = nodeFsSync;
@@ -76,11 +77,65 @@ function pathInside(root, candidate) {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
-async function extractLauncherZip(archivePath, extractRoot, onProgress = () => {}) {
+function newLauncherZipInspection() {
+  return { seen: new Set(), fileCount: 0, declaredBytes: 0 };
+}
+
+function inspectLauncherZipEntry(entry, inspection) {
+  const relPath = safeArchivePath(entry.fileName);
+  const duplicateKey = relPath.toLowerCase();
+  if (inspection.seen.has(duplicateKey)) {
+    throw new Error(`Launcher update ZIP contains a duplicate path: ${relPath}`);
+  }
+  inspection.seen.add(duplicateKey);
+  if (zipEntryIsSymlink(entry)) {
+    throw new Error(`Launcher update ZIP contains a symbolic link: ${relPath}`);
+  }
+  inspection.fileCount += 1;
+  inspection.declaredBytes += Math.max(0, Number(entry.uncompressedSize || 0));
+  if (inspection.fileCount > MAX_ARCHIVE_FILES || inspection.declaredBytes > MAX_ARCHIVE_BYTES) {
+    throw new Error('Launcher update ZIP exceeds the safe extraction limits.');
+  }
+  return relPath;
+}
+
+async function inspectLauncherZip(archivePath) {
   const zipFile = await openZip(archivePath);
-  const seen = new Set();
-  let fileCount = 0;
-  let declaredBytes = 0;
+  const inspection = newLauncherZipInspection();
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      zipFile.on('entry', (entry) => {
+        try {
+          inspectLauncherZipEntry(entry, inspection);
+          if (!settled) zipFile.readEntry();
+        } catch (error) {
+          fail(error);
+        }
+      });
+      zipFile.on('end', () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      });
+      zipFile.on('error', fail);
+      zipFile.readEntry();
+    });
+  } finally {
+    zipFile.close();
+  }
+  return { fileCount: inspection.fileCount, declaredBytes: inspection.declaredBytes };
+}
+
+async function extractLauncherZip(archivePath, extractRoot, onProgress = () => {}) {
+  const expected = await inspectLauncherZip(archivePath);
+  const zipFile = await openZip(archivePath);
+  const inspection = newLauncherZipInspection();
   let extractedBytes = 0;
   try {
     await new Promise((resolve, reject) => {
@@ -92,20 +147,7 @@ async function extractLauncherZip(archivePath, extractRoot, onProgress = () => {
       };
       zipFile.on('entry', (entry) => {
         Promise.resolve().then(async () => {
-          const relPath = safeArchivePath(entry.fileName);
-          const duplicateKey = relPath.toLowerCase();
-          if (seen.has(duplicateKey)) {
-            throw new Error(`Launcher update ZIP contains a duplicate path: ${relPath}`);
-          }
-          seen.add(duplicateKey);
-          if (zipEntryIsSymlink(entry)) {
-            throw new Error(`Launcher update ZIP contains a symbolic link: ${relPath}`);
-          }
-          fileCount += 1;
-          declaredBytes += Math.max(0, Number(entry.uncompressedSize || 0));
-          if (fileCount > MAX_ARCHIVE_FILES || declaredBytes > MAX_ARCHIVE_BYTES) {
-            throw new Error('Launcher update ZIP exceeds the safe extraction limits.');
-          }
+          const relPath = inspectLauncherZipEntry(entry, inspection);
           const target = path.resolve(extractRoot, ...relPath.split('/'));
           if (!pathInside(extractRoot, target)) {
             throw new Error(`Launcher update ZIP escapes the staging directory: ${relPath}`);
@@ -119,7 +161,7 @@ async function extractLauncherZip(archivePath, extractRoot, onProgress = () => {
           const output = fsSync.createWriteStream(target, { flags: 'wx' });
           source.on('data', (chunk) => {
             extractedBytes += chunk.length;
-            onProgress({ completed: extractedBytes, total: declaredBytes, currentPath: relPath });
+            onProgress({ completed: extractedBytes, total: expected.declaredBytes, currentPath: relPath });
           });
           await pipeline(source, output);
         }).then(() => {
@@ -128,6 +170,10 @@ async function extractLauncherZip(archivePath, extractRoot, onProgress = () => {
       });
       zipFile.on('end', () => {
         if (settled) return;
+        if (inspection.fileCount !== expected.fileCount || inspection.declaredBytes !== expected.declaredBytes) {
+          fail(new Error('Launcher update ZIP changed while it was being staged.'));
+          return;
+        }
         settled = true;
         resolve();
       });
@@ -137,7 +183,10 @@ async function extractLauncherZip(archivePath, extractRoot, onProgress = () => {
   } finally {
     zipFile.close();
   }
-  return { fileCount, declaredBytes, extractedBytes };
+  if (expected.declaredBytes > 0) {
+    onProgress({ completed: expected.declaredBytes, total: expected.declaredBytes, currentPath: '' });
+  }
+  return { ...expected, extractedBytes };
 }
 
 async function listTreeFiles(root) {
@@ -171,9 +220,7 @@ async function sha256File(filePath) {
 }
 
 function versionMatches(actual = '', expected = '') {
-  const cleanActual = String(actual || '').trim();
-  const cleanExpected = String(expected || '').trim();
-  return Boolean(cleanActual && cleanExpected && (cleanActual === cleanExpected || cleanActual.startsWith(`${cleanExpected}.`)));
+  return launcherVersionsReferToSameRelease(actual, expected);
 }
 
 async function copyInstallerOwnedFiles(installDir, payloadRoot) {

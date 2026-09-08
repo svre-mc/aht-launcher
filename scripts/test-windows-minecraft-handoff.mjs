@@ -6,6 +6,7 @@ import {
   isWindowsStoreMinecraftLauncherPath,
   windowsLauncherRecordHasUsableWindow,
   windowsLauncherRecordIdentity,
+  windowsLauncherRecordLooksLikeLauncherUi,
   windowsLauncherRecordMatchesAllowedPath,
   windowsLauncherRecordMatchesTarget,
   windowsLauncherTaskkillArgs
@@ -90,8 +91,10 @@ if (
   !windowsLauncherRecordMatchesTarget(base, { kind: 'root', executablePath: curseForgeLauncher, sessionId: 4 })
   || windowsLauncherRecordMatchesTarget({ ...base, path: desktopLauncher }, { kind: 'root', executablePath: curseForgeLauncher, sessionId: 4 })
   || !windowsLauncherRecordHasUsableWindow(base)
+  || !windowsLauncherRecordLooksLikeLauncherUi(base)
   || windowsLauncherRecordHasUsableWindow({ ...base, mainWindowHandle: 0 })
   || windowsLauncherRecordHasUsableWindow({ ...base, responding: false })
+  || windowsLauncherRecordLooksLikeLauncherUi({ ...base, mainWindowTitle: 'A Hard Time 1.12.2' })
 ) {
   throw new Error('Exact route or responsive-window matching failed.');
 }

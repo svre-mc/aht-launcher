@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 10240);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -16,6 +17,9 @@ const userData = path.join(root, 'userData');
 const defaultsPath = path.join(root, 'app.defaults.json');
 const instanceDir = path.join(root, 'A Hard Time');
 const mcRoot = path.join(root, '.minecraft');
+const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
+const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft Launcher.app');
 const fakeHome = path.join(root, 'home');
 const fakeAppData = process.platform === 'win32'
   ? path.join(fakeHome, 'AppData', 'Roaming')
@@ -32,9 +36,14 @@ const electronArgs = smokeExe
   ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
   : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
+const smokeStartedAt = Date.now();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkpoint(label) {
+  console.log(`[close-during-update +${Date.now() - smokeStartedAt}ms] ${label}`);
 }
 
 async function writeJson(file, value) {
@@ -70,20 +79,28 @@ function makeClientZipBuffer() {
   return zip.toBuffer();
 }
 
-async function waitForTarget() {
+async function waitForTarget(timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
   let lastError;
-  for (let attempt = 0; attempt < 180; attempt += 1) {
+  while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const response = await fetch(`${endpoint}/json/list`, {
+        signal: AbortSignal.timeout(Math.min(2000, remainingMs))
+      });
       if (response.ok) {
         const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const page = pages.find((target) => (
+          /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || ''))
+          && String(target.title || '').trim() === 'A Hard Time Launcher'
+        ));
         if (page) return page;
       }
     } catch (error) {
       lastError = error;
     }
-    await sleep(250);
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
   }
   throw new Error(`Timed out waiting for Electron debugger target: ${lastError?.message || 'no target'}`);
 }
@@ -95,8 +112,9 @@ function connect(wsUrl) {
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
     pending.delete(message.id);
+    clearTimeout(timer);
     if (message.error) {
       reject(new Error(`${message.error.message}: ${message.error.data || ''}`.trim()));
     } else {
@@ -104,25 +122,44 @@ function connect(wsUrl) {
     }
   });
   socket.addEventListener('close', () => {
-    for (const { reject } of pending.values()) {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
       reject(new Error('CDP socket closed'));
     }
     pending.clear();
   });
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const rejectBeforeOpen = (message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
+      try {
+        socket.close();
+      } catch {
+        // The socket may still be connecting. The open timeout remains authoritative.
+      }
+      reject(new Error(message));
+    };
+    const openTimer = setTimeout(() => {
+      rejectBeforeOpen(`CDP socket open timed out: ${wsUrl}`);
+    }, 5000);
     socket.addEventListener('open', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
       resolve({
         call(method, params = {}, timeoutMs = 45000) {
           const id = nextId;
           nextId += 1;
           socket.send(JSON.stringify({ id, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(id, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
             }, timeoutMs);
+            pending.set(id, { resolve: callResolve, reject: callReject, timer });
           });
         },
         close() {
@@ -130,32 +167,73 @@ function connect(wsUrl) {
         }
       });
     }, { once: true });
-    socket.addEventListener('error', () => reject(new Error(`Failed to connect to ${wsUrl}`)), { once: true });
+    socket.addEventListener('error', () => rejectBeforeOpen(`Failed to connect to ${wsUrl}`), { once: true });
+    socket.addEventListener('close', () => rejectBeforeOpen(`CDP socket closed before opening: ${wsUrl}`), { once: true });
   });
 }
 
-async function evaluate(client, expression) {
+async function connectReadyLauncherPage(timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  const target = await waitForTarget(Math.max(1, deadline - Date.now()));
+  checkpoint('debugger target found');
+  const candidate = await connect(target.webSocketDebuggerUrl);
+  try {
+    await candidate.call('Runtime.enable', {}, Math.min(5000, Math.max(1, deadline - Date.now())));
+    await candidate.call('Page.enable', {}, Math.min(5000, Math.max(1, deadline - Date.now())));
+    let probe;
+    while (Date.now() < deadline) {
+      try {
+        probe = await candidate.call('Runtime.evaluate', {
+          expression: "document.readyState === 'complete' && Boolean(window.aht) && document.body.classList.contains('is-launcher-ready') && !document.body.classList.contains('is-booting')",
+          returnByValue: true
+        }, Math.min(5000, Math.max(1, deadline - Date.now())));
+        if (probe.result?.value === true) return { client: candidate, target };
+      } catch (error) {
+        lastError = error;
+        checkpoint(`debugger readiness pending: ${error.message || error}`);
+      }
+      if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
+    }
+    throw new Error(`Launcher DOM did not reach its ready state: ${lastError?.message || JSON.stringify(probe)}`);
+  } catch (error) {
+    candidate.close();
+    throw new Error(`Launcher debugger did not become responsive: ${error.message || error}`);
+  }
+}
+
+async function evaluate(client, expression, timeoutMs = 5000) {
   const result = await client.call('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true
-  });
+  }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
   return result.result?.value;
 }
 
-async function waitFor(client, expression, label, attempts = 180) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const value = await evaluate(client, expression);
-    if (value) return value;
-    await sleep(250);
+async function waitFor(client, expression, label, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const value = await evaluate(client, expression, Math.min(5000, remainingMs));
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
   }
-  throw new Error(`Timed out waiting for ${label}`);
+  throw new Error(`Timed out waiting for ${label}: ${lastError?.message || 'condition stayed false'}`);
 }
 
 function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`Launcher process ${child.pid} did not exit within ${timeoutMs}ms after window close.`));
@@ -164,6 +242,27 @@ function waitForExit(child, timeoutMs) {
       clearTimeout(timer);
       resolve({ code, signal });
     });
+  });
+}
+
+function closeHttpServer(server, timeoutMs = 5000) {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      server.closeAllConnections?.();
+      finish(new Error(`HTTP test server did not close within ${timeoutMs}ms.`));
+    }, timeoutMs);
+    server.close(finish);
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
   });
 }
 
@@ -203,6 +302,7 @@ await writeJson(defaultsPath, {
     profileId: 'a-hard-time',
     profileName: 'A Hard Time',
     memoryMb: 6144,
+    javaPath: fakeJavaPath,
     syncDefaultRoots: false,
     autoImportAccount: false,
     openCommand: process.execPath,
@@ -280,6 +380,35 @@ await Promise.all([
   fsp.mkdir(fakeLocalAppData, { recursive: true }),
   fsp.mkdir(userData, { recursive: true })
 ]);
+const fixtureDeviceCredential = createDeviceCredential();
+await Promise.all([
+  writeJson(path.join(userData, 'identity.json'), {
+    installId: crypto.randomUUID(),
+    createdAt: new Date().toISOString()
+  }),
+  writeJson(path.join(userData, 'device-identity.json'), {
+    schemaVersion: fixtureDeviceCredential.schemaVersion,
+    protocol: fixtureDeviceCredential.protocol,
+    algorithm: fixtureDeviceCredential.algorithm,
+    deviceId: fixtureDeviceCredential.deviceId,
+    publicKey: fixtureDeviceCredential.publicKey,
+    privateKey: {
+      value: Buffer.from(fixtureDeviceCredential.privateKey, 'utf8').toString('base64'),
+      encrypted: false
+    },
+    createdAt: fixtureDeviceCredential.createdAt,
+    protectedBy: 'explicit-test-fallback'
+  })
+]);
+await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
+await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
+await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
+await fsp.mkdir(mcRoot, { recursive: true });
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
+} else if (process.platform === 'darwin') {
+  await fsp.mkdir(macMinecraftApp, { recursive: true });
+}
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
@@ -294,7 +423,12 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_REMOTE_DEBUG_PORT: String(port),
     AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+    AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
@@ -303,19 +437,19 @@ const child = spawn(electronBin, electronArgs, {
 
 let client;
 try {
-  const target = await waitForTarget().catch((error) => {
+  const attached = await connectReadyLauncherPage().catch((error) => {
     if (fs.existsSync(startupProbePath)) {
       error.message = `${error.message}; startup probe: ${fs.readFileSync(startupProbePath, 'utf8').trim()}`;
     }
     throw error;
   });
-  client = await connect(target.webSocketDebuggerUrl);
-  await client.call('Runtime.enable');
-  await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  checkpoint('debugger target ready');
+  client = attached.client;
+  checkpoint('player DOM ready');
   await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.8.7' && status.updateRequired ? status : false)
   `, 'update-required status');
+  checkpoint('update-required status ready');
   await evaluate(client, `
     (() => {
       window.__ahtCloseDuringUpdate = window.aht.startUpdate({ forceRepair: false, replaceGameSettings: false })
@@ -324,26 +458,38 @@ try {
       return true;
     })()
   `);
+  checkpoint('update started');
   await waitFor(client, 'window.aht.getUpdateState().then((state) => state.running ? state : false)', 'running update state');
+  checkpoint('running update state observed');
   for (let attempt = 0; attempt < 80 && !packRequestStarted; attempt += 1) {
     await sleep(100);
   }
   if (!packRequestStarted) {
     throw new Error('Update entered running state but did not request the pack ZIP.');
   }
+  checkpoint('pack request started');
   for (let attempt = 0; attempt < 80 && bytesWritten === 0; attempt += 1) {
     await sleep(100);
   }
   if (bytesWritten === 0) {
     throw new Error('Pack ZIP request started, but no download bytes were sent before the close test.');
   }
+  checkpoint('pack response began');
   await client.call('Page.close', {}, 5000).catch((error) => {
     if (!/closed|Target closed/i.test(error.message || '')) throw error;
   });
   const exit = await waitForExit(child, 15000);
+  checkpoint('launcher exited');
   if (child.exitCode === null && !child.killed) {
     throw new Error('Launcher process stayed alive after closing the only player window during update.');
   }
+  for (let attempt = 0; attempt < 20 && !responseClosed; attempt += 1) {
+    await sleep(100);
+  }
+  if (!responseClosed) {
+    throw new Error('Pack response stayed open after the launcher exited.');
+  }
+  checkpoint('pack response closed');
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -364,5 +510,7 @@ try {
   if (child.exitCode === null && !child.killed) {
     child.kill();
   }
-  await new Promise((resolve) => server.close(resolve));
+  checkpoint('closing HTTP test server');
+  await closeHttpServer(server);
+  checkpoint('HTTP test server closed');
 }

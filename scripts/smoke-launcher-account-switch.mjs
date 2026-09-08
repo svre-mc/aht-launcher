@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 10190);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -127,6 +128,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   developer: { adminBaseUrl: `${workerEndpoint}/`, r2Bucket: 'ahtlauncher' },
+  launcherProof: { enabled: false, required: false, baseUrl: `${workerEndpoint}/` },
   minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
@@ -135,6 +137,20 @@ await writeJson(path.join(userData, 'identity.json'), {
   minecraftUsername: 'OldAHTUser',
   usernameRegistrationMode: 'worker',
   usernameRegisteredAt: '2026-06-24T00:00:00.000Z'
+});
+const fixtureDeviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: fixtureDeviceCredential.schemaVersion,
+  protocol: fixtureDeviceCredential.protocol,
+  algorithm: fixtureDeviceCredential.algorithm,
+  deviceId: fixtureDeviceCredential.deviceId,
+  publicKey: fixtureDeviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(fixtureDeviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: fixtureDeviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
 });
 
 const server = http.createServer(async (request, response) => {
@@ -173,7 +189,7 @@ const server = http.createServer(async (request, response) => {
     }
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify({ ok: true, launcherUpdateKey: `launcher-updates/${body.appVersion}.json`, accountRefreshed: true }));
+    response.end(JSON.stringify({ ok: true, launcherUpdateRecorded: true }));
     return;
   }
   response.statusCode = 200;
@@ -188,6 +204,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: 'ignore',
@@ -201,7 +218,7 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'renderer');
-  await waitFor(client, "document.querySelector('#playerLabelView').textContent === 'StunningWolf22'", 'active launcher account imported');
+  await waitFor(client, "document.querySelector('#playerLabelView').textContent === 'StunningWolf22'", 'active launcher account imported during first initialization', 480);
   const proof = await evaluate(client, `
     (async () => {
       const status = await window.aht.getStatus();

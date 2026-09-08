@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_BUCKET = 'ahtlauncher';
-const DEFAULT_BASE_URL = 'https://aht-curseforge-proxy.mysticgamer312.workers.dev';
+const DEFAULT_BASE_URL = 'https://api.ahardtime.net';
 const DEFAULT_MAX_RETAINED_BYTES = 8 * 1024 * 1024 * 1024;
 const MANIFEST_PATHS = ['latest.json', 'ptb/latest.json', 'launcher/latest.json'];
 const RELEASE_KEY_PREFIXES = [
@@ -47,6 +47,9 @@ function cleanObjectKey(value) {
   let key = String(value || '').replaceAll('\\', '/').replace(/^\/+/, '');
   if (key.startsWith('releases/')) key = key.slice('releases/'.length);
   if (!key || key.includes('\0') || key.split('/').includes('..')) return '';
+  // The Worker resolves these public download routes to files in the manifest.
+  // They are HTTP handlers, not R2 objects; the artifact path/url protects the file.
+  if (key.startsWith('launcher/download/')) return '';
   return RELEASE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix)) || MANIFEST_PATHS.includes(key)
     ? key
     : '';
@@ -208,11 +211,6 @@ export function planR2Retention({
   const launcherRetainedVersions = new Set([launcherVersion, launcherRollbackVersion].filter(Boolean));
   for (const object of launcherObjects) {
     if (protectedKeys.has(object.key)) continue;
-    if (object.key.startsWith('launcher/files/linux-x64/')
-        || object.key.startsWith('launcher/files/linux-x64-deb/')) {
-      deletions.set(object.key, { ...object, reason: 'unsupported-linux-launcher-artifact' });
-      continue;
-    }
     const version = versionFromKey(object.key);
     if (!version) throw new Error(`Refusing to classify versionless launcher object ${object.key}.`);
     if (!launcherRetainedVersions.has(version)) {
@@ -345,14 +343,18 @@ async function mapConcurrent(values, limit, worker) {
   }
 }
 
-async function fetchLiveManifests(baseUrlValue, fetchImpl = fetch) {
-  const baseUrl = cleanBaseUrl(baseUrlValue);
+export async function fetchR2Manifests({ accountId, bucket, token, fetchImpl = fetch }) {
   const manifests = {};
   const digests = {};
   for (const manifestPath of MANIFEST_PATHS) {
-    const url = new URL(manifestPath, `${baseUrl.toString()}/`);
-    const response = await fetchImpl(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) throw new Error(`Live manifest ${manifestPath} returned HTTP ${response.status}.`);
+    const url = `${apiBase(accountId, bucket)}/${encodedObjectKey(manifestPath)}`;
+    const response = await fetchImpl(url, {
+      headers: {
+        ...apiHeaders(token),
+        Accept: 'application/json'
+      }
+    });
+    if (!response.ok) throw new Error(`R2 manifest ${manifestPath} returned HTTP ${response.status}.`);
     const text = await response.text();
     let parsed;
     try {
@@ -403,7 +405,7 @@ export async function runRetention({
     throw new Error('The retained-byte safety target must be a positive safe integer.');
   }
   const [{ manifests, digests }, inventory] = await Promise.all([
-    fetchLiveManifests(baseUrl, fetchImpl),
+    fetchR2Manifests({ accountId, bucket, token, fetchImpl }),
     listR2Objects({ accountId, bucket, token, fetchImpl })
   ]);
   const plan = planR2Retention({ inventory, manifests, baseUrl, maxRetainedBytes });
@@ -418,7 +420,7 @@ export async function runRetention({
   if (!apply) return summary;
   if (plan.deleteObjects.length === 0) return { ...summary, readbackVerified: true };
 
-  const { digests: preDeleteDigests } = await fetchLiveManifests(baseUrl, fetchImpl);
+  const { digests: preDeleteDigests } = await fetchR2Manifests({ accountId, bucket, token, fetchImpl });
   for (const manifestPath of MANIFEST_PATHS) {
     if (preDeleteDigests[manifestPath] !== digests[manifestPath]) {
       throw new Error(`Live manifest ${manifestPath} changed before deletion; rerun retention with a fresh plan.`);
@@ -434,7 +436,7 @@ export async function runRetention({
   }));
 
   const [{ digests: readbackDigests }, readbackInventory] = await Promise.all([
-    fetchLiveManifests(baseUrl, fetchImpl),
+    fetchR2Manifests({ accountId, bucket, token, fetchImpl }),
     listR2Objects({ accountId, bucket, token, fetchImpl })
   ]);
   for (const manifestPath of MANIFEST_PATHS) {

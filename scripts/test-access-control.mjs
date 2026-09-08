@@ -65,6 +65,7 @@ const username = 'DeviceRig';
 const minecraftUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const installId = 'device-install-test';
 const device = createDeviceCredential();
+const sameMinecraftUsername = (left, right) => String(left || '').toLowerCase() === String(right || '').toLowerCase();
 const registration = {
   username,
   minecraftUuid,
@@ -95,7 +96,10 @@ const registered = await workerJson('/api/users/register', {
   },
   body: JSON.stringify(registration)
 }, { asn: 64512, asOrganization: 'Test VPN Network', country: 'US', colo: 'LAX' });
-if (!registered.response.ok || registered.body.deviceId !== device.deviceId) {
+const registeredAccount = JSON.parse(objects.get('accounts/usernames/devicerig.json') || 'null');
+if (!registered.response.ok
+    || registeredAccount?.deviceId !== device.deviceId
+    || Object.keys(registered.body).sort().join(',') !== 'minecraftUuid,ok,recovered,username') {
   throw new Error(`Device registration failed: ${registered.response.status} ${JSON.stringify(registered.body)}`);
 }
 
@@ -117,10 +121,13 @@ if (!login.response.ok || !login.body.token) throw new Error(`Admin login failed
 const auth = { Authorization: `Bearer ${login.body.token}` };
 
 const players = await workerJson('/admin/player-records', { headers: auth });
-const player = players.body.players?.find((item) => item.minecraftUsername === username);
+if (!players.response.ok || !Array.isArray(players.body.players)) {
+  throw new Error(`Player records lookup failed: ${players.response.status} ${JSON.stringify(players.body)}`);
+}
+const player = players.body.players.find((item) => sameMinecraftUsername(item.minecraftUsername, username));
 if (!player || player.ipv4 !== '203.0.113.77' || player.deviceId !== device.deviceId
     || player.network?.status !== 'likely' || player.network?.asn !== 64512) {
-  throw new Error(`Player network/device data was incomplete: ${JSON.stringify(player)}`);
+  throw new Error(`Player network/device data was incomplete: ${JSON.stringify({ player, players: players.body.players })}`);
 }
 
 const ipv6Device = createDeviceCredential();
@@ -155,7 +162,10 @@ const ipv6Registered = await workerJson('/api/users/register', {
 });
 if (!ipv6Registered.response.ok) throw new Error(`IPv6 registration failed: ${JSON.stringify(ipv6Registered.body)}`);
 const playersWithIpv6 = await workerJson('/admin/player-records', { headers: auth });
-const ipv6Player = playersWithIpv6.body.players?.find((item) => item.minecraftUsername === 'Ipv6Rig');
+if (!playersWithIpv6.response.ok || !Array.isArray(playersWithIpv6.body.players)) {
+  throw new Error(`IPv6 player records lookup failed: ${playersWithIpv6.response.status} ${JSON.stringify(playersWithIpv6.body)}`);
+}
+const ipv6Player = playersWithIpv6.body.players.find((item) => sameMinecraftUsername(item.minecraftUsername, 'Ipv6Rig'));
 if (ipv6Player?.ip !== '2001:db8::77' || ipv6Player.ipVersion !== 6 || ipv6Player.ipv4) {
   throw new Error(`Native IPv6 was not preserved: ${JSON.stringify(ipv6Player)}`);
 }
@@ -229,6 +239,33 @@ if (!allowedProof.response.ok || allowedProof.body.payload?.deviceId !== device.
     || !allowedProof.body.payload?.reconnectExpiresAt) {
   throw new Error(`Restored device could not obtain proof: ${allowedProof.response.status} ${JSON.stringify(allowedProof.body)}`);
 }
+const guardedRequest = proofRequestPayload();
+guardedRequest.nativeGuardKeyHash = 'a'.repeat(64);
+guardedRequest.deviceAssertion = createDeviceAssertion(device, { purpose: 'launcher-proof', binding: launcherProofDeviceBinding(guardedRequest) });
+const guardedProof = await workerJson('/api/launcher-proof', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' },
+  body: JSON.stringify(guardedRequest)
+}, { asn: 64512, asOrganization: 'Test VPN Network', country: 'US', colo: 'LAX' });
+if (!guardedProof.response.ok || guardedProof.body.payload?.nativeGuardKeyHash !== guardedRequest.nativeGuardKeyHash || guardedProof.body.payload?.nativeGuardProtocol !== 'AHT-GUARD-1') {
+  throw new Error('Worker did not bind the signed native guard key');
+}
+const replacedGuard = await workerJson('/api/launcher-proof', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' },
+  body: JSON.stringify({ ...guardedRequest, nativeGuardKeyHash: 'b'.repeat(64) })
+}, { asn: 64512, asOrganization: 'Test VPN Network', country: 'US', colo: 'LAX' });
+if (replacedGuard.response.status !== 403) throw new Error('Worker accepted replacement of the device-signed guard key');
+if (allowedProof.body.payload.nativeGuardRequired !== false) throw new Error('The existing release was forced into an unavailable guard rollout');
+const previousGuardTestVersion = env.AHT_REQUIRED_LAUNCHER_VERSION;
+try {
+  env.AHT_REQUIRED_LAUNCHER_VERSION = '0.2.09';
+  const requiredRequest = { ...proofRequestPayload(), launcherVersion: '0.2.09', appVersion: '0.2.09', platform: 'win32', nativeGuardKeyHash: 'c'.repeat(64), nativeGuardRequired: false };
+  requiredRequest.deviceAssertion = createDeviceAssertion(device, { purpose: 'launcher-proof', binding: launcherProofDeviceBinding(requiredRequest) });
+  const requiredProof = await workerJson('/api/launcher-proof', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-AHT-Launcher-Recovery': 'device_test_recovery_secret_123456789012345', 'CF-Connecting-IP': '203.0.113.77' }, body: JSON.stringify(requiredRequest)
+  });
+  if (!requiredProof.response.ok || requiredProof.body.payload?.nativeGuardRequired !== true || requiredProof.body.payload?.nativeGuardKeyHash !== requiredRequest.nativeGuardKeyHash) throw new Error('New Windows releases must carry the Worker-authorized guard requirement');
+} finally { env.AHT_REQUIRED_LAUNCHER_VERSION = previousGuardTestVersion; }
+
 const verifiedSession = await workerJson('/api/launcher-proof/verify', {
   headers: { Authorization: `Bearer ${allowedProof.body.token}` }
 });
@@ -257,6 +294,7 @@ const oversizedLogin = await worker.fetch(request('/admin/login', {
 if (oversizedLogin.status !== 413) {
   throw new Error(`Oversized admin request was not rejected before parsing: ${oversizedLogin.status}`);
 }
+const reconnectFixtureNow = Date.now();
 const reconnectProof = workerLauncherProofFixture({
   minecraftUsername: username,
   minecraftUuid,
@@ -264,9 +302,9 @@ const reconnectProof = workerLauncherProofFixture({
   deviceId: device.deviceId,
   launcherVersion: '0.1.86',
   launcherChannel: 'player',
-  issuedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
-  expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
-  reconnectExpiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString()
+  issuedAt: new Date(reconnectFixtureNow - 11 * 60 * 1000).toISOString(),
+  expiresAt: new Date(reconnectFixtureNow - 60 * 1000).toISOString(),
+  reconnectExpiresAt: new Date(reconnectFixtureNow + 12 * 60 * 60 * 1000).toISOString()
 });
 const reconnectSession = await workerJson('/api/launcher-proof/verify', {
   headers: { Authorization: `Bearer ${reconnectProof.token}` }

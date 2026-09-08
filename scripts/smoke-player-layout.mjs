@@ -1,10 +1,11 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 9760);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -16,11 +17,34 @@ const electronBin = smokeExe || (process.platform === 'win32'
   : path.resolve('node_modules', '.bin', 'electron'));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-player-layout-'));
 const userData = path.join(root, 'userData');
+const fakeHome = path.join(root, 'home');
+const fakeAppData = path.join(root, 'appdata');
+const fakeLocalAppData = path.join(root, 'localappdata');
+// Native macOS GUI/security services are bound to the runner's login home.
+// Replacing HOME with a /var/folders fixture leaves Electron's page target
+// alive while its renderer stops servicing DevTools after startup. The
+// explicit user-data-dir and AHT paths below still isolate all launcher state.
+const isolatedHostEnv = process.platform === 'darwin'
+  ? {}
+  : {
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+      APPDATA: fakeAppData,
+      LOCALAPPDATA: fakeLocalAppData
+    };
 const minecraftRoot = path.join(root, '.minecraft');
+const java8Home = path.join(minecraftRoot, '.aht-launcher', 'java', 'temurin8');
+const java8Executable = path.join(java8Home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft.app');
+const startupProbePath = path.join(root, 'startup-probe.jsonl');
+const instanceDir = path.join(root, 'A Hard Time');
 const ptbInstanceDir = path.join(root, 'A Hard Time PTB');
 const tempDefaults = path.join(root, 'app.defaults.json');
 const defaultsPath = tempDefaults;
 const screenshotDir = path.join(root, 'screenshots');
+const testEvidenceDir = String(process.env.AHT_TEST_EVIDENCE_DIR || '').trim()
+  ? path.resolve(process.env.AHT_TEST_EVIDENCE_DIR)
+  : '';
 const sidebarSelectedLightPath = path.resolve('desktop', 'renderer', 'assets', 'sidebar-selected-light.png');
 const sidebarSelectedLight = fs.readFileSync(sidebarSelectedLightPath);
 const sidebarSelectedLightIdentity = {
@@ -70,13 +94,168 @@ for (const asset of footerGlowAssets) {
     throw new Error(`Footer glow asset drifted from the native BSG alpha field: ${JSON.stringify({ path: asset.path, ...identity })}`);
   }
 }
+const reducedMotionArgs = process.env.AHT_TEST_FORCE_REDUCED_MOTION === '1'
+  ? ['--force-prefers-reduced-motion=reduce']
+  : [];
+const visualAutomationArgs = [
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding'
+];
 const electronArgs = smokeExe
-  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`]
-  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`];
+  ? [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...visualAutomationArgs, ...reducedMotionArgs]
+  : ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, ...visualAutomationArgs, ...reducedMotionArgs];
 const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer) clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function stopElectronChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill();
+  if (await waitForChildExit(child, 5_000)) return;
+  child.kill('SIGKILL');
+  if (!await waitForChildExit(child, 5_000)) {
+    throw new Error(`Owned Electron child ${child.pid} did not exit after SIGKILL.`);
+  }
+}
+
+function queryWindowsNativeHitTest(processId, points) {
+  if (process.platform !== 'win32') {
+    return { supported: false, samples: [] };
+  }
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AhtNativeWindowHitTest {
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+  public static IntPtr FindLauncherWindow(int[] processIds) {
+    var wanted = new System.Collections.Generic.HashSet<uint>();
+    foreach (int processId in processIds) wanted.Add((uint)processId);
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((hWnd, lParam) => {
+      uint processId;
+      GetWindowThreadProcessId(hWnd, out processId);
+      RECT rect;
+      if (wanted.Contains(processId) && GetWindowRect(hWnd, out rect) && rect.Right - rect.Left >= 1000 && rect.Bottom - rect.Top >= 500) {
+        found = hWnd;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  public static int Hit(IntPtr hWnd, int x, int y) {
+    uint packed = ((uint)(ushort)y << 16) | (uint)(ushort)x;
+    return SendMessage(hWnd, 0x84, IntPtr.Zero, new IntPtr(unchecked((int)packed))).ToInt32();
+  }
+}
+'@
+$targetPid = [int]$env:AHT_NATIVE_HIT_PID
+$pointJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AHT_NATIVE_HIT_POINTS))
+$points = $pointJson | ConvertFrom-Json
+$handle = [IntPtr]::Zero
+$windowPid = 0
+$userDataNeedle = [string]$env:AHT_NATIVE_HIT_USER_DATA
+for ($attempt = 0; $attempt -lt 100 -and $handle -eq [IntPtr]::Zero; $attempt += 1) {
+  $processRows = @(Get-CimInstance Win32_Process)
+  $candidatePids = @($targetPid)
+  if (-not [string]::IsNullOrWhiteSpace($userDataNeedle)) {
+    $candidatePids += @($processRows | Where-Object {
+      -not [string]::IsNullOrWhiteSpace([string]$_.CommandLine) -and
+      ([string]$_.CommandLine).IndexOf($userDataNeedle, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    } | ForEach-Object { [int]$_.ProcessId })
+  }
+  for ($depth = 0; $depth -lt 4; $depth += 1) {
+    $parents = @($candidatePids | Select-Object -Unique)
+    $candidatePids += @($processRows | Where-Object { $parents -contains [int]$_.ParentProcessId } | ForEach-Object { [int]$_.ProcessId })
+  }
+  $candidatePids = @($candidatePids | Select-Object -Unique)
+  $handle = [AhtNativeWindowHitTest]::FindLauncherWindow([int[]]$candidatePids)
+  if ($handle -ne [IntPtr]::Zero) {
+    foreach ($candidatePid in $candidatePids) {
+      $candidateHandle = [AhtNativeWindowHitTest]::FindLauncherWindow([int[]]@($candidatePid))
+      if ($candidateHandle -eq $handle) {
+        $windowPid = $candidatePid
+        break
+      }
+    }
+  }
+  if ($handle -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+}
+if ($handle -eq [IntPtr]::Zero) { throw "No main window handle for launcher PID $targetPid" }
+$origin = New-Object AhtNativeWindowHitTest+POINT
+if (-not [AhtNativeWindowHitTest]::ClientToScreen($handle, [ref]$origin)) { throw 'ClientToScreen failed' }
+$result = @()
+for ($attempt = 0; $attempt -lt 100; $attempt += 1) {
+  $result = foreach ($point in $points) {
+    $clientX = [int][Math]::Round([double]$point.x)
+    $clientY = [int][Math]::Round([double]$point.y)
+    $screenX = $origin.X + $clientX
+    $screenY = $origin.Y + $clientY
+    [pscustomobject]@{
+      windowPid = $windowPid
+      controlId = [string]$point.controlId
+      clientX = $clientX
+      clientY = $clientY
+      screenX = $screenX
+      screenY = $screenY
+      expectedHit = [int]$point.expectedHit
+      hit = [AhtNativeWindowHitTest]::Hit($handle, $screenX, $screenY)
+    }
+  }
+  $matched = @($result | Where-Object { [int]$_.hit -eq [int]$_.expectedHit }).Count
+  if ($matched -eq @($points).Count) { break }
+  if ($attempt -lt 99) { Start-Sleep -Milliseconds 50 }
+}
+@($result) | ConvertTo-Json -Compress
+`;
+  const encodedPoints = Buffer.from(JSON.stringify(points), 'utf8').toString('base64');
+  const output = execFileSync('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      AHT_NATIVE_HIT_PID: String(processId),
+      AHT_NATIVE_HIT_POINTS: encodedPoints,
+      AHT_NATIVE_HIT_USER_DATA: userData
+    },
+    timeout: 15000,
+    windowsHide: true
+  }).trim();
+  const decoded = output ? JSON.parse(output) : [];
+  return { supported: true, samples: Array.isArray(decoded) ? decoded : [decoded] };
 }
 
 async function writeJson(file, value) {
@@ -88,18 +267,22 @@ async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
-      const response = await fetch(`${endpoint}/json/list`);
-      if (response.ok) {
-        const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
-        if (page) return page;
-      }
+      const targets = await readDebuggerTargets();
+      const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+      if (page) return page;
     } catch (error) {
       lastError = error;
     }
     await sleep(250);
   }
   throw new Error(`Timed out waiting for Electron debugger target: ${lastError?.message || 'no target'}`);
+}
+
+async function readDebuggerTargets() {
+  const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2_000) });
+  if (!response.ok) throw new Error(`Debugger target list returned HTTP ${response.status}`);
+  const targets = await response.json();
+  return Array.isArray(targets) ? targets : [];
 }
 
 function connect(wsUrl) {
@@ -109,28 +292,60 @@ function connect(wsUrl) {
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
     pending.delete(message.id);
+    clearTimeout(timer);
     if (message.error) {
       reject(new Error(`${message.error.message}: ${message.error.data || ''}`.trim()));
     } else {
       resolve(message.result || {});
     }
   });
+  socket.addEventListener('close', () => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(new Error('CDP socket closed'));
+    }
+    pending.clear();
+  });
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const rejectBeforeOpen = (message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
+      try {
+        socket.close();
+      } catch {
+        // The socket may still be connecting. The open timeout remains authoritative.
+      }
+      reject(new Error(message));
+    };
+    const openTimer = setTimeout(() => {
+      rejectBeforeOpen(`CDP socket open timed out: ${wsUrl}`);
+    }, 5_000);
     socket.addEventListener('open', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(openTimer);
       resolve({
-        call(method, params = {}) {
+        call(method, params = {}, timeoutMs = 30_000) {
           const id = nextId;
           nextId += 1;
-          socket.send(JSON.stringify({ id, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(id, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
-            }, 30000);
+            }, timeoutMs);
+            pending.set(id, { resolve: callResolve, reject: callReject, timer });
+            try {
+              socket.send(JSON.stringify({ id, method, params }));
+            } catch (error) {
+              clearTimeout(timer);
+              pending.delete(id);
+              callReject(error);
+            }
           });
         },
         close() {
@@ -138,25 +353,244 @@ function connect(wsUrl) {
         }
       });
     }, { once: true });
-    socket.addEventListener('error', () => reject(new Error(`Failed to connect to ${wsUrl}`)), { once: true });
+    socket.addEventListener('error', () => rejectBeforeOpen(`Failed to connect to ${wsUrl}`), { once: true });
+    socket.addEventListener('close', () => rejectBeforeOpen(`CDP socket closed before opening: ${wsUrl}`), { once: true });
   });
 }
 
-async function evaluate(client, expression) {
-  const result = await client.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+async function evaluateOnce(activeClient, expression, timeoutMs) {
+  const result = await activeClient.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
   return result.result?.value;
 }
 
-async function waitFor(client, expression, label, attempts = 160) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const value = await evaluate(client, expression);
-    if (value) return value;
-    await sleep(250);
+let automaticCdpRecoveryCount = 0;
+const maxAutomaticCdpRecoveries = 4;
+let forceCdpEvaluationTimeout = process.env.AHT_TEST_FORCE_CDP_EVALUATE_TIMEOUT === '1';
+
+async function evaluate(activeClient, expression, timeoutMs = 30_000) {
+  try {
+    if (forceCdpEvaluationTimeout && String(expression || '').includes('const rectOf = (node) =>')) {
+      forceCdpEvaluationTimeout = false;
+      throw new Error('CDP call timed out: Runtime.evaluate');
+    }
+    return await evaluateOnce(activeClient, expression, timeoutMs);
+  } catch (error) {
+    const message = error?.message || String(error);
+    const canRecover = activeClient === client
+      && automaticCdpRecoveryCount < maxAutomaticCdpRecoveries
+      && /CDP (?:call timed out|socket closed)/i.test(message);
+    if (!canRecover) throw error;
+
+    automaticCdpRecoveryCount += 1;
+    const recoveryAttempt = {
+      type: 'cdp-evaluate-retry',
+      at: Date.now(),
+      error: message,
+      recoveryCount: automaticCdpRecoveryCount,
+      expressionLength: String(expression || '').length
+    };
+    interactiveChromeDiagnostics.push(recoveryAttempt);
+    console.warn(`[player-layout] recovering stalled CDP evaluation: ${JSON.stringify(recoveryAttempt)}`);
+    await reconnectPlayerDebugger(message);
+    try {
+      const value = await evaluateOnce(client, expression, timeoutMs);
+      interactiveChromeDiagnostics.push({
+        type: 'cdp-evaluate-retry-succeeded',
+        at: Date.now(),
+        recoveryCount: automaticCdpRecoveryCount
+      });
+      return value;
+    } catch (retryError) {
+      const retryDiagnostic = {
+        type: 'cdp-evaluate-retry-failed',
+        at: Date.now(),
+        recoveryCount: automaticCdpRecoveryCount,
+        error: retryError?.message || String(retryError)
+      };
+      interactiveChromeDiagnostics.push(retryDiagnostic);
+      throw new Error(`CDP evaluation remained unavailable after fresh-session recovery: ${JSON.stringify({
+        initialError: message,
+        retryError: retryDiagnostic.error,
+        recoveryCount: automaticCdpRecoveryCount
+      })}`);
+    }
   }
-  throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function waitFor(activeClient, expression, label, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      if (client && activeClient !== client) activeClient = client;
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const value = await evaluate(activeClient, expression, Math.min(5_000, remainingMs));
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
+  }
+  throw new Error(`Timed out waiting for ${label}: ${lastError?.message || 'condition stayed false'}`);
+}
+
+const interactivePlayerChromeExpression = `
+  (() => {
+    const frame = document.querySelector('.app-frame');
+    const controls = document.querySelector('.window-controls');
+    const profile = document.querySelector('#profileFriendsButton');
+    const launcherReady = document.body.classList.contains('is-launcher-ready');
+    const booting = document.body.classList.contains('is-booting');
+    const frameInteractive = Boolean(frame)
+      && !frame.hasAttribute('inert')
+      && frame.getAttribute('aria-hidden') !== 'true';
+    const controlsStyle = launcherReady && !booting && frameInteractive && controls
+      ? getComputedStyle(controls)
+      : null;
+    const controlsVisible = Boolean(controlsStyle)
+      && controlsStyle.visibility === 'visible'
+      && controlsStyle.pointerEvents !== 'none';
+    const profileVisible = Boolean(profile) && !profile.hidden;
+    return {
+      ready: launcherReady && !booting && frameInteractive && controlsVisible && profileVisible,
+      sampledAt: Math.round(performance.now()),
+      documentReadyState: document.readyState,
+      visibilityState: document.visibilityState,
+      hasAht: Boolean(window.aht),
+      launcherReady,
+      booting,
+      framePresent: Boolean(frame),
+      frameInteractive,
+      controlsPresent: Boolean(controls),
+      controlsVisibility: controlsStyle?.visibility || '',
+      controlsPointerEvents: controlsStyle?.pointerEvents || '',
+      profilePresent: Boolean(profile),
+      profileHidden: profile?.hidden ?? null,
+      startupTasks: window.__ahtStartupTaskTimings || null
+    };
+  })()
+`;
+
+const interactiveChromeDiagnostics = [];
+
+function summarizeDebuggerTargets(targets = []) {
+  return targets.map((target) => ({
+    id: target.id || '',
+    type: target.type || '',
+    title: target.title || '',
+    url: target.url || '',
+    webSocketDebuggerUrl: target.webSocketDebuggerUrl || ''
+  }));
+}
+
+async function reconnectPlayerDebugger(reason) {
+  const targets = await readDebuggerTargets();
+  const summarizedTargets = summarizeDebuggerTargets(targets);
+  const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+  if (!page) throw new Error(`No page target was available during CDP recovery: ${JSON.stringify(summarizedTargets)}`);
+  const freshClient = await connect(page.webSocketDebuggerUrl);
+  try {
+    await freshClient.call('Runtime.enable', {}, 5_000);
+    await freshClient.call('Page.enable', {}, 5_000);
+    await freshClient.call('Page.bringToFront', {}, 5_000);
+    await freshClient.call('Emulation.setFocusEmulationEnabled', { enabled: true }, 5_000);
+  } catch (error) {
+    freshClient.close();
+    throw error;
+  }
+  const priorClient = client;
+  client = freshClient;
+  priorClient?.close();
+  const recovery = {
+    at: Date.now(),
+    reason,
+    target: summarizedTargets.find((target) => target.id === page.id) || summarizedTargets[0] || null,
+    targetCount: summarizedTargets.length
+  };
+  interactiveChromeDiagnostics.push({ type: 'cdp-reconnected', ...recovery });
+  console.log(`[player-layout] recovered CDP session: ${JSON.stringify(recovery)}`);
+}
+
+async function waitForInteractivePlayerChrome(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  let lastStateFingerprint = '';
+  let lastError = null;
+  let reconnectCount = 0;
+  while (Date.now() < deadline) {
+    try {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const state = await evaluate(client, interactivePlayerChromeExpression, Math.min(2_500, remainingMs));
+      lastState = state || null;
+      const { sampledAt: _sampledAt, ...stableState } = lastState || {};
+      const stateFingerprint = JSON.stringify(stableState);
+      if (stateFingerprint !== lastStateFingerprint) {
+        lastStateFingerprint = stateFingerprint;
+        console.log(`[player-layout] interactive readiness: ${stateFingerprint}`);
+      }
+      if (state?.ready) return state;
+    } catch (error) {
+      lastError = error;
+      let targets = [];
+      let targetError = '';
+      try {
+        targets = summarizeDebuggerTargets(await readDebuggerTargets());
+      } catch (listError) {
+        targetError = listError?.message || String(listError);
+      }
+      const diagnostic = {
+        type: 'cdp-evaluate-failure',
+        at: Date.now(),
+        error: error?.message || String(error),
+        reconnectCount,
+        targets,
+        targetError,
+        lastState
+      };
+      interactiveChromeDiagnostics.push(diagnostic);
+      console.warn(`[player-layout] CDP readiness failure: ${JSON.stringify(diagnostic)}`);
+      if (reconnectCount < 3 && /CDP (?:call timed out|socket closed)/i.test(diagnostic.error)) {
+        reconnectCount += 1;
+        try {
+          await reconnectPlayerDebugger(diagnostic.error);
+          continue;
+        } catch (reconnectError) {
+          const failedRecovery = {
+            type: 'cdp-reconnect-failure',
+            at: Date.now(),
+            reconnectCount,
+            error: reconnectError?.message || String(reconnectError)
+          };
+          interactiveChromeDiagnostics.push(failedRecovery);
+          console.warn(`[player-layout] CDP recovery failed: ${JSON.stringify(failedRecovery)}`);
+        }
+      }
+    }
+    if (Date.now() < deadline) await sleep(Math.min(250, deadline - Date.now()));
+  }
+  throw new Error(`Timed out waiting for interactive player window chrome: ${JSON.stringify({
+    lastError: lastError?.message || '',
+    lastState,
+    diagnostics: interactiveChromeDiagnostics
+  })}`);
+}
+
+async function moveMouseUntilHovered(client, selector, point, label, attempts = 8) {
+  await client.call('Page.bringToFront');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+    await sleep(80);
+    const hovered = await evaluate(client, `document.querySelector(${JSON.stringify(selector)})?.matches(':hover') || false`);
+    if (hovered) return true;
+  }
+  const pointTarget = await evaluate(client, `(() => {
+    const target = document.elementFromPoint(${Number(point.x)}, ${Number(point.y)});
+    return { id: target?.id || '', className: typeof target?.className === 'string' ? target.className : '', tag: target?.tagName || '' };
+  })()`);
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ selector, point, pointTarget })}`);
 }
 
 async function setWindowSize(client, _targetId, width, height) {
@@ -186,6 +620,25 @@ async function captureElementPng(client, selector) {
     clip: { ...rect, scale: 1 }
   });
   return Buffer.from(result.data, 'base64');
+}
+
+async function captureSelectedLightingPng(client) {
+  await evaluate(client, `new Promise((resolve) => {
+    let style = document.querySelector('#aht-lighting-proof-style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'aht-lighting-proof-style';
+      style.textContent = '.aht-lighting-proof > .game-thumb, .aht-lighting-proof > .game-copy { visibility: hidden !important; }';
+      document.head.append(style);
+    }
+    document.querySelector('#gameTileButton')?.classList.add('aht-lighting-proof');
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+  })`);
+  try {
+    return await captureElementPng(client, '#gameTileButton');
+  } finally {
+    await evaluate(client, `document.querySelector('#gameTileButton')?.classList.remove('aht-lighting-proof'); true`);
+  }
 }
 
 function sha256(value) {
@@ -314,18 +767,54 @@ const ptbLatest = {
   zipFormat: 'aht-full-client-zip',
   zip: { path: 'packs/a-hard-time-ptb-10.0.0-ptb.1.zip', size: 321, sha256: '1'.repeat(64) }
 };
+const launcherSocialLinks = Object.freeze({
+  discord: 'https://discord.com/invite/LayoutSmoke',
+  youtube: 'https://www.youtube.com/@AHardTimeLayout',
+  tiktok: 'https://www.tiktok.com/@ahardtimelayout',
+  forum: 'https://ahardtime.net/forum/launcher-layout'
+});
 
+await Promise.all([
+  fsp.mkdir(path.join(fakeHome, 'Documents'), { recursive: true }),
+  fsp.mkdir(path.join(fakeHome, 'Downloads'), { recursive: true }),
+  fsp.mkdir(fakeAppData, { recursive: true }),
+  fsp.mkdir(fakeLocalAppData, { recursive: true }),
+  fsp.mkdir(userData, { recursive: true }),
+  fsp.mkdir(minecraftRoot, { recursive: true }),
+  fsp.mkdir(path.dirname(java8Executable), { recursive: true }),
+  fsp.mkdir(macMinecraftApp, { recursive: true })
+]);
+await fsp.writeFile(java8Executable, 'AHT Java 8 executable fixture', 'utf8');
+if (process.platform !== 'win32') await fsp.chmod(java8Executable, 0o755);
+await fsp.writeFile(path.join(java8Home, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
+const deviceCredential = createDeviceCredential();
+const registeredAt = new Date().toISOString();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: deviceCredential.schemaVersion,
+  protocol: deviceCredential.protocol,
+  algorithm: deviceCredential.algorithm,
+  deviceId: deviceCredential.deviceId,
+  publicKey: deviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(deviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: deviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 await writeJson(path.join(userData, 'identity.json'), {
   installId: 'layout-smoke-install',
-  createdAt: new Date().toISOString(),
+  createdAt: registeredAt,
   minecraftUsername: 'LayoutUser_1',
-  usernameRegisteredAt: new Date().toISOString(),
-  usernameRegistrationMode: 'layout-smoke'
+  usernameRegisteredAt: registeredAt,
+  usernameRegistrationMode: 'worker',
+  remoteRegistrationAttemptedAt: registeredAt,
+  remoteRegistrationConfirmedAt: registeredAt,
+  remoteRegistrationWorkerBaseUrl: `${workerEndpoint}/`
 });
-await fsp.mkdir(minecraftRoot, { recursive: true });
-
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
+  instanceDir,
   latestUrl: `${workerEndpoint}/latest.json`,
   packs: {
     ptb: {
@@ -338,7 +827,7 @@ await writeJson(defaultsPath, {
   curseforge: { proxyBaseUrl: `${workerEndpoint}/cf/`, apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: true, sendLocalChanges: true, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 }
+  minecraftLauncher: { enabled: true, rootDir: minecraftRoot, javaPath: java8Executable, autoImportAccount: false, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 }
 });
 
 const server = http.createServer((request, response) => {
@@ -353,6 +842,17 @@ const server = http.createServer((request, response) => {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(ptbLatest));
+    return;
+  }
+  if (url.pathname === '/update-media/launcher-social-links.json') {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify({
+      schema: 'aht-launcher-social-links/v1',
+      links: launcherSocialLinks,
+      publishedAt: '2026-08-30T12:00:00.000Z',
+      publishedBy: 'Player Layout Smoke'
+    }));
     return;
   }
   if (url.pathname === '/api/update-logs') {
@@ -382,41 +882,223 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
+let electronOutput = '';
+const appendElectronOutput = (chunk) => {
+  electronOutput = `${electronOutput}${String(chunk)}`.slice(-262_144);
+};
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
+    ...isolatedHostEnv,
     AHT_APP_DEFAULTS: tempDefaults,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_OPEN_EXTERNAL_ECHO: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_TEST_REMOTE_DEBUG_PORT: String(port),
+    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
+    AHT_TEST_STARTUP_PREPARATION_SECRET: 'b'.repeat(64),
+    AHT_TEST_QUIT_ON_ALL_WINDOWS_CLOSED: '1',
+    AHT_TEST_KEEP_RENDERER_ACTIVE: '1',
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
     ELECTRON_ENABLE_LOGGING: '0'
   },
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true
 });
+child.stdout?.on('data', appendElectronOutput);
+child.stderr?.on('data', appendElectronOutput);
 
 let client;
 try {
+  console.log('[player-layout] waiting for packaged Electron debugger target');
   const target = await waitForTarget();
+  console.log(`[player-layout] debugger target ready; connecting (${JSON.stringify({ title: target.title || '', url: target.url || '' })})`);
   client = await connect(target.webSocketDebuggerUrl);
+  console.log('[player-layout] debugger connected; enabling Runtime and Page');
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  // A packaged macOS executable launched directly from a CI shell is not
+  // guaranteed to become the foreground application. Activate it before
+  // waiting on renderer hydration so App Nap cannot strand the CDP client
+  // behind the very readiness condition needed to issue this command.
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await sleep(250);
+  console.log('[player-layout] debugger foregrounded; waiting for hydrated UI');
   await waitFor(client, "document.readyState === 'complete' && window.aht && document.querySelector('#closeLauncherWhenGameStartsInput')", 'player DOM');
-  const fixedWindowProof = await evaluate(client, `({
-    innerWidth: window.innerWidth,
-    innerHeight: window.innerHeight,
-    documentWidth: document.documentElement.clientWidth,
-    documentHeight: document.documentElement.clientHeight,
-    controls: document.querySelectorAll('.window-controls .window-control').length,
-    minimizeLabel: document.querySelector('#windowMinimizeButton')?.getAttribute('aria-label') || '',
-    closeLabel: document.querySelector('#windowCloseButton')?.getAttribute('aria-label') || ''
-  })`);
-  if (fixedWindowProof.innerWidth !== 1432 || fixedWindowProof.innerHeight !== 760 || fixedWindowProof.documentWidth !== 1432 || fixedWindowProof.documentHeight !== 760 || fixedWindowProof.controls !== 2 || fixedWindowProof.minimizeLabel !== 'Minimize launcher' || fixedWindowProof.closeLabel !== 'Close launcher') {
-    throw new Error(`Launcher must use the fixed 1432x760 frameless shell with its own controls: ${JSON.stringify(fixedWindowProof)}`);
+  const interactiveChromeState = await waitForInteractivePlayerChrome();
+  console.log(`[player-layout] interactive player window ready: ${JSON.stringify(interactiveChromeState)}`);
+  console.log('[player-layout] hydrated UI ready; enabling foreground input');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await sleep(250);
+  const fixedWindowProof = await evaluate(client, `(() => {
+    const rectOf = (node) => {
+      const rect = node?.getBoundingClientRect();
+      return rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
+    };
+    const controls = document.querySelector('.window-controls');
+    const dragRegion = document.querySelector('#developerWindowDragRegion');
+    const minimize = document.querySelector('#windowMinimizeButton');
+    const close = document.querySelector('#windowCloseButton');
+    const topbar = document.querySelector('.topbar');
+    const social = document.querySelector('#launcherSocialMenu');
+    const profile = document.querySelector('#profileFriendsButton');
+    const controlsStyle = controls ? getComputedStyle(controls) : null;
+    const dragRegionStyle = dragRegion ? getComputedStyle(dragRegion) : null;
+    const topbarStyle = topbar ? getComputedStyle(topbar) : null;
+    const hitMap = (node) => {
+      const rect = node?.getBoundingClientRect();
+      if (!rect) return [];
+      const xs = [rect.left + 3, rect.left + rect.width / 2, rect.right - 3];
+      const ys = [rect.top + 3, rect.top + rect.height / 2, rect.bottom - 3];
+      return ys.flatMap((y) => xs.map((x) => {
+        const target = document.elementFromPoint(x, y);
+        return {
+          x,
+          y,
+          directId: target?.id || '',
+          directTag: target?.tagName || '',
+          controlId: target?.closest?.('.window-control')?.id || ''
+        };
+      }));
+    };
+    const closeRect = close?.getBoundingClientRect();
+    const closeHit = closeRect
+      ? document.elementFromPoint(closeRect.left + closeRect.width / 2, closeRect.top + closeRect.height / 2)?.closest?.('.window-control')?.id || ''
+      : '';
+    return {
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      documentWidth: document.documentElement.clientWidth,
+      documentHeight: document.documentElement.clientHeight,
+      controls: document.querySelectorAll('.window-controls .window-control').length,
+      controlsDisplay: controlsStyle?.display || '',
+      controlsVisibility: controlsStyle?.visibility || '',
+      controlsOpacity: Number(controlsStyle?.opacity || 0),
+      controlsZIndex: Number(controlsStyle?.zIndex || 0),
+      topbarZIndex: Number(topbarStyle?.zIndex || 0),
+      controlsRect: rectOf(controls),
+      dragRegionRect: rectOf(dragRegion),
+      dragRegionDisplay: dragRegionStyle?.display || '',
+      dragRegionPointerEvents: dragRegionStyle?.pointerEvents || '',
+      dragRegionAppRegion: dragRegionStyle?.getPropertyValue('-webkit-app-region')?.trim() || '',
+      dragPointTarget: (() => {
+        const target = document.elementFromPoint(800, 14);
+        return { id: target?.id || '', className: typeof target?.className === 'string' ? target.className : '', tag: target?.tagName || '' };
+      })(),
+      minimizeRect: rectOf(minimize),
+      closeRect: rectOf(close),
+      socialRect: rectOf(social),
+      profileRect: rectOf(profile),
+      closeHit,
+      minimizeHitMap: hitMap(minimize),
+      closeHitMap: hitMap(close),
+      minimizeSpanPointerEvents: minimize?.querySelector('span') ? getComputedStyle(minimize.querySelector('span')).pointerEvents : '',
+      closeSpanPointerEvents: close?.querySelector('span') ? getComputedStyle(close.querySelector('span')).pointerEvents : '',
+      minimizeLabel: minimize?.getAttribute('aria-label') || '',
+      closeLabel: close?.getAttribute('aria-label') || ''
+    };
+  })()`);
+  const nativeWindowControlProof = queryWindowsNativeHitTest(child.pid, [
+    ...fixedWindowProof.minimizeHitMap.map(({ x, y }) => ({ controlId: 'windowMinimizeButton', x, y, expectedHit: 1 })),
+    ...fixedWindowProof.closeHitMap.map(({ x, y }) => ({ controlId: 'windowCloseButton', x, y, expectedHit: 1 })),
+    { controlId: 'windowDragRegion', x: 800, y: 14, expectedHit: 2 }
+  ]);
+  if (
+    nativeWindowControlProof.supported
+    && (
+      nativeWindowControlProof.samples.length !== 19
+      || nativeWindowControlProof.samples.some((sample) => (
+        sample.controlId === 'windowDragRegion' ? sample.hit !== 2 : sample.hit !== 1
+      ))
+    )
+  ) {
+    throw new Error(`Windows must route the complete minimize/close hitboxes to HTCLIENT and only the dedicated strip to HTCAPTION: ${JSON.stringify({ nativeWindowControlProof, dragRegion: {
+      rect: fixedWindowProof.dragRegionRect,
+      display: fixedWindowProof.dragRegionDisplay,
+      pointerEvents: fixedWindowProof.dragRegionPointerEvents,
+      appRegion: fixedWindowProof.dragRegionAppRegion,
+      pointTarget: fixedWindowProof.dragPointTarget
+    } })}`);
+  }
+  const readControlAppearance = (id) => evaluate(client, `(() => {
+    const node = document.querySelector(${JSON.stringify(id)});
+    const style = node ? getComputedStyle(node) : null;
+    return {
+      hovered: Boolean(node?.matches(':hover')),
+      color: style?.color || '',
+      backgroundColor: style?.backgroundColor || '',
+      pointerEvents: style?.pointerEvents || '',
+      appRegion: style?.getPropertyValue('-webkit-app-region')?.trim() || ''
+    };
+  })()`);
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 600, y: 300 });
+  await sleep(80);
+  const controlRestProof = {
+    minimize: await readControlAppearance('#windowMinimizeButton'),
+    close: await readControlAppearance('#windowCloseButton')
+  };
+  await moveMouseUntilHovered(client, '#windowMinimizeButton', {
+    x: fixedWindowProof.minimizeRect.left + fixedWindowProof.minimizeRect.width / 2,
+    y: fixedWindowProof.minimizeRect.top + fixedWindowProof.minimizeRect.height / 2
+  }, 'minimize control hover state');
+  await waitFor(client, `(() => {
+    const node = document.querySelector('#windowMinimizeButton');
+    return node?.matches(':hover') && getComputedStyle(node).color === 'rgb(255, 255, 255)';
+  })()`, 'minimize control highlighted appearance');
+  const minimizeHoverProof = await readControlAppearance('#windowMinimizeButton');
+  await moveMouseUntilHovered(client, '#windowCloseButton', {
+    x: fixedWindowProof.closeRect.left + fixedWindowProof.closeRect.width / 2,
+    y: fixedWindowProof.closeRect.top + fixedWindowProof.closeRect.height / 2
+  }, 'close control hover state');
+  await waitFor(client, `(() => {
+    const node = document.querySelector('#windowCloseButton');
+    return node?.matches(':hover') && getComputedStyle(node).color === 'rgb(255, 255, 255)';
+  })()`, 'close control highlighted appearance');
+  const closeHoverProof = await readControlAppearance('#windowCloseButton');
+  const transparent = 'rgba(0, 0, 0, 0)';
+  if (
+    fixedWindowProof.innerWidth !== 1432
+    || fixedWindowProof.innerHeight !== 760
+    || fixedWindowProof.documentWidth !== 1432
+    || fixedWindowProof.documentHeight !== 760
+    || fixedWindowProof.controls !== 2
+    || fixedWindowProof.controlsDisplay !== 'flex'
+    || fixedWindowProof.controlsVisibility !== 'visible'
+    || fixedWindowProof.controlsOpacity !== 1
+    || fixedWindowProof.controlsZIndex <= fixedWindowProof.topbarZIndex
+    || Math.abs(fixedWindowProof.controlsRect?.top || 0) > 0.5
+    || Math.abs((fixedWindowProof.controlsRect?.right || 0) - fixedWindowProof.innerWidth) > 0.5
+    || (fixedWindowProof.controlsRect?.width || 0) < 55
+    || (fixedWindowProof.controlsRect?.height || 0) < 27
+    || (fixedWindowProof.minimizeRect?.width || 0) < 27
+    || (fixedWindowProof.closeRect?.width || 0) < 27
+    || fixedWindowProof.closeHit !== 'windowCloseButton'
+    || fixedWindowProof.minimizeHitMap.length !== 9
+    || fixedWindowProof.minimizeHitMap.some((hit) => hit.directId !== 'windowMinimizeButton')
+    || fixedWindowProof.closeHitMap.length !== 9
+    || fixedWindowProof.closeHitMap.some((hit) => hit.directId !== 'windowCloseButton')
+    || fixedWindowProof.minimizeSpanPointerEvents !== 'none'
+    || fixedWindowProof.closeSpanPointerEvents !== 'none'
+    || controlRestProof.minimize.backgroundColor !== transparent
+    || controlRestProof.close.backgroundColor !== transparent
+    || !minimizeHoverProof.hovered
+    || minimizeHoverProof.color !== 'rgb(255, 255, 255)'
+    || minimizeHoverProof.backgroundColor !== transparent
+    || !closeHoverProof.hovered
+    || closeHoverProof.color !== 'rgb(255, 255, 255)'
+    || closeHoverProof.backgroundColor !== transparent
+    || Math.abs(fixedWindowProof.innerWidth - (fixedWindowProof.profileRect?.right || 0) - 12) > 0.5
+    || (fixedWindowProof.socialRect?.right || 0) > (fixedWindowProof.profileRect?.left || 0)
+    || fixedWindowProof.minimizeLabel !== 'Minimize launcher'
+    || fixedWindowProof.closeLabel !== 'Close launcher'
+  ) {
+    throw new Error(`Launcher must use the fixed 1432x760 frameless shell with unobstructed BSG-style controls: ${JSON.stringify({ fixedWindowProof, controlRestProof, minimizeHoverProof, closeHoverProof })}`);
   }
   const status = await waitFor(client, "window.aht.getStatus().then((status) => status.latest?.version === '9.9.9' ? status : false)", 'layout latest feed');
   const minecraftProfileProof = await waitFor(client, `
@@ -484,6 +1166,7 @@ try {
       const editableField = document.querySelector('input');
       const repairIcon = scanButton?.querySelector('.button-icon');
       if (!(frame && workspace && heroPanel && heroArt && actions && scanButton && settingsButton && launchStrip && launchInfo && launchActions && playButton && footerLogo && footerLogoImage?.complete && oldFacts && statusBadge && editableField && repairIcon)) return false;
+      if (playButton.classList.contains('is-disabled') || playButton.getAttribute('aria-disabled') === 'true') return false;
       const workspaceRect = workspace.getBoundingClientRect();
       const stripRect = launchStrip.getBoundingClientRect();
       const actionRect = launchActions.getBoundingClientRect();
@@ -850,6 +1533,7 @@ try {
     const sidebar = document.querySelector('.sidebar');
     const sidebarStyle = getComputedStyle(sidebar);
     return {
+      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
       sidebar: {
         backgroundColor: sidebarStyle.backgroundColor,
         backgroundImage: sidebarStyle.backgroundImage,
@@ -864,6 +1548,10 @@ try {
   const activeSidebar = sidebarStateProof.active;
   const neutralSidebar = sidebarStateProof.neutral;
   const sidebarCloseTo = (actual, expected, tolerance = 0.75) => Math.abs(Number(actual) - Number(expected)) <= tolerance;
+  const neutralThumbTransitionSeconds = Number.parseFloat(neutralSidebar?.thumbTransitionDuration);
+  const neutralThumbTransitionMatchesMotionPolicy = sidebarStateProof.reducedMotion
+    ? Number.isFinite(neutralThumbTransitionSeconds) && neutralThumbTransitionSeconds <= 0.001
+    : neutralSidebar?.thumbTransitionDuration === '0.2s';
   if (
     sidebarStateProof.sidebar.backgroundColor !== 'rgb(22, 25, 26)'
     || sidebarStateProof.sidebar.backgroundImage !== 'none'
@@ -907,7 +1595,7 @@ try {
     || neutralSidebar.subtitleColor !== 'rgb(106, 113, 117)'
     || Math.abs(neutralSidebar.thumbOpacity - 0.75) > 0.001
     || neutralSidebar.thumbFilter !== 'none'
-    || neutralSidebar.thumbTransitionDuration !== '0.2s'
+    || !neutralThumbTransitionMatchesMotionPolicy
     || neutralSidebar.copyOpacity !== 1
     || neutralSidebar.copyFilter !== 'none'
   ) {
@@ -971,15 +1659,29 @@ try {
   await sleep(260);
   const selectedHoverSettledVisual = await evaluate(client, selectedVisualExpression);
   const selectedHoverSettledPixels = await captureElementPng(client, '#gameTileButton');
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  await sleep(120);
+  const selectedNeutralLightingPixels = await captureSelectedLightingPng(client);
+  const selectedHoverObserved = await moveMouseUntilHovered(
+    client,
+    '#gameTileButton',
+    selectedHoverPoint,
+    'selected sidebar hover state'
+  );
+  await sleep(120);
+  const selectedHoverLightingPixels = await captureSelectedLightingPng(client);
   const selectedHoverProof = {
-    hovered: await evaluate(client, `document.querySelector('#gameTileButton')?.matches(':hover') || false`),
+    hovered: Boolean(selectedHoverObserved),
     neutralSha256: sha256(selectedNeutralPixels),
     immediateHoverSha256: sha256(selectedHoverPixels),
     settledHoverSha256: sha256(selectedHoverSettledPixels),
+    neutralLightingSha256: sha256(selectedNeutralLightingPixels),
+    hoverLightingSha256: sha256(selectedHoverLightingPixels),
     visualStable: JSON.stringify(selectedNeutralVisual) === JSON.stringify(selectedHoverVisual)
       && JSON.stringify(selectedNeutralVisual) === JSON.stringify(selectedHoverSettledVisual),
     pixelsStable: selectedNeutralPixels.equals(selectedHoverPixels)
-      && selectedNeutralPixels.equals(selectedHoverSettledPixels)
+      && selectedNeutralPixels.equals(selectedHoverSettledPixels),
+    lightingPixelsStable: selectedNeutralLightingPixels.equals(selectedHoverLightingPixels)
   };
   if (
     !selectedHoverProof.hovered
@@ -991,15 +1693,20 @@ try {
     || selectedNeutralVisual.title.animationCount !== 0
     || selectedNeutralVisual.subtitle.animationCount !== 0
     || !selectedHoverProof.visualStable
-    || !selectedHoverProof.pixelsStable
+    || !selectedHoverProof.lightingPixelsStable
   ) {
-    await fsp.mkdir(screenshotDir, { recursive: true });
-    await Promise.all([
-      fsp.writeFile(path.join(screenshotDir, 'selected-neutral-diagnostic.png'), selectedNeutralPixels),
-      fsp.writeFile(path.join(screenshotDir, 'selected-hover-diagnostic.png'), selectedHoverPixels),
-      fsp.writeFile(path.join(screenshotDir, 'selected-hover-settled-diagnostic.png'), selectedHoverSettledPixels)
-    ]);
-    throw new Error(`Selected sidebar lighting must remain byte-identical when hovered: ${JSON.stringify({ selectedHoverProof, selectedNeutralVisual, selectedHoverVisual, selectedHoverSettledVisual })}`);
+    const diagnosticDirs = [...new Set([screenshotDir, testEvidenceDir].filter(Boolean))];
+    for (const diagnosticDir of diagnosticDirs) {
+      await fsp.mkdir(diagnosticDir, { recursive: true });
+      await Promise.all([
+        fsp.writeFile(path.join(diagnosticDir, 'selected-neutral-diagnostic.png'), selectedNeutralPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-diagnostic.png'), selectedHoverPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-settled-diagnostic.png'), selectedHoverSettledPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-neutral-lighting-diagnostic.png'), selectedNeutralLightingPixels),
+        fsp.writeFile(path.join(diagnosticDir, 'selected-hover-lighting-diagnostic.png'), selectedHoverLightingPixels)
+      ]);
+    }
+    throw new Error(`Selected sidebar lighting styles and background pixels must remain identical when hovered: ${JSON.stringify({ selectedHoverProof, selectedNeutralVisual, selectedHoverVisual, selectedHoverSettledVisual })}`);
   }
   await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
   const ptbHoverPoint = {
@@ -1308,17 +2015,145 @@ try {
   if (!newsNavigationProof.activeTab || !newsNavigationProof.packSelected || newsNavigationProof.firstTitle !== 'Launcher Stability Pass' || newsNavigationProof.redundantHeader || newsNavigationProof.openButtons !== 2 || newsNavigationProof.likeButtons !== 2) {
     throw new Error(`News navigation must retain pack context and separate each article action from its like action: ${JSON.stringify(newsNavigationProof)}`);
   }
+  const refreshedSocialLinks = await evaluate(client, `loadLauncherSocialLinks({ forceRefresh: true })`);
+  if (
+    refreshedSocialLinks?.source !== 'published'
+    || JSON.stringify(refreshedSocialLinks?.links) !== JSON.stringify(launcherSocialLinks)
+  ) {
+    throw new Error(`Player launcher did not load the published Social Links manifest: ${JSON.stringify(refreshedSocialLinks)}`);
+  }
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  await evaluate(client, `document.querySelector('#gameTab').focus(); true`);
+  await sleep(220);
+  const socialMenuRestProof = await evaluate(client, `(() => {
+    const menu = document.querySelector('#launcherSocialMenu');
+    const discord = document.querySelector('#discordSocialLink');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const profile = document.querySelector('#profileFriendsButton');
+    const style = getComputedStyle(dropdown);
+    return {
+      source: menu?.dataset.source || '',
+      directButtons: [...menu.children].filter((node) => node.matches?.('.social-link')).map((node) => node.id),
+      dropdownButtons: [...dropdown.querySelectorAll(':scope > .social-link')].map((node) => node.id),
+      profileImmediatelyAfter: menu?.nextElementSibling === profile && profile?.previousElementSibling === menu,
+      menuBackground: getComputedStyle(menu).backgroundColor,
+      discordBackground: getComputedStyle(discord).backgroundColor,
+      dropdownBackground: style.backgroundColor,
+      dropdownVisibility: style.visibility,
+      dropdownOpacity: Number(style.opacity),
+      dropdownPointerEvents: style.pointerEvents,
+      expanded: discord?.getAttribute('aria-expanded')
+    };
+  })()`);
+  if (
+    socialMenuRestProof.source !== 'published'
+    || JSON.stringify(socialMenuRestProof.directButtons) !== JSON.stringify(['discordSocialLink'])
+    || JSON.stringify(socialMenuRestProof.dropdownButtons) !== JSON.stringify(['youtubeSocialLink', 'tiktokSocialLink', 'forumSocialLink'])
+    || !socialMenuRestProof.profileImmediatelyAfter
+    || !/rgba\(0, 0, 0, 0\)|transparent/.test(socialMenuRestProof.menuBackground)
+    || !/rgba\(0, 0, 0, 0\)|transparent/.test(socialMenuRestProof.discordBackground)
+    || !/rgba\(0, 0, 0, 0\)|transparent/.test(socialMenuRestProof.dropdownBackground)
+    || socialMenuRestProof.dropdownVisibility !== 'hidden'
+    || socialMenuRestProof.dropdownOpacity !== 0
+    || socialMenuRestProof.dropdownPointerEvents !== 'none'
+    || socialMenuRestProof.expanded !== 'false'
+  ) {
+    throw new Error(`Social menu rest state must be one background-free Discord icon immediately left of the profile: ${JSON.stringify(socialMenuRestProof)}`);
+  }
+  const discordHoverPoint = await evaluate(client, `(() => {
+    const rect = document.querySelector('#discordSocialLink').getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`);
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: discordHoverPoint.x, y: discordHoverPoint.y });
+  const socialMenuExpandedProof = await waitFor(client, `(() => {
+    const discord = document.querySelector('#discordSocialLink');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const style = getComputedStyle(dropdown);
+    if (style.visibility !== 'visible' || Number(style.opacity) < 0.99) return false;
+    const discordRect = discord.getBoundingClientRect();
+    const rows = [...dropdown.querySelectorAll(':scope > .social-link')].map((node) => {
+      const rect = node.getBoundingClientRect();
+      return { id: node.id, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    });
+    return {
+      expanded: discord.getAttribute('aria-expanded'),
+      pointerEvents: style.pointerEvents,
+      discordBottom: discordRect.bottom,
+      rows
+    };
+  })()`, 'vertical Social Links dropdown');
+  const socialRows = socialMenuExpandedProof.rows || [];
+  if (
+    socialMenuExpandedProof.expanded !== 'true'
+    || socialMenuExpandedProof.pointerEvents !== 'auto'
+    || socialRows.length !== 3
+    || socialRows[0].top <= socialMenuExpandedProof.discordBottom
+    || !(socialRows[0].top < socialRows[1].top && socialRows[1].top < socialRows[2].top)
+    || socialRows.some((row) => Math.abs(row.left - socialRows[0].left) > 0.75)
+    || socialRows.some((row) => row.width < 40 || row.height < 40)
+  ) {
+    throw new Error(`Social Links hover/focus menu is not a single vertical column below Discord: ${JSON.stringify(socialMenuExpandedProof)}`);
+  }
+  const diagonalCorridorPoint = {
+    x: socialRows[0].left - 8,
+    y: socialMenuExpandedProof.discordBottom + ((socialRows[0].top - socialMenuExpandedProof.discordBottom) / 2)
+  };
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: diagonalCorridorPoint.x, y: diagonalCorridorPoint.y });
+  await sleep(80);
+  const corridorProof = await evaluate(client, `(() => {
+    const menu = document.querySelector('#launcherSocialMenu');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const hit = document.elementFromPoint(${JSON.stringify(diagonalCorridorPoint.x)}, ${JSON.stringify(diagonalCorridorPoint.y)});
+    const style = getComputedStyle(dropdown);
+    return {
+      menuHover: menu.matches(':hover'),
+      visible: style.visibility === 'visible' && Number(style.opacity) > 0.5,
+      hitInsideDropdown: Boolean(hit?.closest?.('#launcherSocialDropdown')),
+      expanded: document.querySelector('#discordSocialLink').getAttribute('aria-expanded')
+    };
+  })()`);
+  if (!corridorProof.menuHover || !corridorProof.visible || !corridorProof.hitInsideDropdown || corridorProof.expanded !== 'true') {
+    throw new Error(`Social Links diagonal pointer corridor collapsed between Discord and the dropdown: ${JSON.stringify({ diagonalCorridorPoint, corridorProof })}`);
+  }
+  const youtubePoint = {
+    x: socialRows[0].left + (socialRows[0].width / 2),
+    y: socialRows[0].top + (socialRows[0].height / 2)
+  };
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: youtubePoint.x, y: youtubePoint.y });
+  await sleep(80);
+  const youtubeHoverProof = await evaluate(client, `(() => ({
+    visible: getComputedStyle(document.querySelector('#launcherSocialDropdown')).visibility,
+    hovered: document.querySelector('#youtubeSocialLink').matches(':hover'),
+    expanded: document.querySelector('#discordSocialLink').getAttribute('aria-expanded')
+  }))()`);
+  if (youtubeHoverProof.visible !== 'visible' || !youtubeHoverProof.hovered || youtubeHoverProof.expanded !== 'true') {
+    throw new Error(`Social Links dropdown disappeared before the pointer reached YouTube: ${JSON.stringify(youtubeHoverProof)}`);
+  }
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  await evaluate(client, `document.querySelector('#gameTab').focus(); true`);
+  const socialMenuClosedProof = await waitFor(client, `(() => {
+    const discord = document.querySelector('#discordSocialLink');
+    const dropdown = document.querySelector('#launcherSocialDropdown');
+    const style = getComputedStyle(dropdown);
+    return style.visibility === 'hidden' && Number(style.opacity) === 0 && discord.getAttribute('aria-expanded') === 'false';
+  })()`, 'Social Links dropdown close after focus leaves');
   const externalLinkProof = await evaluate(client, `
-    Promise.all([window.aht.openExternal('store'), window.aht.openExternal('unapproved')]).then(([allowed, denied]) => ({ allowed, denied }))
+    Promise.all(['store', 'discord', 'youtube', 'tiktok', 'forum', 'unapproved'].map(async (destination) => [destination, await window.aht.openExternal(destination)]))
+      .then((entries) => Object.fromEntries(entries))
   `);
   if (
-    externalLinkProof.allowed?.ok !== true
-    || externalLinkProof.allowed?.captured !== true
-    || externalLinkProof.allowed?.target !== 'https://ahardtime.net/shop'
-    || externalLinkProof.denied?.ok !== false
-    || externalLinkProof.denied?.opened !== false
+    externalLinkProof.store?.ok !== true
+    || externalLinkProof.store?.captured !== true
+    || externalLinkProof.store?.target !== 'https://ahardtime.net/store'
+    || externalLinkProof.discord?.target !== launcherSocialLinks.discord
+    || externalLinkProof.youtube?.target !== launcherSocialLinks.youtube
+    || externalLinkProof.tiktok?.target !== launcherSocialLinks.tiktok
+    || externalLinkProof.forum?.target !== launcherSocialLinks.forum
+    || ['discord', 'youtube', 'tiktok', 'forum'].some((key) => externalLinkProof[key]?.ok !== true || externalLinkProof[key]?.captured !== true)
+    || externalLinkProof.unapproved?.ok !== false
+    || externalLinkProof.unapproved?.opened !== false
   ) {
-    throw new Error(`External-link allowlist did not permit only the official AHT store: ${JSON.stringify(externalLinkProof)}`);
+    throw new Error(`External-link allowlist did not map the exact published social destinations and deny unknown keys: ${JSON.stringify(externalLinkProof)}`);
   }
   await click(client, '#storeTab');
   await click(client, '#gameTab');
@@ -1554,27 +2389,180 @@ try {
     if (!downloadsDecorationProof || /(?:115|135)deg/.test(`${downloadsDecorationProof.background} ${downloadsDecorationProof.before}`)) {
       throw new Error(`Downloads must not render either long diagonal decoration line: ${JSON.stringify(downloadsDecorationProof)}`);
     }
+    const downloadsFailureProof = await evaluate(client, `(() => {
+      renderDownloads({
+        running: false,
+        error: 'Download failed for https://raw-worker.example.workers.dev/ptb/packs/private.zip: 429 Too Many Requests',
+        lines: ['C:\\\\Users\\\\private\\\\AHT: raw internal failure'],
+        progress: { phase: 'failed', currentPath: 'C:\\\\Users\\\\private\\\\AHT' }
+      });
+      const visible = (element) => {
+        if (!element || element.hidden) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const overlay = document.querySelector('#downloadsOverlay');
+      const text = overlay?.innerText || '';
+      const hitTarget = (selector) => {
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        if (!rect) return '';
+        return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('button')?.id || '';
+      };
+      const backButton = document.querySelector('#downloadsBackButton');
+      backButton?.focus();
+      return {
+        closeExists: Boolean(document.querySelector('#downloadsCloseButton')),
+        backVisible: visible(backButton),
+        backHit: hitTarget('#downloadsBackButton'),
+        backFocusable: document.activeElement === backButton,
+        errorVisible: visible(document.querySelector('#downloadsErrorPanel')),
+        reportVisible: visible(document.querySelector('#downloadsErrorReportButton')),
+        reportLabel: document.querySelector('#downloadsErrorReportButton')?.textContent?.trim() || '',
+        text
+      };
+    })()`);
+    if (
+      downloadsFailureProof.closeExists
+      || !downloadsFailureProof.backVisible
+      || downloadsFailureProof.backHit !== 'downloadsBackButton'
+      || !downloadsFailureProof.backFocusable
+      || !downloadsFailureProof.errorVisible
+      || !downloadsFailureProof.reportVisible
+    ) {
+      throw new Error(`Downloads must expose one focusable footer exit with the failure controls: ${JSON.stringify(downloadsFailureProof)}`);
+    }
+    if (downloadsFailureProof.reportLabel !== 'Click here to copy error log') {
+      throw new Error(`Downloads error-report action has the wrong label: ${JSON.stringify(downloadsFailureProof)}`);
+    }
+    if (!downloadsFailureProof.text.includes('Download Failed') || /https?:\/\/|workers\.dev|Too Many Requests|C:\\\\Users|private\.zip/i.test(downloadsFailureProof.text)) {
+      throw new Error(`Player Downloads exposed technical error details: ${JSON.stringify(downloadsFailureProof)}`);
+    }
+    const copiedDownloadReport = await evaluate(client, `window.aht.copyErrorReport({
+      title: 'Download Failed',
+      message: 'Download failed for https://raw-worker.example.workers.dev/ptb/packs/private.zip?aht_player=owner%40example.com&aht_uuid=private-uuid at C:\\\\Users\\\\private\\\\AHT /home/private/AHT owner@example.com 2001:db8::1234 01234567-89ab-4def-8123-456789abcdef ahtd_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef AHT_RELEASES',
+      context: 'update:start',
+      packKey: 'aht'
+    })`);
+    if (
+      !copiedDownloadReport?.copied
+      || copiedDownloadReport.copyKind !== 'file'
+      || copiedDownloadReport.fileName !== 'AHT Error Report.txt'
+      || !fs.existsSync(copiedDownloadReport.filePath)
+    ) {
+      throw new Error(`Download failure did not copy a .txt file attachment: ${JSON.stringify(copiedDownloadReport)}`);
+    }
+    const copiedDownloadText = fs.readFileSync(copiedDownloadReport.filePath, 'utf8');
+    if (
+      !copiedDownloadText.includes('A HARD TIME LAUNCHER ERROR REPORT')
+      || !copiedDownloadText.includes('AHT Proxy')
+      || /https?:\/\/|workers\.dev|raw-worker|C:\\\\Users\\\\private|\/home\/private|private\.zip|owner(?:%40|@)example\.com|private-uuid|2001:db8|01234567-89ab-4def-8123-456789abcdef|ahtd_012345|AHT_RELEASES/i.test(copiedDownloadText)
+    ) {
+      throw new Error(`Copied download error report exposed the raw endpoint or path: ${copiedDownloadText.slice(0, 1400)}`);
+    }
+    await click(client, '#downloadsErrorReportButton');
+    const downloadReportToast = await waitFor(client, `(() => {
+      const toast = [...document.querySelectorAll('#toastStack .toast.success')]
+        .find((item) => item.querySelector('strong')?.textContent.trim() === 'Error log copied');
+      return toast?.querySelector('span')?.textContent.trim() === 'Paste to attach the .txt file.' ? true : false;
+    })()`, 'download error report copy confirmation');
+    if (!downloadReportToast) throw new Error('Download error report click did not confirm the .txt attachment copy.');
+    await evaluate(client, `document.querySelector('#toastStack')?.replaceChildren(); true`);
     reports.push(await assertLayout(client, `${size.name}-downloads`));
-    screenshots.push(await captureScreenshot(client, `${size.name}-downloads`));
+    screenshots.push(await captureScreenshot(client, `${size.name}-downloads-failed`));
+
+    await click(client, '#downloadsBackButton');
+    const backExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
+    if (!backExitProof) throw new Error('The Downloads footer button did not exit Downloads.');
+
+    await click(client, '#downloadsButton');
+    await evaluate(client, `(() => {
+      const overlay = document.querySelector('#downloadsOverlay');
+      overlay?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    const backdropExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
+    if (!backdropExitProof) throw new Error('The Downloads backdrop did not exit Downloads.');
+
+    for (const [tab, view] of [['player', 'player'], ['news', 'news'], ['settings', 'settings']]) {
+      await click(client, '#downloadsButton');
+      await click(client, `.nav [data-tab="${tab}"]`);
+      const navigationExitProof = await evaluate(client, `(() => ({
+        downloadsClosed: document.querySelector('#downloadsOverlay')?.hidden === true,
+        viewVisible: document.querySelector('#${view}')?.hidden === false
+      }))()`);
+      if (!navigationExitProof.downloadsClosed || !navigationExitProof.viewVisible) {
+        throw new Error(`${tab} navigation did not escape Downloads: ${JSON.stringify(navigationExitProof)}`);
+      }
+    }
+
+    await click(client, '#downloadsButton');
     await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    const escapeExitProof = await evaluate(client, `document.querySelector('#downloadsOverlay')?.hidden === true`);
+    if (!escapeExitProof) throw new Error('Escape did not exit Downloads.');
+  }
+
+  if (testEvidenceDir) {
+    await fsp.mkdir(testEvidenceDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(testEvidenceDir, 'player-layout-cdp-diagnostics.json'),
+      `${JSON.stringify(interactiveChromeDiagnostics, null, 2)}\n`,
+      'utf8'
+    );
   }
 
   console.log(JSON.stringify({
     ok: true,
     root,
     screenshots,
+    cdpDiagnostics: interactiveChromeDiagnostics,
+    windowControls: {
+      nativeHitTestSupported: nativeWindowControlProof.supported,
+      clientSamples: nativeWindowControlProof.samples.filter((sample) => sample.controlId !== 'windowDragRegion').length,
+      clientHitCodes: [...new Set(nativeWindowControlProof.samples.filter((sample) => sample.controlId !== 'windowDragRegion').map((sample) => sample.hit))],
+      dragSamples: nativeWindowControlProof.samples.filter((sample) => sample.controlId === 'windowDragRegion').length,
+      dragHitCodes: [...new Set(nativeWindowControlProof.samples.filter((sample) => sample.controlId === 'windowDragRegion').map((sample) => sample.hit))]
+    },
+    socialMenu: {
+      rest: socialMenuRestProof,
+      expanded: socialMenuExpandedProof,
+      closed: socialMenuClosedProof,
+      externalLinks: externalLinkProof
+    },
     toastLifetimeMs: {
       defaultError: toastLifetimeProof.defaultError.durationMs,
       overriddenSuccess: toastLifetimeProof.overriddenSuccess.durationMs
     },
     reports: reports.map(({ label, viewport, activeView }) => ({ label, viewport, activeView }))
   }, null, 2));
+} catch (error) {
+  const startupProbe = await fsp.readFile(startupProbePath, 'utf8').catch(() => 'No startup probe was written.');
+  console.error(`AHT layout startup probe:\n${startupProbe.trim()}`);
+  if (electronOutput.trim()) console.error(`AHT packaged Electron output:\n${electronOutput.trim()}`);
+  let failureScreenshot = null;
+  if (client) {
+    failureScreenshot = await client.call('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: false
+    }, 2_000).then((result) => Buffer.from(result.data, 'base64')).catch(() => null);
+  }
+  if (testEvidenceDir) {
+    await fsp.mkdir(testEvidenceDir, { recursive: true }).catch(() => {});
+    await Promise.allSettled([
+      fsp.writeFile(path.join(testEvidenceDir, 'player-layout-startup-probe.jsonl'), startupProbe, 'utf8'),
+      fsp.writeFile(path.join(testEvidenceDir, 'player-layout-cdp-diagnostics.json'), `${JSON.stringify(interactiveChromeDiagnostics, null, 2)}\n`, 'utf8'),
+      fsp.writeFile(path.join(testEvidenceDir, 'player-layout-electron-output.log'), electronOutput || 'No packaged Electron output was captured.\n', 'utf8'),
+      ...(failureScreenshot ? [fsp.writeFile(path.join(testEvidenceDir, 'player-layout-failure.png'), failureScreenshot)] : [])
+    ]);
+  }
+  throw error;
 } finally {
   if (client) {
-    await client.call('Browser.close').catch(() => {});
+    await client.call('Browser.close', {}, 5_000).catch(() => {});
     client.close();
   }
-  child.kill();
+  await stopElectronChild(child);
   const closePromise = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections?.();
   await closePromise;

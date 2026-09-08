@@ -13,6 +13,7 @@ import {
 } from './utils.js';
 import { launcherProofJavaArgs, launcherProofPath } from './launcherProof.js';
 import { findInstalledForgeVersion } from './forgeInstaller.js';
+import { repairMinecraftAssetObjects } from './minecraftAssets.js';
 
 const MIN_MINECRAFT_MEMORY_MB = 4096;
 
@@ -231,6 +232,8 @@ function javaArgsFor({ config = {}, latest = null, installed = null, rootDir = '
   const ram = memoryMbFor(config, latest, installed);
   const args = [];
   args.push(`-Xmx${ram}m`, '-Xms512m');
+  // Prevent the standard JVM attach path from loading agents into a running player session.
+  args.push('-XX:+DisableAttachMechanism');
   if (config.launcherProof?.enabled !== false && gameDir) {
     args.push(...launcherProofJavaArgs(launcherProofPath(
       gameDir,
@@ -505,7 +508,7 @@ function minecraftLibraryRuleMatches(rule = {}, { platform = process.platform, a
   return true;
 }
 
-function minecraftLibraryAllowed(library = {}, options = {}) {
+export function minecraftLibraryAllowed(library = {}, options = {}) {
   const rules = Array.isArray(library?.rules) ? library.rules : [];
   if (!rules.length) return true;
   let allowed = false;
@@ -569,6 +572,10 @@ function minecraftBaseVersionMetadataProblem(value = null, minecraftVersion = ''
     || !validMinecraftDownloadDescriptor(value.assetIndex)
   ) {
     return 'asset index metadata is incomplete';
+  }
+  if (minecraftVersion === '1.12.2' && (value.assetIndex.id !== '1.12'
+      || ('assets' in value && value.assets !== '1.12'))) {
+    return 'Minecraft 1.12.2 must use the 1.12 asset index';
   }
   if (!validMinecraftDownloadDescriptor(value?.downloads?.client)) {
     return 'client download metadata is incomplete';
@@ -734,7 +741,7 @@ async function ensureMinecraftBaseFile({ file = '', descriptor = null, label = '
   return { file, downloaded: true };
 }
 
-async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null, includeObjects = false, onProgress = null } = {}) {
   if (!rootDir || !minecraftVersion) {
     return { ok: false, skipped: true, reason: 'missing root or Minecraft version', rootDir, minecraftVersion };
   }
@@ -799,6 +806,10 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
     throw new Error(`Mojang returned incomplete Minecraft asset index ${assetId}.`);
   }
 
+  const assetObjects = includeObjects
+    ? await repairMinecraftAssetObjects({ rootDir, index: assetIndex, logger, onProgress })
+    : null;
+
   return {
     ok: true,
     rootDir,
@@ -807,14 +818,15 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
     clientJarPath,
     assetIndexPath,
     assetId,
+    assetObjects,
     baseLibraryCount: libraryDownloads.length,
     downloadedLibraryCount,
-    repaired: actions.length > 0,
+    repaired: actions.length > 0 || Number(assetObjects?.downloaded || 0) > 0,
     actions
   };
 }
 
-export async function ensureMinecraftLauncherAssets({ config = {}, latest = null, installed = null, profile = null, manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null } = {}) {
+export async function ensureMinecraftLauncherAssets({ config = {}, latest = null, installed = null, profile = null, manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null, includeObjects = true, onProgress = null } = {}) {
   const minecraft = minecraftMetadata(latest, installed);
   const minecraftVersion = minecraft?.version || profile?.minecraftVersion || '';
   if (!minecraftVersion) {
@@ -826,7 +838,7 @@ export async function ensureMinecraftLauncherAssets({ config = {}, latest = null
   const roots = uniqueLauncherRoots(profileRoots);
   const results = [];
   for (const rootDir of roots) {
-    results.push(await ensureMinecraftRootAssets({ rootDir, minecraftVersion, manifestUrl, fetchJsonImpl, logger }));
+    results.push(await ensureMinecraftRootAssets({ rootDir, minecraftVersion, manifestUrl, fetchJsonImpl, logger, includeObjects, onProgress }));
   }
   return {
     ok: true,
@@ -834,6 +846,39 @@ export async function ensureMinecraftLauncherAssets({ config = {}, latest = null
     roots: results,
     repaired: results.some((item) => item.repaired)
   };
+}
+
+export async function inspectMinecraftLauncherRuntime({ config = {}, latest = null, installed = null, profile = null } = {}) {
+  const minecraftVersion = minecraftMetadata(latest, installed)?.version || '';
+  if (!safeMinecraftIdentifier(minecraftVersion)) return { usable: false, reason: 'Minecraft version is missing or invalid.' };
+  const roots = uniqueLauncherRoots(profile?.syncedProfiles?.length
+    ? profile.syncedProfiles.map((item) => item.rootDir) : [profile?.rootDir || minecraftRoot(config)]);
+  try {
+    for (const rootDir of roots) {
+      const version = await readJsonFile(safeJoin(path.join(rootDir, 'versions'), `${minecraftVersion}/${minecraftVersion}.json`));
+      if (!validBaseVersionJson(version, minecraftVersion)) throw new Error('Minecraft version metadata needs repair.');
+      const indexFile = safeJoin(path.join(rootDir, 'assets', 'indexes'), `${version.assetIndex.id}.json`);
+      const files = [
+        [safeJoin(path.join(rootDir, 'versions'), `${minecraftVersion}/${minecraftVersion}.jar`), version.downloads.client],
+        [indexFile, version.assetIndex],
+        ...minecraftBaseLibraryDownloads(version).map((item) => [safeJoin(path.join(rootDir, 'libraries'), item.descriptor.path), item.descriptor])
+      ];
+      for (const [file, descriptor] of files) {
+        if (!(await inspectMinecraftBaseFile(file, descriptor)).ok) throw new Error(`Minecraft runtime file needs repair: ${path.basename(file)}`);
+      }
+      const index = await readJsonFile(indexFile);
+      if (!validAssetIndexJson(index)) throw new Error('Minecraft asset index needs repair.');
+      // Reuse hashes only while size and modification time are unchanged.
+      for (const item of Object.values(index.objects)) {
+        if (!/^[a-f0-9]{40}$/i.test(String(item?.hash || ''))) throw new Error('Minecraft asset hash is invalid.');
+        const file = safeJoin(path.join(rootDir, 'assets', 'objects'), `${item.hash.slice(0, 2)}/${item.hash}`);
+        if (!(await inspectMinecraftBaseFile(file, { sha1: item.hash, size: item.size })).ok) {
+          throw new Error(`Minecraft asset ${item.hash} needs repair.`);
+        }
+      }
+    }
+    return { usable: true };
+  } catch (error) { return { usable: false, reason: error.message }; }
 }
 
 async function readProfiles(file) {
@@ -1037,11 +1082,15 @@ function nextProfileSelectionTimestamp(profiles = {}, nowMs = Date.now()) {
   return new Date(Math.min(upperBound, latestTimestamp + 1)).toISOString();
 }
 
+function usesLegacySelectedProfile(profiles = {}) {
+  const schemaVersion = Number(profiles.version);
+  return Number.isFinite(schemaVersion) && schemaVersion > 0 && schemaVersion < 3;
+}
+
 function updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable, selectForPlay }) {
   const ownsSelection = Object.prototype.hasOwnProperty.call(profiles, 'selectedProfile');
   const selectedProfile = String(profiles.selectedProfile || '').trim();
-  const schemaVersion = Number(profiles.version);
-  const legacySelectionSchema = Number.isFinite(schemaVersion) && schemaVersion > 0 && schemaVersion < 3;
+  const legacySelectionSchema = usesLegacySelectedProfile(profiles);
   if (ownsSelection && (
     selectedProfile === state.profileId
     || (migrateLegacyStable && selectedProfile === 'a-hard-time')
@@ -1053,9 +1102,6 @@ function updateOwnedSelectedProfileState(profiles, state, { migrateLegacyStable,
     }
   }
   if (selectForPlay && legacySelectionSchema) {
-    profiles.selectedProfile = state.profileId;
-  }
-  if (selectForPlay && !legacySelectionSchema) {
     profiles.selectedProfile = state.profileId;
   }
 }
@@ -1100,8 +1146,9 @@ async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = 
     delete profiles.profiles['a-hard-time'];
   }
   if (selectForPlay) {
-    // Keep both selection signals aligned: modern launchers use recent-profile
-    // state while older launchers still honor selectedProfile.
+    // Modern launchers use recent-profile order/lastUsed plus quick-play state.
+    // Keep their schema free of the legacy selectedProfile field so CurseForge
+    // can continue to own and rewrite its launcher metadata independently.
     delete profiles.profiles[state.profileId];
   }
   profiles.profiles[state.profileId] = next;
@@ -1126,7 +1173,9 @@ async function writeMinecraftLauncherProfile(state, { selectForPlay = false } = 
     && String(writtenProfile.lastUsed || '') === selectedAt
     && writtenKeys.at(-1) === state.profileId
     && newerCompetitors.length === 0
-    && (!selectForPlay || String(written.selectedProfile || '') === state.profileId));
+    && (!selectForPlay
+      || !usesLegacySelectedProfile(written)
+      || String(written.selectedProfile || '') === state.profileId));
   if (selectForPlay && !selectionPrepared) {
     if (newerCompetitors.length) {
       throw new Error(`Minecraft Launcher has another installation with a future last-used time (${newerCompetitors[0][0]}). Correct the computer clock or open that installation once, then click Play again.`);
@@ -1180,5 +1229,29 @@ export async function ensureMinecraftLauncherProfile({ config, latest = null, in
     ...primaryProfile,
     syncedProfiles,
     syncedProfileCount: syncedProfiles.length
+  };
+}
+
+export async function selectPreparedMinecraftLauncherProfile(profile = null) {
+  const candidates = Array.isArray(profile?.syncedProfiles) && profile.syncedProfiles.length
+    ? profile.syncedProfiles
+    : (profile ? [profile] : []);
+  if (!candidates.length) {
+    throw new Error('The prepared Minecraft Launcher profile is missing. Restart A Hard Time Launcher.');
+  }
+  for (const candidate of candidates) {
+    if (!candidate?.rootDir || !candidate?.profilesPath || !candidate?.profileId || !candidate?.versionId) {
+      throw new Error('The prepared Minecraft Launcher profile is incomplete. Restart A Hard Time Launcher.');
+    }
+  }
+  const selected = await Promise.all(candidates.map((candidate) => (
+    writeMinecraftLauncherProfile(candidate, { selectForPlay: true })
+  )));
+  const primaryRoot = launcherRootKey(profile?.rootDir || '');
+  const primary = selected.find((candidate) => launcherRootKey(candidate.rootDir) === primaryRoot) || selected[0];
+  return {
+    ...primary,
+    syncedProfiles: selected,
+    syncedProfileCount: selected.length
   };
 }

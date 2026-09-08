@@ -36,7 +36,7 @@ public class PackVersionLock {
     public static final String VERSION = "1.2.0";
 
     private static final String DEFAULT_STATE_WEBSOCKET_URL =
-            "wss://aht-curseforge-proxy.mysticgamer312.workers.dev/server/launcher-state";
+            "wss://api.ahardtime.net/server/launcher-state";
     private static final String DEFAULT_UPDATE_MESSAGE =
             "Current Launcher Version: {current}\nNecessary Launcher Version: {necessary}\n"
                     + "Update A Hard Time Launcher, restart it, and reconnect.";

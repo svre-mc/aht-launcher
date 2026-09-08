@@ -4,6 +4,8 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
+import { defaultInstanceDirForPlatform } from '../src/platformProfile.js';
 
 const port = Number(process.argv[2] || 9700);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -22,11 +24,25 @@ const fakeAppData = process.platform === 'win32'
 const fakeLocalAppData = process.platform === 'win32'
   ? path.join(fakeHome, 'AppData', 'Local')
   : path.join(root, 'localappdata');
+const expectedInstanceDir = defaultInstanceDirForPlatform(process.platform, {
+  HOME: fakeHome,
+  USERPROFILE: fakeHome,
+  SystemDrive: process.env.SystemDrive || 'C:'
+});
+const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const curseForgeStorageFile = path.join(fakeAppData, 'CurseForge', 'storage.json');
 const minecraftRoot = path.join(root, '.minecraft');
 const curseForgeRoot = path.join(root, 'curseforge', 'minecraft', 'Install');
+const expectedLauncherRoot = process.platform === 'win32' ? curseForgeRoot : minecraftRoot;
+const java8FixtureHome = path.join(expectedLauncherRoot, '.aht-launcher', 'java', 'temurin8');
+const java8FixtureExecutable = path.join(java8FixtureHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const tempDefaults = path.join(root, 'app.defaults.json');
-const packagedDefaults = smokeExe ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
+const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';
+// A macOS .app is a signed bundle. Mutating a fixture inside it can make the
+// next packaged launch fail verification even after the file is restored.
+const packagedDefaults = smokeExe && process.platform === 'win32' && !useTempDefaults
+  ? path.join(path.dirname(smokeExe), 'app.defaults.json')
+  : '';
 const defaultsPath = packagedDefaults || tempDefaults;
 const originalDefaults = packagedDefaults && fs.existsSync(packagedDefaults)
   ? await fsp.readFile(packagedDefaults)
@@ -38,6 +54,31 @@ const electronCwd = smokeExe ? path.dirname(smokeExe) : process.cwd();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer) clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function stopElectronChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill();
+  if (await waitForChildExit(child, 5_000)) return;
+  child.kill('SIGKILL');
+  if (!await waitForChildExit(child, 5_000)) {
+    throw new Error(`Owned Electron child ${child.pid} did not exit after SIGKILL.`);
+  }
 }
 
 async function writeJson(file, value) {
@@ -52,7 +93,11 @@ async function waitForTarget() {
       const response = await fetch(`${endpoint}/json/list`);
       if (response.ok) {
         const targets = await response.json();
-        const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const pages = targets.filter((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+        const page = pages.find((target) => (
+          /(?:^|\/)index\.html(?:[?#]|$)/i.test(String(target.url || ''))
+          && String(target.title || '').trim() === 'A Hard Time Launcher'
+        ));
         if (page) return page;
       }
     } catch (error) {
@@ -81,7 +126,7 @@ function connect(wsUrl) {
   return new Promise((resolve, reject) => {
     socket.addEventListener('open', () => {
       resolve({
-        call(method, params = {}) {
+        call(method, params = {}, label = method) {
           const id = nextId;
           nextId += 1;
           socket.send(JSON.stringify({ id, method, params }));
@@ -90,7 +135,7 @@ function connect(wsUrl) {
             setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
-              callReject(new Error(`CDP call timed out: ${method}`));
+              callReject(new Error(`CDP call timed out: ${label} (${method})`));
             }, 30000);
           });
         },
@@ -103,12 +148,12 @@ function connect(wsUrl) {
   });
 }
 
-async function evaluate(client, expression) {
+async function evaluate(client, expression, label = 'renderer expression') {
   const result = await client.call('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true
-  });
+  }, label);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Renderer evaluation failed');
   }
@@ -117,7 +162,7 @@ async function evaluate(client, expression) {
 
 async function waitFor(client, expression, label, attempts = 160) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const value = await evaluate(client, expression);
+    const value = await evaluate(client, expression, label);
     if (value) return value;
     await sleep(250);
   }
@@ -155,6 +200,23 @@ if (process.platform === 'win32') {
     'minecraft-settings': JSON.stringify({ minecraftRoot: path.dirname(curseForgeRoot) })
   });
 }
+await fsp.mkdir(path.dirname(java8FixtureExecutable), { recursive: true });
+await fsp.writeFile(java8FixtureExecutable, 'AHT Java 8 executable fixture', 'utf8');
+await fsp.writeFile(path.join(java8FixtureHome, 'release'), 'JAVA_VERSION="1.8.0_442"\n', 'utf8');
+const deviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: deviceCredential.schemaVersion,
+  protocol: deviceCredential.protocol,
+  algorithm: deviceCredential.algorithm,
+  deviceId: deviceCredential.deviceId,
+  publicKey: deviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(deviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: deviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 
 await writeJson(defaultsPath, {
   packId: 'a-hard-time-dregora',
@@ -181,9 +243,17 @@ await writeJson(defaultsPath, {
   }
 });
 
+let holdReleaseFeed = false;
+let releaseFeedFailureStatus = 0;
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/latest.json') {
+    if (holdReleaseFeed) return;
+    if (releaseFeedFailureStatus) {
+      response.writeHead(releaseFeedFailureStatus, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: 'Fixture service failure' }));
+      return;
+    }
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(latest));
@@ -201,6 +271,9 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(workerPort, '127.0.0.1', resolve));
 
+if (process.argv.includes('--install-recovery')) {
+  await writeJson(path.join(userData, 'launcher.config.json'), { latestUrl: '' });
+}
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
@@ -209,11 +282,17 @@ const child = spawn(electronBin, electronArgs, {
     LOCALAPPDATA: fakeLocalAppData,
     HOME: fakeHome,
     USERPROFILE: fakeHome,
-    AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
+    AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
+    AHT_TEST_RESTORE_PACKAGED_FEEDS: process.argv.includes('--install-recovery') ? '1' : '',
+    AHT_TEST_STARTUP_PROBE_PATH: startupProbePath,
     AHT_TEST_USER_DATA: userData,
-    AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile
+    AHT_TEST_CURSEFORGE_STORAGE_FILE: curseForgeStorageFile,
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
+    AHT_TEST_STARTUP_PREPARATION_SECRET: 'a'.repeat(64),
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64'
   },
   stdio: 'ignore',
   windowsHide: true
@@ -222,10 +301,11 @@ const child = spawn(electronBin, electronArgs, {
 let client;
 try {
   const target = await waitForTarget();
+  console.log(JSON.stringify({ cdpTarget: { id: target.id, title: target.title, url: target.url } }));
   client = await connect(target.webSocketDebuggerUrl);
-  await client.call('Runtime.enable');
-  await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await client.call('Runtime.enable', {}, 'enable renderer runtime');
+  await client.call('Page.enable', {}, 'enable renderer page');
+  await waitFor(client, "document.readyState === 'complete' && Boolean(window.aht)", 'player DOM');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '9.9.9' ? status : false)
   `, 'default Worker feed');
@@ -235,8 +315,8 @@ try {
   if (!status.updateRequired) {
     throw new Error(`Fresh player did not detect required update: ${JSON.stringify(status)}`);
   }
-  if (!status.config.instanceDir.includes('AHT') || !status.config.instanceDir.includes('A Hard Time')) {
-    throw new Error(`Fresh player did not use managed AHT instance dir: ${JSON.stringify(status.config)}`);
+  if (path.resolve(status.config.instanceDir) !== path.resolve(expectedInstanceDir)) {
+    throw new Error(`Fresh player did not use its platform-managed instance dir: ${JSON.stringify({ expectedInstanceDir, config: status.config })}`);
   }
   const legacyInstanceFragments = ['curseforge', 'RLCraft Dregora', 'A Hard Time Dregora'];
   const leakedFreshInstanceFragments = legacyInstanceFragments.filter((item) => status.config.instanceDir.toLowerCase().includes(item.toLowerCase()));
@@ -253,7 +333,6 @@ try {
     throw new Error(`Fresh player honored an unsafe persisted Minecraft shell command: ${JSON.stringify(status.config.minecraftLauncher)}`);
   }
   const launcherRoot = String(status.config.minecraftLauncher?.rootDir || '');
-  const expectedLauncherRoot = process.platform === 'win32' ? curseForgeRoot : minecraftRoot;
   if (path.resolve(launcherRoot) !== path.resolve(expectedLauncherRoot)) {
     throw new Error(`Fresh player did not select the preferred isolated Minecraft Launcher root: ${JSON.stringify({ launcherRoot, expectedLauncherRoot, config: status.config.minecraftLauncher })}`);
   }
@@ -287,11 +366,63 @@ try {
       playCwd: result.config?.playCommand?.cwd || '',
       setup: result.setup || {}
     }))
-  `);
+  `, 'apply recommended setup');
   const appliedPathText = `${appliedSetup.instanceDir}\n${appliedSetup.playCwd}`;
   const leakedAppliedInstanceFragments = legacyInstanceFragments.filter((item) => appliedPathText.toLowerCase().includes(item.toLowerCase()));
-  if (leakedAppliedInstanceFragments.length || !appliedSetup.instanceDir.includes('AHT') || !appliedSetup.instanceDir.includes('A Hard Time')) {
-    throw new Error(`Player auto-setup selected an unsafe instance path: ${JSON.stringify({ leakedAppliedInstanceFragments, appliedSetup })}`);
+  const appliedInstanceMatchesPolicy = path.resolve(appliedSetup.instanceDir) === path.resolve(expectedInstanceDir);
+  const appliedWorkingDirMatchesPolicy = path.resolve(appliedSetup.playCwd) === path.resolve(expectedInstanceDir);
+  if (leakedAppliedInstanceFragments.length || !appliedInstanceMatchesPolicy || !appliedWorkingDirMatchesPolicy) {
+    throw new Error(`Player auto-setup selected an unsafe instance path: ${JSON.stringify({
+      expectedInstanceDir,
+      leakedAppliedInstanceFragments,
+      appliedSetup
+    })}`);
+  }
+  if (process.argv.includes('--install-recovery')) {
+    // The platform default may contain the operator's real pack. Exercise
+    // install recovery only against an empty, isolated fixture directory.
+    await fsp.mkdir(path.join(root, 'recovery-instance'), { recursive: true });
+    await fsp.writeFile(path.join(root, 'recovery-instance', 'options.txt'), 'music:0.5\n');
+    await waitFor(client, 'Boolean(currentStatus?.config)', 'renderer startup configuration');
+    await evaluate(client, `window.aht.saveSettings({ ...currentStatus.config, instanceDir: ${JSON.stringify(path.join(root, 'recovery-instance'))}, playCommand: { command: '', args: [], cwd: ${JSON.stringify(path.join(root, 'recovery-instance'))} } })`);
+    await evaluate(client, `(async () => {
+      const legal = await window.aht.legalStatus();
+      if (legal.required) await window.aht.legalAccept({ termsVersion: legal.termsVersion, privacyVersion: legal.privacyVersion, affirmed: true });
+      await loadLegalGate();
+      revealLauncher();
+    })()`);
+    holdReleaseFeed = true;
+    const started = Date.now();
+    await evaluate(client, 'refresh()', 'timed out release feed');
+    const failure = await evaluate(client, `({
+      latest: currentStatus.latest,
+      error: currentStatus.latestError,
+      disabled: isUnavailable(els.playButton),
+      message: document.querySelector('#launchActionStatus')?.textContent,
+      visible: !document.querySelector('#launchActionStatus')?.hidden,
+      reportVisible: !document.querySelector('#installErrorReportButton')?.hidden
+    })`);
+    if (failure.latest || !failure.error || failure.disabled || !failure.visible || !failure.reportVisible || Date.now() - started > 25_000) {
+      throw new Error('Install did not recover from a stalled feed: ' + JSON.stringify(failure));
+    }
+    holdReleaseFeed = false;
+    releaseFeedFailureStatus = 503;
+    const report = await evaluate(client, `window.aht.copyErrorReport({ context: 'install:check', packKey: 'stable', message: 'Fixture install service failure' })`);
+    const reportText = await fsp.readFile(report.filePath, 'utf8');
+    if (!reportText.includes('DOWNLOAD SERVICE CHECK') || !reportText.includes('503') || !reportText.includes('Error code:')) {
+      throw new Error('Install failure report did not include the fresh service failure and code.');
+    }
+    releaseFeedFailureStatus = 0;
+    await evaluate(client, 'els.playButton.click()');
+    await waitFor(client, '!playBusy && !els.updateOptionsOverlay.hidden', 'Install retry opens download options');
+    await evaluate(client, 'closeUpdateOptions(); renderInitialStatusError(new Error("Startup fixture failure"))');
+    const retry = await evaluate(client, '({ mode: els.playButton.dataset.actionMode, disabled: isUnavailable(els.playButton), message: document.querySelector("#launchActionStatus").textContent })');
+    if (retry.mode !== 'retry' || retry.disabled || !retry.message.includes('Click Retry')) {
+      throw new Error('Startup error did not provide a visible Retry action: ' + JSON.stringify(retry));
+    }
+    await evaluate(client, 'els.playButton.click()');
+    await waitFor(client, '!playBusy && !els.updateOptionsOverlay.hidden', 'startup retry recovers installation');
+    console.log(JSON.stringify({ installRecovery: true, blankSavedFeedRepaired: true, installServiceReport: true, stalledFeedElapsedMs: Date.now() - started, failure, retry }));
   }
   console.log(JSON.stringify({
     ok: true,
@@ -306,13 +437,28 @@ try {
       memoryMb: status.config.minecraftLauncher?.memoryMb
     }
   }, null, 2));
+} catch (error) {
+  console.error(error.stack || String(error));
+  if (client) console.error(JSON.stringify(await evaluate(client, `({
+    action: els.playButton.dataset.actionMode, unavailable: isUnavailable(els.playButton), busy: playBusy,
+    latest: currentStatus?.latest?.version, installed: currentStatus?.installed?.version,
+    preparation: currentStatus?.launchPreparationState, error: currentStatus?.latestError,
+    blocked: currentStatus?.updateBlockedReason, instanceDir: currentStatus?.config?.instanceDir,
+    message: document.querySelector('#launchActionStatus')?.textContent,
+    optionsHidden: els.updateOptionsOverlay.hidden
+  })`).catch(() => ({}))));
+  const startupProbe = await fsp.readFile(startupProbePath, 'utf8').catch(() => 'No startup probe was written.');
+  console.error(`AHT startup probe (tail):\n${startupProbe.trim().split('\n').slice(-8).join('\n')}`);
+  throw error;
 } finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});
     client.close();
   }
-  child.kill();
-  await new Promise((resolve) => server.close(resolve));
+  await stopElectronChild(child);
+  const closePromise = new Promise((resolve) => server.close(resolve));
+  server.closeAllConnections?.();
+  await closePromise;
   if (packagedDefaults) {
     if (originalDefaults) {
       await fsp.writeFile(packagedDefaults, originalDefaults);

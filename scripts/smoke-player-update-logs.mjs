@@ -15,9 +15,11 @@ const instanceDir = path.join(root, 'instance');
 const ptbInstanceDir = path.join(root, 'instance-ptb');
 const mcRoot = path.join(root, 'minecraft');
 const screenshotDir = path.join(root, 'screenshots');
+const updateLogArtwork = fs.readFileSync(path.resolve('desktop', 'renderer', 'assets', 'aht-cover.png'));
 const updateLogRequests = [];
 const likeRequests = [];
-const NEWS_CAROUSEL_CROSSFADE_MS = 320;
+let electronExit = null;
+let electronOutput = '';
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -42,14 +44,16 @@ const logs = [
   },
   {
     id: '00000000-0000-4000-8000-000000000003',
-    title: 'Third newest',
+    title: 'Third newest launcher stability update',
     subtitle: 'A written-only update log.',
     text: '# Written Notes\nSecond visible update log.\n- Non-playable logs should open the full article from the card art or title.\n![Patch comparison](https://packs.example.com/update-media/body-shot.webp)',
     version: '2.8.3',
     publishedAt: '2026-06-24T12:03:00.000Z',
     author: 'admin',
     likes: 16,
-    image: { type: 'image', url: `${workerEndpoint}/update-media/log-3.webp`, path: 'update-media/log-3.webp' }
+    metadata: {
+      image: { type: 'image', url: `${workerEndpoint}/update-media/log-3.webp`, path: 'update-media/log-3.webp' }
+    }
   },
   {
     id: '00000000-0000-4000-8000-000000000002',
@@ -60,6 +64,7 @@ const logs = [
     publishedAt: '2026-06-24T12:02:00.000Z',
     author: 'admin',
     likes: 2,
+    image_url: `${workerEndpoint}/update-media/log-2.webp`,
     media: { type: 'video', url: `${workerEndpoint}/update-media/patch.mp4`, title: 'Direct MP4' }
   },
   {
@@ -85,6 +90,10 @@ async function writeJson(file, value) {
 async function waitForTarget() {
   let lastError;
   for (let attempt = 0; attempt < 180; attempt += 1) {
+    if (electronExit) {
+      const detail = electronOutput.trim().slice(-4000);
+      throw new Error(`Electron exited before exposing a debugger target (${electronExit}).${detail ? `\n${detail}` : ''}`);
+    }
     try {
       const response = await fetch(`${endpoint}/json/list`);
       if (response.ok) {
@@ -107,13 +116,21 @@ function connect(wsUrl) {
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
     pending.delete(message.id);
+    clearTimeout(timer);
     if (message.error) {
       reject(new Error(`${message.error.message}: ${message.error.data || ''}`.trim()));
     } else {
       resolve(message.result || {});
     }
+  });
+  socket.addEventListener('close', () => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(new Error('CDP socket closed'));
+    }
+    pending.clear();
   });
   return new Promise((resolve, reject) => {
     socket.addEventListener('open', () => {
@@ -123,12 +140,12 @@ function connect(wsUrl) {
           nextId += 1;
           socket.send(JSON.stringify({ id, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(id, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
             }, 30000);
+            pending.set(id, { resolve: callResolve, reject: callReject, timer });
           });
         },
         close() {
@@ -161,6 +178,20 @@ async function waitFor(client, expression, label, attempts = 160) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+async function waitForNewsCarouselSettled(client, expectedIndex, label) {
+  return waitFor(client, `(() => {
+    const card = document.querySelector('.news-feature-carousel');
+    const proof = {
+      index: card?.dataset.activeIndex || '',
+      title: document.querySelector('.news-carousel-caption-title')?.textContent || '',
+      layers: document.querySelectorAll('.news-carousel-slide').length,
+      switching: card?.classList.contains('is-switching') || false,
+      transform: card ? getComputedStyle(card).transform : ''
+    };
+    return proof.index === ${JSON.stringify(String(expectedIndex))} && proof.layers === 1 && !proof.switching ? proof : false;
+  })()`, label, 20);
+}
+
 async function captureScreenshot(client, name) {
   await fsp.mkdir(screenshotDir, { recursive: true });
   const result = await client.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
@@ -187,6 +218,106 @@ async function movePointer(client, selectorOrPoint) {
   return point;
 }
 
+async function waitForActualPointerHover(client, selector, label, attempts = 40) {
+  let point = null;
+  let proof = null;
+  await client.call('Page.bringToFront');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    point = await movePointer(client, selector);
+    proof = await evaluate(client, `(() => {
+      const card = document.querySelector(${JSON.stringify(selector)})?.closest('.home-news-card');
+      const copy = card?.querySelector('.feature-copy');
+      const style = copy ? getComputedStyle(copy) : null;
+      return {
+        hovered: card?.matches(':hover') || false,
+        opacity: style?.opacity || '',
+        visibility: style?.visibility || ''
+      };
+    })()`);
+    if (proof.hovered && Number(proof.opacity) >= 0.99 && proof.visibility === 'visible') {
+      return { point, proof };
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ point, proof })}`);
+}
+
+async function waitForActualPointerRest(client, selector, restPoint, label, attempts = 40) {
+  let proof = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await movePointer(client, restPoint);
+    proof = await evaluate(client, `(() => {
+      const card = document.querySelector(${JSON.stringify(selector)})?.closest('.home-news-card');
+      const copy = card?.querySelector('.feature-copy');
+      const style = copy ? getComputedStyle(copy) : null;
+      return {
+        hovered: card?.matches(':hover') || false,
+        opacity: style?.opacity || '',
+        visibility: style?.visibility || ''
+      };
+    })()`);
+    if (!proof.hovered && proof.opacity === '0' && proof.visibility === 'hidden') return proof;
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ restPoint, proof })}`);
+}
+
+async function featuredNewsInteractionProof(client) {
+  return evaluate(client, `(() => {
+    const card = document.querySelector('.news-feature-carousel');
+    const art = card?.querySelector('.news-carousel-slide.is-active');
+    const caption = card?.querySelector('.news-carousel-caption');
+    const arrow = card?.querySelector('.news-carousel-next');
+    const pager = card?.querySelector('.news-carousel-pager');
+    return {
+      hovered: card?.matches(':hover') || false,
+      transform: getComputedStyle(card).transform,
+      artFilter: getComputedStyle(art).filter,
+      captionOpacity: getComputedStyle(caption).opacity,
+      arrowOpacity: getComputedStyle(arrow).opacity,
+      pagerOpacity: getComputedStyle(pager).opacity
+    };
+  })()`);
+}
+
+async function waitForFeaturedNewsPointerHover(client, label, attempts = 40) {
+  let point = null;
+  let proof = null;
+  await client.call('Page.bringToFront');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    point = await movePointer(client, '.news-carousel-media');
+    proof = await featuredNewsInteractionProof(client);
+    if (
+      proof.hovered
+      && Number(proof.captionOpacity) >= 0.99
+      && Number(proof.arrowOpacity) >= 0.99
+      && Number(proof.pagerOpacity) >= 0.99
+    ) {
+      return { point, proof };
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ point, proof })}`);
+}
+
+async function waitForFeaturedNewsPointerRest(client, restPoint, label, attempts = 40) {
+  let proof = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await movePointer(client, restPoint);
+    proof = await featuredNewsInteractionProof(client);
+    if (
+      !proof.hovered
+      && proof.captionOpacity === '0'
+      && proof.arrowOpacity === '0'
+      && proof.pagerOpacity === '0'
+    ) {
+      return proof;
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({ restPoint, proof })}`);
+}
+
 async function pressPointer(client, point) {
   await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', buttons: 1, clickCount: 1 });
 }
@@ -200,6 +331,48 @@ async function clickNode(client, selector) {
   await pressPointer(client, point);
   await releasePointer(client, point);
   return point;
+}
+
+async function setForcedHover(client, selectors, enabled) {
+  const { root: documentNode } = await client.call('DOM.getDocument', { depth: 0, pierce: true });
+  for (const selector of selectors) {
+    const { nodeId } = await client.call('DOM.querySelector', {
+      nodeId: documentNode.nodeId,
+      selector
+    });
+    if (!nodeId) throw new Error(`Could not force hover for missing node: ${selector}`);
+    await client.call('CSS.forcePseudoState', {
+      nodeId,
+      forcedPseudoClasses: enabled ? ['hover'] : []
+    });
+  }
+}
+
+async function ensurePointerHoverOrFocus(client, hoverSelector, focusSelector = hoverSelector, forcedHoverSelectors = [hoverSelector]) {
+  const acceptPointerHover = process.env.AHT_TEST_FORCE_CDP_HOVER !== '1';
+  const proof = await evaluate(client, `(() => {
+    const hoverNode = document.querySelector(${JSON.stringify(hoverSelector)});
+    const focusNode = document.querySelector(${JSON.stringify(focusSelector)});
+    const pointerHover = ${JSON.stringify(acceptPointerHover)} && Boolean(hoverNode?.matches(':hover'));
+    if (!pointerHover && ${JSON.stringify(acceptPointerHover)}) focusNode?.focus({ preventScroll: true });
+    return {
+      pointerHover,
+      focusWithin: Boolean(hoverNode?.matches(':focus-within')),
+      activeTag: document.activeElement?.tagName || ''
+    };
+  })()`);
+  if (proof.pointerHover) return 'pointer';
+  if (proof.focusWithin) return 'keyboard-focus';
+  await setForcedHover(client, forcedHoverSelectors, true);
+  return 'cdp-forced-hover';
+}
+
+async function clearInteractionFocus(client, forcedHoverSelectors = []) {
+  await evaluate(client, `(() => {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    return true;
+  })()`);
+  if (forcedHoverSelectors.length) await setForcedHover(client, forcedHoverSelectors, false);
 }
 
 await writeJson(path.join(userData, 'launcher.config.json'), {
@@ -247,6 +420,12 @@ const server = http.createServer((request, response) => {
     response.end(JSON.stringify({ logs: logs.slice(0, limit) }));
     return;
   }
+  if (/^\/update-media\/log-[234]\.webp$/.test(url.pathname)) {
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'image/png');
+    response.end(updateLogArtwork);
+    return;
+  }
   const likeMatch = url.pathname.match(/^\/api\/update-logs\/([0-9a-f-]{36})\/like$/i);
   if (request.method === 'POST' && likeMatch) {
     likeRequests.push(likeMatch[1].toLowerCase());
@@ -270,9 +449,13 @@ const child = spawn(electronBin, electronArgs, {
     AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     ELECTRON_ENABLE_LOGGING: '0'
   },
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true
 });
+child.stdout.on('data', (chunk) => { electronOutput = `${electronOutput}${String(chunk)}`.slice(-8000); });
+child.stderr.on('data', (chunk) => { electronOutput = `${electronOutput}${String(chunk)}`.slice(-8000); });
+child.on('error', (error) => { electronExit = `spawn error: ${error.message || error}`; });
+child.on('exit', (code, signal) => { electronExit = signal || `exit code ${code}`; });
 
 let client;
 try {
@@ -281,26 +464,86 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  await client.call('DOM.enable');
+  await client.call('CSS.enable');
   await client.call('Page.bringToFront');
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden", 'fully revealed player DOM');
   await waitFor(client, "document.querySelectorAll('#updateLogGrid .feature-card').length === 3", 'three update-log cards');
+  await clearInteractionFocus(client, ['#updateLogGrid .home-news-card']);
+  await waitForActualPointerRest(
+    client,
+    '#updateLogGrid .home-news-card.large .feature-art',
+    { x: 1080, y: 74 },
+    'Game News lead copy idle state'
+  );
+  const unavailableArtworkUrl = `${workerEndpoint}/update-media/intentionally-unavailable.webp`;
+  const artworkMetadataProof = await evaluate(client, `(async () => {
+    startupFirstInitialization = false;
+    const published = {
+      image: { type: 'image', url: ${JSON.stringify(unavailableArtworkUrl)} },
+      metadata: { image: { url: ${JSON.stringify(`${workerEndpoint}/update-media/nested.webp`)} } }
+    };
+    const [result] = await preloadStartupNewsArtwork([{ status: 'fulfilled', value: { updateLogs: [published] } }]);
+    return {
+      retainedImageUrl: result?.value?.updateLogs?.[0]?.image?.url || '',
+      resolvedNestedUrl: updateLogImageUrl({ metadata: published.metadata }),
+      resolvedSnakeUrl: updateLogImageUrl({ image_url: ${JSON.stringify(`${workerEndpoint}/update-media/snake.webp`)} }),
+      resolvedStringUrl: updateLogImageUrl({ image: ${JSON.stringify(`${workerEndpoint}/update-media/string.webp`)} })
+    };
+  })()`);
+  if (
+    artworkMetadataProof.retainedImageUrl !== unavailableArtworkUrl
+    || !artworkMetadataProof.resolvedNestedUrl.endsWith('/update-media/nested.webp')
+    || !artworkMetadataProof.resolvedSnakeUrl.endsWith('/update-media/snake.webp')
+    || !artworkMetadataProof.resolvedStringUrl.endsWith('/update-media/string.webp')
+  ) {
+    throw new Error(`News artwork metadata was discarded or not normalized: ${JSON.stringify(artworkMetadataProof)}`);
+  }
   const proof = await evaluate(client, `
     (() => {
-      const cards = [...document.querySelectorAll('#updateLogGrid .feature-card')].map((card) => ({
-        title: card.querySelector('strong')?.textContent || '',
-        meta: card.querySelector('.feature-copy span')?.textContent || '',
-        body: card.querySelector('.feature-summary')?.textContent || '',
-        large: card.classList.contains('large'),
-        playable: Boolean(card.querySelector('.play-glyph')),
-        tag: card.tagName,
-        nestedButtons: card.querySelectorAll('button').length,
-        hasRedundantCta: Boolean(card.querySelector('.feature-cta'))
-      }));
+      const rect = (node) => {
+        const value = node?.getBoundingClientRect();
+        return value ? {
+          left: Math.round(value.left),
+          top: Math.round(value.top),
+          right: Math.round(value.right),
+          bottom: Math.round(value.bottom),
+          width: Math.round(value.width),
+          height: Math.round(value.height)
+        } : null;
+      };
+      const cards = [...document.querySelectorAll('#updateLogGrid .feature-card')].map((card) => {
+        const art = card.querySelector('.feature-art');
+        const copy = card.querySelector('.feature-copy');
+        const title = copy?.querySelector('strong');
+        const summary = card.querySelector('.feature-summary');
+        const copyStyle = getComputedStyle(copy);
+        return {
+          title: title?.textContent || '',
+          meta: card.querySelector('.feature-copy span')?.textContent || '',
+          body: summary?.textContent || '',
+          large: card.classList.contains('large'),
+          playable: Boolean(card.querySelector('.play-glyph')),
+          tag: card.tagName,
+          nestedButtons: card.querySelectorAll('button').length,
+          hasRedundantCta: Boolean(card.querySelector('.feature-cta')),
+          cardRect: rect(card),
+          artRect: rect(art),
+          copyRect: rect(copy),
+          titleRect: rect(title),
+          summaryRect: rect(summary),
+          copyOpacity: copyStyle.opacity,
+          copyVisibility: copyStyle.visibility,
+          hasImage: art?.classList.contains('has-image') || false,
+          backgroundImage: getComputedStyle(art).backgroundImage
+        };
+      });
       return {
         hidden: document.querySelector('#updateLogGrid').hidden,
         count: cards.length,
         cards,
+        gridRect: rect(document.querySelector('#updateLogGrid')),
         fullText: document.querySelector('#updateLogGrid').textContent
       };
     })()
@@ -309,7 +552,7 @@ try {
   if (proof.hidden || proof.count !== 3) {
     throw new Error(`Expected exactly three visible update-log cards: ${JSON.stringify(proof)}`);
   }
-  if (titles.join('|') !== 'Launcher Stability Patch|Third newest|Second newest') {
+  if (titles.join('|') !== 'Launcher Stability Patch|Third newest launcher stability update|Second newest') {
     throw new Error(`Player update logs are not the latest three in order: ${JSON.stringify(proof)}`);
   }
   if (proof.fullText.includes('Old hidden') || proof.fullText.includes('This older log must not render')) {
@@ -327,8 +570,100 @@ try {
   if (JSON.stringify(proof.cards.map((card) => card.playable)) !== JSON.stringify([true, false, true])) {
     throw new Error(`Play buttons should only render for logs with media: ${JSON.stringify(proof)}`);
   }
+  const [leadHomeCard, firstHomeSideCard, secondHomeSideCard] = proof.cards;
+  if (
+    proof.gridRect?.width !== 1094
+    || leadHomeCard?.cardRect?.width !== 482
+    || firstHomeSideCard?.cardRect?.width !== 284
+    || secondHomeSideCard?.cardRect?.width !== 284
+    || !proof.cards.every((card) => card.cardRect?.height === 270)
+    || firstHomeSideCard?.artRect?.height !== 158
+    || secondHomeSideCard?.artRect?.height !== 158
+    || firstHomeSideCard?.artRect?.width !== secondHomeSideCard?.artRect?.width
+    || firstHomeSideCard?.copyRect?.height !== secondHomeSideCard?.copyRect?.height
+    || firstHomeSideCard?.copyRect?.top !== secondHomeSideCard?.copyRect?.top
+    || firstHomeSideCard?.titleRect?.height !== secondHomeSideCard?.titleRect?.height
+    || firstHomeSideCard?.summaryRect?.top !== secondHomeSideCard?.summaryRect?.top
+    || firstHomeSideCard?.cardRect?.left - leadHomeCard?.cardRect?.right !== 22
+    || secondHomeSideCard?.cardRect?.left - firstHomeSideCard?.cardRect?.right !== 22
+    || leadHomeCard?.artRect?.width !== leadHomeCard?.cardRect?.width - 2
+    || leadHomeCard?.artRect?.height !== leadHomeCard?.cardRect?.height - 2
+    || leadHomeCard?.copyOpacity !== '0'
+    || leadHomeCard?.copyVisibility !== 'hidden'
+    || !firstHomeSideCard?.hasImage
+    || !secondHomeSideCard?.hasImage
+    || !firstHomeSideCard?.backgroundImage.includes('log-3.webp')
+    || !secondHomeSideCard?.backgroundImage.includes('log-2.webp')
+  ) {
+    throw new Error(`Game News lead/side-card geometry or idle visibility regressed: ${JSON.stringify(proof)}`);
+  }
+
+  const fillerGeometryProof = await evaluate(client, `(() => {
+    const card = document.querySelectorAll('#updateLogGrid .home-news-card:not(.large)')[1];
+    const art = card?.querySelector('.feature-art');
+    const before = art?.getBoundingClientRect();
+    if (!art || !before) return null;
+    const originalClass = art.className;
+    const originalBackground = art.style.backgroundImage;
+    art.className = 'feature-art patch-art';
+    art.style.backgroundImage = '';
+    const after = art.getBoundingClientRect();
+    const fallbackBackground = getComputedStyle(art).backgroundImage;
+    art.className = originalClass;
+    art.style.backgroundImage = originalBackground;
+    return {
+      before: { width: Math.round(before.width), height: Math.round(before.height) },
+      after: { width: Math.round(after.width), height: Math.round(after.height) },
+      fallbackBackground
+    };
+  })()`);
+  if (
+    !fillerGeometryProof
+    || fillerGeometryProof.before.width !== fillerGeometryProof.after.width
+    || fillerGeometryProof.before.height !== fillerGeometryProof.after.height
+    || fillerGeometryProof.after.height !== 158
+    || !fillerGeometryProof.fallbackBackground
+    || fillerGeometryProof.fallbackBackground === 'none'
+  ) {
+    throw new Error(`Game News filler artwork must retain the exact side-image box: ${JSON.stringify(fillerGeometryProof)}`);
+  }
+
+  screenshots.push(await captureScreenshot(client, 'game-news-idle'));
+  const leadHomeHoverResult = await waitForActualPointerHover(
+    client,
+    '#updateLogGrid .home-news-card.large .feature-art',
+    'Game News lead copy actual pointer-hover reveal'
+  );
+  const leadHomePoint = leadHomeHoverResult.point;
+  const leadHomeHover = leadHomeHoverResult.proof;
+  screenshots.push(await captureScreenshot(client, 'game-news-lead-hover'));
+  await releasePointer(client, { x: 1080, y: 74 });
+  await clearInteractionFocus(client, ['#updateLogGrid .home-news-card.large']);
+  const leadHomeRestored = await waitForActualPointerRest(
+    client,
+    '#updateLogGrid .home-news-card.large .feature-art',
+    { x: 1080, y: 74 },
+    'Game News lead copy pointer-leave state'
+  );
+  if (
+    !leadHomeHover.hovered
+    || Number(leadHomeHover.opacity) < 0.99
+    || leadHomeHover.visibility !== 'visible'
+    || leadHomeRestored.hovered
+    || leadHomeRestored.opacity !== '0'
+    || leadHomeRestored.visibility !== 'hidden'
+  ) {
+    throw new Error(`Game News lead copy must exist only during actual pointer hover: ${JSON.stringify({ leadHomePoint, leadHomeHover, leadHomeRestored })}`);
+  }
   await evaluate(client, `document.querySelector('#newsTab').click(); true`);
   await waitFor(client, "document.querySelector('.view.active')?.id === 'news' && document.querySelectorAll('#newsFeedGrid .feature-card').length === 4", 'dedicated News view');
+  await clearInteractionFocus(client, ['#newsTab']);
+  await waitFor(client, "getComputedStyle(document.querySelector('#newsTab')).color === 'rgb(255, 255, 255)'", 'settled active News navigation color');
+  const heroNeutral = await waitForFeaturedNewsPointerRest(
+    client,
+    { x: 250, y: 120 },
+    'completed featured News pointer-leave transition'
+  );
   const newsProof = await evaluate(client, `(() => {
     const grid = document.querySelector('#newsFeedGrid');
     const featuredBox = document.querySelector('#newsFeedGrid .news-feed-card.large');
@@ -346,7 +681,14 @@ try {
     const nav = document.querySelector('#newsTab');
     const rect = (node) => {
       const value = node?.getBoundingClientRect();
-      return value ? { width: Math.round(value.width), height: Math.round(value.height) } : null;
+      return value ? {
+        left: Math.round(value.left),
+        top: Math.round(value.top),
+        right: Math.round(value.right),
+        bottom: Math.round(value.bottom),
+        width: Math.round(value.width),
+        height: Math.round(value.height)
+      } : null;
     };
     return {
       activeView: document.querySelector('.view.active')?.id || '',
@@ -376,6 +718,7 @@ try {
       grid: rect(grid),
       featuredBox: rect(featuredBox),
       featured: rect(featured),
+      featuredArt: rect(featuredArt),
       rowArt: rect(rowArt),
       bodyFont: getComputedStyle(document.body).fontFamily,
       navFont: getComputedStyle(nav).fontFamily,
@@ -385,7 +728,7 @@ try {
       rowSummaryColor: getComputedStyle(rowSummary).color
     };
   })()`);
-  if (newsProof.activeView !== 'news' || !newsProof.activeTab || !newsProof.activePack || newsProof.count !== 4 || newsProof.titles[0] !== 'Launcher Stability Patch' || !newsProof.titles.includes('Old hidden') || newsProof.carouselSlides !== 1 || newsProof.carouselPagerButtons !== 3 || newsProof.carouselIndex !== '0' || newsProof.carouselTitle !== 'Launcher Stability Patch' || newsProof.redundantHeader || newsProof.redundantCtas !== 0 || newsProof.featuredLike || newsProof.rowOpenButtons !== 3 || newsProof.rowLikeButtons !== 3 || newsProof.rowArrows !== 3 || newsProof.rowArrowText !== '»' || newsProof.rowArrowSeparator !== '1px' || newsProof.firstRowLikes !== '16') {
+  if (newsProof.activeView !== 'news' || !newsProof.activeTab || !newsProof.activePack || newsProof.count !== 4 || newsProof.titles[0] !== 'Launcher Stability Patch' || !newsProof.titles.includes('Old hidden') || newsProof.carouselSlides !== 1 || newsProof.carouselPagerButtons !== 3 || newsProof.carouselIndex !== '0' || newsProof.carouselTitle !== 'Launcher Stability Patch' || newsProof.redundantHeader || newsProof.redundantCtas !== 0 || newsProof.featuredLike || newsProof.rowOpenButtons !== 3 || newsProof.rowLikeButtons !== 3 || newsProof.rowArrows !== 3 || newsProof.rowArrowText !== '\u00BB' || newsProof.rowArrowSeparator !== '1px' || newsProof.firstRowLikes !== '16') {
     throw new Error(`Dedicated News view did not render the full ordered player-safe feed: ${JSON.stringify(newsProof)}`);
   }
   if (!newsProof.rowArrowInline) {
@@ -404,7 +747,7 @@ try {
     || !newsProof.bodyFont.includes('AHT Bender')
     || !newsProof.navFont.includes('AHT Bender')
     || !newsProof.rowTitleFont.includes('AHT Bender')
-    || newsProof.navColor !== 'rgb(255, 255, 243)'
+    || newsProof.navColor !== 'rgb(255, 255, 255)'
     || newsProof.rowTitleColor !== 'rgb(255, 255, 243)'
     || newsProof.rowSummaryColor !== 'rgb(170, 170, 170)'
     || newsProof.carouselTransform !== 'none'
@@ -415,38 +758,10 @@ try {
     throw new Error(`News typography and measured BSG column geometry regressed: ${JSON.stringify(newsProof)}`);
   }
 
-  await movePointer(client, { x: 250, y: 120 });
-  await sleep(180);
-  const heroNeutral = await evaluate(client, `(() => {
-    const card = document.querySelector('.news-feature-carousel');
-    const art = card?.querySelector('.news-carousel-slide.is-active');
-    const caption = card?.querySelector('.news-carousel-caption');
-    const arrow = card?.querySelector('.news-carousel-next');
-    const pager = card?.querySelector('.news-carousel-pager');
-    return {
-      transform: getComputedStyle(card).transform,
-      artFilter: getComputedStyle(art).filter,
-      captionOpacity: getComputedStyle(caption).opacity,
-      arrowOpacity: getComputedStyle(arrow).opacity,
-      pagerOpacity: getComputedStyle(pager).opacity
-    };
-  })()`);
-  const heroPoint = await movePointer(client, '.news-carousel-media');
-  await sleep(180);
-  const heroHover = await evaluate(client, `(() => {
-    const card = document.querySelector('.news-feature-carousel');
-    const art = card?.querySelector('.news-carousel-slide.is-active');
-    const caption = card?.querySelector('.news-carousel-caption');
-    const arrow = card?.querySelector('.news-carousel-next');
-    const pager = card?.querySelector('.news-carousel-pager');
-    return {
-      transform: getComputedStyle(card).transform,
-      artFilter: getComputedStyle(art).filter,
-      captionOpacity: getComputedStyle(caption).opacity,
-      arrowOpacity: getComputedStyle(arrow).opacity,
-      pagerOpacity: getComputedStyle(pager).opacity
-    };
-  })()`);
+  const heroHoverResult = await waitForFeaturedNewsPointerHover(client, 'completed featured News hover transition');
+  const heroPoint = heroHoverResult.point;
+  const heroHover = heroHoverResult.proof;
+  const heroInteractionMode = 'pointer';
   screenshots.push(await captureScreenshot(client, 'news-hero-hover'));
   await pressPointer(client, heroPoint);
   await sleep(45);
@@ -456,6 +771,7 @@ try {
   })`);
   await movePointer(client, { x: 250, y: 120 });
   await releasePointer(client, { x: 250, y: 120 });
+  await clearInteractionFocus(client, ['.news-feature-carousel']);
   await sleep(180);
   if (
     heroNeutral.transform !== 'none'
@@ -497,6 +813,12 @@ try {
   await sleep(180);
   const rowNeutral = await evaluate(client, rowStateExpression);
   const rowPoint = await movePointer(client, '#newsFeedGrid .news-feed-card:not(.large) .feature-art');
+  const rowInteractionMode = await ensurePointerHoverOrFocus(
+    client,
+    '#newsFeedGrid .news-feed-card:not(.large)',
+    '#newsFeedGrid .news-feed-card:not(.large) .news-card-open',
+    ['#newsFeedGrid .news-feed-card:not(.large)', '#newsFeedGrid .news-feed-card:not(.large) .news-card-open']
+  );
   await sleep(180);
   const rowHover = await evaluate(client, rowStateExpression);
   screenshots.push(await captureScreenshot(client, 'news-row-hover'));
@@ -505,6 +827,10 @@ try {
   const rowPressed = await evaluate(client, rowStateExpression);
   await movePointer(client, { x: 250, y: 120 });
   await releasePointer(client, { x: 250, y: 120 });
+  await clearInteractionFocus(client, [
+    '#newsFeedGrid .news-feed-card:not(.large)',
+    '#newsFeedGrid .news-feed-card:not(.large) .news-card-open'
+  ]);
   await sleep(180);
   await movePointer(client, '#newsFeedGrid .news-feed-card:not(.large) .news-card-like');
   await sleep(180);
@@ -525,21 +851,16 @@ try {
   }
 
   await movePointer(client, '.news-carousel-media');
+  const carouselNavigationMode = await ensurePointerHoverOrFocus(client, '.news-feature-carousel', '.news-carousel-media');
   await sleep(180);
   await clickNode(client, '.news-carousel-next');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
-  const carouselNextProof = await evaluate(client, `({
-    index: document.querySelector('.news-feature-carousel')?.dataset.activeIndex || '',
-    title: document.querySelector('.news-carousel-caption-title')?.textContent || '',
-    layers: document.querySelectorAll('.news-carousel-slide').length,
-    transform: getComputedStyle(document.querySelector('.news-feature-carousel')).transform
-  })`);
+  const carouselNextProof = await waitForNewsCarouselSettled(client, 1, 'News carousel next-slide crossfade');
   screenshots.push(await captureScreenshot(client, 'news-carousel-slide'));
-  if (carouselNextProof.index !== '1' || carouselNextProof.title !== 'Third newest' || carouselNextProof.layers !== 1 || carouselNextProof.transform !== 'none') {
+  if (carouselNextProof.index !== '1' || carouselNextProof.title !== 'Third newest launcher stability update' || carouselNextProof.layers !== 1 || carouselNextProof.transform !== 'none') {
     throw new Error(`News carousel arrow did not complete one fixed-geometry crossfade: ${JSON.stringify(carouselNextProof)}`);
   }
   await clickNode(client, '.news-carousel-pager button:first-child');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
+  await waitForNewsCarouselSettled(client, 0, 'News carousel first-slide pager crossfade');
   await clickNode(client, '.news-carousel-media');
   const inlineMediaProof = await waitFor(client, `(() => {
     const card = document.querySelector('.news-feature-carousel');
@@ -560,7 +881,7 @@ try {
     throw new Error(`Playable featured News did not remain inline in the fixed hero: ${JSON.stringify(inlineMediaProof)}`);
   }
   await clickNode(client, '.news-carousel-next');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
+  await waitForNewsCarouselSettled(client, 1, 'News carousel media-exit crossfade');
   const mediaExitProof = await evaluate(client, `({
     index: document.querySelector('.news-feature-carousel')?.dataset.activeIndex || '',
     mediaHidden: document.querySelector('.news-carousel-inline-media')?.hidden ?? false,
@@ -570,8 +891,9 @@ try {
     throw new Error(`Carousel navigation did not stop inline media before changing slides: ${JSON.stringify(mediaExitProof)}`);
   }
   await clickNode(client, '.news-carousel-pager button:first-child');
-  await sleep(NEWS_CAROUSEL_CROSSFADE_MS + 80);
+  await waitForNewsCarouselSettled(client, 0, 'News carousel final first-slide crossfade');
   await movePointer(client, { x: 250, y: 120 });
+  await clearInteractionFocus(client, ['.news-feature-carousel']);
   await sleep(180);
 
   await evaluate(client, `document.querySelector('#newsFeedGrid .news-feed-card:nth-child(2) .news-card-like').click(); true`);
@@ -598,7 +920,7 @@ try {
   if (!articleExitTransition.switching || !articleExitTransition.leaving || Number(articleExitTransition.loaderOpacity) <= 0) {
     throw new Error(`News article click skipped the measured dim/loader transition: ${JSON.stringify(articleExitTransition)}`);
   }
-  await waitFor(client, "!document.querySelector('#updateLogOverlay').hidden && !document.querySelector('#news').classList.contains('is-transitioning') && document.querySelector('#updateLogModalTitle')?.textContent === 'Third newest'", 'liked article view');
+  await waitFor(client, "!document.querySelector('#updateLogOverlay').hidden && !document.querySelector('#news').classList.contains('is-transitioning') && document.querySelector('#updateLogModalTitle')?.textContent === 'Third newest launcher stability update'", 'liked article view');
   const syncedLikeProof = await evaluate(client, `(() => {
     const header = document.querySelector('.update-log-article-header');
     const hero = document.querySelector('#updateLogHero');
@@ -761,7 +1083,7 @@ try {
     articleImage: document.querySelector('#updateLogArticleBody figure img')?.src || '',
     articleCaption: document.querySelector('#updateLogArticleBody figcaption')?.textContent || ''
   })`);
-  if (articleProof.title !== 'Third newest' || articleProof.subtitleHidden || !articleProof.body.includes('Second visible update log') || !articleProof.articleImage.includes('/update-media/body-shot.webp') || articleProof.articleCaption !== 'Patch comparison') {
+  if (articleProof.title !== 'Third newest launcher stability update' || articleProof.subtitleHidden || !articleProof.body.includes('Second visible update log') || !articleProof.articleImage.includes('/update-media/body-shot.webp') || articleProof.articleCaption !== 'Patch comparison') {
     throw new Error(`Full update-log article did not render expected content: ${JSON.stringify(articleProof)}`);
   }
   screenshots.push(await captureScreenshot(client, 'news-article'));
@@ -786,12 +1108,30 @@ try {
     root,
     screenshots,
     requestQueries: updateLogRequests,
+    artworkMetadataProof,
     titles,
     cardCount: proof.count,
+    gameNewsGeometry: {
+      grid: proof.gridRect,
+      cards: proof.cards.map((card) => ({
+        title: card.title,
+        card: card.cardRect,
+        art: card.artRect,
+        copy: card.copyRect,
+        titleRect: card.titleRect,
+        summary: card.summaryRect
+      }))
+    },
+    fillerGeometryProof,
+    leadHomeHover,
+    leadHomeRestored,
     newsCardCount: newsProof.count,
     likeRequests,
     heroNeutral,
     heroHover,
+    heroInteractionMode,
+    rowInteractionMode,
+    carouselNavigationMode,
     rowNeutral,
     rowHover,
     carouselNextProof,

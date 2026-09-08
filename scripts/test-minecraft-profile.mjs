@@ -11,6 +11,7 @@ import {
   inspectMinecraftLauncherProfile,
   minecraftRootCandidates,
   loaderVersionId,
+  selectPreparedMinecraftLauncherProfile,
   setMinecraftLauncherHomePage
 } from '../src/minecraftLauncherProfile.js';
 import {
@@ -41,13 +42,17 @@ const platformRoots = {
     APPDATA: 'C:\\Users\\Player\\AppData\\Roaming',
     USERPROFILE: 'C:\\Users\\Player'
   }),
-  darwin: defaultMinecraftRoot('darwin', { HOME: '/Users/player' })
+  darwin: defaultMinecraftRoot('darwin', { HOME: '/Users/player' }),
+  linux: defaultMinecraftRoot('linux', { HOME: '/home/player' })
 };
 if (platformRoots.win32 !== 'C:\\Users\\Player\\AppData\\Roaming\\.minecraft') {
   throw new Error(`Unexpected Windows Minecraft root: ${platformRoots.win32}`);
 }
 if (platformRoots.darwin !== '/Users/player/Library/Application Support/minecraft') {
   throw new Error(`Unexpected macOS Minecraft root: ${platformRoots.darwin}`);
+}
+if (platformRoots.linux !== '/home/player/.minecraft') {
+  throw new Error(`Unexpected Ubuntu Minecraft root: ${platformRoots.linux}`);
 }
 
 const macRootCandidates = minecraftRootCandidates('darwin', { HOME: '/Users/player' });
@@ -66,6 +71,10 @@ const winRootCandidates = minecraftRootCandidates('win32', {
 const winStoreRoot = 'C:\\Users\\Player\\AppData\\Local\\Packages\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\LocalCache\\Roaming\\.minecraft';
 if (winRootCandidates[0] !== platformRoots.win32 || !winRootCandidates.includes(winStoreRoot)) {
   throw new Error(`Unexpected Windows Minecraft root candidates: ${JSON.stringify(winRootCandidates)}`);
+}
+const linuxRootCandidates = minecraftRootCandidates('linux', { HOME: '/home/player' });
+if (linuxRootCandidates.length !== 1 || linuxRootCandidates[0] !== platformRoots.linux) {
+  throw new Error(`Unexpected Ubuntu Minecraft root candidates: ${JSON.stringify(linuxRootCandidates)}`);
 }
 
 const latest = {
@@ -169,9 +178,9 @@ if (
   || selectedKeys.at(-1) !== 'a-hard-time-dregora'
   || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) <= Date.parse(selectedProfiles.profiles['random-profile'].lastUsed)
   || Date.parse(selectedProfiles.profiles['a-hard-time-dregora'].lastUsed) > Date.now() + (5 * 60 * 1000)
-  || selectedProfiles.selectedProfile !== 'a-hard-time-dregora'
+  || selectedProfiles.selectedProfile !== 'random-profile'
 ) {
-  throw new Error(`Stable Play did not outrank and reinsert the exact profile: ${JSON.stringify(selectedProfiles)}`);
+  throw new Error(`Stable Play did not outrank and reinsert the exact profile while preserving foreign modern selection state: ${JSON.stringify(selectedProfiles)}`);
 }
 const selectedQuickPlay = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_quick_play.json'), 'utf8'));
 const selectedQuickPlayEntries = selectedQuickPlay.quickPlayData['active-remote-account'];
@@ -181,6 +190,37 @@ if (
   || selectedQuickPlayEntries.some((entry, index) => index > 0 && entry?.javaInstance?.configId === 'a-hard-time-dregora')
 ) {
   throw new Error(`Minecraft Launcher quick-play selection did not move the exact AHT profile to the active account: ${JSON.stringify(selectedQuickPlay)}`);
+}
+const curseForgeForeignProfile = {
+  name: 'CurseForge Owned Instance',
+  type: 'custom',
+  gameDir: path.join(root, 'curseforge-owned-instance'),
+  lastVersionId: 'forge-14.23.5.2860',
+  lastUsed: recentCompetingLastUsed,
+  foreignSentinel: { preserved: true }
+};
+const curseForgeForeignSettings = {
+  crashAssistance: false,
+  enableAdvanced: true,
+  foreignSentinel: ['preserve', 'exactly']
+};
+await fs.writeFile(path.join(minecraftRoot, 'launcher_profiles.json'), `${JSON.stringify({
+  profiles: { 'curseforge-owned': curseForgeForeignProfile },
+  settings: curseForgeForeignSettings,
+  version: 6
+}, null, 2)}\n`, 'utf8');
+const repairedStableSelection = await selectPreparedMinecraftLauncherProfile(stableSelection);
+selectedProfiles = JSON.parse(await fs.readFile(path.join(minecraftRoot, 'launcher_profiles.json'), 'utf8'));
+selectedKeys = Object.keys(selectedProfiles.profiles);
+if (
+  !repairedStableSelection.selectionPrepared
+  || !selectedProfiles.profiles['a-hard-time-dregora']
+  || selectedKeys.at(-1) !== 'a-hard-time-dregora'
+  || Object.prototype.hasOwnProperty.call(selectedProfiles, 'selectedProfile')
+  || JSON.stringify(selectedProfiles.profiles['curseforge-owned']) !== JSON.stringify(curseForgeForeignProfile)
+  || JSON.stringify(selectedProfiles.settings) !== JSON.stringify(curseForgeForeignSettings)
+) {
+  throw new Error(`Prepared AHT profile repair damaged or malformed foreign CurseForge schema-6 metadata: ${JSON.stringify(selectedProfiles)}`);
 }
 const selectedStableLastUsed = selectedProfiles.profiles['a-hard-time-dregora'].lastUsed;
 await ensureMinecraftLauncherProfile({
@@ -1064,6 +1104,7 @@ const fakeFetchJson = async (url) => {
 };
 const assetProfile = { rootDir: assetRoot, syncedProfiles: [{ rootDir: assetRoot }], minecraftVersion: '1.12.2' };
 const firstAssetRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
   latest,
   installed: null,
@@ -1113,6 +1154,7 @@ await fs.writeFile(assetIndexPath, Buffer.alloc(assetIndexBytes.length, 0x7a));
 await fs.writeFile(clientJarPath, Buffer.alloc(clientBytes.length, 0x78));
 await fs.writeFile(baseLibraryPath, Buffer.alloc(libraryBytes.length, 0x79));
 const secondAssetRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
   latest,
   installed: null,
@@ -1158,6 +1200,7 @@ const nullableBaseVersion = {
 await fs.writeFile(path.join(baseVersionDir, '1.12.2.json'), `${JSON.stringify(nullableBaseVersion, null, 2)}\n`, 'utf8');
 const fetchCountBeforeNullableBaseRepair = fakeFetches.length;
 const nullableBaseRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
   config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: assetRoot, syncDefaultRoots: false } },
   latest,
   installed: null,
@@ -1184,6 +1227,7 @@ const incompleteOfficialRoot = path.join(root, 'incomplete-official-root');
 let incompleteOfficialError = null;
 try {
   await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: incompleteOfficialRoot, syncDefaultRoots: false } },
     latest,
     installed: null,
@@ -1205,6 +1249,7 @@ const unsafeAssetRoot = path.join(root, 'unsafe-asset-root');
 let unsafeAssetError = null;
 try {
   await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: unsafeAssetRoot, syncDefaultRoots: false } },
     latest,
     installed: null,
@@ -1226,6 +1271,7 @@ const unsafeVersionRoot = path.join(root, 'unsafe-version-root');
 let unsafeVersionError = null;
 try {
   await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: unsafeVersionRoot, syncDefaultRoots: false } },
     latest: { ...latest, minecraft: { ...latest.minecraft, version: '../escape' } },
     installed: null,
@@ -1266,6 +1312,7 @@ try {
   process.env.AHT_TEST_HOOKS = '1';
   process.env.AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR = hookFixtureDir;
   hookAssetRepair = await ensureMinecraftLauncherAssets({
+    includeObjects: false, // This fixture exercises metadata; test-asset-recovery covers real objects.
     config: { ...config, minecraftLauncher: { ...config.minecraftLauncher, rootDir: hookMinecraftRoot, syncDefaultRoots: false } },
     latest,
     installed: null,

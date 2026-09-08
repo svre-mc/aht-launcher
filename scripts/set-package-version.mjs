@@ -2,12 +2,16 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanLauncherVersion } from '../src/githubActions.js';
+import {
+  cleanLauncherReleaseVersion,
+  launcherPackageVersionForRelease
+} from '../src/launcherVersion.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const version = cleanLauncherVersion(process.argv[2] || process.env.AHT_LAUNCHER_VERSION || '');
+const releaseVersion = cleanLauncherReleaseVersion(process.argv[2] || process.env.AHT_LAUNCHER_VERSION || '');
+const packageVersion = launcherPackageVersionForRelease(releaseVersion);
 
-if (!version) {
+if (!releaseVersion) {
   throw new Error('Usage: node scripts/set-package-version.mjs <version>');
 }
 
@@ -19,14 +23,15 @@ async function updateJson(file, updater) {
 }
 
 await updateJson('package.json', (json) => {
-  json.version = version;
+  json.version = packageVersion;
+  json.ahtLauncherVersion = releaseVersion;
 });
 
 await updateJson('package-lock.json', (json) => {
-  json.version = version;
+  json.version = packageVersion;
   if (json.packages?.['']) {
-    json.packages[''].version = version;
+    json.packages[''].version = packageVersion;
   }
 });
 
-console.log(`Launcher package version set to ${version}`);
+console.log(`Launcher release version set to ${releaseVersion} (npm package version ${packageVersion})`);

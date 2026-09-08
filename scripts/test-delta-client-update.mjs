@@ -182,7 +182,11 @@ try {
   assert(!managed.some((file) => file.relativePath === 'mods/delete.jar'), 'deleted mod remains in managed state');
   assert(!managed.some((file) => file.relativePath === 'config/jei/bookmarks.ini'), 'JEI bookmarks must remain player-owned');
   const integrity = await scanManagedIntegrity(instanceDir);
-  assert(integrity.counts.corrupted === 0, `delta install is not clean: ${JSON.stringify(integrity)}`);
+  assert(
+    integrity.counts.corrupted === 1
+      && integrity.changed[0]?.path === 'config/player-editable.cfg',
+    `full managed-file integrity did not catch the intentionally preserved config edit: ${JSON.stringify(integrity)}`
+  );
 
   const repair = await installPack({
     latestSource: path.join(outDir, 'latest.json'),
@@ -193,6 +197,8 @@ try {
   });
   assert(repair.cleanInstall === true && repair.deltaApplied !== true, 'repair must use the full verified package');
   assert(await fileText(instanceDir, 'options.txt') === 'pack-options\n', 'repair with settings replacement did not restore pack options');
+  const repairedIntegrity = await scanManagedIntegrity(instanceDir);
+  assert(repairedIntegrity.counts.corrupted === 0, `full repair did not restore every managed file: ${JSON.stringify(repairedIntegrity)}`);
 
   const fallbackLatestPath = path.join(outDir, 'latest-fallback.json');
   await fs.writeFile(fallbackLatestPath, `${JSON.stringify({

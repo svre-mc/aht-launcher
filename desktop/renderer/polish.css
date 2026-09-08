@@ -50,6 +50,20 @@ textarea {
 
 body { color: var(--bsg-muted); }
 
+/* Keep the local developer shell still; player distributions retain their UI. */
+body.developer-launcher *,
+body.developer-launcher *::before,
+body.developer-launcher *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+
+body.developer-launcher .startup-loader,
+body.developer-launcher .sidebar-switch-loader {
+  display: none !important;
+}
+
 .app-frame {
   opacity: 1;
   transition: none;
@@ -129,18 +143,23 @@ body.is-booting .startup-loader {
 .startup-loader-rule {
   position: relative;
   display: block;
-  height: 1px;
+  height: 4px;
   overflow: hidden;
-  background: rgba(222, 229, 225, 0.16);
+  border: 1px solid rgba(222, 229, 225, 0.16);
+  background: rgba(2, 4, 5, 0.7);
 }
 
-.startup-loader-rule::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(222, 205, 157, 0.86), transparent);
-  transform: translateX(-100%);
-  animation: startup-rule-pass 1450ms ease-in-out infinite;
+.startup-loader-rule[hidden] {
+  display: none;
+}
+
+.startup-loader-progress {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(124, 108, 74, 0.82), rgba(236, 224, 175, 0.96));
+  box-shadow: 0 0 9px rgba(222, 205, 157, 0.48);
+  transition: width 180ms ease-out;
 }
 
 .money-loader-system {
@@ -153,6 +172,33 @@ body.is-booting .startup-loader {
   perspective: 260px;
   transform-style: preserve-3d;
   opacity: 0.96;
+}
+
+.sidebar-switch-loader {
+  position: fixed;
+  z-index: 9999;
+  right: 0;
+  bottom: 0;
+  width: 192px;
+  height: 132px;
+  overflow: visible;
+  isolation: isolate;
+  pointer-events: none;
+}
+
+.sidebar-switch-loader::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 8px 0 0 8px;
+  background: radial-gradient(ellipse at 58% 60%, rgba(3, 5, 6, 0.82), rgba(3, 5, 6, 0.42) 46%, transparent 74%);
+  pointer-events: none;
+}
+
+.sidebar-switch-loader .money-loader-system {
+  z-index: 1;
+  right: 14px;
+  bottom: 7px;
 }
 
 .startup-money-logo {
@@ -383,11 +429,10 @@ body {
   border-bottom-color: rgba(228, 245, 255, 0.29);
 }
 
-.brand,
-.topbar { -webkit-app-region: drag; }
-
 .nav,
 .nav-item,
+.topbar-social,
+.social-link,
 .profile-card,
 .window-controls,
 .window-control,
@@ -395,10 +440,12 @@ body {
 .sidebar-download { -webkit-app-region: no-drag; }
 
 .topbar {
+  z-index: 60;
   flex: 0 0 106px;
   min-height: 106px;
   max-height: 106px;
-  padding: 0 44px 0 0;
+  padding: 0;
+  overflow: visible;
   background:
     linear-gradient(90deg, rgba(13, 16, 17, 0.99), rgba(19, 25, 26, 0.96) 62%, rgba(8, 11, 12, 0.995)),
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 4px);
@@ -484,6 +531,116 @@ body {
   margin-right: 12px;
   background: transparent;
   box-shadow: none;
+}
+
+.topbar-social {
+  position: relative;
+  z-index: 30;
+  display: grid;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  margin-left: auto;
+  place-items: center;
+}
+
+.topbar-social + .profile-card,
+.topbar-social + .profile-card:hover,
+.topbar-social + .profile-card:focus-visible {
+  margin-left: 5px;
+}
+
+.social-link {
+  appearance: none;
+  -webkit-appearance: none;
+  display: grid;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 2px;
+  outline: 0;
+  background: transparent;
+  color: rgba(224, 228, 228, 0.72);
+  cursor: pointer;
+  box-shadow: none;
+  transition: color 120ms ease, background-color 120ms ease, filter 120ms ease, transform 120ms ease;
+}
+
+.social-link svg {
+  display: block;
+  width: 23px;
+  height: 23px;
+  overflow: visible;
+  fill: currentColor;
+}
+
+.social-link-forum svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.social-link:hover,
+.social-link:focus-visible {
+  background: rgba(224, 232, 232, 0.09);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.social-link-discord:hover,
+.social-link-discord:focus-visible {
+  color: #7683ff;
+  filter: drop-shadow(0 0 7px rgba(88, 101, 242, 0.62));
+}
+
+.social-link-youtube:hover,
+.social-link-youtube:focus-visible {
+  color: #ff263d;
+  filter: drop-shadow(0 0 7px rgba(255, 0, 51, 0.52));
+}
+
+.social-link-tiktok:hover,
+.social-link-tiktok:focus-visible {
+  color: #f7ffff;
+  filter: drop-shadow(-2px 0 0 rgba(37, 244, 238, 0.72)) drop-shadow(2px 0 0 rgba(254, 44, 85, 0.68));
+}
+
+.social-link-forum:hover,
+.social-link-forum:focus-visible {
+  color: #e0bd78;
+  filter: drop-shadow(0 0 6px rgba(224, 189, 120, 0.42));
+}
+
+.social-dropdown {
+  position: absolute;
+  top: 43px;
+  left: 50%;
+  z-index: 40;
+  display: grid;
+  box-sizing: border-box;
+  width: 74px;
+  gap: 2px;
+  padding: 5px 16px 10px;
+  justify-items: center;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, -8px);
+  transition: opacity 120ms ease, transform 150ms ease, visibility 0s linear 150ms;
+}
+
+.topbar-social:hover .social-dropdown,
+.topbar-social:focus-within .social-dropdown,
+.topbar-social.is-social-menu-open .social-dropdown {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+  transition-delay: 0s;
 }
 
 .profile-card:hover .profile-copy strong,
@@ -765,13 +922,33 @@ textarea {
   color: var(--bsg-primary);
 }
 
+.developer-window-drag-region {
+  position: fixed;
+  top: 0;
+  right: 56px;
+  left: 0;
+  z-index: 1000;
+  display: block;
+  height: 28px;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+body.dev-mode .developer-window-drag-region {
+  right: 68px;
+  height: 34px;
+}
+
 .window-controls {
-  position: absolute;
+  position: fixed;
   top: 0;
   right: 0;
-  z-index: 10;
+  z-index: 1001;
   display: flex;
   height: 28px;
+  isolation: isolate;
+  pointer-events: auto;
+  -webkit-app-region: no-drag !important;
 }
 
 .window-control {
@@ -783,17 +960,32 @@ textarea {
   background: transparent;
   color: rgba(221, 224, 223, 0.66);
   cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag !important;
+}
+
+.window-control > span {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  -webkit-app-region: no-drag !important;
+}
+
+.window-control > span::before,
+.window-control > span::after {
+  pointer-events: none;
 }
 
 .window-control:hover,
 .window-control:focus-visible {
   outline: none;
+  background: transparent;
   color: #fff;
-  text-shadow: 0 0 7px rgba(255, 255, 255, 0.52);
+  text-shadow: none;
 }
 
 .window-close:hover,
-.window-close:focus-visible { background: rgba(176, 37, 37, 0.72); }
+.window-close:focus-visible { background: transparent; }
 
 .window-minimize span::before {
   content: "";
@@ -828,40 +1020,28 @@ textarea {
   position: relative;
 }
 
+.workspace > .view.sidebar-view-leaving-ready {
+  will-change: opacity;
+  transition: none;
+}
+
 .workspace > .view.sidebar-view-leaving {
   opacity: 0;
-  transition: opacity 180ms ease-in;
 }
 
 .workspace > .view.sidebar-view-entering {
   opacity: 0;
+  will-change: opacity;
   transition: none;
 }
 
 .workspace > .view.sidebar-view-entering.sidebar-view-entering-active {
   opacity: 1;
-  transition: opacity 330ms ease-out;
+  transition: none;
 }
 
 .workspace.is-sidebar-switching > .view {
   pointer-events: none;
-}
-
-.sidebar-switch-loader {
-  z-index: 30;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 90ms linear;
-}
-
-.workspace.is-sidebar-switching:not(.is-sidebar-switch-entering) .sidebar-switch-loader {
-  opacity: 0.92;
-  transition-delay: 110ms;
-}
-
-.workspace.is-sidebar-switch-entering .sidebar-switch-loader {
-  opacity: 0;
-  transition-delay: 0s;
 }
 
 #player.view.active {
@@ -1753,7 +1933,8 @@ textarea {
 }
 
 .news-feed-card:not(.large) .news-card-open:hover .feature-art,
-.news-feed-card:not(.large) .news-card-open:focus-visible .feature-art {
+.news-feed-card:not(.large) .news-card-open:focus-visible .feature-art,
+.news-feed-card:not(.large):focus-within .feature-art {
   filter: brightness(1.1);
 }
 
@@ -2069,6 +2250,7 @@ textarea {
 
 .news-view.is-transitioning:not(.is-transition-entering) .news-transition-loader {
   opacity: 0.92;
+  transition: none;
 }
 
 .news-loader-globe {
@@ -2164,4 +2346,120 @@ textarea {
 
 .update-log-article-footer {
   display: none;
+}
+
+/* Game view only: one full-art lead story plus two identically sized side
+   stories. Keep this separate from #newsFeedGrid so the dedicated News page
+   retains its accepted single-column 0.1.97 layout. */
+#player #updateLogGrid.update-log-grid {
+  width: 1094px;
+  max-width: calc(100% - 46px);
+  grid-template-columns: 482px 284px 284px;
+  grid-template-rows: 270px;
+  gap: 22px;
+  align-items: stretch;
+}
+
+#player #updateLogGrid > .home-news-card {
+  display: grid;
+  grid-template-rows: 158px 110px;
+  align-self: stretch;
+  width: 100%;
+  height: 270px;
+  min-height: 270px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(218, 230, 232, 0.27);
+  border-radius: 0;
+  background: #16191a;
+  box-shadow: 0 7px 24px rgba(0, 0, 0, 0.46);
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-art {
+  width: 100%;
+  height: 158px;
+  min-height: 158px;
+  aspect-ratio: auto;
+  border-bottom: 1px solid rgba(218, 230, 232, 0.2);
+  background-position: center;
+  background-size: cover;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-copy {
+  display: grid;
+  grid-template-rows: 16px 40px 32px;
+  gap: 2px;
+  height: 110px;
+  min-height: 110px;
+  padding: 6px 13px;
+  align-content: start;
+  background: #16191a;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-copy .feature-meta {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-copy > strong {
+  display: -webkit-box;
+  height: 40px;
+  overflow: hidden;
+  font-size: 16px;
+  line-height: 20px;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+#player #updateLogGrid > .home-news-card:not(.large) .feature-summary {
+  display: -webkit-box;
+  height: 32px;
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 16px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+#player #updateLogGrid > .home-news-card.large {
+  position: relative;
+  display: block;
+  grid-template-rows: none;
+}
+
+#player #updateLogGrid > .home-news-card.large .feature-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+  background-position: center;
+  background-size: cover;
+}
+
+#player #updateLogGrid > .home-news-card.large .feature-copy {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  display: grid;
+  gap: 4px;
+  padding: 54px 16px 13px;
+  background: linear-gradient(180deg, transparent, rgba(3, 5, 6, 0.94) 70%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: none;
+}
+
+#player #updateLogGrid > .home-news-card.large:hover .feature-copy {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 120ms linear;
 }

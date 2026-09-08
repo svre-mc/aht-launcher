@@ -1,3 +1,8 @@
+import {
+  cleanLauncherReleaseVersion,
+  launcherReleaseVersionFromPackage
+} from './launcherVersion.js';
+
 const GITHUB_API = 'https://api.github.com';
 const DEFAULT_REPO = 'svre-mc/aht-launcher';
 const DEFAULT_BRANCH = 'main';
@@ -31,12 +36,7 @@ export function cleanRef(value = DEFAULT_BRANCH) {
 }
 
 export function cleanLauncherVersion(value = '') {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(raw)) {
-    throw new Error('Launcher version must look like 0.1.3.');
-  }
-  return raw;
+  return cleanLauncherReleaseVersion(value);
 }
 
 function githubHeaders(token) {
@@ -61,7 +61,8 @@ function normalizedWorkflowRun(run = null) {
     htmlUrl: run.html_url,
     createdAt: run.created_at,
     updatedAt: run.updated_at,
-    branch: run.head_branch
+    branch: run.head_branch,
+    title: run.display_title || run.name || ''
   } : null;
 }
 
@@ -100,7 +101,7 @@ export async function readGithubPackageVersion({
     throw new Error('GitHub package.json lookup failed: package.json content was empty.');
   }
   const packageJson = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
-  const version = cleanLauncherVersion(packageJson.version);
+  const version = launcherReleaseVersionFromPackage(packageJson);
   if (!version) {
     throw new Error('GitHub package.json lookup failed: package.json version is missing.');
   }
@@ -113,21 +114,22 @@ export async function dispatchGithubWorkflow({
   ref = DEFAULT_BRANCH,
   token,
   publishToR2 = true,
+  inputs = null,
   fetchImpl = globalThis.fetch
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is not available.');
   const cleanRepo = cleanGithubRepo(repo);
   const cleanWorkflow = cleanWorkflowId(workflow);
   const cleanBranch = cleanRef(ref);
-  const inputs = {
-    publish_to_r2: Boolean(publishToR2)
-  };
+  const workflowInputs = inputs && typeof inputs === 'object'
+    ? Object.fromEntries(Object.entries(inputs).map(([key, value]) => [key, String(value)]))
+    : { publish_to_r2: Boolean(publishToR2) };
   const response = await fetchImpl(`${GITHUB_API}/repos/${cleanRepo}/actions/workflows/${encodeURIComponent(cleanWorkflow)}/dispatches`, {
     method: 'POST',
     headers: githubHeaders(token),
     body: JSON.stringify({
       ref: cleanBranch,
-      inputs
+      inputs: workflowInputs
     })
   });
   await readGithubJson(response, 'GitHub workflow dispatch');
@@ -146,6 +148,7 @@ export async function findRecentWorkflowRun({
   ref = DEFAULT_BRANCH,
   token,
   since = new Date(Date.now() - 30_000).toISOString(),
+  runNameIncludes = '',
   fetchImpl = globalThis.fetch
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is not available.');
@@ -161,8 +164,10 @@ export async function findRecentWorkflowRun({
   });
   const parsed = await readGithubJson(response, 'GitHub workflow run lookup');
   const sinceMs = Date.parse(since) || 0;
+  const titleNeedle = String(runNameIncludes || '').trim().toLowerCase();
   const run = (parsed?.workflow_runs || [])
     .filter((item) => Date.parse(item.created_at || '') >= sinceMs - 10_000)
+    .filter((item) => !titleNeedle || String(item.display_title || item.name || '').toLowerCase().includes(titleNeedle))
     .sort((left, right) => Date.parse(right.created_at || '') - Date.parse(left.created_at || ''))[0];
   return normalizedWorkflowRun(run);
 }
@@ -200,13 +205,13 @@ export async function waitForGithubWorkflowRun({
     if (typeof onProgress === 'function') onProgress(run);
     if (run?.status === 'completed') {
       if (run.conclusion !== 'success') {
-        throw new Error(`GitHub launcher workflow completed with ${run.conclusion || 'an unknown result'}. ${run.htmlUrl || ''}`.trim());
+        throw new Error(`GitHub workflow completed with ${run.conclusion || 'an unknown result'}. ${run.htmlUrl || ''}`.trim());
       }
       return run;
     }
     await sleepImpl(Math.max(1, Number(pollIntervalMs) || 1));
   } while (Date.now() < deadline);
-  throw new Error(`GitHub launcher workflow did not finish before the timeout. ${run?.htmlUrl || ''}`.trim());
+  throw new Error(`GitHub workflow did not finish before the timeout. ${run?.htmlUrl || ''}`.trim());
 }
 
 export async function triggerLauncherReleaseWorkflow(options = {}) {

@@ -1,3 +1,5 @@
+import { isLegacyMinecraftAccount, recoverLegacyMinecraftAccount } from './minecraft-account-recovery.js';
+
 const CURSEFORGE_BASE = 'https://api.curseforge.com/v1';
 const RELEASE_PATHS = new Set([
   'latest.json',
@@ -6,6 +8,7 @@ const RELEASE_PATHS = new Set([
   'ptb/release-report.json',
   'launcher/latest.json'
 ]);
+const SITE_DOCUMENT_PATH_PATTERN = /^pdf[1-9]\d*$/;
 const RELEASE_PREFIXES = [
   'packs/',
   'patches/',
@@ -20,17 +23,37 @@ const RELEASE_PREFIXES = [
   'launcher/files/',
   'update-media/'
 ];
+const LEGACY_LAUNCHER_WORKER_NAME = 'aht-curseforge-proxy';
+const LEGACY_LAUNCHER_UPDATE_PATH = '/launcher/latest.json';
+const LEGACY_LAUNCHER_MANIFEST_COLLECTIONS = ['downloads', 'platforms', 'stagedPlatforms'];
 const LAUNCHER_SOCIAL_ACTIONS = new Set([
   'accept_friend',
   'decline_friend',
 ]);
 const SOCIAL_ACTION_PREFIX = 'social/actions/';
 const SOCIAL_STATE_PREFIX = 'social/state/';
-const LAUNCHER_DOWNLOAD_KEYS = new Set(['windows-x64', 'macos-arm64', 'macos-x64']);
+const LAUNCHER_DOWNLOAD_KEY_ALIASES = new Map([
+  ['macos-arm64', 'macos-universal'],
+  ['macos-x64', 'macos-universal'],
+  ['linux-x64', 'ubuntu-x64-appimage'],
+  ['ubuntu-x64', 'ubuntu-x64-appimage']
+]);
+const LAUNCHER_DOWNLOAD_KEYS = new Set([
+  'windows-x64',
+  'macos-universal',
+  'linux-x64',
+  'ubuntu-x64-appimage',
+  ...LAUNCHER_DOWNLOAD_KEY_ALIASES.keys()
+]);
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;
 const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;
+const LAUNCHER_INSTALLER_DOWNLOAD_RETRY_GRACE_MS = 10 * 60 * 1000;
+export const LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH = '2026-09-04-privacy-reset-1';
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH = '/launcher-installer-download-limit';
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER = 'X-AHT-Launcher-Installer-Limit-Internal';
+const LAUNCHER_INSTALLER_ID_COOKIE = '__Host-AHT-Download-ID';
+const LAUNCHER_INSTALLER_ID_COOKIE_PROTOCOL = 'aht-download-id-v1';
+const LAUNCHER_INSTALLER_ID_COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
 const RELEASE_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const LAUNCHER_DOWNLOAD_PREFIX = 'launcher-downloads/';
 const LAUNCHER_UPDATE_PREFIX = 'launcher-updates/';
@@ -76,7 +99,7 @@ function corsHeaders(origin) {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-AHT-Launcher-Recovery, X-AHT-Server-Timestamp, X-AHT-Server-Signature',
-    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified, Retry-After, X-AHT-Download-Limit, X-AHT-Download-Remaining, X-AHT-Download-Reset',
+    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified',
     'Cache-Control': 'private, max-age=60',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
@@ -118,7 +141,118 @@ function normalizePlatform(value = '') {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'win32' || platform === 'win64' || platform.includes('windows')) return 'Windows';
   if (platform === 'darwin' || platform === 'mac' || platform.startsWith('macos') || platform.includes('mac os')) return 'Mac';
+  if (platform === 'linux' || platform === 'ubuntu' || platform.includes('linux') || platform.includes('ubuntu')) return 'Linux';
   return '';
+}
+
+function legacyWorkersDevRedirect(request, env) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return null;
+  if (String(request.headers.get('Upgrade') || '').toLowerCase() === 'websocket') return null;
+  const configuredOrigin = cleanString(env.AHT_PUBLIC_ORIGIN || '', 300);
+  if (!configuredOrigin) return null;
+  try {
+    const source = new URL(request.url);
+    // Java 8's HttpURLConnection does not follow HTTP 308. Existing server
+    // verifiers must receive the authenticated JSON response at this address.
+    if (source.pathname === '/api/launcher-proof/verify') return null;
+    const targetOrigin = new URL(configuredOrigin);
+    if (!source.hostname.toLowerCase().endsWith('.workers.dev')
+        || targetOrigin.protocol !== 'https:'
+        || targetOrigin.username
+        || targetOrigin.password
+        || targetOrigin.pathname !== '/'
+        || targetOrigin.search
+        || targetOrigin.hash) {
+      return null;
+    }
+    const target = new URL(targetOrigin);
+    const downloadKey = cleanString(source.searchParams.get('aht_download') || '', 80);
+    target.pathname = LAUNCHER_DOWNLOAD_KEYS.has(downloadKey) && source.pathname.startsWith('/launcher/files/')
+      ? `/launcher/download/${downloadKey}`
+      : source.pathname;
+    return new Response(null, {
+      status: 308,
+      headers: {
+        Location: target.toString(),
+        'Cache-Control': 'private, no-store',
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff'
+      }
+    });
+  } catch {
+    return null;
+  }
+}
+
+function legacyLauncherUpdateVerificationUrl(request) {
+  if (request.method !== 'GET') return null;
+  try {
+    const source = new URL(request.url);
+    const hostParts = source.hostname.toLowerCase().split('.');
+    const queryEntries = [...source.searchParams.entries()];
+    if (hostParts[0] !== LEGACY_LAUNCHER_WORKER_NAME
+        || !source.hostname.toLowerCase().endsWith('.workers.dev')
+        || source.pathname !== LEGACY_LAUNCHER_UPDATE_PATH
+        || queryEntries.length !== 1
+        || queryEntries[0][0] !== 'aht_verify'
+        || !/^\d{10,17}$/.test(queryEntries[0][1])) {
+      return null;
+    }
+    return source;
+  } catch {
+    return null;
+  }
+}
+
+function legacyLauncherUpdateManifest(manifest, sourceOrigin, publicOrigin) {
+  const result = structuredClone(manifest);
+  const legacyOrigin = new URL(sourceOrigin);
+  const brandedOrigin = new URL(publicOrigin);
+  for (const collectionName of LEGACY_LAUNCHER_MANIFEST_COLLECTIONS) {
+    const collection = result?.[collectionName];
+    if (!collection || typeof collection !== 'object' || Array.isArray(collection)) continue;
+    for (const entry of Object.values(collection)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      try {
+        const artifact = new URL(String(entry.url || ''));
+        if (artifact.origin !== brandedOrigin.origin || !artifact.pathname.startsWith('/launcher/files/')) continue;
+        entry.url = new URL(`${artifact.pathname}${artifact.search}`, legacyOrigin).toString();
+      } catch {
+        // The signed release manifest validator owns malformed artifact handling.
+      }
+    }
+  }
+  return result;
+}
+
+async function legacyLauncherUpdateManifestResponse(request, env, origin) {
+  const source = legacyLauncherUpdateVerificationUrl(request);
+  if (!source) return null;
+  const configuredOrigin = cleanString(env.AHT_PUBLIC_ORIGIN || '', 300);
+  if (!configuredOrigin) return null;
+  let targetOrigin;
+  try {
+    targetOrigin = new URL(configuredOrigin);
+    if (targetOrigin.protocol !== 'https:'
+        || targetOrigin.username
+        || targetOrigin.password
+        || targetOrigin.pathname !== '/'
+        || targetOrigin.search
+        || targetOrigin.hash) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const manifest = legacyLauncherUpdateManifest(
+    await readLauncherManifest(env),
+    source.origin,
+    targetOrigin.origin
+  );
+  return Response.json(manifest, {
+    status: 200,
+    headers: { ...corsHeaders(origin), 'Cache-Control': 'private, no-store' }
+  });
 }
 
 function normalizeMinecraftUuid(value = '') {
@@ -303,6 +437,7 @@ function launcherDownloadKey(receivedAt = new Date().toISOString(), id = crypto.
 function isReleaseCandidatePath(pathname) {
   const trimmed = pathname.replace(/^\/+/, '');
   return RELEASE_PATHS.has(trimmed)
+    || SITE_DOCUMENT_PATH_PATTERN.test(trimmed)
     || RELEASE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
     || trimmed.startsWith('releases/');
 }
@@ -319,7 +454,7 @@ function safeReleaseKey(pathname) {
   if (!key || key.includes('\0') || key.split('/').includes('..')) {
     return '';
   }
-  if (RELEASE_PATHS.has(key) || RELEASE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+  if (RELEASE_PATHS.has(key) || SITE_DOCUMENT_PATH_PATTERN.test(key) || RELEASE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
     return key;
   }
   return '';
@@ -327,6 +462,7 @@ function safeReleaseKey(pathname) {
 
 function contentTypeForKey(key) {
   const lower = key.toLowerCase();
+  if (SITE_DOCUMENT_PATH_PATTERN.test(lower)) return 'application/pdf';
   if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
   if (lower.endsWith('.zip')) return 'application/zip';
   if (lower.endsWith('.jar')) return 'application/java-archive';
@@ -343,6 +479,10 @@ function cacheControlForKey(key) {
     return 'public, max-age=60, must-revalidate';
   }
   return 'public, max-age=31536000, immutable';
+}
+
+function shouldUseReleaseObjectCache(key) {
+  return cacheControlForKey(key).includes('immutable');
 }
 
 function objectHttpDate(value) {
@@ -384,7 +524,18 @@ function parseHttpRangeHeader(header = '', size = 0) {
 function releaseHeaders(key, origin, object, range = null) {
   const headers = corsHeaders(origin);
   headers['Cache-Control'] = cacheControlForKey(key);
-  headers['Content-Type'] = object.httpMetadata?.contentType || contentTypeForKey(key);
+  headers['Content-Type'] = SITE_DOCUMENT_PATH_PATTERN.test(key)
+    ? 'application/pdf'
+    : (object.httpMetadata?.contentType || contentTypeForKey(key));
+  if (SITE_DOCUMENT_PATH_PATTERN.test(key)) {
+    const documentNumber = key.slice(3).padStart(3, '0');
+    headers['Content-Disposition'] = `inline; filename="A Hard Time Update Log ${documentNumber}.pdf"`;
+  } else if (key.startsWith('launcher/files/')) {
+    const fileName = key.split('/').pop().replace(/["\\\r\n]/g, '');
+    headers['Content-Disposition'] = `attachment; filename="${fileName}"`;
+  } else if (object.httpMetadata?.contentDisposition) {
+    headers['Content-Disposition'] = object.httpMetadata.contentDisposition;
+  }
   headers['Accept-Ranges'] = 'bytes';
   if (object.httpEtag) headers.ETag = object.httpEtag;
   if (range) {
@@ -406,26 +557,34 @@ function rangeNotSatisfiable(origin, objectSize) {
 }
 
 function releaseNotFound(key, origin) {
-  return json({ error: 'Release object not found', key }, 404, origin);
+  return json({ error: 'Download not found.' }, 404, origin);
 }
 
-async function enforceReleaseRateLimit(request, env, origin) {
+async function enforceReleaseRateLimit(request, env, origin, key = '') {
   if (!env.AHT_PLAYER_API_RATE_LIMITER?.limit) return null;
   const connection = requestIpv4(request);
   const ipKey = connection.ip || 'unavailable';
+  const rangeKey = cleanString(request.headers.get('Range') || 'whole-object', 160);
   let allowed = false;
   try {
+    // A full client ZIP can contain hundreds of valid parallel byte ranges. A
+    // single IP-wide counter made the launcher's own range downloader exhaust
+    // the bucket and receive 429 responses mid-install. Scope the counter to
+    // the immutable object and exact range so repeated abusive requests are
+    // still bounded without treating one multipart download as an API burst.
+    const requestScope = `${cleanString(key, 512)}\n${rangeKey}`;
     const result = await env.AHT_PLAYER_API_RATE_LIMITER.limit({
-      key: `release:${(await sha256Hex(ipKey)).slice(0, 40)}`
+      key: `release:${(await sha256Hex(ipKey)).slice(0, 20)}:${(await sha256Hex(requestScope)).slice(0, 20)}`
     });
     allowed = result?.success === true;
   } catch {
     allowed = false;
   }
   if (allowed) return null;
-  const response = privateJson({ error: 'Too many release download requests. Try again shortly.' }, 429, origin);
-  response.headers.set('Retry-After', '60');
-  return response;
+  return new Response(null, {
+    status: 429,
+    headers: { ...corsHeaders(origin), 'Cache-Control': 'private, no-store' }
+  });
 }
 
 function releaseCacheRequest(request, key) {
@@ -439,6 +598,9 @@ function releaseCacheRequest(request, key) {
 function releaseResponseForOrigin(response, origin, method) {
   const headers = new Headers(response.headers);
   headers.set('Access-Control-Allow-Origin', origin || '*');
+  // Identity headers are always generated per request and must never survive
+  // an old or externally populated edge-cache entry.
+  headers.delete('Set-Cookie');
   return new Response(method === 'HEAD' ? null : response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -462,6 +624,7 @@ async function writeReleaseCache(request, key, response, context) {
   if (!cache?.put) return;
   const cacheResponse = response.clone();
   cacheResponse.headers.set('Access-Control-Allow-Origin', '*');
+  cacheResponse.headers.delete('Set-Cookie');
   const write = cache.put(releaseCacheRequest(request, key), cacheResponse).catch((error) => {
     console.error(JSON.stringify({
       message: 'release cache put failed',
@@ -473,11 +636,34 @@ async function writeReleaseCache(request, key, response, context) {
   else await write;
 }
 
+function launcherManifestDownload(manifest, platformKey = '') {
+  const candidates = (() => {
+    if (platformKey === 'macos-universal') return ['macos-universal', 'macos-arm64', 'macos-x64'];
+    if (platformKey === 'macos-arm64') return ['macos-universal', 'macos-arm64'];
+    if (platformKey === 'macos-x64') return ['macos-universal', 'macos-x64'];
+    if (platformKey === 'linux-x64') return ['ubuntu-x64-appimage', 'linux-x64'];
+    if (platformKey === 'ubuntu-x64-appimage') return ['ubuntu-x64-appimage', 'linux-x64'];
+    if (platformKey === 'ubuntu-x64') return ['ubuntu-x64-appimage', 'ubuntu-x64', 'linux-x64'];
+    return [LAUNCHER_DOWNLOAD_KEY_ALIASES.get(platformKey) || platformKey];
+  })();
+  for (const candidate of candidates) {
+    const artifact = manifest?.downloads?.[candidate];
+    if (artifact) return artifact;
+  }
+  return null;
+}
+
 async function authorizeTaggedLauncherInstallerArtifact(request, env, origin, key, context) {
   const requestUrl = new URL(request.url);
   const platformKey = cleanString(requestUrl.searchParams.get('aht_download') || '', 80);
   if (request.method !== 'GET' || !LAUNCHER_DOWNLOAD_KEYS.has(platformKey) || !key.startsWith('launcher/files/')) {
-    return { response: null, quota: null };
+    return { response: null, counted: false, identityHash: '', setCookie: '' };
+  }
+  // Historical manifests tagged the immutable file itself. Browsers may issue
+  // several Range requests for one download, so those requests must never
+  // consume separate daily slots. Current manifests use /launcher/download/.
+  if (request.headers.get('Range')) {
+    return { response: null, counted: false, identityHash: '', setCookie: '' };
   }
 
   let manifest;
@@ -485,11 +671,11 @@ async function authorizeTaggedLauncherInstallerArtifact(request, env, origin, ke
     manifest = await readLauncherManifest(env);
   } catch (error) {
     console.error('launcher installer manifest authorization failed', error);
-    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+    return { response: launcherInstallerLimitUnavailable(origin), counted: false, identityHash: '', setCookie: '' };
   }
-  const artifact = manifest?.downloads?.[platformKey];
+  const artifact = launcherManifestDownload(manifest, platformKey);
   const expectedKey = safeReleaseKey(`/${artifact?.path || ''}`);
-  if (!artifact || expectedKey !== key) return { response: null, quota: null };
+  if (!artifact || expectedKey !== key) return { response: null, counted: false, identityHash: '', setCookie: '' };
   return authorizeLauncherInstallerDelivery(request, env, origin, platformKey, manifest, artifact, context);
 }
 
@@ -502,23 +688,23 @@ async function serveReleaseObject(request, env, origin, context = null) {
   }
   const bucket = releaseBucket(env);
   if (!bucket) {
-    return json({ error: 'AHT_RELEASES R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const key = safeReleaseKey(pathname);
   if (!key) {
-    return json({ error: 'Invalid release path' }, 400, origin);
+    return json({ error: 'Invalid download request.' }, 400, origin);
   }
 
-  const rateLimited = await enforceReleaseRateLimit(request, env, origin);
+  const rateLimited = await enforceReleaseRateLimit(request, env, origin, key);
   if (rateLimited) return rateLimited;
 
   const rangeHeader = request.headers.get('Range') || '';
-  if (!rangeHeader) {
+  if (!rangeHeader && shouldUseReleaseObjectCache(key)) {
     const cached = await readReleaseCache(request, key, origin, method);
     if (cached) {
       const authorization = await authorizeTaggedLauncherInstallerArtifact(request, env, origin, key, context);
       if (authorization.response) return authorization.response;
-      return withLauncherInstallerQuotaHeaders(cached, authorization.quota);
+      return withLauncherInstallerIdentity(cached, authorization);
     }
   }
   let range = null;
@@ -550,11 +736,12 @@ async function serveReleaseObject(request, env, origin, context = null) {
   const authorization = await authorizeTaggedLauncherInstallerArtifact(request, env, origin, key, context);
   if (authorization.response) return authorization.response;
   const headers = releaseHeaders(key, origin, object, range);
-  for (const [name, value] of Object.entries(launcherInstallerQuotaHeaders(authorization.quota))) {
-    headers[name] = value;
-  }
-  const response = new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers });
-  if (!range && method === 'GET' && Number(object.size || 0) <= RELEASE_CACHE_MAX_BYTES) {
+  const response = withLauncherInstallerIdentity(
+    new Response(method === 'HEAD' ? null : object.body, { status: range ? 206 : 200, headers }),
+    authorization
+  );
+  if (!range && method === 'GET' && shouldUseReleaseObjectCache(key)
+      && Number(object.size || 0) <= RELEASE_CACHE_MAX_BYTES) {
     await writeReleaseCache(request, key, response, context);
   }
   return response;
@@ -671,47 +858,54 @@ function launcherVersionFailure(currentLauncherVersion, policy) {
   };
 }
 
-function launcherInstallerPersonIdentity(request) {
-  const requestUrl = new URL(request.url);
-  const minecraftUuid = normalizeMinecraftUuid(
-    requestUrl.searchParams.get('aht_uuid')
-      || request.headers.get('X-AHT-Minecraft-UUID')
-      || ''
-  );
-  if (minecraftUuid) return { kind: 'minecraft-uuid', value: minecraftUuid };
-
-  const minecraftUsername = normalizeMinecraftUsername(
-    requestUrl.searchParams.get('aht_player')
-      || requestUrl.searchParams.get('aht_username')
-      || request.headers.get('X-AHT-Minecraft-Username')
-      || ''
-  );
-  if (/^[A-Za-z0-9_]{3,16}$/.test(minecraftUsername)) {
-    return { kind: 'minecraft-username', value: minecraftUsername.toLowerCase() };
+function requestCookieValue(request, name) {
+  const source = String(request.headers.get('Cookie') || '');
+  for (const item of source.split(';')) {
+    const separator = item.indexOf('=');
+    if (separator < 1 || item.slice(0, separator).trim() !== name) continue;
+    return item.slice(separator + 1).trim();
   }
-
-  const connection = requestIpv4(request);
-  if (connection.available && connection.ip) {
-    return { kind: 'network-ip', value: connection.ip };
-  }
-  return null;
+  return '';
 }
 
-function launcherInstallerQuotaHeaders(quota) {
-  if (!quota) return {};
+function launcherInstallerIdentityCookie(value) {
+  return `${LAUNCHER_INSTALLER_ID_COOKIE}=${value}; Max-Age=${LAUNCHER_INSTALLER_ID_COOKIE_MAX_AGE_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
+async function launcherInstallerPersonIdentity(request, env) {
+  const secret = adminTokenSecret(env);
+  const supplied = requestCookieValue(request, LAUNCHER_INSTALLER_ID_COOKIE);
+  const parts = supplied.split('.');
+  if (parts.length === 2
+      && /^[a-f0-9]{32}$/i.test(parts[0])
+      && /^[A-Za-z0-9_-]{43}$/.test(parts[1])) {
+    const expected = await hmac(`${LAUNCHER_INSTALLER_ID_COOKIE_PROTOCOL}\0${parts[0].toLowerCase()}`, secret);
+    if (await secureStringEqual(parts[1], expected)) {
+      const value = parts[0].toLowerCase();
+      return {
+        kind: 'anonymous-cookie',
+        value,
+        identityHash: await sha256Hex(`anonymous-cookie\0${value}`),
+        setCookie: ''
+      };
+    }
+  }
+
+  const value = crypto.randomUUID().replaceAll('-', '').toLowerCase();
+  const signature = await hmac(`${LAUNCHER_INSTALLER_ID_COOKIE_PROTOCOL}\0${value}`, secret);
   return {
-    'X-AHT-Download-Limit': String(LAUNCHER_INSTALLER_DOWNLOAD_LIMIT),
-    'X-AHT-Download-Remaining': String(quota.remaining),
-    'X-AHT-Download-Reset': String(Math.ceil(quota.resetAt / 1000))
+    kind: 'anonymous-cookie',
+    value,
+    identityHash: await sha256Hex(`anonymous-cookie\0${value}`),
+    setCookie: launcherInstallerIdentityCookie(`${value}.${signature}`)
   };
 }
 
-function withLauncherInstallerQuotaHeaders(response, quota) {
-  if (!quota) return response;
+function withLauncherInstallerIdentity(response, authorization) {
+  if (!authorization?.setCookie) return response;
   const headers = new Headers(response.headers);
-  for (const [name, value] of Object.entries(launcherInstallerQuotaHeaders(quota))) {
-    headers.set(name, value);
-  }
+  headers.set('Set-Cookie', authorization.setCookie);
+  headers.set('Cache-Control', 'private, no-store');
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -719,56 +913,81 @@ function withLauncherInstallerQuotaHeaders(response, quota) {
   });
 }
 
-function launcherInstallerLimitUnavailable(origin) {
-  return privateJson({
-    error: 'Launcher download authorization is temporarily unavailable.',
-    code: 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_UNAVAILABLE'
-  }, 503, origin);
+function launcherInstallerBlockedResponse(origin, setCookie = '') {
+  const headers = {
+    ...corsHeaders(origin),
+    'Cache-Control': 'private, no-store'
+  };
+  if (setCookie) headers['Set-Cookie'] = setCookie;
+  // A 204 keeps direct browser navigations on the current page while revealing
+  // no quota, reset, infrastructure, or account details to the player.
+  return new Response(null, { status: 204, headers });
 }
 
-async function enforceLauncherInstallerDownloadLimit(request, env, origin) {
-  const identity = launcherInstallerPersonIdentity(request);
+function launcherInstallerLimitUnavailable(origin, setCookie = '') {
+  return launcherInstallerBlockedResponse(origin, setCookie);
+}
+
+async function enforceLauncherInstallerDownloadLimit(request, env, origin, requestKey = '') {
+  let identity;
+  try {
+    identity = await launcherInstallerPersonIdentity(request, env);
+  } catch (error) {
+    console.error('launcher installer identity check failed', error);
+    return { response: launcherInstallerLimitUnavailable(origin), counted: false, identityHash: '', setCookie: '' };
+  }
   const namespace = env.AHT_LAUNCHER_STATE;
   if (!identity || !namespace?.idFromName || !namespace?.get) {
-    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+    return {
+      response: launcherInstallerLimitUnavailable(origin, identity?.setCookie || ''),
+      counted: false,
+      identityHash: identity?.identityHash || '',
+      setCookie: identity?.setCookie || ''
+    };
   }
 
   let response;
   let result;
   try {
-    const identityHash = await sha256Hex(`${identity.kind}\0${identity.value}`);
-    const stub = namespace.get(namespace.idFromName(`launcher-installer-download:${identityHash}`));
-    if (!stub?.fetch) return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+    const identityHash = identity.identityHash || await sha256Hex(`${identity.kind}\0${identity.value}`);
+    const requestKeyHash = await sha256Hex(cleanString(requestKey || 'launcher-installer', 512));
+    const stub = namespace.get(namespace.idFromName(
+      `launcher-installer-download:${LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH}:${identityHash}`
+    ));
+    if (!stub?.fetch) {
+      return {
+        response: launcherInstallerLimitUnavailable(origin, identity.setCookie),
+        counted: false,
+        identityHash,
+        setCookie: identity.setCookie
+      };
+    }
     response = await stub.fetch(`https://aht-launcher-state.internal${LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH}`, {
       method: 'POST',
-      headers: { [LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER]: '1' }
+      headers: {
+        [LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER]: '1',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ requestKey: requestKeyHash })
     });
     result = await response.json();
   } catch (error) {
     console.error('launcher installer limit check failed', error);
-    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+    return {
+      response: launcherInstallerLimitUnavailable(origin, identity.setCookie),
+      counted: false,
+      identityHash: identity.identityHash,
+      setCookie: identity.setCookie
+    };
   }
 
-  const requestedRetryAfter = Math.ceil(Number(result?.retryAfterSeconds));
-  const retryAfter = Number.isFinite(requestedRetryAfter) && requestedRetryAfter > 0
-    ? Math.max(1, Math.min(Math.ceil(LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS / 1000), requestedRetryAfter))
-    : Math.ceil(LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS / 1000);
   if (response.status === 429 && result?.code === 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT') {
-    const limited = privateJson({
-      error: `Launcher downloads are limited to ${LAUNCHER_INSTALLER_DOWNLOAD_LIMIT} per person during the 24 hours after the first download.`,
-      code: 'LAUNCHER_INSTALLER_DOWNLOAD_LIMIT',
-      limit: LAUNCHER_INSTALLER_DOWNLOAD_LIMIT,
-      remaining: 0,
-      resetAt: Number(result.resetAt || 0)
-    }, 429, origin);
-    limited.headers.set('Retry-After', String(retryAfter));
-    for (const [name, value] of Object.entries(launcherInstallerQuotaHeaders({
-      remaining: 0,
-      resetAt: Number(result.resetAt || Date.now() + retryAfter * 1000)
-    }))) {
-      limited.headers.set(name, value);
-    }
-    return { response: limited, quota: null };
+    return {
+      response: launcherInstallerBlockedResponse(origin, identity.setCookie),
+      counted: false,
+      identityHash: identity.identityHash,
+      setCookie: identity.setCookie
+    };
   }
 
   const quota = {
@@ -781,18 +1000,35 @@ async function enforceLauncherInstallerDownloadLimit(request, env, origin) {
       || !Number.isInteger(quota.remaining) || quota.remaining < 0 || quota.remaining >= LAUNCHER_INSTALLER_DOWNLOAD_LIMIT
       || quota.count + quota.remaining !== LAUNCHER_INSTALLER_DOWNLOAD_LIMIT
       || !Number.isFinite(quota.resetAt) || quota.resetAt <= Date.now()) {
-    return { response: launcherInstallerLimitUnavailable(origin), quota: null };
+    return {
+      response: launcherInstallerLimitUnavailable(origin, identity.setCookie),
+      counted: false,
+      identityHash: identity.identityHash,
+      setCookie: identity.setCookie
+    };
   }
-  return { response: null, quota };
+  return {
+    response: null,
+    counted: result?.counted !== false,
+    identityHash: identity.identityHash,
+    setCookie: identity.setCookie
+  };
 }
 
 async function authorizeLauncherInstallerDelivery(request, env, origin, platformKey, manifest, artifact, context = null) {
-  const authorization = await enforceLauncherInstallerDownloadLimit(request, env, origin);
+  const authorization = await enforceLauncherInstallerDownloadLimit(
+    request,
+    env,
+    origin,
+    `${platformKey}\0${cleanString(manifest?.version || '', 80)}\0${cleanString(artifact?.path || '', 512)}`
+  );
   if (authorization.response) return authorization;
-  const write = recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact)
-    .catch((error) => console.error('launcher download telemetry failed', error));
-  if (context?.waitUntil) context.waitUntil(write);
-  else await write;
+  if (authorization.counted) {
+    const write = recordLauncherInstallerDownload(request, env, platformKey, manifest, artifact)
+      .catch((error) => console.error('launcher download telemetry failed', error));
+    if (context?.waitUntil) context.waitUntil(write);
+    else await write;
+  }
   return authorization;
 }
 
@@ -803,21 +1039,6 @@ async function recordLauncherInstallerDownload(request, env, platformKey, manife
   const ip = requestIpv4(request);
   const network = await requestNetworkAssessment(request, env, ip);
   const platform = normalizePlatform(artifact?.label || platformKey);
-  const requestUrl = new URL(request.url);
-  const requestedUsername = normalizeMinecraftUsername(
-    requestUrl.searchParams.get('aht_player')
-      || requestUrl.searchParams.get('aht_username')
-      || request.headers.get('X-AHT-Minecraft-Username')
-      || ''
-  );
-  const minecraftUsername = /^[A-Za-z0-9_]{3,16}$/.test(requestedUsername) ? requestedUsername : '';
-  const requestedUuid = cleanString(
-    requestUrl.searchParams.get('aht_uuid')
-      || request.headers.get('X-AHT-Minecraft-UUID')
-      || '',
-    80
-  );
-  const minecraftUuid = normalizeMinecraftUuid(requestedUuid);
   const record = {
     schemaVersion: 3,
     type: 'launcher_installer_download',
@@ -828,9 +1049,9 @@ async function recordLauncherInstallerDownload(request, env, platformKey, manife
     platform,
     platformLabel: platform,
     fileName: cleanString(artifact?.fileName || '', 260),
-    minecraftUsername,
-    minecraftUuid,
-    identitySource: minecraftUsername ? 'download-link' : '',
+    minecraftUsername: '',
+    minecraftUuid: '',
+    identitySource: 'anonymous-cookie',
     ipv4: ip.ipv4,
     ip: ip.ip,
     ipVersion: ip.ipVersion,
@@ -855,21 +1076,34 @@ async function recordLauncherInstallerDownload(request, env, platformKey, manife
 
 async function launcherInstallerDownload(request, env, origin, platformKey, context = null) {
   if (!LAUNCHER_DOWNLOAD_KEYS.has(platformKey)) {
-    return json({ error: 'Unknown launcher download platform' }, 404, origin);
+    return launcherInstallerBlockedResponse(origin);
   }
-  const manifest = await readLauncherManifest(env);
-  const artifact = manifest?.downloads?.[platformKey];
+  let manifest;
+  try {
+    manifest = await readLauncherManifest(env);
+  } catch (error) {
+    console.error('launcher installer manifest lookup failed', error);
+    return launcherInstallerBlockedResponse(origin);
+  }
+  const artifact = launcherManifestDownload(manifest, platformKey);
   const key = safeReleaseKey(`/${artifact?.path || ''}`);
   if (!artifact || !key || !key.startsWith('launcher/files/')) {
-    return json({ error: `Launcher installer is not available for ${platformKey}` }, 404, origin);
+    return launcherInstallerBlockedResponse(origin);
   }
   const bucket = releaseBucket(env);
-  const exists = typeof bucket.head === 'function' ? await bucket.head(key) : await bucket.get(key);
-  if (!exists) return releaseNotFound(key, origin);
+  if (!bucket) return launcherInstallerBlockedResponse(origin);
+  let exists;
+  try {
+    exists = typeof bucket.head === 'function' ? await bucket.head(key) : await bucket.get(key);
+  } catch (error) {
+    console.error('launcher installer object lookup failed', error);
+    return launcherInstallerBlockedResponse(origin);
+  }
+  if (!exists) return launcherInstallerBlockedResponse(origin);
 
-  let quota = null;
+  let authorization = { response: null, counted: false, identityHash: '', setCookie: '' };
   if (request.method === 'GET') {
-    const authorization = await authorizeLauncherInstallerDelivery(
+    authorization = await authorizeLauncherInstallerDelivery(
       request,
       env,
       origin,
@@ -879,7 +1113,6 @@ async function launcherInstallerDownload(request, env, origin, platformKey, cont
       context
     );
     if (authorization.response) return authorization.response;
-    quota = authorization.quota;
   }
 
   const location = new URL(`/${key}`, request.url).toString();
@@ -887,8 +1120,8 @@ async function launcherInstallerDownload(request, env, origin, platformKey, cont
     status: 302,
     headers: {
       ...corsHeaders(origin),
-      ...launcherInstallerQuotaHeaders(quota),
       'Cache-Control': 'private, no-store',
+      ...(authorization.setCookie ? { 'Set-Cookie': authorization.setCookie } : {}),
       Location: location
     }
   });
@@ -1187,17 +1420,16 @@ async function launcherProofStatus(env, origin) {
       signingVerified = false;
     }
   }
-  return privateJson({
-    ok: configured && keyId === LAUNCHER_ATTESTATION_KEY_ID && signingVerified,
+  const ready = configured && keyId === LAUNCHER_ATTESTATION_KEY_ID && signingVerified;
+  return privateJson(ready ? {
+    ok: true,
+    service: 'AHT Proxy',
     protocol: LAUNCHER_ATTESTATION_PROTOCOL,
-    algorithm: 'RS256',
-    configured,
-    dedicatedConfigured: privateKeyConfigured,
-    privateKeyConfigured,
-    publicKeyConfigured,
-    keyId,
-    signingVerified
-  }, 200, origin);
+    algorithm: 'RS256'
+  } : {
+    ok: false,
+    service: 'AHT Proxy'
+  }, ready ? 200 : 503, origin);
 }
 
 function adminTokenSecret(env) {
@@ -1253,7 +1485,7 @@ async function verifyToken(request, env) {
 
 async function proxyCurseForge(pathname, env, origin) {
   if (!env.CURSEFORGE_API_KEY) {
-    return json({ error: 'CURSEFORGE_API_KEY is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const target = `${CURSEFORGE_BASE}${pathname}`;
   const response = await fetch(target, {
@@ -1381,8 +1613,7 @@ async function evaluateAccess(env, identifiers = {}) {
 function accessDeniedResponse(access, origin) {
   return privateJson({
     error: 'Access to A Hard Time is restricted for this account or device.',
-    code: access?.code || 'ACCESS_DENIED',
-    decisionId: cleanString(access?.decisionId || '', 120)
+    code: access?.code || 'ACCESS_DENIED'
   }, 403, origin);
 }
 
@@ -1398,7 +1629,7 @@ async function launcherAttestationPublicMaterial(env) {
 async function launcherProofPublicKey(env, origin) {
   const keyId = cleanString(env.LAUNCHER_ATTESTATION_KEY_ID || LAUNCHER_ATTESTATION_KEY_ID, 120);
   if (keyId !== LAUNCHER_ATTESTATION_KEY_ID) {
-    return privateJson({ error: 'Launcher attestation key ID is invalid.' }, 503, origin);
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   try {
     const material = await launcherAttestationPublicMaterial(env);
@@ -1411,7 +1642,7 @@ async function launcherProofPublicKey(env, origin) {
       sha256: material.sha256
     }, 200, origin);
   } catch {
-    return privateJson({ error: 'Launcher attestation verification key is not configured.' }, 503, origin);
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
 }
 
@@ -1632,7 +1863,7 @@ async function indexAccountIpv4(env, record) {
 
 async function registerUser(request, env, origin) {
   if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const rateLimited = await enforcePlayerApiRateLimit(request, env, 'register', origin);
   if (rateLimited) return rateLimited;
@@ -1686,11 +1917,21 @@ async function registerUser(request, env, origin) {
     && accountRecoveryVerifier
     && await secureStringEqual(storedRecoveryVerifier, accountRecoveryVerifier)
   );
-  const recovered = Boolean(installChanged && recoveryRequested && secureRecoveryMatched);
-  if (installChanged && recoveryRequested && !secureRecoveryMatched) {
+  let legacyRecovery = null;
+  if (installChanged && recoveryRequested && !secureRecoveryMatched
+      && isLegacyMinecraftAccount(existingRecord) && device.ok && accountRecoveryVerifier) {
+    if (!body.supportsMinecraftSessionRecovery) {
+      return privateJson({ error: 'This older AHT account needs Minecraft ownership verification. Update AHT Launcher and sign in to Minecraft Launcher.', code: 'LEGACY_ACCOUNT_UPGRADE_REQUIRED' }, 409, origin);
+    }
+    legacyRecovery = await recoverLegacyMinecraftAccount({ env, record: existingRecord, body,
+      username, minecraftUuid, deviceId: device.deviceId, installId });
+    if (!legacyRecovery.verified) return privateJson(legacyRecovery, legacyRecovery.status, origin);
+  }
+  const recovered = Boolean(installChanged && recoveryRequested && (secureRecoveryMatched || legacyRecovery?.verified));
+  if (installChanged && recoveryRequested && !recovered) {
     return json({ error: 'Secure launcher recovery could not be verified for this username.' }, 409, origin);
   }
-  if (recovered && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)) {
+  if (recovered && !legacyRecovery?.verified && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)) {
     return json({ error: 'Minecraft UUID is required and must match this registered player before launcher recovery.' }, 409, origin);
   }
   if (installChanged && !recovered) {
@@ -1752,7 +1993,7 @@ async function registerUser(request, env, origin) {
     createdAt: existingRecord?.createdAt || now,
     updatedAt: now,
     recoveredAt: recovered ? now : existingRecord?.recoveredAt || '',
-    recoveryReason: recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
+    recoveryReason: legacyRecovery?.verified ? 'mojang-verified-legacy-migration' : recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
     previousInstallIds: recovered ? [...new Set([...previousInstallIds, existingRecord.installId].filter(Boolean))].slice(-10) : previousInstallIds,
     ipv4: clientIp.available ? clientIp.ipv4 : cleanString(existingRecord?.ipv4 || '', 80),
     ip: clientIp.available ? clientIp.ip : normalizedConnectionIp(existingRecord?.ip || existingRecord?.ipv4),
@@ -1772,16 +2013,13 @@ async function registerUser(request, env, origin) {
   });
   await indexAccountIpv4(env, record);
   await indexAccountIdentity(env, record);
-  const launcherState = await notifyLauncherServerState(env, recovered ? 'account-recovered' : 'account-registered');
+  if (legacyRecovery?.verified) await env.AHT_DATA.delete(legacyRecovery.key);
+  await notifyLauncherServerState(env, recovered ? 'account-recovered' : 'account-registered');
   return privateJson({
     ok: true,
     username,
     minecraftUuid: record.minecraftUuid,
-    deviceId: record.deviceId,
-    key,
-    recovered,
-    access: { allowed: true, code: 'ACCESS_GRANTED' },
-    launcherStateRevision: launcherState.revision || ''
+    recovered
   }, 200, origin);
 }
 
@@ -1874,6 +2112,7 @@ async function createLauncherProof(request, env, origin) {
   const requestedMinecraftUuid = normalizeMinecraftUuid(body.minecraftUuid);
   const requestedDeviceId = cleanString(body.deviceId || '', 80).toLowerCase();
   const device = await verifyDeviceAssertion(body, 'launcher-proof', {
+    ...(body.nativeGuardKeyHash ? { nativeGuardKeyHash: cleanString(body.nativeGuardKeyHash,64) } : {}),
     protocol: requestedProtocol || LEGACY_LAUNCHER_PROOF_PROTOCOL,
     launchId: cleanString(body.launchId || '', 80),
     minecraftUsername: minecraftUsername.toLowerCase(),
@@ -1892,7 +2131,7 @@ async function createLauncherProof(request, env, origin) {
   let existingRecord = null;
   let accountBindingRefreshRequired = false;
   if (!developerAuthorized && v2Requested && !env.AHT_DATA) {
-    return privateJson({ error: 'Launcher account registration service is not configured.' }, 503, origin);
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   if (env.AHT_DATA && !developerAuthorized) {
     const existing = await env.AHT_DATA.get(minecraftUsernameKey(minecraftUsername));
@@ -2003,6 +2242,10 @@ async function createLauncherProof(request, env, origin) {
     launcherVersion: currentLauncherVersion,
     launcherVersionAuthority: v2Requested && device.ok
       ? 'worker-policy-matched-device-assertion' : 'legacy-client-claim',
+    ...(v2Requested && device.ok && /^[a-f0-9]{64}$/.test(body.nativeGuardKeyHash || '')
+      ? { nativeGuardKeyHash: body.nativeGuardKeyHash, nativeGuardProtocol: 'AHT-GUARD-1' } : {}),
+    nativeGuardRequired: Boolean(v2Requested && cleanString(body.platform,32) === 'win32'
+      && compareLauncherVersions(currentLauncherVersion, '0.2.09') >= 0),
     platform: cleanString(body.platform, 32),
     arch: cleanString(body.arch, 32),
     launcherChannel: developerAuthorized ? 'developer' : 'player',
@@ -2091,7 +2334,7 @@ async function verifyLauncherProofRequest(request, env, options = {}) {
   if (v2) {
     const configuredKeyId = cleanString(env.LAUNCHER_ATTESTATION_KEY_ID || LAUNCHER_ATTESTATION_KEY_ID, 120);
     if (!env.LAUNCHER_ATTESTATION_PUBLIC_KEY_SPKI || configuredKeyId !== LAUNCHER_ATTESTATION_KEY_ID) {
-      return { ok: false, status: 503, error: 'Launcher attestation verification key is not configured.' };
+      return { ok: false, status: 503, error: 'AHT Proxy is temporarily unavailable.' };
     }
     if (header?.alg !== 'RS256'
         || header?.typ !== 'AHT-LAUNCHER-ATTESTATION'
@@ -2114,7 +2357,7 @@ async function verifyLauncherProofRequest(request, env, options = {}) {
     }
   } else {
     const secret = env.LAUNCHER_PROOF_SECRET || env.AHT_LAUNCHER_PROOF_SECRET;
-    if (!secret) return { ok: false, status: 503, error: 'Launcher proof service is not configured.' };
+    if (!secret) return { ok: false, status: 503, error: 'AHT Proxy is temporarily unavailable.' };
     if (header?.alg !== 'HS256'
         || header?.typ !== 'AHT-LAUNCHER-PROOF'
         || header?.kid !== LEGACY_LAUNCHER_PROOF_KEY_ID) {
@@ -2400,7 +2643,7 @@ async function readSocialState(env, username) {
 }
 
 async function launcherSocialState(request, env, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const verified = await verifyLauncherProofRequest(request, env);
   if (!verified.ok) return privateJson({ error: verified.error }, verified.status, origin);
   const username = verified.payload.minecraftUsername;
@@ -2421,7 +2664,7 @@ async function launcherSocialState(request, env, origin) {
 }
 
 async function queueLauncherSocialAction(request, env, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const verified = await verifyLauncherProofRequest(request, env);
   if (!verified.ok) return privateJson({ error: verified.error }, verified.status, origin);
   const body = await readBody(request, 8_192);
@@ -2476,7 +2719,7 @@ async function pendingSocialActions(env, limit = 50) {
 }
 
 async function synchronizeServerSocial(request, env, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 503, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const bodyText = await readRawBody(request);
   if (!(await verifyServerSocialRequest(request, env, bodyText))) {
     return privateJson({ error: 'Server social authentication failed.' }, 401, origin);
@@ -2522,11 +2765,11 @@ async function synchronizeServerSocial(request, env, origin) {
 }
 
 async function listUpdateLogs(env, request, origin, requireAuth = false) {
-  if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (requireAuth && !(await verifyToken(request, env))) {
     return json({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const url = new URL(request.url);
   const limit = Math.max(0, Math.min(Number(url.searchParams.get('limit') || '3'), 50));
@@ -2602,7 +2845,7 @@ async function reconcileUpdateLogLikeCount(env, objectKey) {
 
 async function likeUpdateLog(request, env, origin, routeLogId) {
   if (!env.AHT_DATA) {
-    return privateJson({ error: 'AHT news storage is not configured.' }, 503, origin);
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const rateLimited = await enforcePlayerApiRateLimit(request, env, 'news-like', origin);
   if (rateLimited) return rateLimited;
@@ -2668,11 +2911,11 @@ async function likeUpdateLog(request, env, origin, routeLogId) {
 }
 
 async function publishUpdateLog(request, env, origin) {
-  if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (!(await verifyToken(request, env))) {
     return json({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const body = await readBody(request, 32_768);
   const title = cleanText(body.title, 120);
@@ -2800,7 +3043,7 @@ async function recordLauncherUpdate(env, body, account, clientIp, receivedAt) {
 
 async function writeEvent(request, env, origin) {
   if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const rateLimited = await enforcePlayerApiRateLimit(request, env, 'events', origin);
   if (rateLimited) return rateLimited;
@@ -2846,10 +3089,7 @@ async function writeEvent(request, env, origin) {
   });
   return json({
     ok: true,
-    key,
-    accountValidated: Boolean(accountRefresh?.ok),
-    accountRefreshed: false,
-    launcherUpdateKey: launcherUpdate?.key || ''
+    launcherUpdateRecorded: Boolean(launcherUpdate?.key)
   }, 200, origin);
 }
 
@@ -2858,7 +3098,7 @@ async function login(request, env, origin) {
   try {
     adminTokenSecret(env);
   } catch {
-    return privateJson({ error: 'Admin authentication is not configured.' }, 503, origin);
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const submittedUsername = String(body.username || '');
   const submittedPassword = String(body.password || '');
@@ -2895,11 +3135,11 @@ async function login(request, env, origin) {
 }
 
 async function listEvents(env, request, origin) {
-  if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (!(await verifyToken(request, env))) {
     return json({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '50'), 250));
@@ -3068,8 +3308,8 @@ function playerAdminRecord(item = {}, decisions = []) {
 }
 
 async function listAccessDecisions(env, request, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
   if (!(await verifyToken(request, env))) return privateJson({ error: 'Unauthorized' }, 401, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const params = new URL(request.url).searchParams;
   const activeOnly = params.get('active') === 'true';
   const includeHistory = params.get('history') === 'true';
@@ -3096,9 +3336,9 @@ async function listAccessDecisions(env, request, origin) {
 }
 
 async function setAccessDecision(request, env, origin) {
-  if (!env.AHT_DATA) return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
   const session = await adminSession(request, env);
   if (!session) return privateJson({ error: 'Unauthorized' }, 401, origin);
+  if (!env.AHT_DATA) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const body = await readBody(request, 8_192);
   const action = cleanString(body.action || '', 20).toLowerCase();
   const scope = cleanString(body.scope || '', 40).toLowerCase();
@@ -3154,11 +3394,11 @@ async function setAccessDecision(request, env, origin) {
 }
 
 async function listLauncherDownloads(env, request, origin) {
-  if (!env.AHT_DATA) {
-    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (!(await verifyToken(request, env))) {
     return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
@@ -3179,11 +3419,11 @@ async function listLauncherDownloads(env, request, origin) {
 }
 
 async function listLauncherUpdates(env, request, origin) {
-  if (!env.AHT_DATA) {
-    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (!(await verifyToken(request, env))) {
     return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
@@ -3217,11 +3457,11 @@ async function listLauncherUpdates(env, request, origin) {
 }
 
 async function listPlayerRecords(env, request, origin) {
-  if (!env.AHT_DATA) {
-    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (!(await verifyToken(request, env))) {
     return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || '250'), 250));
@@ -3263,11 +3503,11 @@ async function listAllR2Json(env, prefix) {
 }
 
 async function listPlayerIpv4Groups(env, request, origin) {
-  if (!env.AHT_DATA) {
-    return privateJson({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (!(await verifyToken(request, env))) {
     return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const accounts = (await listAllR2Json(env, ACCOUNT_USERNAME_PREFIX))
     .filter((item) => !isSyntheticReadinessAccount(item));
@@ -3308,11 +3548,11 @@ async function listPlayerIpv4Groups(env, request, origin) {
 }
 
 async function summary(env, request, origin) {
-  if (!env.AHT_DATA) {
-    return json({ error: 'AHT_DATA R2 binding is not configured' }, 500, origin);
-  }
   if (!(await verifyToken(request, env))) {
     return json({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) {
+    return json({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const day = new URL(request.url).searchParams.get('date') || new Date().toISOString().slice(0, 10);
   const listed = await env.AHT_DATA.list({ prefix: `telemetry/events/${day}/`, limit: 1000 });
@@ -3341,14 +3581,23 @@ export class LauncherStateHub {
     this.downloadLimitChain = Promise.resolve();
   }
 
-  async consumeLauncherInstallerDownload() {
+  async consumeLauncherInstallerDownload(requestKey = '') {
     const operation = this.downloadLimitChain.catch(() => {}).then(async () => {
       const now = Date.now();
       const storageKey = 'launcherInstallerDownloadWindow';
       const previous = await this.context.storage.get(storageKey);
       let firstDownloadAt = Number(previous?.firstDownloadAt);
       let count = Number(previous?.count);
-      const validWindow = Number.isFinite(firstDownloadAt)
+      let recentDownloads = Array.isArray(previous?.recentDownloads)
+        ? previous.recentDownloads
+          .filter((item) => /^[a-f0-9]{64}$/i.test(String(item?.requestKey || ''))
+            && Number.isFinite(Number(item?.consumedAt))
+            && Number(item.consumedAt) <= now
+            && now - Number(item.consumedAt) <= LAUNCHER_INSTALLER_DOWNLOAD_RETRY_GRACE_MS)
+          .slice(-LAUNCHER_INSTALLER_DOWNLOAD_LIMIT)
+        : [];
+      const validWindow = previous?.policyEpoch === LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH
+        && Number.isFinite(firstDownloadAt)
         && firstDownloadAt > 0
         && firstDownloadAt <= now
         && Number.isInteger(count)
@@ -3358,9 +3607,20 @@ export class LauncherStateHub {
       if (!validWindow) {
         firstDownloadAt = now;
         count = 0;
+        recentDownloads = [];
       }
 
       const resetAt = firstDownloadAt + LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS;
+      const repeated = recentDownloads.find((item) => item.requestKey === requestKey);
+      if (repeated) {
+        return {
+          ok: true,
+          counted: false,
+          count,
+          remaining: LAUNCHER_INSTALLER_DOWNLOAD_LIMIT - count,
+          resetAt
+        };
+      }
       if (count >= LAUNCHER_INSTALLER_DOWNLOAD_LIMIT) {
         return {
           ok: false,
@@ -3373,13 +3633,17 @@ export class LauncherStateHub {
       }
 
       const nextCount = count + 1;
+      recentDownloads.push({ requestKey, consumedAt: now });
       await this.context.storage.put(storageKey, {
-        schemaVersion: 1,
+        schemaVersion: 3,
+        policyEpoch: LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH,
         firstDownloadAt,
-        count: nextCount
+        count: nextCount,
+        recentDownloads: recentDownloads.slice(-LAUNCHER_INSTALLER_DOWNLOAD_LIMIT)
       });
       return {
         ok: true,
+        counted: true,
         count: nextCount,
         remaining: LAUNCHER_INSTALLER_DOWNLOAD_LIMIT - nextCount,
         resetAt
@@ -3422,7 +3686,12 @@ export class LauncherStateHub {
       if (request.headers.get(LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER) !== '1') {
         return Response.json({ error: 'Unauthorized' }, { status: 401 });
       }
-      const result = await this.consumeLauncherInstallerDownload();
+      const body = await request.json().catch(() => ({}));
+      const requestKey = cleanString(body?.requestKey || '', 64).toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(requestKey)) {
+        return Response.json({ error: 'Invalid request' }, { status: 400 });
+      }
+      const result = await this.consumeLauncherInstallerDownload(requestKey);
       return Response.json(result, {
         status: result.ok ? 200 : 429,
         headers: {
@@ -3491,7 +3760,7 @@ async function launcherServerStateWebSocket(request, env, origin) {
   if (rateLimited) return rateLimited;
   const configuredToken = String(env.AHT_LAUNCHER_STATE_SERVER_TOKEN || '');
   if (configuredToken.length < 32) {
-    return privateJson({ error: 'Launcher state server authentication is not configured.' }, 503, origin);
+    return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   }
   const authorization = request.headers.get('Authorization') || '';
   const suppliedToken = authorization.startsWith('Bearer ')
@@ -3500,7 +3769,7 @@ async function launcherServerStateWebSocket(request, env, origin) {
     return privateJson({ error: 'Launcher state server authentication failed.' }, 401, origin);
   }
   const stub = launcherServerStateStub(env);
-  if (!stub) return privateJson({ error: 'Launcher state service is not configured.' }, 503, origin);
+  if (!stub) return privateJson({ error: 'AHT Proxy is temporarily unavailable.' }, 503, origin);
   const forwarded = new Request('https://aht-launcher-state.internal/connect', request);
   forwarded.headers.delete('Authorization');
   forwarded.headers.delete('Cookie');
@@ -3537,6 +3806,10 @@ export default {
 
     const url = new URL(request.url);
     try {
+      const legacyLauncherManifest = await legacyLauncherUpdateManifestResponse(request, env, origin);
+      if (legacyLauncherManifest) return legacyLauncherManifest;
+      const brandedRedirect = legacyWorkersDevRedirect(request, env);
+      if (brandedRedirect) return brandedRedirect;
       if (url.pathname === LAUNCHER_SERVER_STATE_PATH) {
         return await launcherServerStateWebSocket(request, env, origin);
       }
@@ -3623,44 +3896,7 @@ export default {
       if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/') {
         return json({
           ok: true,
-          endpoints: [
-          '/latest.json',
-          '/packs/{packZip}',
-          '/patches/{deltaZip}',
-          '/manifests/{clientManifest}',
-          '/ptb/latest.json',
-          '/ptb/packs/{packZip}',
-          '/ptb/patches/{deltaZip}',
-          '/ptb/manifests/{clientManifest}',
-          '/cache/mod-cache.json',
-          '/cache/files/{sha256}.jar',
-          '/server/{serverArtifact}',
-          '/launcher/latest.json',
-          '/launcher/files/{launcherArtifact}',
-          '/launcher/download/{windows-x64|macos-arm64|macos-x64}',
-          '/cf/mods/{projectId}/files/{fileId}',
-          '/cf/mods/{projectId}/files/{fileId}/download-url',
-          '/api/events',
-          '/api/users/register',
-          '/api/launcher-proof/status',
-          '/api/launcher-proof/public-key',
-          '/api/launcher-proof',
-          '/api/launcher-proof/verify',
-          '/server/launcher-state',
-          '/api/social',
-          '/api/social/actions',
-          '/server/social/sync',
-          '/api/update-logs',
-          '/admin/login',
-          '/admin/summary',
-          '/admin/events',
-          '/admin/launcher-downloads',
-          '/admin/launcher-updates',
-          '/admin/player-records',
-          '/admin/player-ipv4-groups',
-          '/admin/access-decisions',
-          '/admin/update-logs'
-          ]
+          service: 'AHT Proxy'
         }, 200, origin);
       }
       return privateJson({ error: 'Not found' }, 404, origin);
@@ -3676,7 +3912,7 @@ export default {
         pathname: url.pathname,
         error: cleanString(error?.message || String(error), 1000)
       }));
-      return privateJson({ error: 'Internal service error.', requestId }, 500, origin);
+      return privateJson({ error: 'AHT Proxy could not complete the request.' }, 500, origin);
     }
   }
 };

@@ -239,7 +239,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && document.querySelector('#developerLoginForm')", 'developer login DOM');
+  await waitFor(client, "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm')", 'hydrated developer login DOM');
   await evaluate(client, `
     (() => {
       document.querySelector('#adminPasswordInput').value = 'test-dev-password';

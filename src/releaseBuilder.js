@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import AdmZip from 'adm-zip';
 import yauzl from 'yauzl';
 import yazl from 'yazl';
+import { isVersionLockJarPath, VERSION_LOCK_JAR_PATTERN } from './versionLockJar.js';
 import {
   artifactUrl,
   ensureDir,
@@ -571,7 +572,7 @@ async function inspectFullClientArtifact(filePath, { required = true } = {}) {
     ...metadataRecord,
     entries,
     modEntries,
-    versionLockPath: modEntries.find((entry) => /aht-version-lock-.+\.jar$/i.test(path.posix.basename(entry))) || null,
+    versionLockPath: modEntries.find(isVersionLockJarPath) || null,
     itemFireFixPath: modEntries.find((entry) => /aht-item-fire-fix-.+\.jar$/i.test(path.posix.basename(entry))) || null
   };
 }
@@ -699,10 +700,9 @@ function validatePreviousClientManifest(manifest, latest, { packId, channel }) {
 
 async function previousClientRelease({ outDir, previousLatestSource = '', packId, version, channel }) {
   const localLatestPath = path.join(outDir, 'latest.json');
-  const candidates = [
-    await pathExists(localLatestPath) ? localLatestPath : '',
-    String(previousLatestSource || '').trim()
-  ].filter(Boolean);
+  // Players have the published version, which may differ from a local preview build.
+  const publishedSource = String(previousLatestSource || '').trim();
+  const candidates = publishedSource ? [publishedSource] : [await pathExists(localLatestPath) ? localLatestPath : ''].filter(Boolean);
   const seen = new Set();
   const errors = [];
   for (const source of candidates) {
@@ -952,7 +952,7 @@ async function findVersionLockJar(explicitPath = '') {
   return findBundledJar({
     explicitPath,
     dirName: path.join('server-lock-mod', 'build', 'libs'),
-    pattern: /^aht-version-lock-(?!.*-sources\.jar$).+\.jar$/i
+    pattern: VERSION_LOCK_JAR_PATTERN
   });
 }
 
@@ -986,7 +986,7 @@ function existingVersionLockJar(zip, overridesDir) {
   const prefix = `${normalizedOverridesDir(overridesDir)}/mods/`;
   const entry = zip.getEntries().find((item) => {
     const name = normalizedZipEntryName(item);
-    return !item.isDirectory && name.startsWith(prefix) && /aht-version-lock-.+\.jar$/i.test(path.posix.basename(name));
+    return !item.isDirectory && name.startsWith(prefix) && isVersionLockJarPath(name);
   });
   return entry ? normalizedZipEntryName(entry) : null;
 }
@@ -1032,7 +1032,7 @@ function serverLockConfig({ packId }) {
     '    I:timeoutTicks=300',
     '    S:updateRequiredMessage=Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}\\nUpdate A Hard Time Launcher, restart it, and reconnect.',
     '    S:verificationUnavailableMessage=A Hard Time Launcher verification is temporarily unavailable. Please reconnect shortly.',
-    '    S:verificationUrl=https://aht-curseforge-proxy.mysticgamer312.workers.dev/api/launcher-proof/verify',
+    '    S:verificationUrl=https://api.ahardtime.net/api/launcher-proof/verify',
     '}',
     ''
   ].join('\n');
@@ -1277,6 +1277,17 @@ async function buildFullClientRelease(options, sourceInspection) {
     },
     clientManifest: clientManifestArtifact,
     delta,
+    rebuild: delta ? {
+      schemaVersion: 1,
+      format: 'aht-remote-modpack-rebuild/v1',
+      rootPrefix,
+      clientPack: {
+        sourceFolderName: String(metadata.sourceFolderName || name),
+        includedRoots: Array.isArray(metadata.includedRoots) ? metadata.includedRoots : [],
+        missingRoots: Array.isArray(metadata.missingRoots) ? metadata.missingRoots : [],
+        settingsFiles: Array.isArray(metadata.settingsFiles) ? metadata.settingsFiles : []
+      }
+    } : null,
     serverLock: {
       configPath: serverLockRelPath,
       modPath: serverLockModRelPath,

@@ -15,13 +15,14 @@ function assert(condition, message) {
 
 assert(cleanGithubRepo('https://github.com/svre-mc/aht-launcher.git') === 'svre-mc/aht-launcher', 'repo URL parsing failed');
 assert(cleanLauncherVersion('0.1.3') === '0.1.3', 'version parsing failed');
+assert(cleanLauncherVersion('0.2.01') === '0.2.01', 'zero-padded public launcher version parsing failed');
 
 const calls = [];
 const fetchImpl = async (url, options = {}) => {
   calls.push({ url: String(url), options });
   if (String(url).includes('/contents/package.json')) {
     return Response.json({
-      content: Buffer.from(JSON.stringify({ version: '0.1.9' })).toString('base64')
+      content: Buffer.from(JSON.stringify({ version: '0.1.9', ahtLauncherVersion: '0.1.09' })).toString('base64')
     });
   }
   if (String(url).endsWith('/dispatches')) {
@@ -75,7 +76,7 @@ const githubPackageVersion = await readGithubPackageVersion({
   token: 'test-token',
   fetchImpl
 });
-assert(githubPackageVersion === '0.1.9', 'GitHub package version lookup failed');
+assert(githubPackageVersion === '0.1.09', 'GitHub public launcher version lookup failed');
 
 const run = await findRecentWorkflowRun({
   repo: 'svre-mc/aht-launcher',

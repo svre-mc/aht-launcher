@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import { HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024;
@@ -90,6 +90,36 @@ export async function headR2ObjectDirect({
   }
 }
 
+export async function getR2JsonDirect({
+  accountId,
+  accessKeyId,
+  secretAccessKey,
+  bucket,
+  key,
+  maxBytes = 8 * 1024 * 1024
+} = {}) {
+  const client = r2Client({ accountId, accessKeyId, secretAccessKey });
+  try {
+    const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    const size = Number(result.ContentLength || 0);
+    if (size > maxBytes) throw new Error(`R2 JSON object ${key} is larger than ${maxBytes} bytes.`);
+    const body = await result.Body?.transformToString('utf8');
+    if (!body) throw new Error(`R2 JSON object ${key} is empty.`);
+    return {
+      exists: true,
+      size: size || Buffer.byteLength(body, 'utf8'),
+      etag: String(result.ETag || '').replace(/^"|"$/g, ''),
+      value: JSON.parse(body)
+    };
+  } catch (error) {
+    const status = Number(error?.$metadata?.httpStatusCode || 0);
+    if (status === 404 || error?.name === 'NotFound' || error?.name === 'NoSuchKey') {
+      return { exists: false, size: 0, etag: '', value: null };
+    }
+    throw error;
+  }
+}
+
 export async function uploadR2ObjectDirect({
   accountId,
   accessKeyId,
@@ -147,5 +177,43 @@ export async function uploadR2ObjectDirect({
     size: stat.size,
     partSize,
     queueSize
+  };
+}
+
+export async function uploadR2JsonDirect({
+  accountId,
+  accessKeyId,
+  secretAccessKey,
+  bucket,
+  key,
+  value,
+  sha256 = '',
+  metadata = {}
+} = {}) {
+  assertDirectR2Credentials({ accountId, accessKeyId, secretAccessKey });
+  const body = typeof value === 'string' ? value : JSON.stringify(value);
+  const size = Buffer.byteLength(body, 'utf8');
+  if (!body || size > 256 * 1024) {
+    throw new Error('Direct R2 JSON upload must contain between 1 byte and 256 KB.');
+  }
+  const client = r2Client({ accountId, accessKeyId, secretAccessKey });
+  const uploadMetadata = {
+    ...metadata,
+    ...(sha256 ? { 'aht-sha256': String(sha256).toLowerCase() } : {})
+  };
+  await client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: body,
+    ContentType: 'application/json; charset=utf-8',
+    CacheControl: 'public, max-age=60, must-revalidate',
+    ...(Object.keys(uploadMetadata).length ? { Metadata: uploadMetadata } : {})
+  }));
+  return {
+    method: 'direct-put-json',
+    endpoint: r2Endpoint(accountId),
+    bucket,
+    key,
+    size
   };
 }

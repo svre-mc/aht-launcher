@@ -11,7 +11,10 @@ function descriptor(url, bytes, artifactPath = '') {
   };
 }
 
-export async function writeMinecraftBaseFixture(rootDir, { minecraftVersion = '1.12.2' } = {}) {
+export async function writeMinecraftBaseFixture(
+  rootDir,
+  { minecraftVersion = '1.12.2', includeExcludedLibraryForCurrentPlatform = false } = {}
+) {
   const fixtureDir = path.resolve(rootDir);
   const clientBytes = Buffer.from(`AHT Minecraft ${minecraftVersion} client fixture\n`, 'utf8');
   const libraryBytes = Buffer.from(`AHT Minecraft ${minecraftVersion} library fixture\n`, 'utf8');
@@ -41,7 +44,20 @@ export async function writeMinecraftBaseFixture(rootDir, { minecraftVersion = '1
           'example/aht-base-fixture/1/aht-base-fixture-1.jar'
         )
       }
-    }]
+    }, ...(includeExcludedLibraryForCurrentPlatform ? [{
+      name: 'example:aht-excluded-platform-fixture:1',
+      rules: [{
+        action: 'allow',
+        os: { name: process.platform === 'darwin' ? 'windows' : 'osx' }
+      }],
+      downloads: {
+        artifact: descriptor(
+          'excluded-platform-library.jar',
+          Buffer.from('This platform-excluded fixture must never be downloaded or fingerprinted.\n', 'utf8'),
+          'example/aht-excluded-platform-fixture/1/aht-excluded-platform-fixture-1.jar'
+        )
+      }
+    }] : [])]
   };
   await fs.writeFile(
     path.join(fixtureDir, `${minecraftVersion}.json`),

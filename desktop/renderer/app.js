@@ -4,6 +4,12 @@ const bootDeveloperMode = launchParams.get("mode") === "developer";
 const LOG_TEXT_LIMIT = 24_000;
 const DEV_LOG_TEXT_LIMIT = 60_000;
 const DEFAULT_MEMORY_MB = 4096;
+const DEFAULT_LAUNCHER_SOCIAL_LINKS = Object.freeze({
+  discord: "https://discord.com/invite/AUVMekfNfq",
+  youtube: "https://www.youtube.com/@AHardTime",
+  tiktok: "https://www.tiktok.com/@ahardtimefr",
+  forum: "https://ahardtime.net/forum"
+});
 
 function truncateLogText(text = "", limit = LOG_TEXT_LIMIT) {
   const value = String(text ?? "");
@@ -22,7 +28,11 @@ function setTextContentBounded(element, text = "", limit = LOG_TEXT_LIMIT) {
 }
 
 if (bootDeveloperMode) {
-  document.body.classList.add("dev-mode", "dev-locked");
+  document.body.classList.add("developer-launcher", "is-launcher-ready");
+  document.body.classList.remove("is-booting");
+  document.querySelector(".app-frame")?.removeAttribute("inert");
+  document.querySelector(".app-frame")?.removeAttribute("aria-hidden");
+  document.querySelector("#startupLoader").hidden = true;
 }
 
 if (!window.aht) {
@@ -31,15 +41,15 @@ if (!window.aht) {
     config: {
       latestUrl: "https://packs.example.com/latest.json",
       instanceDir: "C:\\AHT\\A Hard Time Developer",
-      curseforge: { proxyBaseUrl: "https://aht.example.workers.dev/cf/" },
+      curseforge: { proxyBaseUrl: "https://api.ahardtime.net/cf/" },
       sync: {
         enabled: true,
         sendLocalChanges: true,
-        baseUrl: "https://aht.example.workers.dev/",
+        baseUrl: "https://api.ahardtime.net/",
         playerLabel: "Preview"
       },
       developer: {
-        adminBaseUrl: "https://aht.example.workers.dev/",
+        adminBaseUrl: "https://api.ahardtime.net/",
         defaultOutDir: "C:\\Users\\Player\\Documents\\aht-release",
         defaultCacheModsDir: "C:\\AHT\\fallback-cache\\mods",
         r2Bucket: "ahtlauncher",
@@ -180,6 +190,18 @@ if (!window.aht) {
   const mockUpdateLogs = [];
   window.aht = {
     getStatus: async () => mockStatus,
+    retryAccountSync: async () => mockStatus,
+    refreshNews: async (packKey = "aht") => ({
+      activePack: packKey === "ptb" ? "ptb" : "aht",
+      latestRefreshed: true,
+      updateLogsRefreshed: true,
+      latest: mockStatus.latest,
+      latestError: null,
+      updateLogs: mockUpdateLogs.slice(0, 3),
+      updateLogsError: null,
+      updateBlockedReason: "",
+      updateRequired: false
+    }),
     copyErrorReport: async () => ({ ok: true, copied: true, chars: 0 }),
     saveSettings: async (settings = {}) => {
       mockStatus.config = {
@@ -229,6 +251,8 @@ if (!window.aht) {
       error: null,
       progress: { phase: "Ready", completed: 0, total: 0, percent: 0 }
     }),
+    checkLauncherUpdate: async () => ({ enabled: true, currentVersion: "0.1.1", latestVersion: "0.1.1", updateRequired: false, error: "" }),
+    onLauncherUpdateAvailable: () => () => {},
     legalStatus: async () => ({
       required: false,
       accepted: true,
@@ -250,7 +274,11 @@ if (!window.aht) {
       }
       return { ok: true, logId, liked: true, likes: Math.max(0, Number(log?.likes) || 1) };
     },
-    openExternal: async (destination) => ({ ok: destination === "store", opened: destination === "store", destination, target: destination === "store" ? "https://ahardtime.net/shop" : "" }),
+    getSocialLinks: async () => ({ links: { ...DEFAULT_LAUNCHER_SOCIAL_LINKS }, source: "default", publishedAt: "", fetchedAt: "", error: "" }),
+    openExternal: async (destination) => {
+      const target = destination === "store" ? "https://ahardtime.net/store" : DEFAULT_LAUNCHER_SOCIAL_LINKS[destination];
+      return { ok: Boolean(target), opened: Boolean(target), destination, target: target || "" };
+    },
     socialList: async () => ({
       available: true,
       actionsAvailable: true,
@@ -283,6 +311,16 @@ if (!window.aht) {
       missing: [{ path: "mods/missing-one.jar" }, { path: "mods/missing-two.jar" }]
     }),
     syncChanges: async () => ({ ok: true }),
+    getStartupPreparationState: async () => ({ initialized: true, firstInitialization: false, running: false, phase: 'Ready', percent: 100 }),
+    prepareStartup: async () => ({ ok: true, firstInitialization: false, elapsedMs: 10, packs: {} }),
+    onStartupPreparationProgress: () => () => {},
+    preparePlay: async () => ({
+      launchPreparationComplete: true,
+      launchPreparationState: 'ready',
+      launchReady: true,
+      launchBlockedReason: ''
+    }),
+    selectPreparedPlay: async () => ({ launchPreparationState: 'ready', launchReady: true }),
     play: async () => ({}),
     selectJson: async () => "D:\\AHT\\dist-r2\\latest.json",
     selectZip: async () => "D:\\Downloads\\A Hard Time-2.8.2.zip",
@@ -459,6 +497,12 @@ if (!window.aht) {
       encrypted: true,
       warning: ""
     }),
+    devPublishSocialLinks: async (payload = {}) => ({
+      ok: true,
+      links: { ...DEFAULT_LAUNCHER_SOCIAL_LINKS, ...(payload.links || {}) },
+      publishedAt: new Date().toISOString(),
+      upload: { method: "preview", verified: true }
+    }),
     devLogin: async () => ({ ok: true, expiresAt: new Date(Date.now() + 43200000).toISOString() }),
     devSummary: async () => ({ counts: { installs: 184, repairs: 19, changeReports: 42, uniqueIps: 51 } }),
     devUpdateLogs: async () => ({ logs: mockUpdateLogs }),
@@ -547,6 +591,9 @@ const els = {
   appFrame: document.querySelector(".app-frame"),
   workspace: document.querySelector(".workspace"),
   startupLoader: $("#startupLoader"),
+  startupLoaderLabel: $("#startupLoaderLabel"),
+  startupLoaderRule: $("#startupLoaderRule"),
+  startupLoaderProgress: $("#startupLoaderProgress"),
   sidebarSwitchLoader: $("#sidebarSwitchLoader"),
   tabs: [...document.querySelectorAll(".tab")],
   gameTiles: [...document.querySelectorAll(".game-tile[data-tab]")],
@@ -562,26 +609,35 @@ const els = {
   sidebarProgressCount: $("#sidebarProgressCount"),
   sidebarProgressBar: $("#sidebarProgressBar"),
   downloadsOverlay: $("#downloadsOverlay"),
-  downloadsCloseButton: $("#downloadsCloseButton"),
+  downloadsBackButton: $("#downloadsBackButton"),
   downloadsState: $("#downloadsState"),
   downloadsProgressText: $("#downloadsProgressText"),
   downloadsRowProgress: $("#downloadsRowProgress"),
   downloadsProgressBar: $("#downloadsProgressBar"),
   downloadsLog: $("#downloadsLog"),
+  downloadsErrorPanel: $("#downloadsErrorPanel"),
+  downloadsErrorReportButton: $("#downloadsErrorReportButton"),
   downloadsUpdateIconButton: $("#downloadsUpdateIconButton"),
   launcherUpdateOverlay: $("#launcherUpdateOverlay"),
+  launcherUpdateDialog: $("#launcherUpdateOverlay .launcher-update-dialog"),
+  launcherUpdateVersion: $("#launcherUpdateVersion"),
   launcherUpdateTitle: $("#launcherUpdateTitle"),
   launcherUpdateSummary: $("#launcherUpdateSummary"),
+  launcherUpdateProgress: $("#launcherUpdateProgress"),
   launcherUpdateProgressLabel: $("#launcherUpdateProgressLabel"),
   launcherUpdateProgressCount: $("#launcherUpdateProgressCount"),
   launcherUpdateProgressBar: $("#launcherUpdateProgressBar"),
+  launcherUpdateError: $("#launcherUpdateError"),
   launcherUpdateLog: $("#launcherUpdateLog"),
   launcherUpdateNowButton: $("#launcherUpdateNowButton"),
+  launcherUpdateErrorReportButton: $("#launcherUpdateErrorReportButton"),
   activityPanel: $("#activityPanel"),
   updateLogGrid: $("#updateLogGrid"),
   newsView: $("#news"),
   newsFeedGrid: $("#newsFeedGrid"),
   newsEmptyState: $("#newsEmptyState"),
+  launcherSocialMenu: $("#launcherSocialMenu"),
+  launcherSocialDropdown: $("#launcherSocialDropdown"),
   externalLinks: [...document.querySelectorAll("[data-external-destination]")],
   statusBadge: $("#statusBadge"),
   syncStatus: $("#syncStatus"),
@@ -649,6 +705,9 @@ const els = {
   syncUrlInput: $("#syncUrlInput"),
   instanceInput: $("#instanceInput"),
   minecraftRootInput: $("#minecraftRootInput"),
+  minecraftExecutableField: $("#minecraftExecutableField"),
+  minecraftExecutableInput: $("#minecraftExecutableInput"),
+  pickMinecraftExecutableButton: $("#pickMinecraftExecutableButton"),
   openInstancePathButton: $("#openInstancePathButton"),
   openMinecraftRootPathButton: $("#openMinecraftRootPathButton"),
   minecraftProfileNameInput: $("#minecraftProfileNameInput"),
@@ -772,6 +831,13 @@ const els = {
   updateLogBodyInput: $("#updateLogBodyInput"),
   updateLogStatus: $("#updateLogStatus"),
   developerUpdateLogsList: $("#developerUpdateLogsList"),
+  loadSocialLinksButton: $("#loadSocialLinksButton"),
+  publishSocialLinksButton: $("#publishSocialLinksButton"),
+  discordUrlInput: $("#discordUrlInput"),
+  youtubeUrlInput: $("#youtubeUrlInput"),
+  tiktokUrlInput: $("#tiktokUrlInput"),
+  forumUrlInput: $("#forumUrlInput"),
+  socialLinksPublishStatus: $("#socialLinksPublishStatus"),
   updateLogOverlay: $("#updateLogOverlay"),
   updateLogHero: $("#updateLogHero"),
   updateLogHeroPlay: $("#updateLogHeroPlay"),
@@ -816,12 +882,15 @@ const els = {
 };
 
 let currentStatus = null;
+let lastLauncherUpdateCheck = null;
+let launcherUpdateCheckInFlight = null;
 let updatePoll = null;
 let launcherUpdatePoll = null;
 let launcherDeployPoll = null;
 let serverTransferPoll = null;
 let lastUpdateState = null;
 let lastLauncherUpdateState = null;
+let lastLauncherUpdateVisualState = "";
 let lastServerTransferState = null;
 let lastIntegrityScan = null;
 let scanProgressHideTimer = null;
@@ -843,16 +912,21 @@ let activePlayerDataView = "downloads";
 let playerDataLoaded = false;
 let playerDataLoading = false;
 let uploadPoll = null;
+let uploadPollGeneration = 0;
 let releaseBusy = false;
 let developerSecretSaveTimer = null;
+let launcherSocialLinksState = { links: { ...DEFAULT_LAUNCHER_SOCIAL_LINKS }, source: "default", publishedAt: "", fetchedAt: "", error: "" };
+let developerSocialLinksLoaded = false;
 let launcherUpdateAutoStarted = false;
 let lastStatusRefreshAt = 0;
+let statusRefreshGeneration = 0;
+let accountSyncRetryBusy = false;
+let startupFirstInitialization = false;
 let updateCompleteHideTimer = null;
 let friendsBusy = false;
 let friendsLoading = false;
 let friendsActionsAvailable = false;
 let friendsRefreshTimer = null;
-let friendsNotificationTimer = null;
 let friendsPresenceTimer = null;
 let friendsRequestId = 0;
 let friendsSocialState = null;
@@ -868,11 +942,10 @@ const NEWS_SURFACE_ENTER_MS = 230;
 const NEWS_CAROUSEL_CROSSFADE_MS = 320;
 const SIDEBAR_SWITCH_EXIT_DELAY_MS = 50;
 const SIDEBAR_SWITCH_EXIT_MS = 180;
-const SIDEBAR_SWITCH_LOAD_HOLD_MS = 180;
 const SIDEBAR_SWITCH_ENTER_MS = 330;
-const STARTUP_MIN_VISIBLE_MS = 700;
-const STARTUP_ESSENTIAL_TIMEOUT_MS = 12_000;
-const STARTUP_ASSET_TIMEOUT_MS = 2_500;
+const STARTUP_MIN_VISIBLE_MS = 0;
+const STARTUP_NEWS_ART_TIMEOUT_MS = 15_000;
+const STARTUP_WARM_NEWS_ART_TIMEOUT_MS = 1_200;
 const STARTUP_FADE_MS = 320;
 const DOWNLOAD_COMPLETE_VISIBLE_MS = 2200;
 const DOWNLOAD_ERROR_VISIBLE_MS = 6200;
@@ -904,6 +977,40 @@ function setSyncLine(text) {
 
 function syncSetupNotice() {
   els.setupNotice.hidden = true;
+  const notice = document.getElementById("accountSyncNotice");
+  if (!notice) return;
+  const warning = currentStatus?.identity?.minecraftUsernameSyncWarning || "";
+  notice.hidden = !warning;
+  document.getElementById("accountSyncMessage").textContent = warning;
+  const retry = document.getElementById("accountSyncRetry");
+  retry.disabled = accountSyncRetryBusy;
+  retry.textContent = accountSyncRetryBusy ? "Retrying..." : "Retry account sync";
+  retry.onclick = async () => {
+    if (accountSyncRetryBusy) return;
+    accountSyncRetryBusy = true;
+    retry.disabled = true;
+    retry.textContent = "Retrying...";
+    document.getElementById("accountSyncMessage").textContent = "Checking your signed-in Minecraft account...";
+    try {
+      const status = await window.aht.retryAccountSync(activeSidebarPack);
+      statusRefreshGeneration += 1;
+      renderStatus(status);
+      const remainingWarning = status?.identity?.minecraftUsernameSyncWarning || "";
+      if (remainingWarning) {
+        showToast("Account sync still needs attention", remainingWarning, "error");
+      } else {
+        showToast("Account sync restored", "Your signed-in Minecraft account is connected.", "success");
+      }
+    } catch (error) {
+      const message = cleanErrorMessage(error) || "Account sync could not connect. Please try again shortly.";
+      document.getElementById("accountSyncMessage").textContent = message;
+      showToast("Account sync failed", message, "error");
+    } finally {
+      accountSyncRetryBusy = false;
+      retry.disabled = false;
+      retry.textContent = "Retry account sync";
+    }
+  };
 }
 
 function currentLogText() {
@@ -928,17 +1035,20 @@ function setDevLog(value) {
   setTextContentBounded(els.devLog, stringifyLogValue(value, DEV_LOG_TEXT_LIMIT), DEV_LOG_TEXT_LIMIT);
 }
 
+function syncDeveloperAppearance(developerMode = bootDeveloperMode) {
+  const toolsOpen = developerMode && activeTabName === "developer";
+  document.body.classList.toggle("developer-launcher", developerMode);
+  document.body.classList.toggle("dev-mode", toolsOpen);
+  document.body.classList.toggle("dev-locked", toolsOpen && !developerAuthenticated);
+}
+
 function applyDeveloperGate(status) {
   const developerMode = Boolean(status.developerMode);
-  document.body.classList.toggle("dev-mode", developerMode);
-  document.body.classList.toggle("dev-locked", developerMode && !developerAuthenticated);
-  if (els.sidePackTitle) els.sidePackTitle.textContent = developerMode ? "AHT Modpack" : "AHT";
-  if (els.developerTileTitle) els.developerTileTitle.textContent = "The Developer Mode";
+  syncDeveloperAppearance(developerMode);
+  if (els.sidePackTitle) els.sidePackTitle.textContent = "AHT";
+  if (els.developerTileTitle) els.developerTileTitle.textContent = "Developer";
   if (!developerMode) {
     return;
-  }
-  if (!developerAuthenticated && activeTabName !== "developer") {
-    activateTab("developer");
   }
   els.developerLoginScreen.hidden = developerAuthenticated;
   els.developerConsole.hidden = !developerAuthenticated;
@@ -947,25 +1057,44 @@ function applyDeveloperGate(status) {
     : "Locked";
   if (!developerAuthenticated) {
     els.developerLoginStatus.textContent = "Enter the developer credentials to continue.";
-    window.setTimeout(() => els.adminPasswordInput.focus(), 0);
+    if (activeTabName === "developer") {
+      window.setTimeout(() => {
+        if (activeTabName === "developer") els.adminPasswordInput.focus();
+      }, 0);
+    }
   }
 }
 
 function cleanErrorMessage(error) {
-  return String(error?.message || error || "Unknown error")
+  const value = String(error?.message || error || "Unknown error")
     .replace(/^Error invoking remote method '[^']+': (?:Error|RangeError|SyntaxError): /, "")
     .replace(/^Error invoking remote method '[^']+': /, "")
     .replace(/^Error: /, "");
+  if (bootDeveloperMode) return value;
+  if (/Minecraft (?:Launcher is required|not installed)/i.test(value)) return "Minecraft Launcher is required to play.";
+  if (/No usable 64-bit Java 8|Java 8 (?:path|runtime)|initialized Java 8/i.test(value)) return "A 64-bit Java 8 runtime is required to play.";
+  if (/Review and accept the current Terms|Terms and Privacy/i.test(value)) return "Review and accept the Terms and Privacy notice to continue.";
+  if (/Update package is not ready|verified AHT update package is not available/i.test(value)) return "The verified AHT update package is not available yet.";
+  if (/Repair required|needs Repair|managed file issue|files changed after initialization|corrupt/i.test(value)) return "Repair required before playing.";
+  if (/is not installed|Install the pack before playing/i.test(value)) return "Install the modpack before playing.";
+  if (/launcher (?:session|preparation|setup).*?(?:no longer|not ready|changed)/i.test(value)) return "Launcher setup could not be refreshed. Click Play again.";
+  if (/(?:download|429|Too Many Requests)/i.test(value)) return "Download failed.";
+  if (/(?:https?:\/\/|aht-curseforge-proxy|workers\.dev|\b(?:R2|D1|KV)\b|binding|ECONN|ENOTFOUND|fetch failed)/i.test(value)) {
+    return "AHT Proxy is temporarily unavailable.";
+  }
+  if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users|opt|var|tmp)\/)/.test(value)) {
+    return "The launcher could not complete this action.";
+  }
+  return "The launcher could not complete this action.";
 }
 
 async function copyErrorReportFromToast(payload = {}) {
   if (!window.aht?.copyErrorReport) return;
   try {
     const result = await window.aht.copyErrorReport(payload);
-    const file = result.fileName ? ` Saved as ${result.fileName}.` : "";
-    showToast("Launch report copied", `${result.chars || 0} characters copied.${file} Paste it into your support message.`, "success", { durationMs: 1800, disableDiagnostics: true });
+    showToast("Error log copied", result?.copyKind === "file" ? "Paste to attach the .txt file." : "", "success", { durationMs: 1800, disableDiagnostics: true });
   } catch {
-    showToast("Copy failed", "Open the AHT instance logs\\launcher folder and send the newest AHT-Launch text file.", "warn", { durationMs: 1800, disableDiagnostics: true });
+    showToast("Copy failed", "Try again, or contact A Hard Time support.", "warn", { durationMs: 1800, disableDiagnostics: true });
   }
 }
 
@@ -994,8 +1123,36 @@ function updateLogText(log) {
 }
 
 function updateLogImageUrl(log) {
-  const value = String(log?.image?.url || log?.imageUrl || log?.bannerUrl || "").trim();
-  return isRemoteUrl(value) ? value : "";
+  const assetUrl = (value) => {
+    if (typeof value === "string") return value.trim();
+    if (!value || typeof value !== "object") return "";
+    return String(value.url || value.href || value.src || "").trim();
+  };
+  const candidates = [
+    assetUrl(log?.image),
+    log?.imageUrl,
+    log?.image_url,
+    assetUrl(log?.banner),
+    log?.bannerUrl,
+    log?.banner_url,
+    assetUrl(log?.thumbnail),
+    log?.thumbnailUrl,
+    log?.thumbnail_url,
+    assetUrl(log?.coverImage),
+    log?.coverImageUrl,
+    assetUrl(log?.metadata?.image),
+    log?.metadata?.imageUrl,
+    log?.metadata?.image_url,
+    assetUrl(log?.metadata?.banner),
+    log?.metadata?.bannerUrl,
+    assetUrl(log?.metadata?.thumbnail),
+    log?.metadata?.thumbnailUrl
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || "").trim();
+    if (isRemoteUrl(value)) return value;
+  }
+  return "";
 }
 
 function isRemoteUrl(value) {
@@ -1163,7 +1320,7 @@ function cancelNewsSurfaceTransition() {
 function transitionNewsSurface(source, incoming, commit, focusTarget = null) {
   cancelNewsSurfaceTransition();
   const transitionId = newsSurfaceTransitionId;
-  if (!source || !incoming) {
+  if (bootDeveloperMode || !source || !incoming) {
     commit();
     focusTarget?.focus({ preventScroll: true });
     return;
@@ -1747,6 +1904,7 @@ async function loadLegalGate() {
 
 async function acceptLegalTerms() {
   if (!currentLegalState || !els.legalAcceptCheckbox?.checked) return;
+  let accepted = false;
   els.legalAcceptButton.disabled = true;
   setUnavailable(els.legalAcceptButton, true);
   els.legalAcceptCheckbox.disabled = true;
@@ -1757,10 +1915,23 @@ async function acceptLegalTerms() {
       privacyVersion: currentLegalState.privacyVersion,
       affirmed: true
     });
+    accepted = true;
+    currentLegalState = { ...currentLegalState, required: false, accepted: true };
     els.legalOverlay.hidden = true;
-    showToast("Terms accepted", "Your acceptance was saved on this device.", "success");
+    showLauncherPreparation();
+    const startupState = await window.aht.getStartupPreparationState();
+    await prepareStartupAndRender({
+      initialState: startupState
+    });
+    revealLauncher();
+    showToast("Terms accepted", "Your acceptance was saved and launch preparation is complete.", "success");
     if (currentStatus) renderAccountGate(currentStatus);
   } catch (error) {
+    if (accepted) {
+      renderInitialStatusError(error);
+      revealLauncher();
+      return;
+    }
     els.legalError.textContent = cleanErrorMessage(error);
     els.legalAcceptCheckbox.disabled = false;
     els.legalAcceptButton.disabled = !els.legalAcceptCheckbox.checked;
@@ -1946,21 +2117,6 @@ async function refreshFriendsPanel({ quiet = false } = {}) {
   }
 }
 
-async function refreshFriendsNotification() {
-  if (typeof window.aht?.socialList !== "function" || !accountUsername(currentStatus)) {
-    renderFriendsNotification(null);
-    return;
-  }
-  try {
-    const social = await window.aht.socialList();
-    friendsSocialState = social;
-    renderFriendsNotification(social);
-    if (els.friendsOverlay && !els.friendsOverlay.hidden && !friendsLoading) renderFriendsPanel(social);
-  } catch {
-    // Keep the last known request count until the service is reachable again.
-  }
-}
-
 function queueFriendsRefresh(delayMs) {
   const timer = window.setTimeout(() => {
     friendsActionRefreshTimers.delete(timer);
@@ -2129,12 +2285,17 @@ function playerSafeFeedProblem(status = currentStatus) {
 
 function playerSafeBlockedReason(status = currentStatus) {
   if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return playerSafeFeedProblem(status);
-  return status?.launchBlockedReason || "";
+  return playerSafeErrorMessage(status?.launchBlockedReason || "", status);
 }
 
 function playerSafeErrorMessage(message = "", status = currentStatus) {
   const value = cleanErrorMessage(message);
   if (status?.developerMode) return value;
+  if (/Minecraft (?:Launcher is required|not installed)/i.test(value)) return "Minecraft Launcher is required to play.";
+  if (/Java 8/i.test(value)) return "A 64-bit Java 8 runtime is required to play.";
+  if (/launcher (?:session|preparation|setup).*?(?:no longer|not ready|changed)/i.test(value)) {
+    return "Launcher setup could not be refreshed. Click Play again.";
+  }
   if (/Release feed cannot be checked|latest\.json|GET https?:\/\//i.test(value)) {
     return playerSafeFeedProblem({ ...status, latestError: status?.latestError || value });
   }
@@ -2321,19 +2482,24 @@ function playerFeedUrl() {
 }
 
 function ptbPlayerFeedUrl() {
-  const stableFeed = playerFeedUrl();
+  const stableFeed = stablePlayerFeedUrl();
   if (!/^https?:\/\//i.test(stableFeed)) return "";
   try {
-    const stableUrl = new URL(stableFeed);
-    if (/\/ptb\/latest\.json$/i.test(stableUrl.pathname)) return stableUrl.toString();
-    return new URL("ptb/latest.json", new URL(".", stableUrl)).toString();
+    return new URL("ptb/latest.json", new URL(".", stableFeed)).toString();
   } catch {
     return "";
   }
 }
 
+function stablePlayerFeedUrl() {
+  const selectedFeed = playerFeedUrl();
+  const workerBase = workerBaseFromFeedUrl(selectedFeed);
+  if (!workerBase) return selectedFeed;
+  return new URL("latest.json", workerBase).toString();
+}
+
 function releaseFeedUrl(target = "stable") {
-  return target === "ptb" ? ptbPlayerFeedUrl() : playerFeedUrl();
+  return target === "ptb" ? ptbPlayerFeedUrl() : stablePlayerFeedUrl();
 }
 
 function developerBaseUrl() {
@@ -2413,6 +2579,7 @@ function queueDeveloperSecretSave() {
 }
 
 function publishBlockReason(target = "stable") {
+  if (!currentStatus?.config) return "Launcher settings are still loading.";
   if (!developerAuthenticated) return "Developer login is required before publishing releases.";
   if (!selectedPackZip(target)) return target === "ptb" ? "Choose or create an exact PTB client ZIP first." : "Choose an exact AHT client ZIP from Modpack ZIP first.";
   if (!/^https?:\/\//i.test(releaseFeedUrl(target))) {
@@ -2422,6 +2589,7 @@ function publishBlockReason(target = "stable") {
 }
 
 function setupCloudBlockReason() {
+  if (!currentStatus?.config) return "Launcher settings are still loading.";
   if (!developerAuthenticated) return "Developer login is required before cloud setup.";
   if (!localLauncherProofSecret()) {
     return "Enter the Launcher Proof Secret before cloud setup. The server must use the same value.";
@@ -2450,11 +2618,13 @@ function cacheOnlyValidationBlockReason(validation) {
 function updateReleaseUploadState() {
   const reason = publishBlockReason("stable");
   const setupReason = setupCloudBlockReason();
-  const defaultsReason = !developerAuthenticated
-    ? "Developer login is required before writing player defaults."
-    : !/^https?:\/\//i.test(playerFeedUrl())
-      ? "Enter the public Player Feed URL first."
-      : "";
+  const defaultsReason = !currentStatus?.config
+    ? "Launcher settings are still loading."
+    : !developerAuthenticated
+      ? "Developer login is required before writing player defaults."
+      : !/^https?:\/\//i.test(playerFeedUrl())
+        ? "Enter the public Player Feed URL first."
+        : "";
   setUnavailable(els.publishReleaseButton, releaseBusy || Boolean(reason));
   const ptbCreateReason = developerAuthenticated ? "" : "Developer login is required before creating PTB releases.";
   setUnavailable(els.buildPtbClientZipButton, releaseBusy || Boolean(ptbCreateReason));
@@ -2464,7 +2634,7 @@ function updateReleaseUploadState() {
     els.setupCloudButton.title = setupReason || "Create buckets, set Worker secrets, and deploy the Worker";
   }
   if (els.publishReleaseButton) {
-    els.publishReleaseButton.title = reason || "Publish stable AHT to its R2 and GitHub release tracks";
+    els.publishReleaseButton.title = reason || "Make the update available to AHT players";
   }
   if (els.buildPtbClientZipButton) {
     els.buildPtbClientZipButton.title = ptbCreateReason || "Create and upload a ZIP to the isolated PTB release track";
@@ -2474,7 +2644,7 @@ function updateReleaseUploadState() {
   }
 }
 
-function invalidateReleaseValidation(label = "Ready", detail = "Pick an exact client ZIP, then publish it to its isolated R2 and GitHub release tracks.", target = "stable") {
+function invalidateReleaseValidation(label = "Ready", detail = "Pick an exact client ZIP, then publish the update for players.", target = "stable") {
   releaseValidationByTarget.delete(target);
   setReleaseUploadProgress(null, true, target);
   setReleaseCheck("warn", label, selectedPackZip(target) ? (target === "ptb" ? "Publish PTB" : "Publish update") : "Choose a ZIP", detail, target);
@@ -2557,6 +2727,27 @@ function setLauncherDeployProgress(progress = null, hidden = false) {
 function renderUploadState(state) {
   if (!state) return;
   const target = state.releaseTarget === "ptb" ? "ptb" : "stable";
+  if (state.stage === "remote-rebuild" && state.running) {
+    setReleaseUploadProgress({ percent: 100, phase: "Changes uploaded" }, false, target);
+    setReleaseCheck(
+      "warn",
+      "Finalizing release",
+      state.current || "Rebuilding first-install package",
+      "Only changed files were uploaded. The full package is being rebuilt remotely; the live channel is unchanged until verification finishes.",
+      target
+    );
+    return;
+  }
+  if (state.stage === "github") {
+    const progress = state.progress || { percent: 0, phase: "Checking GitHub mirror" };
+    const bytes = progress.total ? `${formatBytes(progress.completed || 0)} / ${formatBytes(progress.total)}` : "Preparing mirror";
+    setReleaseUploadProgress(progress, false, target);
+    setReleaseCheck(state.error ? "warn" : (state.running ? "warn" : "ok"),
+      state.error ? "GitHub mirror failed" : (state.running ? "Release live; mirroring to GitHub" : (target === "ptb" ? "PTB published" : "Upload complete")),
+      state.running ? `${progress.phase} (${bytes})` : (state.error ? "Player release is live on R2" : "R2 and GitHub are ready"),
+      state.error || "Players can install the verified release now. GitHub is a separate mirror.", target);
+    return;
+  }
   const total = state.total || 0;
   const completed = state.completed || 0;
   const progress = state.progress || null;
@@ -2578,9 +2769,10 @@ function renderUploadState(state) {
     setReleaseUploadProgress(progress || { percent }, false, target);
     setReleaseCheck("bad", "Upload failed", `${completed}/${total} files uploaded`, state.error, target);
   } else if (state.lastResult) {
-    setReleaseUploadProgress({ percent: 100, phase: "Upload complete" }, false, target);
+    const publishedLabel = target === "ptb" ? "PTB published" : "Upload complete";
+    setReleaseUploadProgress({ percent: 100, phase: publishedLabel }, false, target);
     const verified = state.verification?.publicLatestUrl || state.lastResult?.verification?.publicLatestUrl || "";
-    setReleaseCheck("ok", "Upload complete", `${completed}/${total} files uploaded`, verified ? `Player feed verified: ${verified}` : "Release artifacts are in remote R2.", target);
+    setReleaseCheck("ok", publishedLabel, `${completed}/${total} files uploaded`, verified ? `Player feed verified: ${verified}` : "Release artifacts are in remote R2.", target);
   } else {
     setReleaseUploadProgress(null, true, target);
   }
@@ -2589,17 +2781,22 @@ function renderUploadState(state) {
   }
 }
 
-function startUploadPolling() {
+function startUploadPolling(expectedStage = null) {
   clearInterval(uploadPoll);
+  const generation = ++uploadPollGeneration;
+  let fetching = false;
   uploadPoll = setInterval(async () => {
+    if (fetching) return;
+    fetching = true;
     try {
       const state = await window.aht.devUploadState();
+      if (generation !== uploadPollGeneration || (expectedStage && state.stage !== expectedStage)) return;
       renderUploadState(state);
       if (!state.running) {
         clearInterval(uploadPoll);
         uploadPoll = null;
       }
-    } catch {}
+    } catch {} finally { fetching = false; }
   }, 1000);
 }
 
@@ -2659,7 +2856,7 @@ function showToast(title, detail = "", type = "info", options = {}) {
     const action = document.createElement("button");
     action.type = "button";
     action.className = "toast-copy-action";
-    action.textContent = options.copyLabel || "Click here to copy";
+    action.textContent = options.copyLabel || "Click here to copy error log";
     body.appendChild(action);
     const copy = (event) => {
       event.preventDefault();
@@ -2863,7 +3060,7 @@ function isUnavailable(button) {
 
 function downloadStateLabel(status, state) {
   if (state?.running) return state.progress?.phase || "Installing";
-  if (state?.error) return "Needs attention";
+  if (state?.error) return "Download Failed";
   if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state)) return "Complete";
   if (!status?.config?.latestUrl) return "Setup required";
   if (status?.latestError && !(status?.developerClientBypass && status?.installed)) return isFirstPublishPending(status) ? "Not installed" : (status.developerMode ? "Feed unavailable" : "Service unavailable");
@@ -2874,6 +3071,12 @@ function downloadStateLabel(status, state) {
 }
 
 function downloadLogText(state) {
+  if (!currentStatus?.developerMode) {
+    if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state) && state.lastResult?.installed?.version) {
+      return `Installed ${state.lastResult.installed.version}`;
+    }
+    return "";
+  }
   const lines = [...(state?.lines || [])];
   if (state?.error) lines.push(`ERROR: ${state.error}`);
   if (isSuccessfulUpdateState(state) && shouldShowUpdateProgress(state) && state.lastResult?.installed?.version) {
@@ -2899,36 +3102,61 @@ function renderDownloads(state = lastUpdateState) {
   setMiniProgress(els.downloadsProgressBar, percent);
   const logText = downloadLogText(state);
   setTextContentBounded(els.downloadsLog, logText, LOG_TEXT_LIMIT);
-  els.downloadsLog.hidden = logText === "No downloads yet.";
+  els.downloadsLog.hidden = !logText || logText === "No downloads yet.";
+  if (els.downloadsErrorPanel) els.downloadsErrorPanel.hidden = !state?.error;
   setUnavailable(els.downloadsUpdateIconButton, !status?.latest || !status?.updateRequired || Boolean(state?.running));
 }
 
 function openDownloads() {
   renderDownloads();
   els.downloadsOverlay.hidden = false;
-  els.downloadsCloseButton.focus();
+  els.downloadsBackButton?.focus();
 }
 
-function closeDownloads() {
+function closeDownloads(options = {}) {
   els.downloadsOverlay.hidden = true;
-  els.downloadsButton.focus();
+  if (options.restoreFocus !== false) els.downloadsButton.focus();
+}
+
+function showDownloadFailureToast(packKey = activeSidebarPack) {
+  showToast("Download Failed", "", "error", {
+    context: "update:start",
+    packKey,
+    copyLabel: "Click here to copy error log"
+  });
 }
 
 function launcherUpdatePercent(state) {
-  if (state?.progress && Number.isFinite(state.progress.percent)) return state.progress.percent;
-  if (state?.lastResult) return 100;
-  if (state?.error) return 100;
-  return state?.running ? 25 : 0;
+  if (state?.progress && Number.isFinite(Number(state.progress.percent))) {
+    return Math.max(0, Math.min(100, Number(state.progress.percent)));
+  }
+  if (state?.lastResult?.restartRequired) return 100;
+  return 0;
 }
 
-function setLauncherUpdateButton(restartReady = false, instantRestartReady = false) {
+function launcherUpdatePhaseLabel(state, restartReady = false, externalPackageInstall = false) {
+  if (state?.error) return restartReady ? "Restart paused" : "Update paused";
+  if (state?.running && restartReady) return "Restarting";
+  if (restartReady) return externalPackageInstall ? "Ready to install" : "Ready";
+  const phase = String(state?.progress?.phase || "");
+  if (/download/i.test(phase)) return "Downloading";
+  if (/verif|hash/i.test(phase)) return "Verifying";
+  if (/extract|stage|prepar|final|arm|handoff/i.test(phase)) return "Preparing";
+  return state?.running ? "Preparing" : "Update available";
+}
+
+function setLauncherUpdateButton({ restartReady = false, instantRestartReady = false, externalPackageInstall = false, running = false, error = false } = {}) {
   if (!els.launcherUpdateNowButton) return;
   const icon = document.createElement("span");
-  icon.className = `button-icon ${restartReady ? "icon-sync" : "icon-download"}`;
+  icon.className = `button-icon ${restartReady || running ? "icon-sync" : "icon-download"}`;
   icon.setAttribute("aria-hidden", "true");
-  const label = restartReady
-    ? instantRestartReady ? "Restart Launcher" : "Install and Restart"
-    : "Update Launcher";
+  const label = running
+    ? restartReady ? "Restarting…" : "Updating…"
+    : error
+      ? restartReady ? "Retry restart" : "Retry update"
+      : restartReady
+        ? instantRestartReady ? "Restart now" : externalPackageInstall ? "Open installer" : "Install and restart"
+        : "Update now";
   els.launcherUpdateNowButton.replaceChildren(icon, document.createTextNode(label));
 }
 
@@ -2944,36 +3172,62 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   );
   const required = Boolean(update.updateRequired || developerReinstall);
   els.launcherUpdateOverlay.hidden = !required;
-  if (!required) return;
-  const restartReady = Boolean(state?.lastResult?.restartRequired && !state?.error);
+  document.body.classList.toggle("launcher-update-open", required);
+  if (!required) {
+    launcherUpdateAutoStarted = false;
+    lastLauncherUpdateVisualState = "";
+    return;
+  }
+  const restartReady = Boolean(state?.lastResult?.restartRequired);
   const instantRestartReady = Boolean(restartReady && state?.lastResult?.instantRestartReady);
-  const current = update.currentVersion || status?.appVersion || "-";
-  const latest = update.latestVersion || "-";
-  els.launcherUpdateTitle.textContent = restartReady
-    ? instantRestartReady ? developerReinstall ? "Reinstall finished" : "Update finished" : "Ready to Install"
-    : developerReinstall ? "Preparing launcher reinstall" : "Launcher update required";
-  els.launcherUpdateSummary.textContent = restartReady
-    ? instantRestartReady
-      ? developerReinstall
-        ? `AHT Launcher ${latest} is fully copied, extracted, and verified for a same-version reinstall. Click Restart Launcher to swap to the prepared copy immediately.`
-        : `AHT Launcher ${latest} is fully downloaded, extracted, and verified. Click Restart Launcher to close this version and open the prepared update immediately.`
-      : `AHT Launcher ${latest} uses the legacy installer. Click Install and Restart to apply it and reopen when finished.`
-    : developerReinstall
-      ? `AHT Launcher ${latest} is preparing a developer-only same-version reinstall. Installed launcher version: ${current}.`
-      : `AHT Launcher ${latest} is required. Installed launcher version: ${current}.`;
+  const externalPackageInstall = Boolean(restartReady && state?.lastResult?.externalPackageInstall);
+  const restarting = Boolean(state?.running && state?.lastResult?.restartRequired);
+  const failed = Boolean(state?.error);
+  const latest = update.latestVersion || state?.lastResult?.version || "";
+  const visualState = failed ? "error" : restarting ? "restarting" : restartReady ? "ready" : state?.running ? "updating" : "available";
+  const visualStateChanged = visualState !== lastLauncherUpdateVisualState;
+  lastLauncherUpdateVisualState = visualState;
+  if (els.launcherUpdateDialog) els.launcherUpdateDialog.dataset.state = visualState;
+  if (els.launcherUpdateVersion) els.launcherUpdateVersion.textContent = latest ? `· v${latest}` : "";
+  els.launcherUpdateTitle.textContent = failed
+    ? restartReady ? "Restart interrupted" : "Update paused"
+    : restarting ? "Restarting launcher"
+      : restartReady ? externalPackageInstall ? "Ready to install" : "Ready to restart"
+        : state?.running ? developerReinstall ? "Preparing reinstall" : "Updating launcher"
+          : "Launcher update";
+  els.launcherUpdateSummary.textContent = failed
+    ? restartReady ? "The prepared update is safe. Try the restart again." : "Your current launcher is unchanged. Retry when ready."
+    : restarting ? "Opening the prepared launcher now."
+      : restartReady ? externalPackageInstall ? "The verified package is ready to open." : "The verified update is staged and ready."
+        : state?.running ? "Download, verification, and staging happen automatically." : "A new version is ready to download.";
   const percent = launcherUpdatePercent(state);
-  const phase = state?.progress?.phase || (state?.error ? "Update failed" : restartReady ? instantRestartReady ? "Update finished - ready to restart" : "Ready to install" : state?.lastResult ? "Update ready" : "Preparing");
+  const phase = launcherUpdatePhaseLabel(state, restartReady, externalPackageInstall);
   els.launcherUpdateProgressLabel.textContent = phase;
   els.launcherUpdateProgressCount.textContent = `${Math.round(percent)}%`;
   setMiniProgress(els.launcherUpdateProgressBar, percent);
-  const lines = [...(state?.lines || [])];
-  if (state?.error) lines.push(`ERROR: ${state.error}`);
+  els.launcherUpdateProgress?.setAttribute("aria-valuenow", String(Math.round(percent)));
+  els.launcherUpdateOverlay.setAttribute("aria-busy", state?.running ? "true" : "false");
+  if (els.launcherUpdateError) els.launcherUpdateError.hidden = !failed;
+  const lines = bootDeveloperMode
+    ? [...(state?.lines || [])]
+    : [state?.error
+      ? "Launcher update paused."
+      : restartReady
+        ? "Launcher update verified and ready."
+        : state?.running
+          ? "Downloading and verifying launcher update."
+          : "Waiting to start launcher update."];
+  if (bootDeveloperMode && state?.error) lines.push(`ERROR: ${state.error}`);
   if (!lines.length) lines.push("Waiting to start launcher update.");
   setTextContentBounded(els.launcherUpdateLog, lines.join("\n"), LOG_TEXT_LIMIT);
-  setLauncherUpdateButton(restartReady, instantRestartReady);
+  setLauncherUpdateButton({ restartReady, instantRestartReady, externalPackageInstall, running: Boolean(state?.running), error: failed });
   setUnavailable(els.launcherUpdateNowButton, Boolean(state?.running));
+  if (visualStateChanged && ["available", "ready", "error"].includes(visualState)) {
+    window.requestAnimationFrame(() => els.launcherUpdateNowButton?.focus({ preventScroll: true }));
+  }
+  if (els.launcherUpdateErrorReportButton) els.launcherUpdateErrorReportButton.hidden = !failed;
   if (developerReinstall && developerAuthenticated && !state && !launcherUpdatePoll) {
-    launcherUpdatePoll = setInterval(pollLauncherUpdate, 800);
+    launcherUpdatePoll = setInterval(pollLauncherUpdate, 125);
     window.setTimeout(() => pollLauncherUpdate(), 0);
   }
   if (!developerReinstall && !launcherUpdateAutoStarted && !state?.running && !state?.lastResult) {
@@ -2987,7 +3241,7 @@ async function pollLauncherUpdate() {
   try {
     state = await window.aht.getLauncherUpdateState();
   } catch (error) {
-    state = { running: false, error: cleanErrorMessage(error), lines: [], progress: { phase: "Update failed", percent: 100 } };
+    state = { running: false, error: cleanErrorMessage(error), lines: [], progress: { phase: "Update paused", percent: launcherUpdatePercent(lastLauncherUpdateState) } };
   }
   lastLauncherUpdateState = state;
   renderLauncherUpdateOverlay(currentStatus, state);
@@ -3006,7 +3260,7 @@ async function startLauncherSelfUpdate() {
   lastLauncherUpdateState = {
     running: true,
     lines: ["Starting launcher update."],
-    progress: { phase: "Preparing launcher update", percent: 8 },
+    progress: { phase: "Preparing launcher update", percent: 0 },
     error: null,
     lastResult: null
   };
@@ -3026,7 +3280,7 @@ async function startLauncherSelfUpdate() {
         running: false,
         lines: [],
         error: cleanErrorMessage(error),
-        progress: { phase: "Update failed", percent: 100 },
+        progress: { phase: "Update paused", percent: launcherUpdatePercent(lastLauncherUpdateState) },
         lastResult: null
       };
       renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
@@ -3035,7 +3289,7 @@ async function startLauncherSelfUpdate() {
         launcherUpdatePoll = null;
       }
     });
-  launcherUpdatePoll = setInterval(pollLauncherUpdate, 800);
+  launcherUpdatePoll = setInterval(pollLauncherUpdate, 125);
   await pollLauncherUpdate();
 }
 
@@ -3049,8 +3303,22 @@ async function restartLauncherSelfUpdate() {
   lastLauncherUpdateState = {
     ...lastLauncherUpdateState,
     running: true,
-    lines: [...(lastLauncherUpdateState.lines || []), "Installing launcher update."],
-    progress: { phase: lastLauncherUpdateState?.lastResult?.instantRestartReady ? "Restarting launcher" : "Starting install helper", percent: 100 },
+    lines: [
+      ...(lastLauncherUpdateState.lines || []),
+      lastLauncherUpdateState?.lastResult?.externalPackageInstall
+        ? "Opening the Linux package installer."
+        : lastLauncherUpdateState?.lastResult?.portableLinuxUpdate
+          ? "Installing the portable Linux AppImage update."
+        : "Installing launcher update."
+    ],
+    progress: {
+      phase: lastLauncherUpdateState?.lastResult?.instantRestartReady
+        ? "Restarting launcher"
+        : lastLauncherUpdateState?.lastResult?.externalPackageInstall
+          ? "Opening package installer"
+          : "Starting install helper",
+      percent: 100
+    },
     error: null
   };
   renderLauncherUpdateOverlay(currentStatus, lastLauncherUpdateState);
@@ -3116,13 +3384,14 @@ function renderPrimaryAction(status = currentStatus) {
   const packageActionMode = installMode || updateMode;
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status?.launcherUpdate?.updateRequired);
-  const actionBusy = playBusy || updateRunning;
+  const launchPreparing = sidebarSwitching || status?.launchPreparationState === "preparing";
+  const actionBusy = playBusy || updateRunning || launchPreparing;
   const actionMode = installMode ? "install" : (updateMode ? "update" : "play");
   const label = installMode
     ? (updateRunning ? "Installing..." : "Install")
     : (updateMode
       ? (updateRunning ? "Updating..." : "Update")
-      : (playBusy ? "Preparing..." : "Play"));
+      : (playBusy ? "Opening..." : "Play"));
   const iconClass = packageActionMode ? "icon-download" : "icon-play";
   els.playButton.dataset.actionMode = actionMode;
   els.playButton.classList.toggle("is-install-action", installMode);
@@ -3131,16 +3400,86 @@ function renderPrimaryAction(status = currentStatus) {
   els.playButton.setAttribute("aria-busy", actionBusy ? "true" : "false");
   els.playButton.innerHTML = `<span class="button-icon ${iconClass}" aria-hidden="true"></span><span class="primary-action-label">${label}</span>`;
   const unavailable = packageActionMode
-    ? (launcherUpdateRequired || Boolean(status?.updateBlockedReason) || !status?.latest || actionBusy)
+    ? (launcherUpdateRequired || actionBusy)
     : actionBusy;
   setUnavailable(els.playButton, unavailable);
+  const retryReason = !updateRunning
+    ? (status?.updateBlockedReason || (!status?.latest
+      ? `The ${installMode ? "install" : "update"} check has not completed. Click ${installMode ? "Install" : "Play"} to retry.`
+      : ""))
+    : "";
+  setLaunchActionStatus(launcherUpdateRequired
+    ? "Update the launcher to continue. The launcher update is starting automatically."
+    : retryReason);
   els.playButton.title = installMode
     ? (status?.updateBlockedReason || (updateRunning ? "Installing the selected AHT pack" : "Install the selected AHT pack"))
     : (updateMode
       ? (status?.updateBlockedReason || (updateRunning ? "Installing the selected AHT update" : "Update the selected AHT installation"))
       : (playBusy
-        ? "Preparing the exact Minecraft Launcher profile"
+        ? "Opening Minecraft Launcher"
         : (status?.launchReady ? "Launch Minecraft" : (playerSafeBlockedReason(status) || "Finish setup before playing."))));
+}
+
+function setLaunchActionStatus(message = "") {
+  const element = $("#launchActionStatus");
+  if (!element) return;
+  element.textContent = message;
+  element.hidden = !message;
+  const reportButton = $("#installErrorReportButton");
+  if (reportButton) reportButton.hidden = !message || playBusy || Boolean(currentStatus?.latest && !currentStatus?.latestError && !currentStatus?.updateBlockedReason);
+}
+
+function launcherUpdateCheckCanReplaceCurrent(update) {
+  if (!update) return false;
+  if (!lastLauncherUpdateCheck) return true;
+  if (update.error && lastLauncherUpdateCheck.updateRequired) return false;
+  const incomingCheckedAt = Math.max(0, Number(update.checkedAt || 0));
+  const currentCheckedAt = Math.max(0, Number(lastLauncherUpdateCheck.checkedAt || 0));
+  if (incomingCheckedAt && currentCheckedAt) return incomingCheckedAt >= currentCheckedAt;
+  return Boolean(update.updateRequired || !lastLauncherUpdateCheck.updateRequired);
+}
+
+function acceptLauncherUpdateCheck(update) {
+  if (launcherUpdateCheckCanReplaceCurrent(update)) lastLauncherUpdateCheck = update;
+  if (currentStatus) renderStatus({ ...currentStatus, launcherUpdate: lastLauncherUpdateCheck });
+  else renderLauncherUpdateOverlay({ launcherUpdate: lastLauncherUpdateCheck });
+  return lastLauncherUpdateCheck;
+}
+
+async function checkLauncherUpdateQuietly() {
+  if (bootDeveloperMode) return null;
+  if (typeof window.aht.checkLauncherUpdate !== "function") return null;
+  if (launcherUpdateCheckInFlight) return launcherUpdateCheckInFlight;
+  launcherUpdateCheckInFlight = (async () => {
+    const update = await window.aht.checkLauncherUpdate();
+    return acceptLauncherUpdateCheck(update);
+  })().catch((error) => {
+    console.warn("Launcher update check failed", error);
+    return null;
+  }).finally(() => { launcherUpdateCheckInFlight = null; });
+  return launcherUpdateCheckInFlight;
+}
+
+async function retryInstallCheck() {
+  setPlayBusy(true);
+  setLaunchActionStatus("Checking the installation and launcher version...");
+  let retryMessage = "";
+  try {
+    await checkLauncherUpdateQuietly();
+    const status = await refresh(activeSidebarPack);
+    if (status.launcherUpdate?.updateRequired) return;
+    if (!status.latest || status.updateBlockedReason) {
+      retryMessage = status.updateBlockedReason || "The download service could not be reached. Check your connection and click Install to retry.";
+      return;
+    }
+    if (!status.installed?.version || status.updateRequired) openUpdateOptions();
+  } catch (error) {
+    renderInitialStatusError(error);
+  } finally {
+    playBusy = false;
+    if (currentStatus && els.playButton.dataset.actionMode !== "retry") renderPrimaryAction(currentStatus);
+    if (retryMessage) setLaunchActionStatus(retryMessage);
+  }
 }
 
 function setPlayBusy(busy) {
@@ -3152,6 +3491,7 @@ function normalizePlayerPlatform(value = "") {
   const platform = String(value || "").trim().toLowerCase();
   if (platform.includes("win")) return "Windows";
   if (platform.includes("mac") || platform.includes("darwin") || platform.includes("osx")) return "Mac";
+  if (platform.includes("linux") || platform.includes("ubuntu")) return "Linux";
   return "—";
 }
 
@@ -3624,20 +3964,20 @@ async function prepareLocalLauncherReinstall() {
   setUnavailable(els.testLauncherReinstallButton, true);
   setLauncherReinstallStatus(
     "warn",
-    "Opening regular launcher",
-    "Preparing a one-time local update test",
-    "The exact current-version Windows ZIP is copied and hash-bound before the installed regular AHT Launcher opens."
+    "Preparing local test",
+    "Verifying the current launcher build",
+    "The installed player launcher will open with the production update flow. Nothing is published."
   );
   try {
     const result = await window.aht.devPrepareLauncherReinstall();
     setLauncherReinstallStatus(
       "ok",
-      "Regular launcher opened",
-      `AHT Launcher ${result.version} update prompt is ready`,
-      "Continue in the regular launcher. It will run the normal copy, verification, staging, Restart Launcher, swap, relaunch, and acknowledgement flow; Developer Mode will close."
+      "Player launcher ready",
+      `AHT Launcher ${result.version}`,
+      "Continue in the player launcher. This Developer Launcher will close after the local handoff."
     );
     setDevLog(result);
-    showToast("Regular launcher ready", `Continue the local update test in AHT Launcher ${result.version}.`, "success");
+    showToast("Player launcher ready", `Continue the local update test in AHT Launcher ${result.version}.`, "success");
   } catch (error) {
     const message = cleanErrorMessage(error);
     setLauncherReinstallStatus("bad", "Local update test failed", "Regular launcher was not opened", message);
@@ -3653,7 +3993,7 @@ function renderLauncherDeployState(state) {
   setLauncherDeployProgress(state.progress, false);
   if (Array.isArray(state.lines) && state.lines.length) setDevLog(state.lines.join("\n"));
   if (state.running) {
-    setLauncherUpdateStatus("warn", "Deploying public launcher", state.progress?.phase || "GitHub Actions running", "Windows and macOS player builds are publishing to GitHub Releases and R2. The developer launcher is never uploaded.");
+    setLauncherUpdateStatus("warn", "Deploying public launcher", state.progress?.phase || "GitHub Actions running", "Windows, universal macOS, and portable Linux player builds are publishing to GitHub Releases and R2. The developer launcher is never uploaded.");
     return;
   }
   if (state.error) {
@@ -3690,7 +4030,7 @@ async function publishLauncherUpdate() {
       githubToken: inputValue(els.githubTokenInput, ""),
       publishToR2: true
     };
-    setLauncherUpdateStatus("warn", "Preparing deploy", "Reading latest GitHub launcher version", "Only public Windows and macOS player-launcher artifacts will be released.");
+    setLauncherUpdateStatus("warn", "Preparing deploy", "Reading latest GitHub launcher version", "Only the public Windows, universal macOS, and portable Linux player-launcher artifacts will be released.");
     setLauncherDeployProgress({ phase: "Preparing public deploy", percent: 0 });
     const state = await window.aht.devDeployLauncher(payload);
     renderLauncherDeployState(state);
@@ -3840,9 +4180,17 @@ function activateDeveloperSection(targetId) {
   if (targetId === "playerDataTools" && developerAuthenticated && !playerDataLoaded) {
     void loadPlayerDownloadHistory();
   }
+  if (targetId === "socialLinkTools" && developerAuthenticated && !developerSocialLinksLoaded) {
+    void loadLauncherSocialLinks({ forceRefresh: true, populateDeveloper: true }).catch((error) => {
+      setSocialLinksPublishStatus("bad", "Links could not be loaded", cleanErrorMessage(error));
+    });
+  }
 }
 
 function serializeSettings() {
+  if (!currentStatus?.config) {
+    throw new Error("Launcher settings are still loading. Wait for startup to finish before saving.");
+  }
   const existingDeveloper = currentStatus?.config?.developer || {};
   const existingSync = currentStatus?.config?.sync || {};
   const existingCurseForge = currentStatus?.config?.curseforge || {};
@@ -3876,6 +4224,7 @@ function serializeSettings() {
       enabled: true,
       closeLauncherWhenGameStarts: els.closeLauncherWhenGameStartsInput.checked,
       rootDir: els.minecraftRootInput.value.trim(),
+      executablePath: els.minecraftExecutableInput.value.trim(),
       profileName: els.minecraftProfileNameInput.value.trim(),
       memoryMb: Number(els.minecraftMemoryInput.value || DEFAULT_MEMORY_MB)
     },
@@ -3920,6 +4269,8 @@ function fillSettings(status) {
   setInputValue(els.syncUrlInput, config.sync?.baseUrl || "");
   setInputValue(els.instanceInput, config.instanceDir || "");
   setInputValue(els.minecraftRootInput, config.minecraftLauncher?.rootDir || status.minecraftProfile?.rootDir || "");
+  els.minecraftExecutableField.hidden = status.platformProfile?.key !== 'linux';
+  setInputValue(els.minecraftExecutableInput, config.minecraftLauncher?.executablePath || "");
   setInputValue(els.minecraftProfileNameInput, config.minecraftLauncher?.profileName || status.minecraftProfile?.profileName || "");
   setMemoryValue(config.minecraftLauncher?.memoryMb || DEFAULT_MEMORY_MB);
   setInputValue(els.playCommandInput, config.playCommand?.command || "");
@@ -4001,6 +4352,8 @@ function fillSettings(status) {
 }
 
 function renderStatus(status) {
+  if (launcherUpdateCheckCanReplaceCurrent(status.launcherUpdate)) lastLauncherUpdateCheck = status.launcherUpdate;
+  if (lastLauncherUpdateCheck) status = { ...status, launcherUpdate: lastLauncherUpdateCheck };
   currentStatus = status;
   const statusPack = status.activePack || activeSidebarPack || "aht";
   activeSidebarPack = statusPack;
@@ -4008,7 +4361,8 @@ function renderStatus(status) {
   developerAuthenticated = Boolean(status.developerAuthenticated);
   applyDeveloperGate(status);
   const latestVersion = status.latest?.version || "-";
-  const launcherVersion = status.appVersion ? `Launcher v${status.appVersion}` : "Launcher v-";
+  const launcherVersion = (status.appVersion ? `Launcher v${status.appVersion}` : "Launcher v-")
+    + (status.buildLabel ? ` · ${status.buildLabel}` : "");
   const developerBypass = Boolean(status.developerClientBypass || status.developerMode);
   const installedVersion = status.installed?.version || null;
   const configured = Boolean(status.config.latestUrl);
@@ -4032,13 +4386,18 @@ function renderStatus(status) {
   }
   if (els.installId) els.installId.textContent = shortId(status.identity.installId);
   els.playerLabelView.textContent = accountUsername(status) || "Player";
-  if (els.profileFriendsButton) els.profileFriendsButton.hidden = !accountUsername(status);
-  renderFriendsNotification(friendsSocialState);
-  if (!friendsNotificationTimer) {
-    refreshFriendsNotification();
-    friendsNotificationTimer = window.setInterval(refreshFriendsNotification, 15000);
+  const detectedAccount = status.identity?.minecraftLauncherDetectedUsername || "";
+  const accountPending = Boolean(detectedAccount && !accountUsername(status));
+  if (accountPending) els.playerLabelView.textContent = detectedAccount;
+  if (els.profileFriendsButton) {
+    els.profileFriendsButton.hidden = !accountUsername(status) && !detectedAccount;
+    els.profileFriendsButton.disabled = accountPending;
+    els.profileFriendsButton.title = accountPending
+      ? status.identity?.minecraftUsernameSyncWarning || "Minecraft account detected; account sync is pending."
+      : "Open friends";
   }
-  setSyncLine(status.config.sync?.enabled === false ? "Offline" : "Online");
+  renderFriendsNotification(friendsSocialState);
+  setSyncLine(accountPending ? "Account sync pending" : status.config.sync?.enabled === false ? "Offline" : "Online");
   els.developerTab.hidden = !status.developerMode;
   els.developerTileButton.hidden = !status.developerMode;
   syncSetupNotice();
@@ -4095,6 +4454,7 @@ function renderStatus(status) {
   } else if (status.latest) {
     if (status.launchReady) {
       setBadge("Ready", "ok");
+      els.diffSummary.textContent = "Clean";
       if (logIsEmpty()) setLog("Pack is current.");
     } else {
       setLaunchStatusBadge(status);
@@ -4119,11 +4479,39 @@ function renderStatus(status) {
 }
 
 async function refresh(packKey = activeSidebarPack, options = {}) {
-  const status = await window.aht.getStatus(packKey);
+  const generation = ++statusRefreshGeneration;
+  const status = await window.aht.getStatus(packKey, { preferCache: Boolean(options.preferCache) });
   if (options.renderGate) await options.renderGate;
+  if (generation !== statusRefreshGeneration) return currentStatus || status;
   renderStatus(status);
   lastStatusRefreshAt = Date.now();
   return status;
+}
+
+function mergeLaunchPreparation(status, preparation, options = {}) {
+  const merged = { ...(status || {}), ...(preparation || {}) };
+  for (const key of ['latest', 'installed', 'integrity', 'minecraftProfile', 'java8Runtime']) {
+    if (preparation?.[key] === undefined) merged[key] = status?.[key];
+  }
+  if (options.preserveStatusPackageState) {
+    for (const key of ['latest', 'installed', 'integrity', 'updateBlockedReason', 'updateRequired']) {
+      if (Object.prototype.hasOwnProperty.call(status || {}, key)) merged[key] = status[key];
+    }
+  }
+  return merged;
+}
+
+async function refreshPrepared(packKey = activeSidebarPack, options = {}) {
+  const generation = ++statusRefreshGeneration;
+  const status = await window.aht.getStatus(packKey, { preferCache: Boolean(options.preferCache) });
+  if (options.renderGate) await options.renderGate;
+  if (generation === statusRefreshGeneration) renderStatus(status);
+  const preparation = await window.aht.preparePlay(packKey, { force: Boolean(options.forcePreparation) });
+  const preparedStatus = mergeLaunchPreparation(status, preparation);
+  statusRefreshGeneration += 1;
+  renderStatus(preparedStatus);
+  lastStatusRefreshAt = Date.now();
+  return preparedStatus;
 }
 
 async function refreshQuietly() {
@@ -4132,6 +4520,61 @@ async function refreshQuietly() {
     await refresh();
   } catch (error) {
     console.warn("Status refresh failed", error);
+  }
+}
+
+async function refreshPackQuietly(packKey = activeSidebarPack) {
+  if (updatePoll || launcherUpdatePoll) return;
+  try {
+    const rawStatus = await window.aht.getStatus(packKey);
+    const [hydratedResult] = await preloadStartupNewsArtwork([{ status: "fulfilled", value: rawStatus }]);
+    const status = hydratedResult?.status === "fulfilled" ? hydratedResult.value : rawStatus;
+    const statusPack = status.activePack || packKey;
+    packStatusCache.set(statusPack, status);
+    if (statusPack === activeSidebarPack && !sidebarSwitching) {
+      statusRefreshGeneration += 1;
+      renderStatus(status);
+      lastStatusRefreshAt = Date.now();
+    }
+  } catch (error) {
+    console.warn(`Status refresh failed for ${packKey}`, error);
+  }
+}
+
+async function refreshStartupNewsQuietly(packKey = activeSidebarPack) {
+  if (typeof window.aht?.refreshNews !== "function") return null;
+  try {
+    const news = await window.aht.refreshNews(packKey);
+    const statusPack = news?.activePack || packKey;
+    const cached = packStatusCache.get(statusPack);
+    if (!cached) return news;
+    const status = { ...cached };
+    if (news.latestRefreshed) {
+      status.latest = news.latest;
+      status.latestError = news.latestError || null;
+      status.updateBlockedReason = news.updateBlockedReason || "";
+      status.updateRequired = Boolean(news.updateRequired);
+    } else if (news.latestError) {
+      status.latestError = news.latestError;
+    }
+    if (news.updateLogsRefreshed) {
+      status.updateLogs = Array.isArray(news.updateLogs) ? news.updateLogs : [];
+      status.updateLogsError = news.updateLogsError || null;
+    } else if (news.updateLogsError) {
+      status.updateLogsError = news.updateLogsError;
+    }
+    const [hydrated] = await preloadStartupNewsArtwork([{ status: "fulfilled", value: status }]);
+    const readyStatus = hydrated?.status === "fulfilled" ? hydrated.value : status;
+    packStatusCache.set(statusPack, readyStatus);
+    if (statusPack === activeSidebarPack && !sidebarSwitching) {
+      statusRefreshGeneration += 1;
+      renderStatus(readyStatus);
+      lastStatusRefreshAt = Date.now();
+    }
+    return readyStatus;
+  } catch (error) {
+    console.warn(`News refresh failed for ${packKey}`, error);
+    return null;
   }
 }
 
@@ -4147,11 +4590,15 @@ function syncNavigationSelection(name = activeTabName, packKey = activeSidebarPa
 }
 
 function activateTab(name, options = {}) {
+  if (els.downloadsOverlay && !els.downloadsOverlay.hidden) {
+    closeDownloads({ restoreFocus: false });
+  }
   if (name !== "news" && activeTabName === "news" && options.preserveNewsArticleTransition !== true) {
     stopActiveNewsCarouselMedia();
     if (!els.updateLogOverlay.hidden || els.newsView?.classList.contains("is-transitioning")) closeUpdateLog(true);
   }
   activeTabName = name;
+  syncDeveloperAppearance();
   syncNavigationSelection(name, activeSidebarPack);
   els.views.forEach((view) => view.classList.toggle("active", view.id === name));
   syncSetupNotice();
@@ -4175,6 +4622,39 @@ function waitForNextPaint() {
   });
 }
 
+function animateSidebarOpacity(view, from, to, durationMs, easing = "ease-out") {
+  if (!view) return Promise.resolve();
+  const startedAt = performance.now();
+  const duration = Math.max(1, Number(durationMs) || 1);
+  const start = Number(from);
+  const distance = Number(to) - start;
+  view.style.opacity = String(start);
+  return new Promise((resolve) => {
+    let timer = null;
+    const tick = () => {
+      const progress = Math.min(1, Math.max(0, (performance.now() - startedAt) / duration));
+      const eased = easing === "ease-in"
+        ? progress * progress
+        : 1 - ((1 - progress) ** 3);
+      view.style.opacity = String(start + (distance * eased));
+      if (progress < 1) return;
+      if (timer !== null) window.clearInterval(timer);
+      resolve();
+    };
+    timer = window.setInterval(tick, 16);
+    tick();
+  });
+}
+
+function setSidebarSwitchLoader(visible, packKey = activeSidebarPack) {
+  if (!els.sidebarSwitchLoader) return;
+  els.sidebarSwitchLoader.hidden = !visible;
+  els.sidebarSwitchLoader.setAttribute("aria-hidden", String(!visible));
+  els.sidebarSwitchLoader.setAttribute("aria-label", visible
+    ? `Switching to ${packKey === "ptb" ? "PTB" : "AHT"}`
+    : "Switching packs");
+}
+
 async function transitionSidebarSelection(tile) {
   if (!tile || tile.disabled) return;
   if (sidebarSwitching) {
@@ -4191,30 +4671,69 @@ async function transitionSidebarSelection(tile) {
     return;
   }
 
+  if (bootDeveloperMode) {
+    // Tool navigation is independent of pack preparation or developer login.
+    if (nextPack === previousPack) {
+      activateTab(nextTab);
+      return;
+    }
+    sidebarSwitching = true;
+    renderPrimaryAction(currentStatus);
+    try {
+      const cachedStatus = packStatusCache.get(nextPack) || await window.aht.getStatus(nextPack, { preferCache: true });
+      const selection = await window.aht.selectPreparedPlay(nextPack);
+      activeSidebarPack = nextPack;
+      statusRefreshGeneration += 1;
+      renderStatus(mergeLaunchPreparation(cachedStatus, selection));
+      lastStatusRefreshAt = Date.now();
+      activateTab(nextTab);
+    } catch (error) {
+      activeSidebarPack = previousPack;
+      activateTab(previousTab);
+      showToast("Pack status failed", cleanErrorMessage(error), "error");
+    } finally {
+      sidebarSwitching = false;
+      renderPrimaryAction(currentStatus);
+      void refreshPackQuietly(activeSidebarPack);
+      const queuedTile = queuedSidebarTile;
+      queuedSidebarTile = null;
+      if (queuedTile) void transitionSidebarSelection(queuedTile);
+    }
+    return;
+  }
+
   const sourceView = els.views.find((view) => view.classList.contains("active")) || null;
   sidebarSwitching = true;
   activeSidebarPack = nextPack;
+  renderPrimaryAction(currentStatus);
   syncNavigationSelection(nextTab, nextPack);
   els.workspace?.classList.add("is-sidebar-switching");
   els.workspace?.setAttribute("aria-busy", "true");
+  setSidebarSwitchLoader(true, nextPack);
+  sourceView?.classList.add("sidebar-view-leaving-ready");
 
   const exitGate = (async () => {
     await waitForUiDelay(SIDEBAR_SWITCH_EXIT_DELAY_MS);
     sourceView?.classList.add("sidebar-view-leaving");
-    setBadge("Checking", "warn");
-    await waitForUiDelay(SIDEBAR_SWITCH_EXIT_MS);
+    await animateSidebarOpacity(sourceView, 1, 0, SIDEBAR_SWITCH_EXIT_MS, "ease-in");
   })();
-  const minimumEnterGate = (async () => {
+  const statusResultPromise = (async () => {
+    const cachedStatus = packStatusCache.get(nextPack)
+      || await window.aht.getStatus(nextPack, { preferCache: true });
+    const selection = await window.aht.selectPreparedPlay(nextPack);
     await exitGate;
-    await waitForUiDelay(SIDEBAR_SWITCH_LOAD_HOLD_MS);
-  })();
-  const statusResultPromise = refresh(nextPack, { renderGate: exitGate }).then(
+    const status = mergeLaunchPreparation(cachedStatus, selection);
+    statusRefreshGeneration += 1;
+    renderStatus(status);
+    lastStatusRefreshAt = Date.now();
+    return status;
+  })().then(
     (status) => ({ status, error: null }),
     (error) => ({ status: null, error })
   );
 
   try {
-    const [statusResult] = await Promise.all([statusResultPromise, minimumEnterGate]);
+    const [statusResult] = await Promise.all([statusResultPromise, exitGate]);
     let incomingView = document.getElementById(nextTab) || sourceView;
     if (statusResult.error) {
       activeSidebarPack = previousPack;
@@ -4225,22 +4744,29 @@ async function transitionSidebarSelection(tile) {
       incomingView?.classList.add("sidebar-view-entering");
       activateTab(nextTab);
     }
+    setSidebarSwitchLoader(false);
 
     if (statusResult.error) incomingView?.classList.add("sidebar-view-entering");
-    sourceView?.classList.remove("sidebar-view-leaving");
+    sourceView?.classList.remove("sidebar-view-leaving", "sidebar-view-leaving-ready");
     void incomingView?.offsetWidth;
     await waitForNextPaint();
     await waitForNextPaint();
     els.workspace?.classList.add("is-sidebar-switch-entering");
     incomingView?.classList.add("sidebar-view-entering-active");
-    await waitForUiDelay(SIDEBAR_SWITCH_ENTER_MS);
+    await animateSidebarOpacity(incomingView, 0, 1, SIDEBAR_SWITCH_ENTER_MS, "ease-out");
   } finally {
     for (const view of els.views) {
-      view.classList.remove("sidebar-view-leaving", "sidebar-view-entering", "sidebar-view-entering-active");
+      view.classList.remove("sidebar-view-leaving-ready", "sidebar-view-leaving", "sidebar-view-entering", "sidebar-view-entering-active");
+      view.style.removeProperty("opacity");
     }
     els.workspace?.classList.remove("is-sidebar-switching", "is-sidebar-switch-entering");
     els.workspace?.removeAttribute("aria-busy");
+    setSidebarSwitchLoader(false);
     sidebarSwitching = false;
+    renderPrimaryAction(currentStatus);
+    window.setTimeout(() => {
+      void refreshPackQuietly(activeSidebarPack);
+    }, 0);
     const queuedTile = queuedSidebarTile;
     queuedSidebarTile = null;
     if (queuedTile && !queuedTile.disabled) {
@@ -4257,14 +4783,66 @@ function waitForWindowLoad() {
 }
 
 async function waitForCriticalImages() {
-  const imageSettles = [...document.images].map((image) => {
-    if (image.complete) return typeof image.decode === "function" ? image.decode().catch(() => {}) : Promise.resolve();
-    return new Promise((resolve) => {
+  const stallDecodeForTest = new URLSearchParams(window.location.search || "").get("testStallImageDecode") === "1";
+  const imageSettles = [...document.images].map(async (image) => {
+    if (!image.complete) await new Promise((resolve) => {
       image.addEventListener("load", resolve, { once: true });
       image.addEventListener("error", resolve, { once: true });
     });
+    if (!image.complete || image.naturalWidth <= 0 || typeof image.decode !== "function") return;
+    const decodeReady = stallDecodeForTest ? new Promise(() => {}) : image.decode().catch(() => {});
+    void decodeReady;
   });
   await Promise.allSettled(imageSettles);
+}
+
+function preloadImageAsset(source, timeoutMs = STARTUP_NEWS_ART_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    let settled = false;
+    let timeout = 0;
+    const finish = (loaded) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      image.onload = null;
+      image.onerror = null;
+      resolve(Boolean(loaded));
+    };
+    const finishLoaded = () => {
+      if (typeof image.decode !== "function") {
+        finish(image.naturalWidth > 0);
+        return;
+      }
+      image.decode().then(() => finish(true), () => finish(image.naturalWidth > 0));
+    };
+    image.onload = finishLoaded;
+    image.onerror = () => finish(false);
+    timeout = window.setTimeout(() => finish(false), timeoutMs);
+    image.src = source;
+    if (image.complete) finishLoaded();
+  });
+}
+
+async function preloadStartupNewsArtwork(statusResults = []) {
+  const urls = new Set(["assets/aht-cover.png"]);
+  for (const result of statusResults) {
+    if (result?.status !== "fulfilled") continue;
+    for (const log of result.value?.updateLogs || []) {
+      const url = updateLogImageUrl(log);
+      if (url) urls.add(url);
+    }
+  }
+  await Promise.all([...urls].map(async (url) => ({
+    url,
+    loaded: await preloadImageAsset(url, startupFirstInitialization
+      ? STARTUP_NEWS_ART_TIMEOUT_MS
+      : STARTUP_WARM_NEWS_ART_TIMEOUT_MS)
+  })));
+  // A preload miss is only a timing result. Keep the published metadata so the
+  // card can finish loading the same image after reveal (or use its CSS fallback
+  // if the URL is genuinely unavailable) instead of permanently becoming filler.
+  return statusResults;
 }
 
 function renderInitialStatusError(error) {
@@ -4272,12 +4850,99 @@ function renderInitialStatusError(error) {
   setBadge("Error", "bad");
   setLog(message);
   setUnavailable(els.playButton, false);
-  els.playButton.title = "Run the launch checks and create a support report if anything fails.";
+  els.playButton.dataset.actionMode = "retry";
+  els.playButton.innerHTML = '<span class="button-icon icon-sync" aria-hidden="true"></span><span class="primary-action-label">Retry</span>';
+  els.playButton.title = "Retry loading the launcher";
+  setLaunchActionStatus(`The launcher could not finish loading. Click Retry. ${message}`);
   showToast("Launcher error", message, "error", {
     context: "play:start",
     packKey: activeSidebarPack,
     copyLabel: "Click here to copy"
   });
+}
+
+function renderStartupPreparationState(state = {}) {
+  startupFirstInitialization = Boolean(state.firstInitialization);
+  els.startupLoader?.classList.toggle("is-initializing", startupFirstInitialization);
+  if (els.startupLoaderLabel) {
+    els.startupLoaderLabel.textContent = startupFirstInitialization
+      ? "Initializing"
+      : "Loading launcher";
+  }
+  if (els.startupLoaderRule) els.startupLoaderRule.hidden = !startupFirstInitialization;
+  if (els.startupLoaderProgress) {
+    const percent = Math.max(0, Math.min(100, Number(state.percent) || 0));
+    els.startupLoaderProgress.style.width = `${percent}%`;
+  }
+}
+
+async function renderPreparedStartupStatuses(preparation = {}, results = null, options = {}) {
+  const packKeys = ["aht", "ptb"];
+  const resolvedResults = results || await Promise.allSettled(packKeys.map((packKey) => (
+    window.aht.getStatus(packKey, { preferCache: true, includeUpdateLogs: true })
+  )));
+  const hydratedResults = options.artworkHydrated ? resolvedResults : await preloadStartupNewsArtwork(resolvedResults);
+  // Select the active profile while the launcher is loading. Play then has no
+  // launcher-metadata write or pack verification in front of the handoff.
+  const activeSelection = await window.aht.selectPreparedPlay(activeSidebarPack);
+  const mergedResults = hydratedResults.map((result, index) => {
+    if (result.status !== "fulfilled") return result;
+    const packKey = packKeys[index];
+    const prepared = mergeLaunchPreparation(result.value, preparation?.packs?.[packKey], { preserveStatusPackageState: true });
+    const merged = packKey === activeSidebarPack
+      ? mergeLaunchPreparation(prepared, activeSelection, { preserveStatusPackageState: true })
+      : prepared;
+    packStatusCache.set(merged.activePack || packKey, merged);
+    return { status: "fulfilled", value: merged };
+  });
+  const activeIndex = packKeys.indexOf(activeSidebarPack);
+  const activeResult = mergedResults[activeIndex >= 0 ? activeIndex : 0];
+  if (activeResult?.status !== "fulfilled") throw activeResult?.reason || new Error("Launcher status is unavailable.");
+  statusRefreshGeneration += 1;
+  renderStatus(activeResult.value);
+  lastStatusRefreshAt = Date.now();
+  return activeResult.value;
+}
+
+async function prepareStartupAndRender(options = {}) {
+  const initialState = options.initialState || await window.aht.getStartupPreparationState();
+  renderStartupPreparationState(initialState);
+  const unsubscribe = window.aht.onStartupPreparationProgress((progress) => {
+    if (startupFirstInitialization || progress?.firstInitialization) renderStartupPreparationState(progress);
+  });
+  try {
+    const packKeys = ["aht", "ptb"];
+    const loadNewsStatusResults = (preferCache) => Promise.allSettled(packKeys.map((packKey) => (
+      window.aht.getStatus(packKey, { preferCache, includeUpdateLogs: true })
+    ))).then((results) => preloadStartupNewsArtwork(results));
+    let preparation;
+    let newsStatusResults;
+    if (initialState.initialized && !initialState.firstInitialization) {
+      preparation = await window.aht.prepareStartup();
+      newsStatusResults = await loadNewsStatusResults(true);
+    } else {
+      [preparation, newsStatusResults] = await Promise.all([
+        window.aht.prepareStartup(),
+        loadNewsStatusResults(false)
+      ]);
+    }
+    renderStartupPreparationState({ ...preparation, firstInitialization: Boolean(preparation.firstInitialization), percent: 100 });
+    return renderPreparedStartupStatuses(preparation, newsStatusResults, { artworkHydrated: true });
+  } finally {
+    unsubscribe?.();
+  }
+}
+
+function showLauncherPreparation() {
+  if (bootDeveloperMode) return;
+  if (els.startupLoader) {
+    els.startupLoader.hidden = false;
+    els.startupLoader.setAttribute("aria-hidden", "false");
+  }
+  els.appFrame?.setAttribute("inert", "");
+  els.appFrame?.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("is-launcher-ready");
+  document.body.classList.add("is-booting");
 }
 
 function revealLauncher() {
@@ -4292,31 +4957,158 @@ function revealLauncher() {
   }, STARTUP_FADE_MS);
 }
 
+function setSocialLinksPublishStatus(state, title, detail) {
+  if (!els.socialLinksPublishStatus) return;
+  els.socialLinksPublishStatus.className = `release-check-card ${state}`;
+  const label = els.socialLinksPublishStatus.querySelector("span");
+  const heading = els.socialLinksPublishStatus.querySelector("strong");
+  const copy = els.socialLinksPublishStatus.querySelector("p");
+  if (label) label.textContent = "Launcher social menu";
+  if (heading) heading.textContent = title;
+  if (copy) copy.textContent = detail;
+}
+
+function renderLauncherSocialLinks(state = {}, { populateDeveloper = false } = {}) {
+  const links = { ...DEFAULT_LAUNCHER_SOCIAL_LINKS, ...(state.links || {}) };
+  launcherSocialLinksState = { ...state, links };
+  if (els.launcherSocialMenu) {
+    els.launcherSocialMenu.dataset.source = String(state.source || "default");
+    els.launcherSocialMenu.dataset.publishedAt = String(state.publishedAt || "");
+  }
+  if (populateDeveloper) {
+    const fields = {
+      discord: els.discordUrlInput,
+      youtube: els.youtubeUrlInput,
+      tiktok: els.tiktokUrlInput,
+      forum: els.forumUrlInput
+    };
+    for (const [key, input] of Object.entries(fields)) {
+      if (input && document.activeElement !== input) input.value = links[key];
+    }
+    developerSocialLinksLoaded = true;
+    const published = state.source === "published" || state.source === "cache";
+    const when = state.publishedAt ? new Date(state.publishedAt).toLocaleString() : "";
+    setSocialLinksPublishStatus(
+      state.error ? "warn" : (published ? "ok" : "warn"),
+      published ? "Published links loaded" : "Using safe defaults",
+      state.error || (when ? `Last published ${when}.` : "No published social-links object was found; the launcher defaults remain active.")
+    );
+  }
+  return launcherSocialLinksState;
+}
+
+async function loadLauncherSocialLinks({ forceRefresh = false, populateDeveloper = false } = {}) {
+  if (typeof window.aht?.getSocialLinks !== "function") {
+    return renderLauncherSocialLinks(launcherSocialLinksState, { populateDeveloper });
+  }
+  const state = await window.aht.getSocialLinks({
+    preferCache: !forceRefresh,
+    forceRefresh
+  });
+  return renderLauncherSocialLinks(state, { populateDeveloper });
+}
+
+function developerSocialLinksPayload() {
+  return {
+    links: {
+      discord: inputValue(els.discordUrlInput, DEFAULT_LAUNCHER_SOCIAL_LINKS.discord),
+      youtube: inputValue(els.youtubeUrlInput, DEFAULT_LAUNCHER_SOCIAL_LINKS.youtube),
+      tiktok: inputValue(els.tiktokUrlInput, DEFAULT_LAUNCHER_SOCIAL_LINKS.tiktok),
+      forum: inputValue(els.forumUrlInput, DEFAULT_LAUNCHER_SOCIAL_LINKS.forum)
+    },
+    r2Bucket: inputValue(els.bucketInput, "ahtlauncher"),
+    r2AccountId: inputValue(els.r2AccountIdInput, ""),
+    r2AccessKeyId: inputValue(els.r2AccessKeyIdInput, ""),
+    r2SecretAccessKey: inputValue(els.r2SecretAccessKeyInput, "")
+  };
+}
+
+async function publishDeveloperSocialLinks() {
+  if (!developerAuthenticated || typeof window.aht?.devPublishSocialLinks !== "function") return;
+  setUnavailable(els.publishSocialLinksButton, true);
+  setUnavailable(els.loadSocialLinksButton, true);
+  setSocialLinksPublishStatus("warn", "Publishing links", "Uploading and verifying the launcher social-links object.");
+  try {
+    await saveDeveloperSecrets();
+    const result = await window.aht.devPublishSocialLinks(developerSocialLinksPayload());
+    renderLauncherSocialLinks({
+      links: result.links,
+      source: "published",
+      publishedAt: result.publishedAt,
+      fetchedAt: new Date().toISOString(),
+      error: ""
+    }, { populateDeveloper: true });
+    setSocialLinksPublishStatus("ok", "Social links published", `Verified ${result.upload?.method || "R2"} publish at ${new Date(result.publishedAt).toLocaleString()}.`);
+    showToast("Social links published", "Discord, YouTube, TikTok, and Forum are ready for launcher players.", "success");
+  } catch (error) {
+    const message = cleanErrorMessage(error);
+    setSocialLinksPublishStatus("bad", "Publish failed", message);
+    showToast("Social links publish failed", message, "error");
+  } finally {
+    setUnavailable(els.publishSocialLinksButton, false);
+    setUnavailable(els.loadSocialLinksButton, false);
+  }
+}
+
 async function bootstrapLauncher() {
   const startedAt = performance.now();
-  let essentialsSettled = false;
-  const fontsReady = document.fonts?.ready || Promise.resolve();
-  const initialStatusReady = refresh().catch((error) => {
+  const startupTaskTimings = { startedAt, settled: {} };
+  window.__ahtStartupTaskTimings = startupTaskTimings;
+  const trackStartupTask = (name, promise) => Promise.resolve(promise).then((value) => {
+    startupTaskTimings.settled[name] = { status: "fulfilled", elapsedMs: Math.round(performance.now() - startedAt) };
+    return value;
+  }, (error) => {
+    startupTaskTimings.settled[name] = { status: "rejected", elapsedMs: Math.round(performance.now() - startedAt), error: String(error?.message || error) };
+    throw error;
+  });
+  const fontsReady = trackStartupTask("fonts", document.fonts?.ready || Promise.resolve());
+  const criticalImagesReady = trackStartupTask("criticalImages", waitForCriticalImages());
+  const startupStateReady = trackStartupTask("startupState", window.aht.getStartupPreparationState().then((state) => {
+    renderStartupPreparationState(state);
+    return state;
+  }));
+  const legalReady = trackStartupTask("legal", loadLegalGate());
+  const socialLinksReady = trackStartupTask("socialLinks", loadLauncherSocialLinks().catch(() => launcherSocialLinksState));
+  const startupState = await startupStateReady;
+  const initialStatusReady = trackStartupTask("initialStatus", (async () => {
+    await legalReady;
+    if (currentLegalState?.required) {
+      return refresh(activeSidebarPack, { preferCache: true });
+    }
+    return prepareStartupAndRender({ initialState: startupState });
+  })().catch((error) => {
     renderInitialStatusError(error);
-  });
-  const essentials = Promise.allSettled([
-    loadLegalGate(),
+    return null;
+  }));
+  const windowLoadReady = trackStartupTask("windowLoad", waitForWindowLoad());
+  const startupTasks = Promise.allSettled([
+    legalReady,
+    startupStateReady,
     initialStatusReady,
-    waitForWindowLoad(),
-    fontsReady
-  ]).then(() => {
-    essentialsSettled = true;
-  });
-  await Promise.race([essentials, waitForUiDelay(STARTUP_ESSENTIAL_TIMEOUT_MS)]);
-  if (!essentialsSettled && !currentStatus) {
-    renderInitialStatusError(new Error("Launcher startup timed out while loading status."));
-  }
-  await Promise.race([waitForCriticalImages(), waitForUiDelay(STARTUP_ASSET_TIMEOUT_MS)]);
-  const remaining = Math.max(0, STARTUP_MIN_VISIBLE_MS - (performance.now() - startedAt));
+    windowLoadReady,
+    fontsReady,
+    criticalImagesReady,
+    socialLinksReady
+  ]);
+  await startupTasks;
+  startupTaskTimings.readiness = {
+    activePack: String(currentStatus?.activePack || ""),
+    launchReady: Boolean(currentStatus?.launchReady),
+    launchPreparationState: String(currentStatus?.launchPreparationState || "missing"),
+    actionMode: String(els.playButton?.dataset.actionMode || "")
+  };
+  const remaining = bootDeveloperMode ? 0 : Math.max(0, STARTUP_MIN_VISIBLE_MS - (performance.now() - startedAt));
   if (remaining) await waitForUiDelay(remaining);
   await waitForNextPaint();
   await waitForNextPaint();
   revealLauncher();
+  window.setTimeout(() => {
+    if (!bootDeveloperMode && !startupFirstInitialization) {
+      void refreshStartupNewsQuietly("aht");
+      void refreshStartupNewsQuietly("ptb");
+    }
+    if (!bootDeveloperMode) void loadLauncherSocialLinks({ forceRefresh: true }).catch(() => {});
+  }, 0);
 }
 
 async function openExternalDestination(button) {
@@ -4330,7 +5122,8 @@ async function openExternalDestination(button) {
       throw new Error(result?.error || "The link could not be opened.");
     }
   } catch (error) {
-    showToast("Store could not be opened", cleanErrorMessage(error), "error");
+    const label = button?.getAttribute("title") || "Launcher link";
+    showToast(`${label} could not be opened`, cleanErrorMessage(error), "error");
   } finally {
     button.disabled = false;
     button.removeAttribute("aria-busy");
@@ -4365,10 +5158,10 @@ async function pollUpdate() {
   }
   lastUpdateState = state;
   renderPrimaryAction(currentStatus);
-  const lines = [...state.lines];
+  const lines = bootDeveloperMode ? [...state.lines] : [];
   if (els.activityState) els.activityState.textContent = state.running ? "Running" : "Idle";
   setProgress(shouldShowUpdateProgress(state), estimateProgress(state), updateProgressLabel(state));
-  if (state.error) lines.push(`ERROR: ${state.error}`);
+  if (bootDeveloperMode && state.error) lines.push(`ERROR: ${state.error}`);
   if (isSuccessfulUpdateState(state) && state.lastResult?.installed?.version) lines.push(`Installed ${state.lastResult.installed.version}`);
   setLog(lines.join("\n"));
   renderDownloads(state);
@@ -4377,7 +5170,7 @@ async function pollUpdate() {
     updatePoll = null;
     const completedKind = activeUpdateKind;
     if (state.error) {
-      showToast(completedKind === "repair" ? "Repair failed" : "Update failed", state.error, "error");
+      showDownloadFailureToast(state.packKey || activeSidebarPack);
     } else if (state.lastResult?.installed?.version) {
       if (completedKind === "repair") {
         lastIntegrityScan = null;
@@ -4387,7 +5180,11 @@ async function pollUpdate() {
       showToast(completedKind === "repair" ? "Repair complete" : "Update complete", `Installed ${state.lastResult.installed.version}.`, "success");
     }
     activeUpdateKind = "";
-    await refresh();
+    if (!state.error && state.lastResult?.installed?.version) {
+      await refresh(activeSidebarPack, { preferCache: true });
+    } else {
+      await refresh();
+    }
     if (completedKind === "repair" && !state.error && !(currentStatus?.integrity?.counts?.corrupted > 0)) {
       lastIntegrityScan = null;
       closeRepairPrompt();
@@ -4399,6 +5196,7 @@ async function pollUpdate() {
 }
 
 async function startUpdate(forceRepair, options = {}) {
+  const requestedPackKey = options.packKey || activeSidebarPack;
   if (updatePoll || lastUpdateState?.running) {
     showToast("Install already running", "The launcher is already installing files. Leave it open until it finishes.", "info");
     return;
@@ -4428,17 +5226,19 @@ async function startUpdate(forceRepair, options = {}) {
   setLog("");
   renderDownloads(lastUpdateState);
   showToast(forceRepair ? "Repair started" : "Update started", "Progress is shown in the sidebar.", "info");
-  window.aht.startUpdate({ forceRepair, replaceGameSettings: Boolean(options.replaceGameSettings), packKey: activeSidebarPack }).catch((error) => {
-    const message = cleanErrorMessage(error);
+  window.aht.startUpdate({ forceRepair, runtimeOnly: Boolean(options.runtimeOnly), replaceGameSettings: Boolean(options.replaceGameSettings), packKey: requestedPackKey }).catch((error) => {
+    const technicalMessage = cleanErrorMessage(error);
+    const message = forceRepair ? "Repair failed." : "Download failed.";
     lastUpdateState = ensureTerminalUpdateTimestamp({
       ...(lastUpdateState || {}),
       running: false,
       error: message,
       progress: { ...(lastUpdateState?.progress || {}), phase: forceRepair ? "Repair failed" : "Update failed", percent: 100 }
     });
-    appendLog(`ERROR: ${message}`);
+    if (currentStatus?.developerMode) appendLog(`ERROR: ${technicalMessage}`);
+    else setLog(message);
     renderDownloads(lastUpdateState);
-    showToast(forceRepair ? "Repair failed" : "Update failed", message, "error");
+    showDownloadFailureToast(activeSidebarPack);
     clearInterval(updatePoll);
     updatePoll = null;
     activeUpdateKind = "";
@@ -4540,6 +5340,7 @@ function closeRepairPrompt() {
 }
 
 async function scanFilesForRepair() {
+  const requestedPackKey = activeSidebarPack;
   if (updatePoll || lastUpdateState?.running) {
     showToast("Install already running", "Wait for the current install to finish before scanning.", "info");
     return;
@@ -4552,7 +5353,7 @@ async function scanFilesForRepair() {
   setLog("");
   let scanCompleted = false;
   try {
-    const scan = await window.aht.scanFiles(activeSidebarPack);
+    const scan = await window.aht.scanFiles(requestedPackKey);
     scanCompleted = true;
     lastIntegrityScan = scan;
     setLog(formatIntegrityScan(scan));
@@ -4569,12 +5370,10 @@ async function scanFilesForRepair() {
       setBadge("Repair needed", "warn");
       clearScanProgressSoon();
       showRepairPrompt(scan);
+      els.repairPromptRepairButton.dataset.packKey = requestedPackKey;
     } else {
-      els.diffSummary.textContent = "Clean";
-      setProgress(true, 100, "Scan complete");
-      restoreStatusBadge();
-      clearScanProgressSoon();
-      showToast("Scan complete", integrityIssueSummary(scan), "success");
+      setLog(`${formatIntegrityScan(scan)}\nChecking Java, Minecraft, Forge, and assets...`);
+      await startUpdate(true, { runtimeOnly: true, packKey: requestedPackKey });
     }
   } catch (error) {
     const message = cleanErrorMessage(error);
@@ -4584,7 +5383,7 @@ async function scanFilesForRepair() {
     setLog(message);
     showToast("Scan failed", message, "error");
   } finally {
-    setUnavailable(els.scanButton, false);
+    setUnavailable(els.scanButton, Boolean(updatePoll || lastUpdateState?.running));
     if (currentStatus) {
       renderPrimaryAction(currentStatus);
     }
@@ -4624,8 +5423,8 @@ async function applyRecommendedSetup() {
   setUnavailable(els.setupAutoButton, true);
   setUnavailable(els.settingsAutoSetupButton, true);
   try {
-    const status = await window.aht.setupApply();
-    renderStatus(status);
+    await window.aht.setupApply();
+    const status = await refreshPrepared(activeSidebarPack, { forcePreparation: true });
     const detail = status.config.latestUrl
       ? "Release feed and instance path were applied."
       : "Instance path was applied. Add a latest.json feed to continue.";
@@ -4642,6 +5441,29 @@ els.tabs.forEach((tab) => tab.addEventListener("click", () => {
   if (!sidebarSwitching) activateTab(tab.dataset.tab);
 }));
 els.externalLinks.forEach((button) => button.addEventListener("click", () => openExternalDestination(button)));
+if (els.launcherSocialMenu) {
+  let socialCloseTimer = 0;
+  const setSocialExpanded = (expanded) => {
+    window.clearTimeout(socialCloseTimer);
+    socialCloseTimer = 0;
+    els.launcherSocialMenu.classList.toggle("is-social-menu-open", expanded);
+    els.launcherSocialMenu.querySelector("[aria-controls='launcherSocialDropdown']")?.setAttribute("aria-expanded", String(expanded));
+  };
+  const keepSocialExpanded = () => setSocialExpanded(true);
+  const queueSocialClose = () => {
+    window.clearTimeout(socialCloseTimer);
+    socialCloseTimer = window.setTimeout(() => {
+      socialCloseTimer = 0;
+      const pointerInside = els.launcherSocialMenu.matches(":hover");
+      const focusInside = els.launcherSocialMenu.contains(document.activeElement);
+      if (!pointerInside && !focusInside) setSocialExpanded(false);
+    }, 180);
+  };
+  els.launcherSocialMenu.addEventListener("mouseenter", keepSocialExpanded);
+  els.launcherSocialMenu.addEventListener("mouseleave", queueSocialClose);
+  els.launcherSocialMenu.addEventListener("focusin", keepSocialExpanded);
+  els.launcherSocialMenu.addEventListener("focusout", queueSocialClose);
+}
 els.gameTiles.forEach((tile) => tile.addEventListener("click", () => {
   void transitionSidebarSelection(tile);
 }));
@@ -4649,7 +5471,21 @@ els.setupSettingsButton.addEventListener("click", () => activateTab("settings"))
 els.setupAutoButton.addEventListener("click", applyRecommendedSetup);
 els.settingsAutoSetupButton.addEventListener("click", applyRecommendedSetup);
 els.downloadsButton.addEventListener("click", openDownloads);
-els.downloadsCloseButton.addEventListener("click", closeDownloads);
+$("#installErrorReportButton").addEventListener("click", () => copyErrorReportFromToast({
+  title: "Installation service check",
+  message: currentStatus?.latestError || currentStatus?.updateBlockedReason || "The download service could not be read.",
+  context: "install:check",
+  packKey: activeSidebarPack
+}));
+if (els.downloadsBackButton) els.downloadsBackButton.addEventListener("click", closeDownloads);
+if (els.downloadsErrorReportButton) {
+  els.downloadsErrorReportButton.addEventListener("click", () => copyErrorReportFromToast({
+    title: "Download Failed",
+    message: "Download failed.",
+    context: "update:start",
+    packKey: lastUpdateState?.packKey || activeSidebarPack
+  }));
+}
 if (els.windowMinimizeButton) els.windowMinimizeButton.addEventListener("click", () => window.aht.windowMinimize());
 if (els.windowCloseButton) els.windowCloseButton.addEventListener("click", () => window.aht.windowClose());
 if (els.profileFriendsButton) els.profileFriendsButton.addEventListener("click", openFriendsPanel);
@@ -4681,6 +5517,20 @@ if (els.launcherUpdateNowButton) {
     startLauncherSelfUpdate();
   });
 }
+$("#launcherUpdateErrorReportButton")?.addEventListener("click", async () => {
+  const button = $("#launcherUpdateErrorReportButton");
+  button.disabled = true;
+  try {
+    await window.aht.copyErrorReport({
+      title: "Launcher update handoff",
+      context: "launcher:updateRestart",
+      message: lastLauncherUpdateState?.error || "Launcher update is waiting to restart."
+    });
+    button.textContent = "Report copied — paste to attach it";
+  } catch {
+    button.textContent = "Copy failed — click to retry";
+  } finally { button.disabled = false; }
+});
 els.downloadsOverlay.addEventListener("click", (event) => {
   if (event.target === els.downloadsOverlay) closeDownloads();
 });
@@ -4706,6 +5556,10 @@ if (els.downloadsUpdateIconButton) {
 }
 els.playButton.addEventListener("click", async () => {
   if (playBusy || isUnavailable(els.playButton)) return;
+  if (els.playButton.dataset.actionMode === "retry" || !currentStatus?.latest || currentStatus?.updateBlockedReason) {
+    await retryInstallCheck();
+    return;
+  }
   if (els.playButton.dataset.actionMode === "install" || currentStatus?.updateRequired) {
     openUpdateOptions();
     return;
@@ -4714,8 +5568,8 @@ els.playButton.addEventListener("click", async () => {
   const requestedPackName = requestedPackKey === "ptb" ? "A Hard Time PTB" : "A Hard Time";
   if (els.copyLatestLaunchReportButton) els.copyLatestLaunchReportButton.hidden = true;
   setPlayBusy(true);
-  setLog(`Preparing ${requestedPackName} and Minecraft Launcher...`);
-  showToast("Preparing Minecraft Launcher", `Selecting the exact ${requestedPackName} installation.`, "info");
+  setLog(`Opening Minecraft Launcher for ${requestedPackName}...`);
+  showToast("Opening Minecraft Launcher", `Using the prepared ${requestedPackName} installation.`, "info");
   try {
     const result = await window.aht.play(requestedPackKey);
     const profileName = result?.minecraftProfile?.profileName || requestedPackName;
@@ -4784,7 +5638,7 @@ if (els.repairPromptOverlay) {
 if (els.repairPromptRepairButton) {
   els.repairPromptRepairButton.addEventListener("click", () => {
     closeRepairPrompt();
-    startUpdate(true);
+    startUpdate(true, { packKey: els.repairPromptRepairButton.dataset.packKey || activeSidebarPack });
   });
 }
 if (els.updateOptionsBackButton) {
@@ -4823,6 +5677,14 @@ if (els.openMinecraftRootPathButton) {
 els.pickMinecraftRootButton.addEventListener("click", async () => {
   const folder = await window.aht.selectFolder(els.minecraftRootInput.value.trim() || currentStatus?.config?.minecraftLauncher?.rootDir || "");
   if (folder) els.minecraftRootInput.value = folder;
+});
+els.pickMinecraftExecutableButton.addEventListener("click", async () => {
+  try {
+    const file = await window.aht.selectMinecraftExecutable();
+    if (file) els.minecraftExecutableInput.value = file;
+  } catch (error) {
+    showToast("Select Minecraft Launcher", error.message || String(error), "error");
+  }
 });
 if (els.minecraftMemoryInput) {
   els.minecraftMemoryInput.addEventListener("input", () => setMemoryValue(els.minecraftMemoryInput.value));
@@ -4864,7 +5726,7 @@ els.saveSettingsButton.addEventListener("click", async () => {
   try {
     await saveDeveloperSecrets({ quiet: false });
     const result = await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
-    await refresh();
+    await refreshPrepared(activeSidebarPack);
     if (result?.profileUpdated) {
       showToast("Settings saved", "Minecraft Launcher profile was updated.", "success");
     } else if (result?.profileError) {
@@ -4902,6 +5764,13 @@ async function loginDeveloper() {
       password: els.adminPasswordInput.value
     });
     els.adminPasswordInput.value = "";
+    els.developerLoginStatus.textContent = "Loading launcher settings...";
+    let refreshError = "";
+    try {
+      await refresh();
+    } catch (error) {
+      refreshError = cleanErrorMessage(error);
+    }
     developerAuthenticated = true;
     document.body.classList.remove("dev-locked");
     els.developerTab.hidden = false;
@@ -4913,7 +5782,10 @@ async function loginDeveloper() {
       : "Session active";
     activateTab("developer");
     updateReleaseUploadState();
-    setDevLog(result);
+    setDevLog(refreshError ? { ...result, statusRefreshError: refreshError } : result);
+    const recoveryDetail = result.credentialsRecovered
+      ? "Saved developer credentials were recovered and re-encrypted for this Windows profile."
+      : "";
     const remoteDetail = result.remoteAuthenticated
       ? "Worker admin data is connected."
       : result.remotePending
@@ -4921,16 +5793,12 @@ async function loginDeveloper() {
         : result.remoteError
           ? `Worker data not connected: ${result.remoteError}`
           : "";
-    showToast("Developer login successful", remoteDetail || (result.expiresAt ? `Expires ${new Date(result.expiresAt).toLocaleString()}` : ""), "success");
-    refresh().catch((error) => {
-      const message = cleanErrorMessage(error);
-      setDevLog(message);
-      showToast("Status refresh failed", message, "error");
-    });
+    const refreshDetail = refreshError ? `Launcher settings could not refresh: ${refreshError}` : "";
+    showToast("Developer login successful", [recoveryDetail, remoteDetail, refreshDetail].filter(Boolean).join(" ") || (result.expiresAt ? `Expires ${new Date(result.expiresAt).toLocaleString()}` : ""), refreshError ? "info" : "success");
   } catch (error) {
     const message = cleanErrorMessage(error);
     developerAuthenticated = false;
-    document.body.classList.add("dev-locked");
+    syncDeveloperAppearance();
     els.developerLoginScreen.hidden = false;
     els.developerConsole.hidden = true;
     els.developerLoginStatus.textContent = message;
@@ -4949,6 +5817,24 @@ els.developerLoginForm.addEventListener("submit", (event) => {
 els.devTabs.forEach((tab) => {
   tab.addEventListener("click", () => activateDeveloperSection(tab.dataset.devTarget));
 });
+if (els.loadSocialLinksButton) {
+  els.loadSocialLinksButton.addEventListener("click", async () => {
+    setUnavailable(els.loadSocialLinksButton, true);
+    setSocialLinksPublishStatus("warn", "Loading published links", "Checking the public launcher social-links object.");
+    try {
+      await loadLauncherSocialLinks({ forceRefresh: true, populateDeveloper: true });
+    } catch (error) {
+      const message = cleanErrorMessage(error);
+      setSocialLinksPublishStatus("bad", "Links could not be loaded", message);
+      showToast("Social links load failed", message, "error");
+    } finally {
+      setUnavailable(els.loadSocialLinksButton, false);
+    }
+  });
+}
+if (els.publishSocialLinksButton) {
+  els.publishSocialLinksButton.addEventListener("click", () => publishDeveloperSocialLinks());
+}
 els.loadUpdateLogsButton.addEventListener("click", () => loadDeveloperUpdateLogs());
 els.publishUpdateLogButton.addEventListener("click", () => publishDeveloperUpdateLog());
 els.pickUpdateLogImageButton.addEventListener("click", async () => {
@@ -5105,7 +5991,7 @@ async function buildPtbClientZipFromSelectedFolder() {
     return;
   }
   if (!version) {
-    setReleaseCheck("bad", "PTB version required", "Enter the PTB pack version", "The version is used by the PTB player feed and GitHub release.", "ptb");
+    setReleaseCheck("bad", "PTB version required", "Enter the PTB pack version", "The version identifies the update in the PTB player feed.", "ptb");
     return;
   }
   setUnavailable(els.buildPtbClientZipButton, true);
@@ -5312,6 +6198,7 @@ async function publishSelectedRelease(target = "stable") {
   }
   setReleaseBusy(true);
   let r2Result = null;
+  let github = null;
   try {
     await saveDeveloperSecrets();
     await window.aht.saveSettings(serializeSettings(), activeSidebarPack);
@@ -5333,27 +6220,34 @@ async function publishSelectedRelease(target = "stable") {
       releaseTarget: target,
       r2AccountId: inputValue(els.r2AccountIdInput, ""),
       r2AccessKeyId: inputValue(els.r2AccessKeyIdInput, ""),
-      r2SecretAccessKey: inputValue(els.r2SecretAccessKeyInput, "")
+      r2SecretAccessKey: inputValue(els.r2SecretAccessKeyInput, ""),
+      githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
+      githubBranch: inputValue(els.githubBranchInput, "main"),
+      githubToken: inputValue(els.githubTokenInput, "")
     });
-    setReleaseCheck("warn", "Publishing GitHub mirror", target === "ptb" ? "Using modpack-ptb tag" : "Using modpack-stable tag", "R2 is verified. Uploading the exact ZIP and channel manifest to the separate GitHub release.", target);
-    const github = await window.aht.devPublishModpackGithub({
+    // Ignore late polling responses after the verified player release completes.
+    clearInterval(uploadPoll); uploadPoll = null; uploadPollGeneration++;
+    setReleaseCheck("warn", "Release live", "Mirroring changed files", "The player feed is verified. GitHub receives only the patch and release metadata, never the full package.", target);
+    startUploadPolling("github");
+    github = await window.aht.devPublishModpackGithub({
       outDir: developerOutDir(),
       releaseTarget: target,
       githubRepo: inputValue(els.githubRepoInput, "svre-mc/aht-launcher"),
       githubBranch: inputValue(els.githubBranchInput, "main"),
       githubToken: inputValue(els.githubTokenInput, "")
     });
+    clearInterval(uploadPoll); uploadPoll = null; uploadPollGeneration++;
     const defaults = target === "stable"
       ? await writePlayerDefaultsForCurrentFeed().catch((error) => ({ error: cleanErrorMessage(error) }))
       : null;
     setDevLog({ r2: r2Result, github, playerDefaults: defaults });
-    if (r2Result.validation?.ok) {
-      releaseValidationByTarget.set(target, { ok: true, outDir: releaseKey(target), result: r2Result.validation });
-      const feed = r2Result.verification?.publicLatestUrl ? ` Verified ${r2Result.verification.publicLatestUrl}.` : "";
-      const defaultsLine = defaults?.written?.length ? ` Player defaults updated in ${defaults.written.length} location${defaults.written.length === 1 ? "" : "s"}.` : "";
-      setReleaseCheck("ok", target === "ptb" ? "PTB published" : "Upload complete", r2Result.validation.latest ? `${displayPackName(r2Result.validation.latest.name)} ${r2Result.validation.latest.version}`.trim() : "Release uploaded", `${r2Result.uploaded?.length || 0} R2 objects uploaded.${feed} GitHub ${github.tagName} published.${defaultsLine}`, target);
-    }
-    showToast(target === "ptb" ? "PTB published" : "Update published", `${r2Result.uploaded?.length || 0} R2 objects and GitHub ${github.tagName} are ready.`, "success");
+    if (r2Result.validation?.ok) releaseValidationByTarget.set(target, { ok: true, outDir: releaseKey(target), result: r2Result.validation });
+    const uploaded = r2Result.uploaded?.filter((item) => !item.skipped).length || 0;
+    const skipped = r2Result.uploaded?.filter((item) => item.skipped).length || 0;
+    const feed = r2Result.verification?.publicLatestUrl ? ` Verified ${r2Result.verification.publicLatestUrl}.` : "";
+    setReleaseUploadProgress({ percent: 100, phase: "Update published" }, false, target);
+    setReleaseCheck("ok", target === "ptb" ? "PTB published" : "Upload complete", "Players can update now", `${uploaded} changed files uploaded; ${skipped} unchanged files reused.${feed} GitHub ${github.tagName} contains changes only.`, target);
+    showToast(target === "ptb" ? "PTB published" : "Update published", "The update is available in the launcher.", "success");
     return { ok: true, r2: r2Result, github, defaults };
   } catch (error) {
     const message = cleanErrorMessage(error);
@@ -5364,10 +6258,11 @@ async function publishSelectedRelease(target = "stable") {
     }
     setDevLog(message);
     const partial = Boolean(r2Result);
-    setReleaseCheck("bad", partial ? "GitHub mirror failed" : (message.includes("Cache-only mode requires") ? "Cache-only blocked" : (message.startsWith("Release blocked:") ? "Upload blocked" : "Publish failed")), partial ? "R2 published; GitHub incomplete" : "Update was not published", message, target);
-    showToast(partial ? "Publication incomplete" : "Publish failed", message, "error");
+    setReleaseCheck(partial ? "warn" : "bad", partial ? "Update published" : (message.includes("Cache-only mode requires") ? "Cache-only blocked" : (message.startsWith("Release blocked:") ? "Upload blocked" : "Publish failed")), partial ? "Player release is live; GitHub mirror incomplete" : "Update was not published", message, target);
+    showToast(partial ? "Update published; mirror incomplete" : "Publish failed", message, "error");
     return { ok: false, partial, error: message };
   } finally {
+    clearInterval(uploadPoll); uploadPoll = null; uploadPollGeneration++;
     setReleaseBusy(false);
   }
 }
@@ -5386,13 +6281,13 @@ els.publishReleaseButton.addEventListener("click", () => {
   input.addEventListener("change", () => invalidateReleaseValidation());
 });
 [els.ptbPackZipInput, els.ptbClientModpackDirInput, els.ptbClientZipVersionInput].filter(Boolean).forEach((input) => {
-  input.addEventListener("input", () => invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb"));
-  input.addEventListener("change", () => invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb"));
+  input.addEventListener("input", () => invalidateReleaseValidation("PTB ready", "Publish updates to the separate PTB player feed.", "ptb"));
+  input.addEventListener("change", () => invalidateReleaseValidation("PTB ready", "Publish updates to the separate PTB player feed.", "ptb"));
 });
 [els.playerFeedUrlInput, els.curseforgeApiKeyInput, els.launcherProofSecretInput, els.socialServerSecretInput, els.cacheOnlyInput, els.outDirInput, els.cacheModsInput, els.baseUrlInput, els.r2AccountIdInput, els.r2AccessKeyIdInput, els.r2SecretAccessKeyInput].filter(Boolean).forEach((input) => {
   const invalidateBoth = () => {
     invalidateReleaseValidation();
-    invalidateReleaseValidation("PTB ready", "PTB uses its own R2 prefix and GitHub release tags.", "ptb");
+    invalidateReleaseValidation("PTB ready", "Publish updates to the separate PTB player feed.", "ptb");
   };
   input.addEventListener("input", invalidateBoth);
   input.addEventListener("change", invalidateBoth);
@@ -5463,17 +6358,28 @@ els.bucketInput.addEventListener("input", () => {
   updateReleaseUploadState();
 });
 
+void checkLauncherUpdateQuietly();
+window.aht.onLauncherUpdateAvailable?.((update) => acceptLauncherUpdateCheck(update));
+const startupWatchdog = window.setTimeout(() => {
+  if (!document.body.classList.contains("is-booting")) return;
+  if (!currentStatus) renderInitialStatusError(new Error("A startup check is taking too long."));
+  else setLaunchActionStatus("A startup check is taking too long. You can retry the installation check.");
+  revealLauncher();
+}, 20_000);
 void bootstrapLauncher().catch((error) => {
   console.warn("Launcher startup gate failed", error);
   if (!currentStatus) renderInitialStatusError(error);
   revealLauncher();
-});
+}).finally(() => window.clearTimeout(startupWatchdog));
 
 window.addEventListener("focus", () => {
+  void checkLauncherUpdateQuietly();
   if (Date.now() - lastStatusRefreshAt > 5000) {
     refreshQuietly();
   }
 });
+
+window.addEventListener("online", () => void checkLauncherUpdateQuietly());
 
 window.setInterval(() => {
   refreshQuietly();

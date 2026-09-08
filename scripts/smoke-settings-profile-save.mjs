@@ -21,7 +21,11 @@ const javaPath = path.join(javaHome, 'bin', 'java.exe');
 const versionId = '1.12.2-forge-14.23.5.2860';
 const latestPath = path.join(root, 'latest.json');
 const tempDefaults = path.join(root, 'app.defaults.json');
-const packagedDefaults = smokeExe ? path.join(path.dirname(smokeExe), 'app.defaults.json') : '';
+const useTempDefaults = process.env.AHT_SMOKE_USE_TEMP_DEFAULTS === '1';
+// Keep mutable test data outside signed macOS app bundles and Linux packages.
+const packagedDefaults = smokeExe && process.platform === 'win32' && !useTempDefaults
+  ? path.join(path.dirname(smokeExe), 'app.defaults.json')
+  : '';
 const defaultsPath = packagedDefaults || tempDefaults;
 const originalDefaults = packagedDefaults && fs.existsSync(packagedDefaults)
   ? await fsp.readFile(packagedDefaults)
@@ -170,7 +174,7 @@ const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
   env: {
     ...process.env,
-    AHT_APP_DEFAULTS: smokeExe ? '' : tempDefaults,
+    AHT_APP_DEFAULTS: packagedDefaults ? '' : tempDefaults,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
@@ -192,6 +196,7 @@ try {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'player DOM');
+  await waitFor(client, "!document.body.classList.contains('is-booting')", 'startup preparation gate');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.config?.latestUrl === ${JSON.stringify(latestPath)} ? status : false)
   `, 'local default config');
@@ -302,6 +307,28 @@ try {
     || java8SettingsProof.bodyMentionsReadyJava
   ) {
     throw new Error(`Java 8 runtime details leaked back into Game Settings: ${JSON.stringify({ java8SettingsProof, java8Runtime: status.java8Runtime })}`);
+  }
+
+  const executableSettings = await evaluate(client, `
+    window.aht.getStatus().then((status) => {
+      const executablePath = '/home/Test Player/Downloads/minecraft-launcher/minecraft-launcher';
+      fillSettings({ ...status, platformProfile: { key: 'linux' }, config: {
+        ...status.config, minecraftLauncher: { ...status.config.minecraftLauncher, executablePath }
+      }});
+      const result = {
+        visible: !document.querySelector('#minecraftExecutableField').hidden,
+        executablePath: serializeSettings().minecraftLauncher.executablePath,
+        pickerAvailable: typeof window.aht.selectMinecraftExecutable === 'function'
+      };
+      fillSettings({ ...status, platformProfile: { key: 'windows' } });
+      result.hiddenOnWindows = document.querySelector('#minecraftExecutableField').hidden;
+      fillSettings(status);
+      return result;
+    })
+  `);
+  if (!executableSettings.visible || !executableSettings.hiddenOnWindows || !executableSettings.pickerAvailable
+      || executableSettings.executablePath !== '/home/Test Player/Downloads/minecraft-launcher/minecraft-launcher') {
+    throw new Error(`Linux Minecraft executable settings failed: ${JSON.stringify(executableSettings)}`);
   }
 
   const saveResult = await evaluate(client, `

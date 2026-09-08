@@ -6,6 +6,8 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { workerLauncherProofFixture } from './helpers/launcher-proof-fixture.mjs';
+import { writeMinecraftBaseFixture } from './helpers/minecraft-base-fixture.mjs';
 
 const port = Number(process.argv[2] || 9480);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -15,6 +17,10 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-r2-ui-flow-'));
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
+const minecraftBaseFixtureDir = path.join(root, 'minecraft-base-fixture');
+const fakeJavaHome = path.join(root, 'runtime', 'temurin-8-jre');
+const fakeJavaPath = path.join(fakeJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft Launcher.app');
 const outDir = path.join(root, 'release');
 const fakeBin = path.join(root, 'bin');
 const fakeR2Root = path.join(root, 'r2');
@@ -133,6 +139,23 @@ async function waitFor(client, expression, label, attempts = 180) {
 await fsp.mkdir(fakeBin, { recursive: true });
 await fsp.mkdir(path.join(fakeR2Root, bucket), { recursive: true });
 await fsp.mkdir(path.join(instanceDir, '.aht-launcher'), { recursive: true });
+await writeMinecraftBaseFixture(minecraftBaseFixtureDir);
+await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
+await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(path.dirname(fakeJavaPath), 'javaw.exe'), 'fake windowless Java 8 executable\n', 'utf8');
+}
+await fsp.writeFile(path.join(fakeJavaHome, 'release'), 'JAVA_VERSION="1.8.0_999"\n', 'utf8');
+await fsp.mkdir(mcRoot, { recursive: true });
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
+} else if (process.platform === 'darwin') {
+  await fsp.mkdir(macMinecraftApp, { recursive: true });
+} else if (process.platform === 'linux') {
+  const linuxMinecraftLauncher = path.join(fakeBin, 'minecraft-launcher');
+  await fsp.writeFile(linuxMinecraftLauncher, '#!/usr/bin/env sh\nexit 0\n', 'utf8');
+  await fsp.chmod(linuxMinecraftLauncher, 0o755);
+}
 
 const fakeWrangler = path.join(fakeBin, 'fake-wrangler.mjs');
 await fsp.writeFile(fakeWrangler, `
@@ -243,18 +266,49 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
     ptbClientModpackDir: ptbClientDir,
     r2Bucket: bucket
   },
-  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144 },
+  launcherProof: { enabled: false, required: false, baseUrl: workerEndpoint },
+  minecraftLauncher: { enabled: false, rootDir: mcRoot, profileId: 'a-hard-time-dregora', profileName: 'A Hard Time', memoryMb: 6144, javaPath: fakeJavaPath },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'smoke-install', minecraftUsername: 'SmokeUser' });
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, workerEndpoint);
+  if (url.pathname === '/admin/login') {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (body.username !== 'admin' || body.password !== 'test-dev-password') {
+      response.statusCode = 401;
+      response.end(JSON.stringify({ error: 'Invalid username or password' }));
+      return;
+    }
+    response.statusCode = 200;
+    response.end(JSON.stringify({ token: 'release-ui-smoke-token', expiresAt: new Date(Date.now() + 3_600_000).toISOString() }));
+    return;
+  }
+  if (url.pathname === '/api/launcher-proof') {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    response.statusCode = 200;
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.end(JSON.stringify(workerLauncherProofFixture(payload, { signature: 'release-ui-smoke-signature' })));
+    return;
+  }
   if (url.pathname.startsWith('/github-api/') || url.pathname.startsWith('/github-uploads/')) {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = Buffer.concat(chunks);
-    githubCalls.push({ method: request.method, path: url.pathname, search: url.search, body: body.toString('utf8') });
+    githubCalls.push({
+      method: request.method,
+      path: url.pathname,
+      search: url.search,
+      body: body.toString('utf8'),
+      size: body.length,
+      contentLength: String(request.headers['content-length'] || '')
+    });
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     if (request.method === 'GET' && url.pathname.includes('/releases/tags/')) {
       response.statusCode = 404;
@@ -325,6 +379,11 @@ const child = spawn(electronBin, electronArgs, {
     AHT_TEST_USER_DATA: userData,
     AHT_TEST_GITHUB_API_BASE: `${workerEndpoint}/github-api`,
     AHT_TEST_GITHUB_UPLOADS_BASE: `${workerEndpoint}/github-uploads`,
+    AHT_TEST_FORGE_INSTALLER_SUCCESS: '1',
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: 'amd64',
+    AHT_TEST_MINECRAFT_BASE_FIXTURE_DIR: minecraftBaseFixtureDir,
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
 
     ELECTRON_ENABLE_LOGGING: '0'
   },
@@ -338,7 +397,7 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && document.querySelector('#developerLoginForm')", 'developer login DOM');
+  await waitFor(client, "document.readyState === 'complete' && document.body.classList.contains('is-launcher-ready') && document.querySelector('#developerLoginForm')", 'hydrated developer login DOM');
   await evaluate(client, `
     (() => {
       document.querySelector('#adminPasswordInput').value = 'test-dev-password';
@@ -369,7 +428,7 @@ try {
   await evaluate(client, "document.querySelector('#publishReleaseButton').click()");
   await waitFor(client, `(() => {
     const state = document.querySelector('#releaseCheckState')?.textContent || '';
-    return ['Upload complete', 'Upload failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
+    return ['Upload complete', 'Update published', 'Upload failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
   })()`, 'release publish terminal state', 360);
   const uiProof = await evaluate(client, `
     ({
@@ -392,8 +451,12 @@ try {
   if (updateResult.installed?.version !== '2.8.3') {
     throw new Error(`Player update failed after UI publish: ${JSON.stringify(updateResult)}`);
   }
+  const versionLocks = fs.readdirSync(path.join(instanceDir, 'mods'))
+    .filter((name) => /^aht-version-lock-[0-9][0-9A-Za-z.-]*\.jar$/i.test(name));
+  if (versionLocks.length !== 1) {
+    throw new Error(`Exact client ZIP install did not contain one current AHT version lock: ${JSON.stringify(versionLocks)}`);
+  }
   for (const requiredPath of [
-    path.join(instanceDir, 'mods', 'aht-version-lock-1.1.1.jar'),
     path.join(instanceDir, 'config', 'aht-ui-test.cfg'),
     path.join(instanceDir, 'resourcepacks', 'aht-ui-test.zip'),
     path.join(instanceDir, 'scripts', 'aht-ui.zs')
@@ -423,7 +486,7 @@ try {
   await evaluate(client, "document.querySelector('#buildPtbClientZipButton').click()");
   await waitFor(client, `(() => {
     const state = document.querySelector('#ptbReleaseCheckState')?.textContent || '';
-    return ['PTB published', 'GitHub mirror failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
+    return ['PTB published', 'Update published', 'GitHub mirror failed', 'Publish failed', 'Upload blocked', 'Release blocked', 'Cache-only blocked'].includes(state);
   })()`, 'PTB publish terminal state', 360);
   const ptbUiProof = await evaluate(client, `({
     state: document.querySelector('#ptbReleaseCheckState').textContent,
@@ -485,6 +548,12 @@ try {
     .map((call) => new URLSearchParams(call.search).get('name'));
   if (!githubAssetNames.some((name) => name?.startsWith('a-hard-time-stable-')) || !githubAssetNames.some((name) => name?.startsWith('a-hard-time-ptb-'))) {
     throw new Error(`UI publication did not upload separate stable/PTB GitHub assets: ${JSON.stringify(githubAssetNames)}`);
+  }
+  const invalidLength = githubCalls
+    .filter((call) => call.method === 'POST' && call.path.includes('/assets'))
+    .find((call) => Number(call.contentLength) !== call.size);
+  if (invalidLength) {
+    throw new Error(`Electron did not send the exact GitHub asset Content-Length: ${JSON.stringify(invalidLength)}`);
   }
   const defaults = JSON.parse(fs.readFileSync(path.join(defaultsDir, 'app.defaults.json'), 'utf8'));
   if (defaults.latestUrl !== `${workerEndpoint}/latest.json`) {

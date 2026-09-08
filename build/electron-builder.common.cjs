@@ -4,6 +4,7 @@ const developerOnlySourceFiles = [
   'src/serverTransfer.js',
   'src/githubActions.js',
   'src/githubModpackRelease.js',
+  'src/githubPublishRequest.js',
   'src/r2DirectUpload.js'
 ];
 const developerOnlyNodeModules = [
@@ -13,6 +14,11 @@ const developerOnlyNodeModules = [
   'node_modules/ssh2/**',
   'node_modules/yazl/**'
 ];
+const packageMetadata = require('../package.json');
+const launcherReleaseVersion = String(packageMetadata.ahtLauncherVersion || packageMetadata.version || '').trim();
+if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(launcherReleaseVersion)) {
+  throw new Error('package.json ahtLauncherVersion must be a numeric launcher release version.');
+}
 
 const files = [
   // Installer/build sources are not runtime payload. Shipping them inside
@@ -47,13 +53,15 @@ function regularPlayerConfig({ productName, output, target }) {
     asarUnpack,
     extraMetadata: {
       ahtLauncherTarget: target,
-      ahtLauncherMode: 'player'
+      ahtLauncherMode: 'player',
+      ahtLauncherVersion: launcherReleaseVersion
     }
   };
 }
 
 module.exports = {
   regularPlayerConfig,
+  launcherReleaseVersion,
   developerOnlySourceFiles,
   developerOnlyNodeModules
 };

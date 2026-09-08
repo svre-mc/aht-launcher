@@ -11,6 +11,9 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aht-developer-client-bypass-
 const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
+const java8Path = path.join(root, 'java8', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+const macMinecraftApp = path.join(root, 'Minecraft Launcher.app');
+const linuxMinecraftLauncher = path.join(root, 'bin', 'minecraft-launcher');
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
@@ -137,7 +140,7 @@ await writeJson(path.join(userData, 'launcher.config.json'), {
   developer: { adminBaseUrl: '', defaultOutDir: path.join(root, 'release'), defaultCacheModsDir: '', r2Bucket: 'ahtlauncher' },
   launcherUpdate: { enabled: false, latestUrl: '' },
   launcherProof: { enabled: false, required: false, baseUrl: '', keyId: 'aht-launcher-proof-v1' },
-  minecraftLauncher: { enabled: true, rootDir: mcRoot, profileId: latest.packId, profileName: latest.name, memoryMb: 6144 },
+  minecraftLauncher: { enabled: true, rootDir: mcRoot, profileId: latest.packId, profileName: latest.name, memoryMb: 6144, javaPath: java8Path },
   playCommand: { command: '', args: [], cwd: instanceDir }
 });
 await writeJson(path.join(userData, 'identity.json'), { installId: 'developer-smoke-install', minecraftUsername: 'DeveloperSmoke' });
@@ -167,6 +170,17 @@ await writeJson(
   path.join(mcRoot, 'versions', '1.12.2-forge-14.23.5.2860', '1.12.2-forge-14.23.5.2860.json'),
   { id: '1.12.2-forge-14.23.5.2860', type: 'release' }
 );
+await fsp.mkdir(path.dirname(java8Path), { recursive: true });
+await fsp.writeFile(java8Path, '', 'utf8');
+await fsp.writeFile(path.join(root, 'java8', 'release'), 'JAVA_VERSION="1.8.0_402"\n', 'utf8');
+if (process.platform === 'win32') {
+  await fsp.writeFile(path.join(mcRoot, 'minecraft.exe'), '', 'utf8');
+} else if (process.platform === 'darwin') {
+  await fsp.mkdir(macMinecraftApp, { recursive: true });
+} else if (process.platform === 'linux') {
+  await fsp.mkdir(path.dirname(linuxMinecraftLauncher), { recursive: true });
+  await fsp.writeFile(linuxMinecraftLauncher, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+}
 
 const child = spawn(electronBin, electronArgs, {
   cwd: electronCwd,
@@ -174,6 +188,12 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_TEST_JAVA_RUNTIME_PROBE: 'release-file',
+    AHT_TEST_JAVA_ARCH: process.arch === 'arm64' ? 'aarch64' : 'amd64',
+    AHT_MINECRAFT_MAC_APP: process.platform === 'darwin' ? macMinecraftApp : '',
+    PATH: process.platform === 'linux'
+      ? `${path.dirname(linuxMinecraftLauncher)}${path.delimiter}${process.env.PATH || ''}`
+      : process.env.PATH,
     ELECTRON_ENABLE_LOGGING: '0',
     AHT_ALLOW_DEVELOPER: '1',
     AHT_LAUNCHER_SOURCE_ROOT: process.cwd()
@@ -188,10 +208,27 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
-  await waitFor(client, "document.readyState === 'complete' && window.aht", 'developer DOM');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting')", 'revealed developer DOM');
   const status = await waitFor(client, `
     window.aht.getStatus().then((status) => status.developerMode && status.installed?.version === '2.8.51' ? status : false)
   `, 'developer status');
+  const modeProof = await evaluate(client, `(async () => {
+    renderStatus(await window.aht.getStatus());
+    const initial = { active: activeTabName, developerStyled: document.body.classList.contains('dev-mode'), splashHidden: document.querySelector('#startupLoader').hidden };
+    await transitionSidebarSelection(document.querySelector('#developerTileButton'));
+    const locked = { active: activeTabName, sidebarVisible: getComputedStyle(document.querySelector('.sidebar')).display !== 'none', loginVisible: !document.querySelector('#developerLoginScreen').hidden, consoleHidden: document.querySelector('#developerConsole').hidden };
+    let denied = '';
+    try { await window.aht.devBuildRelease({}); } catch (error) { denied = error.message; }
+    await transitionSidebarSelection(document.querySelector('#gameTileButton'));
+    return { initial, locked, denied, returned: activeTabName, developerStyled: document.body.classList.contains('dev-mode'), animated: document.getAnimations().length };
+  })()`);
+  if (modeProof.initial.active === 'developer' || modeProof.initial.developerStyled || !modeProof.initial.splashHidden
+      || modeProof.locked.active !== 'developer' || !modeProof.locked.sidebarVisible || !modeProof.locked.loginVisible || !modeProof.locked.consoleHidden
+      || !/Developer login is required/.test(modeProof.denied) || modeProof.returned !== 'player' || modeProof.developerStyled || modeProof.animated !== 0) {
+    throw new Error(`Developer player/tool mode separation regressed: ${JSON.stringify(modeProof)}`);
+  }
   if (!status.developerClientBypass) {
     throw new Error(`Developer client bypass was not enabled: ${JSON.stringify(status)}`);
   }
@@ -255,6 +292,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     root,
+    modeProof,
     badge,
     latestError: status.latestError,
     integrity: status.integrity.counts,

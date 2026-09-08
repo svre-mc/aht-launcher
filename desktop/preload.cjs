@@ -9,7 +9,14 @@ function developerApiAllowed() {
 }
 
 const playerApi = {
-  getStatus: (packKey = 'aht') => ipcRenderer.invoke('status:get', { packKey }),
+  selectMinecraftExecutable: () => ipcRenderer.invoke('dialog:minecraftExecutable'),
+  getStatus: (packKey = 'aht', options = {}) => ipcRenderer.invoke('status:get', {
+    packKey,
+    preferCache: Boolean(options.preferCache),
+    includeUpdateLogs: Boolean(options.includeUpdateLogs)
+  }),
+  retryAccountSync: (packKey = 'aht') => ipcRenderer.invoke('account:retrySync', { packKey }),
+  refreshNews: (packKey = 'aht') => ipcRenderer.invoke('news:refresh', { packKey }),
   copyErrorReport: (payload) => ipcRenderer.invoke('diagnostics:copyErrorReport', payload || {}),
   saveSettings: (config, packKey = 'aht') => ipcRenderer.invoke('settings:save', { config, packKey }),
   testFeed: (config, packKey = 'aht') => ipcRenderer.invoke('settings:testFeed', { config, packKey }),
@@ -18,6 +25,13 @@ const playerApi = {
   startLauncherUpdate: () => ipcRenderer.invoke('launcher:updateStart'),
   restartLauncherUpdate: () => ipcRenderer.invoke('launcher:updateRestart'),
   getLauncherUpdateState: () => ipcRenderer.invoke('launcher:updateState'),
+  checkLauncherUpdate: () => ipcRenderer.invoke('launcher:checkUpdate'),
+  onLauncherUpdateAvailable: (listener) => {
+    if (typeof listener !== 'function') return () => {};
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on('launcher:update-available', handler);
+    return () => ipcRenderer.removeListener('launcher:update-available', handler);
+  },
   scanFiles: (packKey = 'aht') => ipcRenderer.invoke('files:scan', { packKey }),
   scanChanges: (packKey = 'aht') => ipcRenderer.invoke('changes:scan', { packKey }),
   syncChanges: (packKey = 'aht') => ipcRenderer.invoke('changes:sync', { packKey }),
@@ -27,8 +41,19 @@ const playerApi = {
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
   likeUpdateLog: (logId) => ipcRenderer.invoke('update-log:like', { logId }),
+  getSocialLinks: (options = {}) => ipcRenderer.invoke('social-links:get', options || {}),
   socialList: () => ipcRenderer.invoke('social:list'),
   socialAction: (payload) => ipcRenderer.invoke('social:action', payload || {}),
+  getStartupPreparationState: () => ipcRenderer.invoke('startup:get-state'),
+  prepareStartup: () => ipcRenderer.invoke('startup:prepare'),
+  onStartupPreparationProgress: (listener) => {
+    if (typeof listener !== 'function') return () => {};
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on('startup:preparation-progress', handler);
+    return () => ipcRenderer.removeListener('startup:preparation-progress', handler);
+  },
+  preparePlay: (packKey = 'aht', options = {}) => ipcRenderer.invoke('play:prepare', { packKey, force: Boolean(options.force) }),
+  selectPreparedPlay: (packKey = 'aht') => ipcRenderer.invoke('play:select-prepared', { packKey }),
   play: (packKey = 'aht') => ipcRenderer.invoke('play:start', { packKey }),
   setupRecommend: () => ipcRenderer.invoke('setup:recommend'),
   setupApply: () => ipcRenderer.invoke('setup:apply'),
@@ -66,6 +91,7 @@ const developerApi = {
   devServerTransferState: () => ipcRenderer.invoke('dev:serverTransferState'),
   devGetSecrets: () => ipcRenderer.invoke('dev:getSecrets'),
   devSaveSecrets: (payload) => ipcRenderer.invoke('dev:saveSecrets', payload),
+  devPublishSocialLinks: (payload) => ipcRenderer.invoke('dev:publishSocialLinks', payload || {}),
   devLogin: (payload) => ipcRenderer.invoke('dev:login', payload),
   devSummary: () => ipcRenderer.invoke('dev:summary'),
   devEvents: (limit) => ipcRenderer.invoke('dev:events', limit),

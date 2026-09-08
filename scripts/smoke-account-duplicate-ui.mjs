@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeviceCredential } from '../src/deviceIdentity.js';
 
 const port = Number(process.argv[2] || 10060);
 const endpoint = `http://127.0.0.1:${port}`;
@@ -14,6 +15,7 @@ const userData = path.join(root, 'userData');
 const instanceDir = path.join(root, 'instance');
 const mcRoot = path.join(root, 'minecraft');
 const requests = [];
+let registrationDelayMs = 0;
 const recoverySecrets = new Map([
   ['takenuser_1', 'TakenUser_secure_launcher_credential_000000000001'],
   ['disabledprof', 'DisabledProf_secure_launcher_credential_0000000001']
@@ -149,11 +151,26 @@ await writeJson(path.join(userData, 'account-recovery', 'takenuser_1.json'), {
   secret: recoverySecrets.get('takenuser_1'),
   createdAt: '2026-08-03T00:00:00.000Z'
 });
+const fixtureDeviceCredential = createDeviceCredential();
+await writeJson(path.join(userData, 'device-identity.json'), {
+  schemaVersion: fixtureDeviceCredential.schemaVersion,
+  protocol: fixtureDeviceCredential.protocol,
+  algorithm: fixtureDeviceCredential.algorithm,
+  deviceId: fixtureDeviceCredential.deviceId,
+  publicKey: fixtureDeviceCredential.publicKey,
+  privateKey: {
+    value: Buffer.from(fixtureDeviceCredential.privateKey, 'utf8').toString('base64'),
+    encrypted: false
+  },
+  createdAt: fixtureDeviceCredential.createdAt,
+  protectedBy: 'explicit-test-fallback'
+});
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, workerEndpoint);
   if (url.pathname === '/api/users/register' && request.method === 'POST') {
     const body = await readBody(request);
+    if (registrationDelayMs > 0) await sleep(registrationDelayMs);
     const recoveryHeader = String(request.headers['x-aht-launcher-recovery'] || '');
     requests.push({ ...body, recoveryHeader });
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -197,6 +214,7 @@ const child = spawn(electronBin, electronArgs, {
     ...process.env,
     AHT_TEST_HOOKS: '1',
     AHT_TEST_USER_DATA: userData,
+    AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
     ELECTRON_ENABLE_LOGGING: '0'
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -218,18 +236,22 @@ try {
   client = await connect(target.webSocketDebuggerUrl);
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  await client.call('Page.bringToFront');
+  await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.readyState === 'complete' && window.aht", 'launcher DOM');
   const recovery = await waitFor(client, `
-    window.aht.getStatus().then((status) => status.identity?.minecraftUsername === 'TakenUser_1'
-      ? ({
+    window.aht.getStatus().then((status) => {
+      if (status.identity?.minecraftUsername !== 'TakenUser_1') return false;
+      renderStatus(status);
+      return ({
           status,
           playerLabel: document.querySelector('#playerLabelView')?.textContent || '',
           usernameSurfaceAbsent: !document.querySelector('#accountOverlay')
             && !document.querySelector('#minecraftUsernameInput')
             && !document.querySelector('#playerLabelInput')
             && typeof window.aht.accountRegister === 'undefined'
-        })
-      : false)
+        });
+    })
   `, 'automatic Minecraft Launcher account recovery');
   const recoveredIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
   const storedConfig = JSON.parse(fs.readFileSync(path.join(userData, 'launcher.config.json'), 'utf8'));
@@ -248,6 +270,101 @@ try {
     throw new Error(`Recovery did not retry with a Minecraft Launcher account match: ${JSON.stringify(requests)}`);
   }
 
+  await waitFor(client, "!document.body.classList.contains('is-booting')", 'interactive launcher surface', 480);
+  const retryFixture = {
+    ...recoveredIdentity,
+    usernameRegistrationMode: 'worker',
+    remoteRegistrationAttemptedAt: '2026-08-03T00:00:00.000Z',
+    remoteRegistrationConfirmedAt: '',
+    remoteRegistrationWorkerBaseUrl: '',
+    minecraftUsernameSyncWarning: 'Account sync could not connect.',
+    minecraftUsernameSyncWarningUsername: 'TakenUser_1'
+  };
+  await writeJson(path.join(userData, 'identity.json'), retryFixture);
+  const retryReady = await waitFor(client, `
+    window.aht.getStatus().then((status) => {
+      renderStatus(status);
+      const notice = document.querySelector('#accountSyncNotice');
+      return !notice.hidden && document.querySelector('#accountSyncMessage')?.textContent === 'Account sync could not connect.';
+    })
+  `, 'account sync warning before explicit retry');
+  if (!retryReady) throw new Error('Account sync retry notice did not become visible.');
+
+  const requestsBeforeRetry = requests.length;
+  registrationDelayMs = 250;
+  const retryHitState = await evaluate(client, `(() => {
+    const rect = document.querySelector('#accountSyncRetry').getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, hitId: hit?.id || '', hitClass: hit?.className || '', pointerEvents: getComputedStyle(hit).pointerEvents };
+  })()`);
+  if (retryHitState.hitId !== 'accountSyncRetry') {
+    throw new Error(`Account sync retry is not the top hit target: ${JSON.stringify(retryHitState)}`);
+  }
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: retryHitState.x, y: retryHitState.y });
+  await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: retryHitState.x, y: retryHitState.y, button: 'left', clickCount: 1 });
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: retryHitState.x, y: retryHitState.y, button: 'left', clickCount: 1 });
+  await sleep(40);
+  const retryBusyState = await evaluate(client, `(() => {
+    const button = document.querySelector('#accountSyncRetry');
+    return { disabled: button.disabled, text: button.textContent };
+  })()`);
+  if (!retryBusyState?.disabled || retryBusyState.text !== 'Retrying...') {
+    throw new Error(`Account sync retry did not expose a busy state: ${JSON.stringify(retryBusyState)}`);
+  }
+  await waitFor(client, "document.querySelector('#accountSyncNotice').hidden === true", 'successful account sync retry');
+  registrationDelayMs = 0;
+  const retriedIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
+  const retryRequests = requests.slice(requestsBeforeRetry);
+  if (
+    retryRequests.length !== 2
+    || retryRequests[1]?.recoverExistingUsername !== true
+    || retryRequests[1]?.minecraftAccountMatched !== true
+    || retriedIdentity.minecraftUsernameSyncWarning
+    || !retriedIdentity.remoteRegistrationConfirmedAt
+    || retriedIdentity.usernameRegistrationMode !== 'minecraft-launcher-retry'
+  ) {
+    throw new Error(`Explicit account sync retry did not persist success: ${JSON.stringify({
+      requestDelta: requests.length - requestsBeforeRetry,
+      recoveryAttempted: Boolean(retryRequests[1]?.recoverExistingUsername && retryRequests[1]?.minecraftAccountMatched),
+      retriedIdentity
+    })}`);
+  }
+
+  await writeJson(path.join(userData, 'identity.json'), {
+    ...retriedIdentity,
+    minecraftLauncherDetectedUsername: 'PreviouslyActiveUser',
+    minecraftUsernameSyncWarning: 'Secure launcher recovery could not be verified for this username.',
+    minecraftUsernameSyncWarningUsername: 'PreviouslyActiveUser'
+  });
+  const requestsBeforeReconcile = requests.length;
+  const reconciledStatus = await evaluate(client, `
+    window.aht.getStatus().then((status) => {
+      renderStatus(status);
+      return {
+        detected: status.identity?.minecraftLauncherDetectedUsername || '',
+        warning: status.identity?.minecraftUsernameSyncWarning || '',
+        noticeHidden: document.querySelector('#accountSyncNotice').hidden
+      };
+    })
+  `);
+  const reconciledIdentity = JSON.parse(fs.readFileSync(path.join(userData, 'identity.json'), 'utf8'));
+  if (
+    requests.length !== requestsBeforeReconcile
+    || reconciledStatus.detected !== 'TakenUser_1'
+    || reconciledStatus.warning
+    || !reconciledStatus.noticeHidden
+    || reconciledIdentity.minecraftUsernameSyncWarning
+    || reconciledIdentity.minecraftLauncherDetectedUsername !== 'TakenUser_1'
+  ) {
+    throw new Error(`A resolved stale account warning was not reconciled locally: ${JSON.stringify({
+      requestDelta: requests.length - requestsBeforeReconcile,
+      reconciledStatus,
+      reconciledIdentity
+    })}`);
+  }
+
   console.log(JSON.stringify({
     ok: true,
     root,
@@ -255,6 +372,9 @@ try {
     profileForcedEnabled: storedConfig.minecraftLauncher.enabled,
     registeredUsername: recoveredIdentity.minecraftUsername,
     recoveryMode: recoveredIdentity.usernameRegistrationMode,
+    retryBusyState,
+    retryRecovered: !retriedIdentity.minecraftUsernameSyncWarning,
+    staleWarningReconciled: !reconciledIdentity.minecraftUsernameSyncWarning,
     requests: requests.map((item) => ({ username: item.username, installId: item.installId, packId: item.packId, recovered: Boolean(item.recoverExistingUsername && item.minecraftAccountMatched) }))
   }, null, 2));
 } finally {

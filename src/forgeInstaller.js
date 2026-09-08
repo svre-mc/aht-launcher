@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { cleanJavaEnvironment } from './javaEnvironment.js';
+import { renameRuntimeDirectory } from './runtimeFileOps.js';
 import {
   downloadToFile,
   ensureDir,
@@ -184,6 +186,7 @@ function forgeLibraryLauncherCompatible(library = null, plan = {}) {
 
 function validForgeVersionJson(value = null, versionId = '', plan = {}) {
   if (!isPlainObject(value)) return false;
+  if (plan.minecraftVersion === '1.12.2' && ('assets' in value || 'assetIndex' in value)) return false;
   const id = String(value.id || '').trim();
   const inheritsFrom = String(value.inheritsFrom || '').trim();
   const minecraftArguments = String(value.minecraftArguments || '').trim();
@@ -282,6 +285,12 @@ async function inspectForgeVersionJson(jsonPath = '', versionId = '', plan = {},
     };
   }
   const sanitized = sanitizeForgeLauncherMetadata(parsed);
+  if (plan.minecraftVersion === '1.12.2' && sanitized?.inheritsFrom === '1.12.2') {
+    // The verified vanilla parent owns the asset index. Stale CurseForge
+    // overrides can incorrectly send this profile to the retired legacy index.
+    delete sanitized.assets;
+    delete sanitized.assetIndex;
+  }
   const repairedMetadata = JSON.stringify(sanitized) !== JSON.stringify(parsed);
   if (repairedMetadata && options.repairMetadata !== false && validForgeVersionJson(sanitized, versionId, plan)) {
     // Any code path that elects to rewrite launcher metadata must preserve the
@@ -512,6 +521,7 @@ function runJavaProbeProcess(command, args, options = {}) {
     let settled = false;
     const child = spawn(command, args, {
       cwd: options.cwd,
+      env: cleanJavaEnvironment(options.env || process.env),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -617,6 +627,9 @@ export function javaSetupHelpMessage(platform = process.platform) {
 function minecraftServiceFailureMessage(error = null) {
   const text = `${error?.message || error || ''}`;
   const compact = text.replace(/\s+/g, ' ');
+  if (/Unable to prepare assets for download|Error preparing asset index/i.test(compact)) {
+    return 'Minecraft asset preparation failed. Close Minecraft Launcher and click Repair in AHT Launcher to verify Minecraft, Forge, and asset files.';
+  }
   const officialServicePattern = /REQUEST_FAILED|Unable to prepare assets for download|launcher\.mojang\.com|piston-meta\.mojang\.com|resources\.download\.minecraft\.net|libraries\.minecraft\.net|api\.minecraftservices\.com|sessionserver\.mojang\.com|authserver\.mojang\.com|maven\.minecraftforge\.net|maven\.forgecdn\.net|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network timeout/i;
   const launcherRuntimePattern = /could not open .*java-runtime-(?:gamma|beta|delta|epsilon|alpha).*javaw?\.cfg/i;
   if (!officialServicePattern.test(compact) && !launcherRuntimePattern.test(compact)) {
@@ -643,6 +656,9 @@ export function friendlyForgeJavaErrorMessage(error = null, javaPath = 'java', p
 
 function managedJavaDownloadFailureMessage(error = null, platform = process.platform) {
   const cause = String(error?.message || error || '').replace(/\s+/g, ' ').trim().slice(0, 320);
+  if (['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) {
+    return `Windows could not finish preparing Java 8 because its runtime files are locked or inaccessible. Close Minecraft and Minecraft Launcher, then click Repair in AHT Launcher. Cause: ${cause}`;
+  }
   return `AHT could not download or validate its managed Java 8 runtime.${cause ? ` Cause: ${cause}` : ''} ${javaSetupHelpMessage(platform)}`;
 }
 
@@ -740,27 +756,20 @@ async function ensureManagedJava8Runtime(plan = {}, options = {}) {
     }
     options.logger?.log?.('Extracting and validating Adoptium Java 8...');
     await extractJavaArchive(archivePath, extractedRoot);
-    const staged = await detectJava8Runtime({}, {
-      ...options,
-      javaPath: '',
-      javaRoots: [extractedRoot],
-      javaInstallRoots: [],
-      includeDefaultJavaRoots: false,
-      includeEnvironmentJava: false,
-      includePathJava: false,
-      refresh: true
-    });
-    if (!staged.usable) {
-      throw new Error(staged.reason || 'Downloaded Java 8 failed its executable and architecture probe.');
+    let stagedJavaPath = '';
+    for (const candidate of await findJavaCandidatesInRoot(extractedRoot)) {
+      if (await javaMajorFromReleaseFile(candidate) === 8) { stagedJavaPath = candidate; break; }
     }
+    if (!stagedJavaPath) throw new Error('Downloaded Java 8 archive is missing its executable or release metadata.');
+    // Probe only after promotion so Windows does not lock staging executables.
     if (await pathExists(installedRoot)) {
       previousRoot = path.join(cacheDir, `adoptium-jre8-previous-${Date.now()}`);
-      await fs.rename(installedRoot, previousRoot);
+      await renameRuntimeDirectory(installedRoot, previousRoot, { logger: options.logger });
     }
-    await fs.rename(extractedRoot, installedRoot);
+    await renameRuntimeDirectory(extractedRoot, installedRoot, { logger: options.logger });
     promoted = true;
     clearJavaRuntimeDetectionCache();
-    const installedJava = path.join(installedRoot, path.relative(extractedRoot, staged.javaPath));
+    const installedJava = path.join(installedRoot, path.relative(extractedRoot, stagedJavaPath));
     const verified = await inspectJavaRuntime(installedJava, { ...options, refresh: true });
     if (!verified.usable) {
       throw new Error(verified.reason || 'Installed Adoptium Java 8 failed its final executable probe.');
@@ -774,11 +783,11 @@ async function ensureManagedJava8Runtime(plan = {}, options = {}) {
     if (promoted) {
       await fs.rm(installedRoot, { recursive: true, force: true }).catch(() => {});
       if (previousRoot) {
-        await fs.rename(previousRoot, installedRoot).catch(() => {});
+        await renameRuntimeDirectory(previousRoot, installedRoot).catch(() => {});
       }
       clearJavaRuntimeDetectionCache();
     } else if (!promoted && previousRoot && !(await pathExists(installedRoot))) {
-      await fs.rename(previousRoot, installedRoot).catch(() => {});
+      await renameRuntimeDirectory(previousRoot, installedRoot).catch(() => {});
       clearJavaRuntimeDetectionCache();
     }
     await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
@@ -921,6 +930,34 @@ function windowsJavaInstallRoots(env = process.env) {
   return roots;
 }
 
+function macosJavaInstallRoots(env = process.env) {
+  if (process.platform !== 'darwin') return [];
+  return uniqueValues([
+    env.HOME ? path.join(env.HOME, 'Library', 'Java', 'JavaVirtualMachines') : '',
+    '/Library/Java/JavaVirtualMachines'
+  ]);
+}
+
+function linuxJavaInstallRoots(env = process.env) {
+  if (process.platform !== 'linux') return [];
+  const home = env.HOME || '';
+  return uniqueValues([
+    '/usr/lib/jvm',
+    '/usr/java',
+    '/opt/java',
+    '/opt/jdk',
+    home ? path.join(home, '.jdks') : '',
+    home ? path.join(home, '.sdkman', 'candidates', 'java') : ''
+  ]);
+}
+
+function defaultJavaInstallRoots(env = process.env) {
+  if (process.platform === 'win32') return windowsJavaInstallRoots(env);
+  if (process.platform === 'darwin') return macosJavaInstallRoots(env);
+  if (process.platform === 'linux') return linuxJavaInstallRoots(env);
+  return [];
+}
+
 function javaSearchRoots(profile = {}, options = {}) {
   const roots = [];
   const rootDir = profile?.rootDir || '';
@@ -930,7 +967,7 @@ function javaSearchRoots(profile = {}, options = {}) {
   }
   pushJavaRoot(roots, rootDir ? path.join(rootDir, '.aht-launcher', 'java') : '');
   pushJavaRoot(roots, rootDir ? path.join(rootDir, 'java') : '');
-  for (const root of options.javaInstallRoots || (includeDefaultRoots ? windowsJavaInstallRoots() : [])) {
+  for (const root of options.javaInstallRoots || (includeDefaultRoots ? defaultJavaInstallRoots() : [])) {
     pushJavaRoot(roots, root);
   }
   pushJavaRoot(roots, rootDir ? path.join(rootDir, 'runtime') : '');
@@ -1018,7 +1055,10 @@ function pathJavaCandidates(env = process.env) {
   const executable = javaExecutableName();
   return uniqueValues(String(env.PATH || '').split(path.delimiter).map((dir) => (
     String(dir || '').trim() ? path.join(String(dir).trim(), executable) : ''
-  )));
+  ))).filter((candidate) => !(
+    process.platform === 'darwin'
+    && path.resolve(candidate) === '/usr/bin/java'
+  ));
 }
 
 async function collectJavaCandidates(profile = {}, options = {}) {
@@ -1104,6 +1144,8 @@ export async function detectJava8Runtime(profile = {}, options = {}) {
   const candidates = await collectJavaCandidates(profile, options);
   const rejected = [];
   for (const candidate of candidates) {
+    const releaseMajor = await javaMajorFromReleaseFile(candidate);
+    if (releaseMajor && releaseMajor !== 8) continue;
     const inspected = await inspectJavaRuntime(candidate, options);
     if (inspected.usable) {
       const value = {
@@ -1235,6 +1277,7 @@ function runProcess(command, args, options = {}) {
     const output = [];
     const child = spawn(command, args, {
       cwd: options.cwd,
+      env: cleanJavaEnvironment(options.env || process.env),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -1383,7 +1426,7 @@ export async function installForgeLoader(profile, options = {}) {
     result = await runForgeInstallerProcess(plan, options, plan.javaPath);
   } catch (error) {
     const cacheDir = defaultJavaCacheDir(plan, options);
-    if (!certificateFailureMessage(error) || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
+    if (options.allowManagedJavaDownload === false || !certificateFailureMessage(error) || isManagedAhtJavaPath(plan.javaPath, cacheDir)) {
       const friendly = friendlyForgeJavaErrorMessage(error, plan.javaPath);
       throw new Error(friendly || error.message || String(error));
     }

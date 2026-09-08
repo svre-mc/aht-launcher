@@ -75,6 +75,10 @@ body {
   background: #050607;
 }
 
+.developer-window-drag-region {
+  display: none;
+}
+
 .sidebar {
   position: relative;
   display: grid;
@@ -1250,6 +1254,14 @@ h2 {
   gap: 9px;
 }
 
+#launchActionStatus {
+  margin: 10px 0 0;
+  max-width: 640px;
+  color: #f4d49b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .launch-actions .button {
   min-width: 0;
   min-height: 52px;
@@ -2253,33 +2265,63 @@ body.dev-mode .workspace {
   background: #090b0c;
 }
 
-body.dev-mode.dev-locked .app-frame {
+body.dev-mode .developer-window-drag-region {
+  position: fixed;
+  top: 0;
+  right: 68px;
+  left: 0;
+  z-index: 1000;
   display: block;
+  height: 34px;
+  -webkit-app-region: drag;
+  user-select: none;
 }
 
-body.dev-mode.dev-locked .sidebar,
-body.dev-mode.dev-locked .topbar,
-body.dev-mode.dev-locked #player,
-body.dev-mode.dev-locked #news,
-body.dev-mode.dev-locked #settings {
-  display: none !important;
+body.dev-mode .window-controls {
+  position: fixed;
+  z-index: 1001;
+  height: 34px;
+  -webkit-app-region: no-drag;
 }
 
-body.dev-mode.dev-locked #developer {
-  display: block;
+body.dev-mode .window-control {
+  width: 34px;
+  height: 34px;
 }
 
-body.dev-mode:not(.dev-locked) #player,
-body.dev-mode:not(.dev-locked) #news,
-body.dev-mode:not(.dev-locked) #settings,
-body.dev-mode:not(.dev-locked) #developer {
+body.dev-mode .window-minimize span::before {
+  top: 16px;
+  left: 11px;
+  width: 12px;
+}
+
+body.dev-mode .window-close span::before,
+body.dev-mode .window-close span::after {
+  top: 16px;
+  left: 10px;
+  width: 14px;
+}
+
+body.dev-mode .sidebar {
+  padding-top: 46px;
+}
+
+body.dev-mode .dev-login-screen,
+body.dev-mode .dev-console {
+  padding-top: 48px;
+}
+
+body.dev-mode #player,
+body.dev-mode #news,
+body.dev-mode #settings,
+body.dev-mode #developer {
   display: none;
 }
 
-body.dev-mode:not(.dev-locked) #player.active,
-body.dev-mode:not(.dev-locked) #news.active,
-body.dev-mode:not(.dev-locked) #settings.active,
-body.dev-mode:not(.dev-locked) #developer.active {
+body.dev-mode #player.active,
+body.dev-mode #news.active,
+body.dev-mode #settings.active,
+body.dev-mode #developer.active {
   display: block;
 }
 
@@ -3020,7 +3062,7 @@ body.dev-mode .button.strong.is-disabled {
   max-height: none;
   min-height: 100vh;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   gap: 0;
   overflow: hidden;
   border: 0;
@@ -3057,12 +3099,13 @@ body.dev-mode .button.strong.is-disabled {
 
 .downloads-head {
   position: relative;
+  grid-row: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   min-height: 62px;
-  padding-bottom: 32px;
+  padding-bottom: 18px;
   border-bottom: 1px solid var(--line-strong);
 }
 
@@ -3075,6 +3118,7 @@ body.dev-mode .button.strong.is-disabled {
 }
 
 .downloads-list {
+  grid-row: 2;
   display: grid;
   align-content: start;
   min-height: 0;
@@ -3193,7 +3237,62 @@ body.dev-mode .button.strong.is-disabled {
   cursor: default;
 }
 
+.downloads-error-panel {
+  grid-row: 3;
+  align-self: start;
+  display: grid;
+  justify-items: start;
+  gap: 5px;
+  width: min(520px, 100%);
+  margin-top: 18px;
+  border: 1px solid rgba(210, 84, 72, 0.44);
+  border-left: 3px solid #e45a4f;
+  border-radius: 3px;
+  padding: 12px 14px 11px;
+  background: linear-gradient(90deg, rgba(82, 24, 20, 0.32), rgba(7, 10, 10, 0.62));
+  box-shadow: var(--bevel), 0 16px 34px rgba(0, 0, 0, 0.28);
+}
+
+.downloads-error-panel[hidden] {
+  display: none;
+}
+
+.downloads-error-panel strong {
+  color: #f4f0e6;
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.downloads-error-report {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #e6bc75;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.downloads-error-report:hover,
+.downloads-error-report:focus-visible {
+  color: #fff2c9;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.downloads-error-report:focus-visible {
+  outline: 2px solid rgba(135, 184, 216, 0.72);
+  outline-offset: 4px;
+}
+
 .downloads-log {
+  grid-row: 4;
   align-self: start;
   max-width: min(780px, 100%);
   max-height: min(32vh, 260px);
@@ -3212,10 +3311,48 @@ body.dev-mode .button.strong.is-disabled {
 }
 
 .downloads-footer {
+  grid-row: 5;
   align-self: end;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
   color: var(--quiet);
   font-size: 16px;
   font-weight: 700;
+}
+
+.downloads-back-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 184px;
+  min-height: 46px;
+  border: 1px solid rgba(244, 240, 230, 0.2);
+  border-radius: 3px;
+  padding: 0 16px;
+  background: linear-gradient(180deg, rgba(244, 240, 230, 0.06), rgba(0, 0, 0, 0.2));
+  color: rgba(244, 240, 230, 0.82);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: var(--bevel), 0 12px 26px rgba(0, 0, 0, 0.24);
+  -webkit-app-region: no-drag;
+}
+
+.downloads-back-button:hover,
+.downloads-back-button:focus-visible {
+  border-color: rgba(244, 240, 230, 0.46);
+  color: #fff;
+  background: linear-gradient(180deg, rgba(244, 240, 230, 0.11), rgba(0, 0, 0, 0.16));
+}
+
+.downloads-back-button:focus-visible {
+  outline: 2px solid rgba(135, 184, 216, 0.72);
+  outline-offset: 2px;
 }
 
 .repair-prompt-overlay {
@@ -3655,11 +3792,6 @@ body {
 .workspace {
   height: 760px;
   min-height: 760px;
-}
-
-.brand,
-.topbar {
-  -webkit-app-region: drag;
 }
 
 .nav,
@@ -4452,35 +4584,230 @@ body {
 }
 
 .launcher-update-overlay {
-  z-index: 60;
+  z-index: 11000;
   background:
-    radial-gradient(circle at 50% 14%, rgba(135, 184, 216, 0.18), transparent 30%),
-    radial-gradient(circle at 80% 70%, rgba(223, 179, 106, 0.12), transparent 32%),
-    rgba(0, 0, 0, 0.76);
-  backdrop-filter: blur(10px);
+    radial-gradient(circle at 50% 36%, rgba(135, 184, 216, 0.12), transparent 34%),
+    rgba(2, 4, 5, 0.8);
+  backdrop-filter: blur(12px) saturate(0.78);
 }
 
 .launcher-update-dialog {
-  width: min(520px, calc(100vw - 56px));
+  width: min(440px, calc(100vw - 56px));
+  gap: 0;
+  border-color: rgba(218, 225, 222, 0.26);
+  border-radius: 6px;
+  padding: 0;
+  background:
+    linear-gradient(145deg, rgba(34, 40, 40, 0.98), rgba(9, 12, 13, 0.995) 58%),
+    #0b0f10;
+  box-shadow:
+    0 34px 90px rgba(0, 0, 0, 0.76),
+    0 1px 0 rgba(255, 255, 255, 0.08) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.72) inset;
+  isolation: isolate;
+  animation: launcher-update-enter 180ms cubic-bezier(0.2, 0.78, 0.22, 1) both;
+}
+
+.launcher-update-dialog::before {
+  height: 2px;
+  background: linear-gradient(90deg, rgba(135, 184, 216, 0.96), rgba(223, 179, 106, 0.92) 62%, transparent);
+}
+
+.launcher-update-dialog::after {
+  background:
+    linear-gradient(135deg, transparent 0 56%, rgba(244, 240, 230, 0.034) 56% 56.25%, transparent 56.25%),
+    radial-gradient(circle at 7% 6%, rgba(135, 184, 216, 0.09), transparent 31%);
+}
+
+.launcher-update-header {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 13px;
+  padding: 22px 24px 12px;
+}
+
+.launcher-update-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(135, 184, 216, 0.32);
+  border-radius: 5px;
+  background:
+    linear-gradient(145deg, rgba(135, 184, 216, 0.14), rgba(244, 240, 230, 0.025)),
+    rgba(2, 5, 6, 0.46);
+  color: #d7e9f5;
+  box-shadow: var(--bevel), 0 12px 30px rgba(0, 0, 0, 0.32);
+}
+
+.launcher-update-mark .button-icon {
+  width: 19px;
+  height: 19px;
+}
+
+.launcher-update-dialog[data-state="updating"] .launcher-update-mark .button-icon,
+.launcher-update-dialog[data-state="restarting"] .launcher-update-mark .button-icon {
+  --icon-url: url("icons/refresh-cw.svg");
+  animation: launcher-update-spin 1.2s linear infinite;
+}
+
+.launcher-update-dialog[data-state="ready"] .launcher-update-mark {
+  border-color: rgba(223, 179, 106, 0.48);
+  background: linear-gradient(145deg, rgba(223, 179, 106, 0.19), rgba(244, 240, 230, 0.035));
+  color: #f7d99d;
+  box-shadow: var(--bevel), 0 0 28px rgba(223, 179, 106, 0.12);
+}
+
+.launcher-update-dialog[data-state="ready"] .launcher-update-mark .button-icon {
+  --icon-url: url("icons/shield-check.svg");
+}
+
+.launcher-update-dialog[data-state="error"] .launcher-update-mark {
+  border-color: rgba(226, 104, 62, 0.46);
+  color: #f3a27f;
+}
+
+.launcher-update-heading {
+  min-width: 0;
+}
+
+.launcher-update-kicker {
+  margin: 0 0 4px;
+  color: rgba(223, 179, 106, 0.9);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.launcher-update-kicker span {
+  color: rgba(244, 240, 230, 0.52);
+  letter-spacing: 0.05em;
+}
+
+.launcher-update-dialog h2 {
+  font-size: 23px;
+  line-height: 1.05;
+  letter-spacing: -0.015em;
+  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.34);
+}
+
+.launcher-update-summary {
+  min-height: 19px;
+  margin: 0;
+  padding: 0 24px 18px;
+  color: rgba(214, 218, 211, 0.74);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.42;
 }
 
 .launcher-update-progress {
   display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0 24px 22px;
+}
+
+.launcher-update-progress .progress-meta {
+  color: rgba(223, 226, 219, 0.76);
+  font-size: 11px;
+  letter-spacing: 0.015em;
+}
+
+.launcher-update-progress .progress-track {
+  height: 6px;
+  border-color: rgba(244, 240, 230, 0.13);
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.launcher-update-progress .progress-bar {
+  background: linear-gradient(90deg, #77a9c9, #d8be83 78%, #f0d8a4);
+  box-shadow: 0 0 16px rgba(135, 184, 216, 0.24), 0 0 12px rgba(223, 179, 106, 0.16);
+  transition: width 110ms linear;
+}
+
+.launcher-update-dialog[data-state="ready"] .launcher-update-progress .progress-track::after,
+.launcher-update-dialog[data-state="error"] .launcher-update-progress .progress-track::after {
+  animation: none;
+  opacity: 0;
+}
+
+.launcher-update-error {
+  margin: -5px 24px 19px;
+  border-left: 2px solid rgba(226, 104, 62, 0.82);
+  padding: 1px 0 1px 10px;
+  color: rgba(243, 183, 157, 0.92);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.42;
+}
+
+.launcher-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 67px;
+  border-top: 1px solid rgba(244, 240, 230, 0.085);
+  padding: 14px 24px 16px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.launcher-update-action {
+  min-width: 132px;
+  min-height: 37px;
+  margin-left: auto;
+  padding-inline: 16px;
+  order: 2;
+}
+
+.launcher-update-report {
+  appearance: none;
+  border: 0;
+  padding: 5px 0;
+  background: transparent;
+  color: rgba(244, 240, 230, 0.58);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  order: 1;
+}
+
+.launcher-update-report:hover,
+.launcher-update-report:focus-visible {
+  color: rgba(244, 240, 230, 0.92);
+  outline: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .launcher-update-log {
-  max-height: 160px;
-  margin: 0;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background:
-    linear-gradient(180deg, rgba(244, 240, 230, 0.035), transparent),
-    rgba(4, 6, 7, 0.52);
-  box-shadow: var(--bevel);
+  display: none !important;
 }
 
 .launcher-update-dialog .button {
-  justify-self: start;
+  justify-self: auto;
+}
+
+@keyframes launcher-update-enter {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes launcher-update-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launcher-update-dialog,
+  .launcher-update-dialog[data-state="updating"] .launcher-update-mark .button-icon,
+  .launcher-update-dialog[data-state="restarting"] .launcher-update-mark .button-icon {
+    animation: none;
+  }
 }
 
 .toast-stack {

@@ -9,6 +9,7 @@ import {
   inspectLauncherProof,
   launcherProofJavaArgs,
   launcherProofPath,
+  launcherProofStorageDir,
   writeLauncherProof
 } from '../src/launcherProof.js';
 
@@ -77,6 +78,8 @@ const proofFile = launcherProofPath(instanceDir);
 const reusable = await inspectLauncherProof({ config, identity, latest, installed, minValidityMs: 30_000 });
 assert.equal(reusable.usable, true, reusable.reason);
 assert.equal(reusable.proofFile, path.resolve(proofFile));
+const missingGuard = await inspectLauncherProof({ config, identity: { ...identity, requireNativeGuard: true }, latest, installed, minValidityMs: 30_000 });
+assert.equal(missingGuard.usable, false, 'An old cached Windows proof must refresh to acquire runtime coverage');
 assert.match(launcherProofJavaArgs(proofFile).join(' '), /aht\.launcher\.protocol=aht-launcher-attestation-v2/);
 
 const privateInstanceDir = path.join(root, 'Private Proof Instance');
@@ -182,6 +185,55 @@ await expectRejected('Short Validity', (_fixture, payload) => {
   });
 });
 
+const multiInstanceProofRoot = path.join(root, 'multi-instance-user-data', '.aht-launcher');
+const firstInstanceDir = path.join(root, 'A Hard Time Stable');
+const secondInstanceDir = path.join(root, 'A Hard Time PTB');
+const firstLatest = { ...latest, version: '2.8.534' };
+const secondLatest = { ...latest, version: '2.8.6' };
+const firstConfig = {
+  ...config,
+  instanceDir: firstInstanceDir,
+  launcherProof: {
+    ...config.launcherProof,
+    proofDir: launcherProofStorageDir(multiInstanceProofRoot, firstInstanceDir)
+  }
+};
+const secondConfig = {
+  ...config,
+  instanceDir: secondInstanceDir,
+  launcherProof: {
+    ...config.launcherProof,
+    proofDir: launcherProofStorageDir(multiInstanceProofRoot, secondInstanceDir)
+  }
+};
+const fixtureFetch = async (_url, options) => {
+  const payload = JSON.parse(options.body);
+  return { ok: true, json: async () => workerLauncherProofFixture(payload) };
+};
+const firstPreparedProof = await writeLauncherProof({
+  config: firstConfig,
+  identity,
+  latest: firstLatest,
+  installed: firstLatest,
+  recoverySecret: 'recovery_secret_that_is_long_enough_123456',
+  fetchImpl: fixtureFetch
+});
+const secondPreparedProof = await writeLauncherProof({
+  config: secondConfig,
+  identity,
+  latest: secondLatest,
+  installed: secondLatest,
+  recoverySecret: 'recovery_secret_that_is_long_enough_123456',
+  fetchImpl: fixtureFetch
+});
+assert.notEqual(firstPreparedProof.proofFile, secondPreparedProof.proofFile, 'prepared pack proofs must not share a file');
+const [firstStillUsable, secondStillUsable] = await Promise.all([
+  inspectLauncherProof({ config: firstConfig, identity, latest: firstLatest, installed: firstLatest, minValidityMs: 30_000 }),
+  inspectLauncherProof({ config: secondConfig, identity, latest: secondLatest, installed: secondLatest, minValidityMs: 30_000 })
+]);
+assert.equal(firstStillUsable.usable, true, `second pack refresh replaced the first proof: ${firstStillUsable.reason}`);
+assert.equal(secondStillUsable.usable, true, secondStillUsable.reason);
+
 const localSourceFile = launcherProofPath(instanceDir);
 const saved = JSON.parse(await fs.readFile(localSourceFile, 'utf8'));
 await fs.writeFile(localSourceFile, `${JSON.stringify({ ...saved, source: 'local-hmac' }, null, 2)}\n`, 'utf8');
@@ -190,6 +242,16 @@ assert.equal(localSourceInspection.usable, false);
 assert.match(localSourceInspection.reason, /source is not trusted/i);
 
 const desktopMain = await fs.readFile(path.resolve('desktop', 'main.js'), 'utf8');
+const guardIdentity = { ...identity, nativeGuardKeyHash: 'a'.repeat(64), nativeGuard: { protocol: 'AHT-GUARD-1', port: 34567, keyHash: 'a'.repeat(64) } };
+const guardProof = await writeLauncherProof({ config, identity: guardIdentity, latest, installed,
+  fetchImpl: async (_url, options) => ({ ok: true, json: async () => workerLauncherProofFixture(JSON.parse(options.body)) }) });
+assert.equal(guardProof.payload.nativeGuardKeyHash, guardIdentity.nativeGuardKeyHash);
+assert.equal(guardProof.nativeGuard.port, 34567);
+await assert.rejects(() => writeLauncherProof({ config, identity: guardIdentity, latest, installed,
+  fetchImpl: async (_url, options) => {
+    const payload=JSON.parse(options.body);delete payload.nativeGuardKeyHash;
+    return { ok: true, json: async () => workerLauncherProofFixture(payload) };
+  } }), /nativeGuardKeyHash/);
 assert.match(desktopMain, /X-AHT-Launcher-Recovery|recoverySecret/);
 assert.match(desktopMain, /writeSerializedRegisteredLauncherProof[\s\S]*?writeRegisteredLauncherProof/);
 assert.doesNotMatch(await fs.readFile(path.resolve('src', 'launcherProof.js'), 'utf8'), /source:\s*['"]local-hmac['"]|createHmac|AHT_LAUNCHER_PROOF_SECRET/);
@@ -203,5 +265,6 @@ console.log(JSON.stringify({
   localTrustedSigningDisabled: true,
   malformedResponsesRejected: 4,
   packLocalMirrorRemoved: true,
+  multiInstanceProofIsolation: true,
   proofFile
 }, null, 2));
