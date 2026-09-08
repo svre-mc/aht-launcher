@@ -42,6 +42,8 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
       INPUT_RELEASE_TARGET: ${{ inputs.release_target }}
       INPUT_VERSION: ${{ inputs.version }}
@@ -66,6 +68,8 @@ jobs:
         run: |
           test -n "$CLOUDFLARE_API_TOKEN"
           test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$R2_ACCESS_KEY_ID"
+          test -n "$R2_SECRET_ACCESS_KEY"
 
       - name: Download private candidate and live channel pointer
         shell: bash
@@ -110,13 +114,7 @@ jobs:
           --candidate-id "$INPUT_CANDIDATE_ID"
 
       - name: Upload rebuilt immutable ZIP
-        shell: bash
-        run: >-
-          npx --yes wrangler@4.124.0 r2 object put
-          "$AHT_R2_BUCKET/${{ steps.plan.outputs.zip_key }}"
-          --file="${{ steps.plan.outputs.output_zip }}"
-          --content-type=application/zip
-          --remote
+        run: node scripts/upload-rebuilt-modpack.mjs rebuild-plan.json rebuild-result.json
 
       - name: Publish private verified result for commit
         shell: bash

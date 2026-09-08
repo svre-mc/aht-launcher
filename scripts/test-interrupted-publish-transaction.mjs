@@ -35,7 +35,8 @@ assert(renderer.includes('function stablePlayerFeedUrl()')
 'Release Builder does not derive stable/PTB feeds independently of the selected sidebar pack.');
 
 const putLines = workflow.split(/\r?\n/).filter((line) => /r2 object put/i.test(line));
-assert.equal(putLines.length, 2, 'Remote workflow must upload only the rebuilt immutable ZIP and private result.');
+assert.equal(putLines.length, 1, 'Wrangler uploads only the private result; the full ZIP uses multipart upload.');
+assert(workflow.includes('node scripts/upload-rebuilt-modpack.mjs rebuild-plan.json rebuild-result.json'));
 assert(!workflow.match(/r2 object put[\s\S]{0,180}(?:^|\/)latest\.json/m), 'Remote workflow must never commit a public latest.json pointer.');
 assert(workflow.includes('group: aht-modpack-rebuild-${{ inputs.release_target }}'), 'Remote rebuilds are not serialized per channel.');
 
