@@ -24,6 +24,7 @@ const pureChecks = [
   ['test:release-targets'],
   ['test:r2-direct-upload'],
   ['test:phoenix-anticheat'],
+  ['test:play-proof-isolation'],
   ['test:server-transfer-plan'],
   ['test:mod-only-changes'],
   ['test:managed-security'],

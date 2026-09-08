@@ -3921,7 +3921,20 @@ async function writeSerializedRegisteredLauncherProof({
 }
 
 async function socialRequestContext() {
-  const config = await minecraftLauncherRuntimeConfig(await loadConfig());
+  const runtimeConfig = await minecraftLauncherRuntimeConfig(await loadConfig());
+  const config = {
+    ...runtimeConfig,
+    launcherProof: {
+      ...(runtimeConfig.launcherProof || {}),
+      // Social requests must never replace the Play-scoped proof while the
+      // game is starting or connected. That proof carries the live Phoenix
+      // session binding on Windows.
+      proofDir: launcherProofStorageDir(
+        path.join(app.getPath('userData'), '.aht-launcher', 'social'),
+        runtimeConfig.instanceDir
+      )
+    }
+  };
   const identity = await identityPayload(config);
   let latest = null;
   let installed = null;
@@ -14172,7 +14185,11 @@ function startupPackPreparationForRenderer(descriptor, entry = null) {
 async function refreshPreparedLauncherProof(key, expectedEntry, nativeGuard = null) {
   const current = launchPreparationCache.get(key);
   if (current !== expectedEntry || current?.state !== 'ready') return null;
-  if (current.proofRefreshInFlight) return current.proofRefreshInFlight;
+  if (current.proofRefreshInFlight) {
+    const inFlight = await current.proofRefreshInFlight;
+    if (!nativeGuard || inFlight?.payload?.nativeGuardKeyHash === nativeGuard.keyHash) return inFlight;
+    if (launchPreparationCache.get(key) !== current || current?.state !== 'ready') return null;
+  }
   const refresh = (async () => {
     current.identity = await identityPayload(current.launcherConfig);
     if (current.identity?.minecraftUsernameSyncWarning
@@ -15139,7 +15156,12 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
             || (proof?.payload?.launchId && proof.payload.launchId === prepared.lastUsedLauncherProofId)) {
           proof = await refreshPreparedLauncherProof(key, prepared, nativeGuard);
         }
-        if (!proof?.usable || !proof?.trusted || launchPreparationCache.get(key) !== prepared) {
+        if (!proof?.usable
+            || !proof?.trusted
+            || (nativeGuard && (proof?.payload?.nativeGuardKeyHash !== nativeGuard.keyHash
+              || proof?.nativeGuard?.keyHash !== nativeGuard.keyHash
+              || proof?.nativeGuard?.protocol !== 'AHT-GUARD-1'))
+            || launchPreparationCache.get(key) !== prepared) {
           throw new Error(`The initialized launcher session is no longer usable${proof?.reason ? `: ${proof.reason}` : '.'} Restart A Hard Time Launcher.`);
         }
         prepared.lastUsedLauncherProofId = proof?.payload?.launchId || '';

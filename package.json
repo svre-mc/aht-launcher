@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.10",
-  "ahtLauncherVersion": "0.2.10",
+  "version": "0.2.11",
+  "ahtLauncherVersion": "0.2.11",
   "phoenixAntiCheatVersion": "1.1.0",
   "private": true,
   "type": "module",
@@ -55,6 +55,7 @@
     "test:r2-direct-upload": "node scripts/test-r2-direct-upload-config.mjs",
     "test:r2-retention": "node scripts/test-r2-retention.mjs",
     "test:phoenix-anticheat": "node scripts/test-phoenix-anticheat-install.mjs",
+    "test:play-proof-isolation": "node scripts/test-play-proof-isolation.mjs",
     "r2:retention": "node scripts/r2-retention.mjs",
     "test:server-transfer-plan": "node scripts/smoke-server-transfer-plan.mjs",
     "test:mod-only-changes": "node scripts/smoke-mod-only-changes.mjs",
