@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { hashFile, normalizeRelPath, pathExists, readJsonFile, safeJoin } from './utils.js';
+import { CLIENT_UPDATE_PRESERVED_FILES } from './clientPackFormat.js';
 
 const MODS_ONLY_MONITORED_ROOTS = Object.freeze(['mods']);
 const LAUNCH_CRITICAL_MONITORED_ROOTS = Object.freeze([
@@ -15,6 +16,7 @@ const LAUNCH_CRITICAL_MONITORED_ROOTS = Object.freeze([
 const ALLOWED_UNMANAGED_MOD_DIRECTORIES = new Set(['openterraingenerator']);
 const PLAYER_MUTABLE_MANAGED_ROOTS = new Set(['config']);
 const PLAYER_MUTABLE_MANAGED_FILES = new Set([
+  ...CLIENT_UPDATE_PRESERVED_FILES,
   'options.txt',
   'optionsof.txt',
   'optionsshaders.txt',
@@ -163,7 +165,8 @@ async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
   let visited = 0;
 
   const addFileIssue = async (abs, rel, size) => {
-    if (managedSet.has(rel) || isAllowedUnmanagedModPath(rel)) {
+    if (managedSet.has(rel) || isAllowedUnmanagedModPath(rel)
+      || PLAYER_MUTABLE_MANAGED_FILES.has(rel.toLowerCase())) {
       return;
     }
     added.push({
@@ -313,6 +316,9 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
         throw error;
       }
       const type = stat.isFile() ? 'file' : (stat.isDirectory() ? 'directory' : 'other');
+      // Ignore only known player-owned regular files. Links and unexpected
+      // payloads in the same directory still invalidate launch preparation.
+      if (type === 'file' && PLAYER_MUTABLE_MANAGED_FILES.has(current.rel.toLowerCase())) return null;
       const mtimeNs = statNanoseconds(stat, 'mtime');
       const ctimeNs = statNanoseconds(stat, 'ctime');
       const state = {

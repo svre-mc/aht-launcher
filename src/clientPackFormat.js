@@ -5,7 +5,12 @@ export const CLIENT_DELTA_FORMAT = 'aht-client-delta-v1';
 export const CLIENT_DELTA_METADATA_ENTRY = 'aht-client-delta.json';
 
 export const CLIENT_GAME_SETTINGS_FILES = ['options.txt', 'optionsof.txt'];
-export const CLIENT_UPDATE_PRESERVED_FILES = ['config/jei/bookmarks.ini'];
+export const CLIENT_UPDATE_PRESERVED_FILES = [
+  'config/jei/bookmarks.ini',
+  // FancyMenu rewrites this last-played-world pointer during normal gameplay.
+  // It is player state, not a pack asset or executable integrity requirement.
+  'fancymenu_data/last_world.fmdata'
+];
 export const CLIENT_PACK_CONTENT_ROOTS = [
   'config',
   'fancymenu_data',

@@ -124,6 +124,10 @@ final class ServerStateClient {
                 connectAndRead(config);
                 retryMillis = 1000L;
             } catch (Exception error) {
+                // A healthy channel ending in an I/O exception is not another
+                // failed connection attempt. Do not accumulate a 30-second
+                // reconnect delay across otherwise healthy long-lived sessions.
+                if (connected) retryMillis = 1000L;
                 long now = System.currentTimeMillis();
                 if (now - lastWarningAt >= 60000L && PackVersionLock.LOG != null) {
                     PackVersionLock.LOG.warn(

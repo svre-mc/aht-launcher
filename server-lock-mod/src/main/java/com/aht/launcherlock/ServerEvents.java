@@ -17,7 +17,11 @@ public class ServerEvents {
 
     @SubscribeEvent
     public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
-        PackVersionLock.clearPlayer(event.player.getUniqueID());
+        if (event.player instanceof EntityPlayerMP) {
+            PackVersionLock.clearPlayer((EntityPlayerMP) event.player);
+        } else {
+            PackVersionLock.clearPlayer(event.player.getUniqueID());
+        }
     }
 
     @SubscribeEvent

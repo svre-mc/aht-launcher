@@ -19,7 +19,7 @@ import org.apache.logging.log4j.Logger;
 import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -33,7 +33,7 @@ import java.util.concurrent.CompletableFuture;
 public class PackVersionLock {
     public static final String MODID = "ahtversionlock";
     public static final String NAME = "AHT Launcher Lock";
-    public static final String VERSION = "1.2.0";
+    public static final String VERSION = "1.2.1";
 
     private static final String DEFAULT_STATE_WEBSOCKET_URL =
             "wss://api.ahardtime.net/server/launcher-state";
@@ -44,6 +44,8 @@ public class PackVersionLock {
             "A valid A Hard Time Launcher session is required. Restart the launcher and reconnect.";
     private static final String DEFAULT_UNAVAILABLE_MESSAGE =
             "A Hard Time Launcher policy is temporarily unavailable. Please reconnect shortly.";
+    private static final String DEFAULT_PACK_UPDATE_MESSAGE =
+            "Your A Hard Time modpack is out of date. Update it in A Hard Time Launcher and reconnect.";
 
     public static Logger LOG;
     public static SimpleNetworkWrapper NETWORK;
@@ -81,6 +83,7 @@ public class PackVersionLock {
         }
         NETWORK = NetworkRegistry.INSTANCE.newSimpleChannel(MODID);
         NETWORK.registerMessage(LauncherProofMessageHandler.class, LauncherProofMessage.class, 0, Side.SERVER);
+        NETWORK.registerMessage(LauncherProofControlHandler.class, LauncherProofControl.class, 1, Side.CLIENT);
     }
 
     @Mod.EventHandler
@@ -207,22 +210,43 @@ public class PackVersionLock {
     }
 
     static void watchPlayer(EntityPlayerMP player) {
-        if (player != null) {
-            SESSIONS.begin(player.getUniqueID(), timeoutTicks);
-        }
+        if (player == null || player.connection == null) return;
+        if (rejectOutdatedClient(player)) return;
+        SESSIONS.begin(player.getUniqueID(), player.connection.netManager, timeoutTicks);
+        sendControl(player, SESSIONS.isAccepted(player.getUniqueID(), player.connection.netManager));
     }
 
     static void clearPlayer(UUID playerId) {
         SESSIONS.clear(playerId);
     }
 
-    static void handleLauncherProof(final EntityPlayerMP player, LauncherProofMessage message) {
-        if (player == null || player.connection == null) return;
-        final UUID playerId = player.getUniqueID();
-        final UUID connectionId = SESSIONS.markVerificationInFlight(playerId);
-        if (connectionId == null) return;
+    static void clearPlayer(EntityPlayerMP player) {
+        if (player != null && player.connection != null) {
+            SESSIONS.clear(player.getUniqueID(), player.connection.netManager);
+        }
+    }
 
-        if (message == null || !message.available || !LauncherProofMessage.isTokenShapeValid(message.token)) {
+    static void handleLauncherProof(final EntityPlayerMP player, LauncherProofMessage message) {
+        if (player == null || player.connection == null
+                || !player.connection.netManager.isChannelOpen()) return;
+        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
+        EntityPlayerMP current = server == null || server.getPlayerList() == null
+                ? null : server.getPlayerList().getPlayerByUUID(player.getUniqueID());
+        if (current != null && current != player) return;
+        if (rejectOutdatedClient(player)) return;
+        final UUID playerId = player.getUniqueID();
+        SESSIONS.begin(playerId, player.connection.netManager, timeoutTicks);
+        if (SESSIONS.isAccepted(playerId, player.connection.netManager)) {
+            sendControl(player, true);
+            return;
+        }
+
+        // A temporarily unreadable proof file is not a signed denial. Keep requesting it until
+        // the original bounded join deadline expires.
+        if (message == null || !message.available) return;
+        final UUID connectionId = SESSIONS.markVerificationInFlight(playerId, player.connection.netManager);
+        if (connectionId == null) return;
+        if (!LauncherProofMessage.isTokenShapeValid(message.token)) {
             if (SESSIONS.fail(playerId, connectionId)) {
                 disconnect(player, invalidProofMessage, "INVALID_LAUNCHER_PROOF", "", "");
             }
@@ -261,15 +285,23 @@ public class PackVersionLock {
         EntityPlayerMP player = server.getPlayerList() == null
                 ? null : server.getPlayerList().getPlayerByUUID(playerId);
         if (player == null || player.connection == null) {
-            SESSIONS.clear(playerId);
+            SESSIONS.fail(playerId, connectionId);
             return;
         }
+        if (!SESSIONS.current(playerId, connectionId)) return;
         if (result.accepted) {
             if (SESSIONS.accept(playerId, connectionId)) {
                 LOG.info("{} passed signed local launcher verification (current {}, necessary {}, policy {}).",
                         player.getName(), result.currentLauncherVersion, result.necessaryLauncherVersion,
                         result.policyRevision.substring(0, 12));
+                sendControl(player, true);
             }
+            return;
+        }
+        // Keep the admission gate closed, but tolerate a short state-channel reconnect by
+        // requesting the same signed proof again within the unchanged join deadline.
+        if ("VERIFICATION_UNAVAILABLE".equals(result.code)) {
+            if (SESSIONS.retryVerification(playerId, connectionId)) sendControl(player, false);
             return;
         }
         if (!SESSIONS.fail(playerId, connectionId)) return;
@@ -279,22 +311,54 @@ public class PackVersionLock {
                     .replace("{necessary}", readableVersion(result.necessaryLauncherVersion));
             disconnect(player, message, result.code,
                     result.currentLauncherVersion, result.necessaryLauncherVersion);
-        } else if ("VERIFICATION_UNAVAILABLE".equals(result.code)) {
-            disconnect(player, verificationUnavailableMessage, result.code, "", "");
         } else {
             disconnect(player, invalidProofMessage, result.code, "", "");
         }
     }
 
     static void expirePendingPlayers(MinecraftServer server) {
-        List<UUID> expired = SESSIONS.tickAndCollectExpired();
         if (server == null || server.getPlayerList() == null) return;
-        for (UUID playerId : expired) {
-            EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(playerId);
+        for (UUID playerId : SESSIONS.requestsDue()) {
+            sendControl(server.getPlayerList().getPlayerByUUID(playerId), false);
+        }
+        for (Map.Entry<UUID, String> expired : SESSIONS.tickAndCollectExpired().entrySet()) {
+            EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(expired.getKey());
             if (player != null && player.connection != null) {
-                disconnect(player, verificationUnavailableMessage, "VERIFICATION_TIMEOUT", "", "");
+                boolean deliveryTimeout = "PROOF_DELIVERY_TIMEOUT".equals(expired.getValue());
+                disconnect(player,
+                        deliveryTimeout
+                                ? "Launcher verification was not received. Fully close Minecraft, then click Play in A Hard Time Launcher and reconnect."
+                                : verificationUnavailableMessage,
+                        expired.getValue(), "", "");
             }
         }
+    }
+
+    private static void sendControl(EntityPlayerMP player, boolean accepted) {
+        if (player == null || player.connection == null
+                || !player.connection.netManager.isChannelOpen()) return;
+        net.minecraftforge.fml.common.network.handshake.NetworkDispatcher dispatcher =
+                net.minecraftforge.fml.common.network.handshake.NetworkDispatcher.get(
+                        player.connection.netManager);
+        // Never send the new discriminator to an older client that did not register it.
+        if (dispatcher != null && dispatcher.getModList() != null
+                && VERSION.equals(dispatcher.getModList().get(MODID))) {
+            NETWORK.sendTo(new LauncherProofControl(accepted), player);
+        }
+    }
+
+    private static boolean rejectOutdatedClient(EntityPlayerMP player) {
+        if (player == null || player.connection == null) return false;
+        net.minecraftforge.fml.common.network.handshake.NetworkDispatcher dispatcher =
+                net.minecraftforge.fml.common.network.handshake.NetworkDispatcher.get(
+                        player.connection.netManager);
+        if (dispatcher == null || dispatcher.getModList() == null) return false;
+        String clientVersion = dispatcher.getModList().get(MODID);
+        if (VERSION.equals(clientVersion)) return false;
+        SESSIONS.clear(player.getUniqueID(), player.connection.netManager);
+        disconnect(player, DEFAULT_PACK_UPDATE_MESSAGE, "MODPACK_UPDATE_REQUIRED",
+                clientVersion, VERSION);
+        return true;
     }
 
     private static void disconnect(EntityPlayerMP player, String message, String code,

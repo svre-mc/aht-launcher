@@ -44,7 +44,7 @@ try {
       zip.writeZip(packZip);
       const outDir = path.join(root, `release-${releases}`);
       const release = await buildRelease({packZip, outDir, versionLockJar: helper});
-      const expected = format === 'legacy' ? 'overrides/mods/aht-version-lock-99.0.jar' : 'mods/aht-version-lock-99.0.jar';
+      const expected = `${format === 'legacy' ? 'overrides/' : ''}mods/${name}`;
       assert.equal(release.latest.serverLock.clientModPath, expected, `${format}: ${name}`);
       assert.equal(release.latest.serverLock.injected, false, 'Replacing an existing lock is not a new injection');
       assert.equal(release.latest.serverLock.replaced, true, 'Existing lock must be replaced by the authoritative release lock');
@@ -52,7 +52,7 @@ try {
       const locks = built.getEntries().filter(entry => !entry.isDirectory && isVersionLockJarPath(entry.entryName));
       assert.equal(locks.length, 1, 'Release must contain exactly one runtime lock');
       const archiveExpected = format === 'wrapped' ? `${prefix}${expected}` : expected;
-      assert.equal(locks[0].entryName.replaceAll('\\', '/'), archiveExpected, 'Stale lock path survived replacement');
+      assert.equal(locks[0].entryName.replaceAll('\\', '/'), archiveExpected, 'The pack integrity path must remain stable');
       assert.deepEqual(locks[0].getData(), helperBytes, 'Release must contain the authoritative runtime lock bytes');
       releases++;
     }

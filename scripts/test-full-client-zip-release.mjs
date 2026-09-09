@@ -71,7 +71,7 @@ const release = await buildRelease({
 assert(release.latest.installMode === 'full-client-zip', 'release did not use full-client install mode');
 assert(release.latest.curseforge?.disabled === true, 'full-client release should not use CurseForge resolution');
 assert(release.latest.clientZip?.modFileCount >= 2, 'full-client release did not count mod archives');
-assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.2.0.jar', 'full-client release did not replace the stale client version lock mod');
+assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.0.0.jar', 'full-client release must update the lock bytes without breaking its required-file path');
 assert(release.latest.serverLock?.replaced === true, 'full-client release did not record the version-lock replacement');
 const serverLockConfig = await fs.readFile(path.join(outDir, release.latest.serverLock.configPath), 'utf8');
 assert(serverLockConfig.includes('S:stateWebSocketUrl=wss://api.ahardtime.net/server/launcher-state'), 'server launcher lock config is missing the authenticated state channel');

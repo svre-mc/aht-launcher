@@ -105,6 +105,9 @@ jobs:
       - name: Test platform build config
         run: npm run test:platform-builds
 
+      - name: Test join-fix publication and player-state update regressions
+        run: npm run test:version-lock-release && npm run test:delta-update && npm run test:player-runtime-state && npm run test:managed-security
+
       - name: Test asset recovery and legacy account migration
         run: npm run test:asset-recovery && npm run test:account-migration
 

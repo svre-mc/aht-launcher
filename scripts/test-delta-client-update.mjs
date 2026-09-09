@@ -52,6 +52,7 @@ try {
   await writeFile(sourceDir, 'resourcepacks/change.zip', 'resourcepack-v1');
   await writeFile(sourceDir, 'resources/unchanged.bin', Buffer.alloc(2 * 1024 * 1024, 0x5a));
   await writeFile(sourceDir, 'options.txt', 'pack-options\n');
+  await writeFile(sourceDir, 'fancymenu_data/last_world.fmdata', 'previous developer world');
   await writeFile(sourceDir, 'optionsof.txt', 'pack-optionsof\n');
   await writeFile(sourceDir, 'minecraftinstance.json', JSON.stringify({
     gameVersion: '1.12.2',
@@ -87,6 +88,7 @@ try {
   await fs.rm(path.join(outDir, releaseV1.latest.clientManifest.path), { force: true });
 
   await writeFile(instanceDir, 'options.txt', 'player-options\n');
+  await writeFile(instanceDir, 'fancymenu_data/last_world.fmdata', 'players last world changed by normal gameplay');
   await writeFile(instanceDir, 'optionsof.txt', 'player-optionsof\n');
   await writeFile(instanceDir, 'config/jei/bookmarks.ini', 'player-bookmarks\n');
   await writeFile(instanceDir, 'config/player-editable.cfg', 'player-custom-config-with-another-size\n');
@@ -168,6 +170,7 @@ try {
   assert(await fileText(instanceDir, 'resourcepacks/change.zip') === 'resourcepack-v2', 'changed resource pack was not updated');
   assert(await fileText(instanceDir, 'config/player-editable.cfg') === 'player-custom-config-with-another-size\n', 'unchanged player-edited config was overwritten');
   assert(await fileText(instanceDir, 'options.txt') === 'player-options\n', 'player options were overwritten without consent');
+  assert(await fileText(instanceDir, 'fancymenu_data/last_world.fmdata') === 'players last world changed by normal gameplay', 'FancyMenu player state forced a full download or was overwritten');
   assert(await fileText(instanceDir, 'optionsof.txt') === 'player-optionsof\n', 'player OptiFine options were overwritten without consent');
   assert(await fileText(instanceDir, 'config/jei/bookmarks.ini') === 'player-bookmarks\n', 'JEI bookmarks were overwritten');
   assert(await fileText(instanceDir, 'mods/OpenTerrainGenerator/runtime/generated.dat') === 'runtime data', 'OpenTerrainGenerator runtime data was not preserved');

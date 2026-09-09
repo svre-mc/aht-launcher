@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import AdmZip from 'adm-zip';
 import yauzl from 'yauzl';
 import yazl from 'yazl';
-import { isVersionLockJarPath, VERSION_LOCK_JAR_PATTERN } from './versionLockJar.js';
+import { isVersionLockJarPath, versionLockClientPath, VERSION_LOCK_JAR_PATTERN } from './versionLockJar.js';
 import {
   artifactUrl,
   ensureDir,
@@ -1150,9 +1150,8 @@ async function buildFullClientRelease(options, sourceInspection) {
   const existingClientVersionLockPaths = sourceInspection.modEntries.filter(isVersionLockJarPath);
   const injectClientVersionLock = Boolean(versionLockJarPath && existingClientVersionLockPaths.length === 0);
   const replaceClientVersionLock = Boolean(versionLockJarPath && existingClientVersionLockPaths.length > 0);
-  const clientVersionLockPath = versionLockJarPath
-    ? `mods/${path.basename(versionLockJarPath)}`
-    : (existingClientVersionLockPaths[0] || null);
+  const clientVersionLockPath = versionLockClientPath(existingClientVersionLockPaths,
+    versionLockJarPath ? `mods/${path.basename(versionLockJarPath)}` : null);
   const fullClientZipInjections = [
     versionLockJarPath ? {
       sourceZip: packZip,
@@ -1409,9 +1408,8 @@ export async function buildRelease(options) {
   const zipDest = path.join(outDir, zipRelPath);
   const overridesDir = normalizedOverridesDir(manifest.overrides || 'overrides');
   const existingClientVersionLockPaths = existingVersionLockJars(zip, overridesDir);
-  const clientVersionLockPath = versionLockJarPath
-    ? `${overridesDir}/mods/${path.basename(versionLockJarPath)}`
-    : (existingClientVersionLockPaths[0] || null);
+  const clientVersionLockPath = versionLockClientPath(existingClientVersionLockPaths,
+    versionLockJarPath ? `${overridesDir}/mods/${path.basename(versionLockJarPath)}` : null);
   const injectClientVersionLock = Boolean(versionLockJarPath && existingClientVersionLockPaths.length === 0);
   const replaceClientVersionLock = Boolean(versionLockJarPath && existingClientVersionLockPaths.length > 0);
   const itemFireFixJarPath = await findItemFireFixJar(manifest);

@@ -2,60 +2,95 @@ package com.aht.launcherlock;
 
 import org.junit.Test;
 
-import java.util.List;
+import java.util.Collections;
 import java.util.UUID;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class JoinSessionRegistryTest {
     @Test
-    public void acceptedConnectionIsNotRecheckedUntilLogout() {
+    public void proofBeforeLoginIsRetainedAndLoginDoesNotResetVerification() {
         JoinSessionRegistry registry = new JoinSessionRegistry();
-        UUID playerId = UUID.randomUUID();
-        UUID connectionId = registry.begin(playerId, 3);
+        UUID player = UUID.randomUUID();
+        Object socket = new Object();
+        UUID first = registry.begin(player, socket, 5);
 
-        assertEquals(connectionId, registry.markVerificationInFlight(playerId));
-        assertTrue(registry.accept(playerId, connectionId));
-        for (int index = 0; index < 10000; index++) {
-            assertTrue(registry.tickAndCollectExpired().isEmpty());
-        }
-        assertTrue(registry.isAccepted(playerId));
-        assertNull(registry.markVerificationInFlight(playerId));
-
-        registry.clear(playerId);
-        assertFalse(registry.isAccepted(playerId));
-        UUID reconnectId = registry.begin(playerId, 3);
-        assertNotEquals(connectionId, reconnectId);
-        assertEquals(reconnectId, registry.markVerificationInFlight(playerId));
+        assertEquals(first, registry.markVerificationInFlight(player, socket));
+        assertEquals(first, registry.begin(player, socket, 1000));
+        assertNull(registry.markVerificationInFlight(player, socket));
+        assertTrue(registry.accept(player, first));
+        assertNull(registry.begin(player, socket, 5));
+        assertTrue(registry.isAccepted(player, socket));
     }
 
     @Test
-    public void staleVerificationCannotAffectNewConnection() {
+    public void staleLogoutAndCallbackCannotAffectRejoinedConnection() {
         JoinSessionRegistry registry = new JoinSessionRegistry();
-        UUID playerId = UUID.randomUUID();
-        UUID firstConnection = registry.begin(playerId, 20);
-        assertEquals(firstConnection, registry.markVerificationInFlight(playerId));
+        UUID player = UUID.randomUUID();
+        Object oldSocket = new Object();
+        Object newSocket = new Object();
+        UUID oldConnection = registry.begin(player, oldSocket, 20);
+        registry.markVerificationInFlight(player, oldSocket);
+        UUID newConnection = registry.begin(player, newSocket, 20);
 
-        UUID secondConnection = registry.begin(playerId, 20);
-        assertFalse(registry.accept(playerId, firstConnection));
-        assertEquals(secondConnection, registry.markVerificationInFlight(playerId));
-        assertTrue(registry.accept(playerId, secondConnection));
+        registry.clear(player, oldSocket);
+        assertFalse(registry.accept(player, oldConnection));
+        assertFalse(registry.fail(player, oldConnection));
+        assertTrue(registry.current(player, newConnection));
+        assertTrue(registry.accept(player, newConnection));
+        registry.clear(player, oldSocket);
+        assertTrue(registry.isAccepted(player, newSocket));
+        registry.clear(player, newSocket);
+        assertFalse(registry.isAccepted(player, newSocket));
     }
 
     @Test
-    public void pendingConnectionExpiresFailClosed() {
+    public void deliveryAndLocalVerificationHaveSeparateReasons() {
         JoinSessionRegistry registry = new JoinSessionRegistry();
-        UUID playerId = UUID.randomUUID();
-        registry.begin(playerId, 2);
+        UUID player = UUID.randomUUID();
+        Object socket = new Object();
 
+        registry.begin(player, socket, 2);
         assertTrue(registry.tickAndCollectExpired().isEmpty());
-        List<UUID> expired = registry.tickAndCollectExpired();
-        assertEquals(1, expired.size());
-        assertEquals(playerId, expired.get(0));
-        assertFalse(registry.isAccepted(playerId));
+        assertEquals("PROOF_DELIVERY_TIMEOUT", registry.tickAndCollectExpired().get(player));
+
+        registry.begin(player, socket, 2);
+        registry.markVerificationInFlight(player, socket);
+        assertTrue(registry.tickAndCollectExpired().isEmpty());
+        assertEquals("LOCAL_VERIFICATION_TIMEOUT", registry.tickAndCollectExpired().get(player));
+    }
+
+    @Test
+    public void unavailablePolicyRetriesWithoutExtendingOriginalDeadline() {
+        JoinSessionRegistry registry = new JoinSessionRegistry();
+        UUID player = UUID.randomUUID();
+        Object socket = new Object();
+        UUID connection = registry.begin(player, socket, 3);
+
+        assertEquals(connection, registry.markVerificationInFlight(player, socket));
+        assertTrue(registry.tickAndCollectExpired().isEmpty());
+        assertTrue(registry.retryVerification(player, connection));
+        assertEquals(Collections.singletonList(player), registry.requestsDue());
+        assertEquals(connection, registry.markVerificationInFlight(player, socket));
+        assertTrue(registry.tickAndCollectExpired().isEmpty());
+        assertEquals("LOCAL_VERIFICATION_TIMEOUT", registry.tickAndCollectExpired().get(player));
+    }
+
+    @Test
+    public void requestsStopDuringVerificationAndAfterAcceptance() {
+        JoinSessionRegistry registry = new JoinSessionRegistry();
+        UUID player = UUID.randomUUID();
+        Object socket = new Object();
+        UUID connection = registry.begin(player, socket, 50);
+
+        assertEquals(Collections.singletonList(player), registry.requestsDue());
+        assertTrue(registry.requestsDue().isEmpty());
+        registry.markVerificationInFlight(player, socket);
+        for (int index = 0; index < 100; index++) assertTrue(registry.requestsDue().isEmpty());
+        assertTrue(registry.accept(player, connection));
+        assertTrue(registry.requestsDue().isEmpty());
     }
 }

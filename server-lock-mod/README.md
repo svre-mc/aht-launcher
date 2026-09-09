@@ -26,7 +26,7 @@ Necessary Launcher Version: 0.1.87
 Update A Hard Time Launcher, restart it, and reconnect.
 ```
 
-The server fails closed for new joins when the authenticated state channel is unavailable, stale, unsigned, unpinned, malformed, or inconsistent. Existing players are not rechecked or kicked. WebSocket protocol ping/pong maintains connection liveness without reading policy or waking the Durable Object.
+The server requests proof on the exact joining connection until it is accepted or the bounded join deadline expires. A temporarily unreadable proof file and a brief authenticated state-channel reconnect are retried without extending that deadline. The server remains fail-closed when the state channel is unavailable, stale, unsigned, unpinned, malformed, or inconsistent for the full deadline. Existing players are not rechecked or kicked. WebSocket protocol ping/pong maintains connection liveness without reading policy or waking the Durable Object.
 
 Server configuration is `config/aht_version_lock.cfg`. Set the public SPKI SHA-256 pin and provide the server-only channel token through `AHT_LAUNCHER_STATE_TOKEN` (preferred) or the server-only config fallback. Never put that server config or token in a player artifact. The public-key fingerprint is not secret.
 
