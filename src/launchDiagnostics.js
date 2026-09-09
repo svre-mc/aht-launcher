@@ -242,11 +242,18 @@ export function diagnoseLaunchFailure(attempt) {
     const minecraftFailure = diagnoseMinecraftSignals(attempt);
     if (minecraftFailure) return minecraftFailure;
     return {
-      cause: 'The AHT Launcher completed its handoff to a verified Minecraft Launcher window.',
-      actions: [
-        'If Minecraft later exits after you click Play in the Minecraft Launcher, send this report together with the displayed exit code.',
-        'After Minecraft exits, use Copy latest launch report in AHT Launcher so the newest Minecraft Launcher signals are included.'
-      ]
+      cause: attempt.gameStartConfirmed
+        ? 'Minecraft started the configured A Hard Time instance after the launcher handoff.'
+        : 'The AHT Launcher completed its handoff to a verified Minecraft Launcher window.',
+      actions: attempt.gameStartConfirmed
+        ? [
+            'No Minecraft Launcher repair is required for this handoff.',
+            'If Minecraft later exits, reopen AHT Launcher and copy the latest launch report.'
+          ]
+        : [
+            'If Minecraft later exits after you click Play in the Minecraft Launcher, send this report together with the displayed exit code.',
+            'After Minecraft exits, use Copy latest launch report in AHT Launcher so the newest Minecraft Launcher signals are included.'
+          ]
     };
   }
   if (attempt?.result === 'DIAGNOSTIC') {

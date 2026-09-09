@@ -762,6 +762,7 @@ try {
   let desktopFallbackPlayResult = null;
   let desktopFallbackProof = null;
   let curseForgePlayResult = null;
+  let windowlessGameStartProof = null;
   if (process.platform === 'win32') {
     const routeConfigPath = path.join(userData, 'launcher.config.json');
     const routeConfig = JSON.parse(fs.readFileSync(routeConfigPath, 'utf8'));
@@ -1117,11 +1118,61 @@ try {
     if (retryMigrationBackups.length !== 1) {
       throw new Error(`CurseForge settings self-heal created duplicate backups: ${JSON.stringify(retryMigrationBackups)}`);
     }
+
+    const windowlessState = JSON.parse(fs.readFileSync(windowsProcessStatePath, 'utf8'));
+    windowlessState.nextWindowUsable = false;
+    await writeJson(windowsProcessStatePath, windowlessState);
+    await evaluate(client, `(() => {
+      window.__ahtWindowlessPlayResult = null;
+      window.aht.play()
+        .then((result) => { window.__ahtWindowlessPlayResult = { ok: true, result }; })
+        .catch((error) => { window.__ahtWindowlessPlayResult = { ok: false, message: String(error?.message || error || '') }; });
+      return true;
+    })()`);
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const capture = fs.existsSync(curseForgeSpawnCapture)
+        ? JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'))
+        : null;
+      if (capture?.captureCount === 3) break;
+      await sleep(25);
+    }
+    const windowlessCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
+    if (windowlessCapture.captureCount !== 3) {
+      throw new Error(`Windowless game-start handoff did not spawn exactly one launcher: ${JSON.stringify(windowlessCapture)}`);
+    }
+    await fsp.appendFile(
+      path.join(instanceDir, 'logs', 'latest.log'),
+      `[INFO] Configured A Hard Time game started after launcher UI handoff ${Date.now()}\n`,
+      'utf8'
+    );
+    const windowlessGameStartResult = await waitFor(
+      client,
+      'window.__ahtWindowlessPlayResult || false',
+      'configured game start after Minecraft Launcher window closed'
+    );
+    if (
+      !windowlessGameStartResult.ok
+      || !windowlessGameStartResult.result?.activationConfirmed
+      || !windowlessGameStartResult.result?.gameStartConfirmed
+      || windowlessGameStartResult.result?.visibilityConfirmed
+    ) {
+      throw new Error(`An exact configured game start did not complete the windowless launcher handoff: ${JSON.stringify(windowlessGameStartResult)}`);
+    }
+    windowlessGameStartProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
+    const windowlessProcessState = JSON.parse(fs.readFileSync(windowsProcessStatePath, 'utf8'));
+    if (!windowlessProcessState.records.some((record) => (
+      record.image === 'minecraft.exe'
+      && record.mainWindowHandle === 0
+      && record.windowVisible === false
+    ))) {
+      throw new Error(`Windowless handoff regression did not exercise a launcher without a usable window: ${JSON.stringify(windowlessProcessState)}`);
+    }
     const playLaunchIds = [
       proof.payload?.launchId,
       desktopFallbackProof.payload?.launchId,
       curseForgeProof.payload?.launchId,
-      retryProof.payload?.launchId
+      retryProof.payload?.launchId,
+      windowlessGameStartProof.payload?.launchId
     ];
     const requestedLaunchIds = launcherProofRequests.map((request) => request?.launchId).filter(Boolean);
     const missingOrRepeatedPlayLaunchIds = playLaunchIds.filter((launchId) => (
@@ -1138,7 +1189,7 @@ try {
     }
     curseForgePlayResult.durationMs = curseForgePlayDurationMs;
     curseForgePlayResult.spawnLatencyMs = curseForgeSpawnLatencyMs;
-    curseForgePlayResult.distinctLaunchIds = 4;
+    curseForgePlayResult.distinctLaunchIds = 5;
   }
 
   const initializationMarkerPath = path.join(userData, 'startup-initialization.json');
@@ -1155,6 +1206,7 @@ try {
       || cachedNewsRecords[0].logs.length !== 0) {
     throw new Error(`A valid empty News response was not persisted for warm startup: ${JSON.stringify(startupNewsCache)}`);
   }
+  const proofBeforeLauncherClose = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
   await evaluate(client, 'window.aht?.windowClose?.(); true').catch(() => {});
   client.close();
   client = null;
@@ -1163,6 +1215,13 @@ try {
     if (!(await waitForChildExit(child))) {
       throw new Error('The first launcher process remained alive after its bounded shutdown and contaminated the cached-startup timing boundary.');
     }
+  }
+  if (!fs.existsSync(launcherProofStatePath)) {
+    throw new Error('Closing AHT after Play deleted the active proof before Minecraft could connect.');
+  }
+  const retainedProofAfterLauncherClose = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
+  if (retainedProofAfterLauncherClose.payload?.launchId !== proofBeforeLauncherClose.payload?.launchId) {
+    throw new Error('Closing AHT after Play did not retain the exact active launch proof.');
   }
 
   const rewrittenManagedFile = path.join(instanceDir, 'mods', 'aht-integrity-test.jar');

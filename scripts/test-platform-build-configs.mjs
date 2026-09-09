@@ -1074,7 +1074,7 @@ assert(desktopMain.includes('async function existingLaunchCwd'), 'Minecraft Laun
 assert(desktopMain.includes('const cwd = await existingLaunchCwd(requestedCwd);'), 'Minecraft Launcher opener must use a verified existing cwd.');
 assert(desktopMain.includes('async function openWindowsStoreMinecraftLauncher('), 'Windows Store Minecraft Launcher opener must be isolated.');
 assert(desktopMain.includes("process.env.SystemRoot ? path.join(process.env.SystemRoot, 'explorer.exe')"), 'Windows Store opener must use absolute explorer.exe when available.');
-assert(desktopMain.includes('openWindowsStoreMinecraftLauncher(cwd, env, options.sessionId, options.storeRoots || [])'), 'Windows play fallback must use the robust Store opener with registered package roots.');
+assert(/openWindowsStoreMinecraftLauncher\(\s*cwd,\s*env,\s*options\.sessionId,\s*options\.storeRoots \|\| \[\],\s*\{ config: launcherConfig, attempt: options\.attempt \}/.test(desktopMain), 'Windows play fallback must use the robust Store opener with registered package roots and the exact Play handoff context.');
 assert(desktopMain.includes('function minecraftProfileInstallTargets(profile = null)'), 'Launcher must gather all synced Minecraft profile roots before installing loaders.');
 assert(desktopMain.includes('profile.syncedProfiles'), 'Launcher must inspect synced Minecraft roots for missing loaders.');
 assert(desktopMain.includes('installMinecraftProfileLoaders(profile'), 'Update and Play must install Forge into synced launcher roots.');
@@ -1110,6 +1110,14 @@ assert(
   && desktopMain.includes("launcherProofStorageDir(")
   && smokePlayerUpdatePlay.includes('Stable and PTB Play did not retain distinct instance-bound proof files'),
   'Stable and PTB Play must retain separate launcher-owned, instance-bound proof files so one target cannot invalidate the other.'
+);
+assert(
+  desktopMain.includes('configuredMinecraftInstanceStarted(handoff.config, handoff.attempt)')
+  && desktopMain.includes('retainActiveLauncherProof(prepared.launcherProof)')
+  && desktopMain.includes('activeLauncherProofFiles.has(file)')
+  && smokePlayIntegrityGate.includes('configured game start after Minecraft Launcher window closed')
+  && smokePlayIntegrityGate.includes('Closing AHT after Play deleted the active proof before Minecraft could connect.'),
+  'A verified configured game start must complete a vanished-window handoff, and its time-bound proof must survive AHT closing until Minecraft connects.'
 );
 assert(rendererApp.includes('await refreshPrepared(activeSidebarPack);') && !/await refreshPrepared\(activeSidebarPack, \{ forcePreparation: true \}\);\s*if \(result\?\.profileUpdated\)/.test(rendererApp), 'Saving Game Settings must reuse a ready launch snapshot when preparation paths did not change.');
 assert(rendererApp.includes('loadNewsStatusResults(false)') && rendererApp.includes('loadNewsStatusResults(true)') && preloadScript.includes("refreshNews: (packKey = 'aht')") && desktopMain.includes("ipcMain.handle('news:refresh'") && desktopMain.includes('async function refreshNewsStatus') && rendererApp.includes('if (!bootDeveloperMode && !startupFirstInitialization)') && rendererApp.includes('refreshStartupNewsQuietly("aht")') && rendererApp.includes('refreshStartupNewsQuietly("ptb")') && !rendererApp.includes('void refreshPackQuietly("aht");') && !rendererApp.includes('void refreshPackQuietly("ptb");'), 'First initialization must load fresh News before reveal without re-rendering it, while warm player startup refreshes News afterward through a lightweight path without repeating full prerequisite status work.');
