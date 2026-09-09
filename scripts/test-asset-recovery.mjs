@@ -72,12 +72,14 @@ try {
   const source = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   const startup = source.slice(source.indexOf('async function prepareStartupPrerequisiteEntry('), source.indexOf('async function hydrateLaunchPreparationFromSnapshot('));
   const policy = source.match(/const STARTUP_PREREQUISITE_POLICY = '([^']+)'/)[1];
+  const managedPolicy = source.match(/const LAUNCH_PREPARATION_MANAGED_POLICY = '([^']+)'/)[1];
   for (const { fail, warm } of [{ fail: false, warm: false }, { fail: true, warm: false }, { fail: false, warm: true }]) {
     let repairs = 0;
     const installed = { version: 'fixture', packId: 'aht' };
     const profile = { profileId: 'aht', versionId: plan.versionId, profileExists: true, loaderInstalled: true };
     const context = {
       process: { platform: 'win32' }, Date, STARTUP_PREREQUISITE_POLICY: policy,
+      LAUNCH_PREPARATION_MANAGED_POLICY: managedPolicy,
       developerClientBypassAllowed: () => false,
       createLaunchDiagnosticAttempt: createLaunchAttempt, launcherLegalStatus: async () => ({ required: false }),
       installedPackMatchesReleaseTarget: () => true, launchPreparationConfigSignature: () => 'config',
@@ -85,6 +87,7 @@ try {
       preparedLauncherRouteForSnapshot: route => route, preparedLauncherRouteAvailable: async () => true,
       useBundledJava8: () => false, preparedJava8RuntimeAvailable: async () => true,
       minecraftJavaExecutable: async value => value, preparedProfileForSnapshot: value => value,
+      preparedManagedSnapshotFromEntry: () => ({ complete: false, managedFiles: [], fileStates: [], fingerprint: null }),
       inspectMinecraftLauncherProfile: async () => profile,
       inspectMinecraftLauncherRuntime: async () => ({ usable: false }),
       repairMinecraftRuntime: async () => { repairs++; if (fail) throw new Error('asset checksum failed'); return { profile, minecraftAssets: { repaired: true } }; },

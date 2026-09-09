@@ -5,6 +5,8 @@ const pureChecks = [
   ['test:platform-builds'],
   ['test:profile'],
   ['test:managed-runtime'],
+  ['test:asset-recovery'],
+  ['test:account-migration'],
   ['test:windows-handoff'],
   ['test:worker'],
   ['test:telemetry'],
