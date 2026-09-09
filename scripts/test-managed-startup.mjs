@@ -11,6 +11,7 @@ const target = { id: 'stable', name: 'A Hard Time' };
 const installed = { packId: 'aht', version: '2.8.62' };
 const profile = { profileId: 'aht', versionId: '1.12.2-forge-14.23.5.2860', profileExists: true, loaderInstalled: true };
 const policy = source.match(/const STARTUP_PREREQUISITE_POLICY = '([^']+)'/)[1];
+const managedPolicy = source.match(/const LAUNCH_PREPARATION_MANAGED_POLICY = '([^']+)'/)[1];
 
 async function scenario({ cached = true, healthy = false, failRepair = false, missingJava = false, developer = false } = {}) {
   let repairs = 0;
@@ -21,6 +22,7 @@ async function scenario({ cached = true, healthy = false, failRepair = false, mi
     process: { platform: 'win32' }, Date,
     developerClientBypassAllowed: () => developer,
     STARTUP_PREREQUISITE_POLICY: policy,
+    LAUNCH_PREPARATION_MANAGED_POLICY: managedPolicy,
     createLaunchDiagnosticAttempt: createLaunchAttempt, launcherLegalStatus: async () => ({ required: false }),
     installedPackMatchesReleaseTarget: () => true, launchPreparationConfigSignature: () => 'config',
     samePath: (a, b) => a === b, launcherConfigFromPreparedPaths: () => structuredClone(config),
@@ -47,6 +49,12 @@ async function scenario({ cached = true, healthy = false, failRepair = false, mi
     cachedLatestRelease: () => installed,
     loadIdentity: async () => ({ installId: 'test' }),
     preparedIntegritySummaryForSnapshot: (value) => value ? { valid: true, counts: { corrupted: 0 } } : null,
+    preparedManagedSnapshotFromEntry: () => ({
+      complete: false,
+      managedFiles: [],
+      fileStates: [],
+      fingerprint: null
+    }),
     setLaunchRequirement, launchPreparationCache: new Map(), persistPreparedLaunchEntry: async () => {},
     markFailedLaunchRequirement: () => {}, completeLaunchAttempt: () => {},
     blockedLaunchPreparation: (_target, error, { attempt }) => ({ state: 'blocked', error: error.message, attempt })
@@ -102,6 +110,7 @@ for (const missingAtDetection of [true, false]) {
   const previous = { state: 'blocked' };
   const finalContext = {
     clearLaunchPreparationResources: () => {},
+    developerClientBypassAllowed: () => true,
     resolveMinecraftLauncherRoute: async () => ({ kind: 'desktop' }),
     java8RuntimeStatus: async (_config, options) => {
       assert.equal(options.refresh, true, 'Repair must discard cached Java detection at its final gate');

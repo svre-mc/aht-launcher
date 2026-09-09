@@ -71,9 +71,13 @@ const release = await buildRelease({
 assert(release.latest.installMode === 'full-client-zip', 'release did not use full-client install mode');
 assert(release.latest.curseforge?.disabled === true, 'full-client release should not use CurseForge resolution');
 assert(release.latest.clientZip?.modFileCount >= 2, 'full-client release did not count mod archives');
-assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.0.0.jar', 'full-client release did not record the client version lock mod');
+assert(release.latest.serverLock?.clientModPath === 'mods/aht-version-lock-1.2.0.jar', 'full-client release did not replace the stale client version lock mod');
+assert(release.latest.serverLock?.replaced === true, 'full-client release did not record the version-lock replacement');
 const serverLockConfig = await fs.readFile(path.join(outDir, release.latest.serverLock.configPath), 'utf8');
-assert(serverLockConfig.includes('S:verificationUrl=https://api.ahardtime.net/api/launcher-proof/verify'), 'server launcher lock config is missing the authoritative AHT Proxy verifier');
+assert(serverLockConfig.includes('S:stateWebSocketUrl=wss://api.ahardtime.net/server/launcher-state'), 'server launcher lock config is missing the authenticated state channel');
+assert(serverLockConfig.includes('S:stateServerTokenEnvironmentVariable=AHT_LAUNCHER_STATE_TOKEN'), 'server launcher lock config must keep the server token outside player artifacts');
+assert(serverLockConfig.includes('S:attestationPublicKeySha256=8ac90ac7194d749980d45e2ad616ebed85f298511adb14d1d60e49f3fa6d20a8'), 'server launcher lock config is missing its public signing-key pin');
+assert(!serverLockConfig.includes('verificationUrl=') && /^\s*S:stateServerToken=\s*$/m.test(serverLockConfig), 'server launcher lock config retained the per-player verifier or embedded a token');
 assert(serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}'), 'server launcher lock config is missing the reconnect update message');
 assert(!serverLockConfig.includes('requiredVersion='), 'server launcher lock config must read launcher policy live instead of freezing a pack version');
 

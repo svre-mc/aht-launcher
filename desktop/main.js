@@ -392,7 +392,7 @@ const STARTUP_PREPARATION_CACHE_SCHEMA = 'aht-launcher-startup-preparation-cache
 const STARTUP_PREPARATION_LEGACY_CACHE_SCHEMA = 'aht-launcher-startup-preparation-cache/v1';
 const STARTUP_PREPARATION_ENVELOPE_SCHEMA = 'aht-launcher-startup-preparation-envelope/v1';
 const STARTUP_PREPARATION_KEY_SCHEMA = 'aht-launcher-startup-preparation-key/v1';
-const STARTUP_PREREQUISITE_POLICY = 'java8-and-minecraft-launcher-paths/v5-assets';
+const STARTUP_PREREQUISITE_POLICY = 'java8-launcher-paths-and-play-integrity/v6';
 const LAUNCH_PREPARATION_MANAGED_POLICY = 'launch-critical-managed-files/v1';
 const LAUNCH_PREPARATION_RUNTIME_POLICY = 'minecraft-forge-runtime-content/v2';
 const STARTUP_PREPARATION_PACKS = Object.freeze(['stable', 'ptb']);
@@ -691,7 +691,7 @@ function playerPublicErrorMessage(error = null, channel = '') {
   if (/Update package is not ready/i.test(message)) {
     return 'The verified AHT update package is not available yet.';
   }
-  if (/Repair required|needs Repair|managed file issue|files changed after initialization|corrupt/i.test(message)) {
+  if (/Repair required|needs Repair|managed file issue|Client files changed|files changed after initialization|corrupt/i.test(message)) {
     return 'Repair required before playing.';
   }
   if (/is not installed|Install the pack before playing/i.test(message)) {
@@ -11695,11 +11695,16 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
               overrideFileCount = entries.length;
               cacheCoverage = { total: 0, covered: 0, missing: [], complete: true };
               add('ok', 'AHT full client ZIP parsed', `${entries.length} files, ${modEntries.length} mod archives`);
-              const versionLockEntry = modEntries.find(isVersionLockJarPath);
-              if (versionLockEntry) {
+              const versionLockEntries = modEntries.filter(isVersionLockJarPath);
+              const versionLockEntry = versionLockEntries[0];
+              if (versionLockEntries.length === 1
+                  && normalizeRelPath(versionLockEntry).toLowerCase()
+                    === normalizeRelPath(latest.serverLock?.clientModPath || '').toLowerCase()) {
                 add('ok', 'client version lock mod included', versionLockEntry);
+              } else if (versionLockEntries.length > 1) {
+                add('error', 'multiple client version lock mods found', versionLockEntries.join(', '));
               } else {
-                add('error', 'client version lock mod missing', 'Include the AHT Version Lock JAR in mods/ so stale clients cannot bypass the launcher.');
+                add('error', 'client version lock mod mismatch', `Expected ${latest.serverLock?.clientModPath || 'one authoritative lock in mods/'}.`);
               }
               if (metadata.minecraft?.version || latest.minecraft?.version) {
                 add('ok', 'Minecraft version present', metadata.minecraft?.version || latest.minecraft?.version);
@@ -11733,14 +11738,19 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
             const prefix = `${String(overridesDir).replace(/\/+$/, '')}/`;
             overrideFileCount = entries.filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix)).length;
             add('ok', 'CurseForge manifest parsed', `${manifestFileCount} mod entries, ${overrideFileCount} override files`);
-            const versionLockEntry = entries.find((entry) => {
+            const versionLockEntries = entries.filter((entry) => {
               const name = entry.entryName.replaceAll('\\', '/');
               return !entry.isDirectory && name.startsWith(`${prefix}mods/`) && isVersionLockJarPath(name);
             });
-            if (versionLockEntry) {
+            const versionLockEntry = versionLockEntries[0];
+            if (versionLockEntries.length === 1
+                && normalizeRelPath(versionLockEntry.entryName).toLowerCase()
+                  === normalizeRelPath(latest.serverLock?.clientModPath || '').toLowerCase()) {
               add('ok', 'client version lock mod included', versionLockEntry.entryName);
+            } else if (versionLockEntries.length > 1) {
+              add('error', 'multiple client version lock mods found', versionLockEntries.map((entry) => entry.entryName).join(', '));
             } else {
-              add('error', 'client version lock mod missing', `Include the AHT Version Lock JAR in ${prefix}mods/ so stale clients cannot bypass the launcher.`);
+              add('error', 'client version lock mod mismatch', `Expected ${latest.serverLock?.clientModPath || `${prefix}mods/`}.`);
             }
             if (manifest.minecraft?.version) {
               add('ok', 'Minecraft version present', manifest.minecraft.version);
@@ -12045,12 +12055,15 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
   } else {
     const serverLockConfig = await fs.readFile(serverLockPath, 'utf8');
     const hasPackId = serverLockConfig.includes(`S:requiredPackId=${latest.packId}`);
-    const hasVerifier = serverLockConfig.includes('S:verificationUrl=https://api.ahardtime.net/api/launcher-proof/verify');
+    const hasStateChannel = serverLockConfig.includes('S:stateWebSocketUrl=wss://api.ahardtime.net/server/launcher-state')
+      && serverLockConfig.includes('S:stateServerTokenEnvironmentVariable=AHT_LAUNCHER_STATE_TOKEN')
+      && /^\s*S:stateServerToken=\s*$/m.test(serverLockConfig);
+    const hasSigningPin = /^\s*S:attestationPublicKeySha256=[a-f0-9]{64}\s*$/m.test(serverLockConfig);
     const hasReconnectMessage = serverLockConfig.includes('Current Launcher Version: {current}\\nNecessary Launcher Version: {necessary}');
-    if (hasPackId && hasVerifier && hasReconnectMessage) {
+    if (hasPackId && hasStateChannel && hasSigningPin && hasReconnectMessage) {
       add('ok', 'server launcher lock config matches release', path.relative(outDir, serverLockPath));
     } else {
-      add('error', 'server launcher lock config mismatch', `Expected live proof verification for ${latest.packId}`);
+      add('error', 'server launcher lock config mismatch', `Expected the signed server-only policy channel for ${latest.packId}`);
     }
   }
 
@@ -12062,6 +12075,13 @@ async function validateRelease({ outDir, publicLatestUrl = '', allowLegacyCurseF
     add('error', 'server launcher lock jar missing', serverLockModPath);
   } else {
     add('ok', 'server launcher lock jar bundled', path.relative(outDir, serverLockModPath));
+  }
+  const clientLockName = path.posix.basename(normalizeRelPath(latest.serverLock?.clientModPath || '')).toLowerCase();
+  const serverLockName = path.posix.basename(normalizeRelPath(serverLockModRef || '')).toLowerCase();
+  if (!clientLockName || clientLockName !== serverLockName) {
+    add('error', 'client and server launcher locks differ', `client=${clientLockName || 'missing'}, server=${serverLockName || 'missing'}`);
+  } else {
+    add('ok', 'client and server launcher locks match', clientLockName);
   }
 
   return {
@@ -13823,6 +13843,182 @@ function preparedIntegritySummaryForSnapshot(integrity = null) {
   };
 }
 
+function preparedManagedFilesForSnapshot(files = []) {
+  return launchCriticalManagedFiles(Array.isArray(files) ? files : []).map((item) => ({
+    relativePath: normalizeRelPath(String(item?.relativePath || item?.path || '')),
+    source: String(item?.source || 'verified-client-manifest'),
+    sha256: String(item?.sha256 || '').trim().toLowerCase(),
+    sha1: String(item?.sha1 || '').trim().toLowerCase(),
+    size: Number.isSafeInteger(Number(item?.size)) && Number(item.size) >= 0 ? Number(item.size) : 0,
+    requiredByLatest: item?.requiredByLatest !== false
+  })).filter((item) => item.relativePath && /^[a-f0-9]{64}$/.test(item.sha256));
+}
+
+function preparedManagedFileStatesForSnapshot(states = [], managedFiles = []) {
+  const managedPaths = new Set(preparedManagedFilesForSnapshot(managedFiles)
+    .map((item) => item.relativePath));
+  return (Array.isArray(states) ? states : []).map((state) => ({
+    path: normalizeRelPath(String(state?.path || '')),
+    type: String(state?.type || ''),
+    size: String(state?.size ?? ''),
+    mtimeNs: String(state?.mtimeNs ?? ''),
+    ctimeNs: String(state?.ctimeNs ?? ''),
+    ino: String(state?.ino ?? '')
+  })).filter((state) => managedPaths.has(state.path)
+    && state.type === 'file'
+    && [state.size, state.mtimeNs, state.ctimeNs, state.ino].every((value) => /^\d+$/.test(value)))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function preparedManagedSnapshotFromEntry(entry = {}, supplied = null) {
+  const source = supplied && typeof supplied === 'object' ? supplied : entry;
+  const managedFiles = preparedManagedFilesForSnapshot(source.managedFiles || entry.managedFiles || []);
+  const fileStates = preparedManagedFileStatesForSnapshot(
+    source.fileStates || source.managedFileStates || entry.managedFileStates || [],
+    managedFiles
+  );
+  const fingerprint = source.fingerprint || source.managedFingerprint || entry.managedFingerprint || null;
+  const complete = fingerprint?.schemaVersion === 2
+    && fingerprint.pathsValid === true
+    && managedFiles.length > 0
+    && fileStates.length === managedFiles.length;
+  return { complete, managedFiles, fileStates, fingerprint };
+}
+
+function managedIntegrityVerificationError(target, snapshot = null) {
+  const issues = Array.isArray(snapshot?.issues) ? snapshot.issues : [];
+  const error = new Error('Client files changed. Run Repair before playing.');
+  error.name = 'AhtManagedIntegrityError';
+  error.code = 'AHT_MANAGED_CLIENT_CHANGED';
+  error.subsystem = 'managed-client-integrity';
+  error.diagnosticFlags = [
+    {
+      status: 'FAIL',
+      code: 'MANAGED_CLIENT_INTEGRITY',
+      detail: `${target?.name || 'A Hard Time'} failed its protected-file verification.`
+    },
+    {
+      status: snapshot?.fingerprint?.pathsValid === true ? 'PASS' : 'FAIL',
+      code: 'MANAGED_CLIENT_PATH_SET',
+      detail: `${Number(snapshot?.fingerprint?.managedCount) || 0} protected files were expected.`
+    },
+    ...issues.slice(0, 24).map((issue) => ({
+      status: 'FAIL',
+      code: issue.reason === 'content-changed' ? 'MANAGED_CLIENT_CONTENT_CHANGED' : 'MANAGED_CLIENT_PATH_CHANGED',
+      detail: `${String(issue.path || 'protected client files')}: ${String(issue.reason || 'changed')}`
+    }))
+  ];
+  return error;
+}
+
+function managedIntegrityStateFromPlaySnapshot(snapshot = null, checkMode = 'metadata-first') {
+  const issues = Array.isArray(snapshot?.issues) ? snapshot.issues : [];
+  const changed = issues
+    .filter((issue) => issue.reason === 'content-changed')
+    .map((issue) => ({ path: String(issue.path || ''), source: 'protected-client' }));
+  const added = issues
+    .filter((issue) => issue.reason === 'managed-path-set-changed')
+    .map((issue) => ({ path: String(issue.path || 'launch-critical-roots'), source: 'protected-client' }));
+  const missing = issues
+    .filter((issue) => !['content-changed', 'managed-path-set-changed'].includes(issue.reason))
+    .map((issue) => ({ path: String(issue.path || ''), source: 'protected-client' }));
+  const managed = Array.isArray(snapshot?.managedFiles) ? snapshot.managedFiles.length : 0;
+  return {
+    generatedAt: new Date().toISOString(),
+    valid: issues.length === 0 && snapshot?.fingerprint?.pathsValid === true,
+    source: 'play-integrity-gate',
+    checkMode,
+    fingerprint: snapshot?.fingerprint || null,
+    counts: {
+      managed,
+      checked: Number(snapshot?.hashedFiles) || 0,
+      ok: Math.max(0, managed - issues.length),
+      changed: changed.length,
+      missing: missing.length,
+      added: added.length,
+      corrupted: issues.length
+    },
+    changed,
+    missing,
+    added
+  };
+}
+
+async function verifyPreparedClientIntegrityAtPlay(target, prepared) {
+  if (developerClientBypassAllowed()) {
+    return { skipped: true, managedFilesChecked: 0, hashedFiles: 0, metadataChanges: 0 };
+  }
+  let trusted = preparedManagedSnapshotFromEntry(prepared);
+  let managedFiles = trusted.managedFiles;
+  if (!managedFiles.length) {
+    let releaseForManifest = prepared.latest;
+    if (!releaseForManifest?.clientManifest?.url) {
+      const currentRelease = cachedLatestRelease(prepared.config, Number.MAX_SAFE_INTEGER)
+        || await readLatest(prepared.config);
+      releaseForManifest = validateLatestReleaseFeed(currentRelease, `${target.name} protected Play gate`);
+      if (String(releaseForManifest.version || '') !== String(prepared.installed?.version || '')) {
+        throw new Error(`Update ${target.name} before playing.`);
+      }
+      prepared.latest = releaseForManifest;
+    }
+    const managedOptions = await managedIntegrityOptions(prepared.config, releaseForManifest);
+    managedFiles = preparedManagedFilesForSnapshot(managedOptions.managedFiles || []);
+    trusted = { complete: false, managedFiles, fileStates: [], fingerprint: null };
+  }
+  if (!managedFiles.length) {
+    throw new Error('Repair required. The protected client manifest is unavailable.');
+  }
+  const snapshot = await verifyManagedIntegritySnapshot(prepared.config.instanceDir, {
+    managedFiles,
+    ignoreLocalManaged: true,
+    previousFileStates: trusted.complete ? trusted.fileStates : [],
+    forceAll: !trusted.complete
+  });
+  if (snapshot.valid !== true) {
+    const error = managedIntegrityVerificationError(target, snapshot);
+    const integrity = managedIntegrityStateFromPlaySnapshot(
+      snapshot,
+      trusted.complete ? 'metadata-first' : 'full-hash'
+    );
+    prepared.managedMutationMonitor?.close?.();
+    prepared.managedMutationMonitor = null;
+    clearLaunchPreparationResources(target.id);
+    blockedLaunchPreparation(target, error, { ...prepared, integrity });
+    throw error;
+  }
+  prepared.managedFilePolicy = LAUNCH_PREPARATION_MANAGED_POLICY;
+  prepared.managedFiles = snapshot.managedFiles;
+  prepared.managedFileStates = snapshot.fileStates;
+  prepared.managedFingerprint = snapshot.fingerprint;
+  prepared.integrity = {
+    ...(prepared.integrity || {}),
+    valid: true,
+    source: 'play-integrity-gate',
+    checkMode: trusted.complete ? 'metadata-first' : 'full-hash',
+    checkedAt: new Date().toISOString(),
+    fingerprint: snapshot.fingerprint,
+    counts: {
+      ...(prepared.integrity?.counts || {}),
+      managed: snapshot.managedFiles.length,
+      checked: snapshot.hashedFiles,
+      changed: 0,
+      missing: 0,
+      corrupted: 0
+    }
+  };
+  if (!trusted.complete || snapshot.metadataChanges > 0
+      || trusted.fingerprint?.digest !== snapshot.fingerprint?.digest) {
+    await persistPreparedLaunchEntry(target.id, prepared, { managedSnapshot: snapshot });
+  }
+  return {
+    skipped: false,
+    managedFilesChecked: snapshot.managedFiles.length,
+    hashedFiles: snapshot.hashedFiles,
+    metadataChanges: snapshot.metadataChanges,
+    fingerprint: snapshot.fingerprint
+  };
+}
+
 function preparedLauncherPathsForSnapshot(launcherConfig = {}, java8Runtime = null) {
   const minecraft = launcherConfig.minecraftLauncher || {};
   return {
@@ -13986,11 +14182,14 @@ function preparedRuntimeVerificationError(target, snapshot = null, options = {})
 
 async function persistPreparedLaunchEntry(key, entry = {}, options = {}) {
   if (entry.state !== 'ready' || !entry.config || !entry.installed) return null;
+  const managedSnapshot = preparedManagedSnapshotFromEntry(entry, options.managedSnapshot);
   const cachedEntry = {
     cachedAt: new Date().toISOString(),
     targetId: String(entry.target?.id || key),
     prerequisitePolicy: STARTUP_PREREQUISITE_POLICY,
     configSignature: launchPreparationConfigSignature(entry.config),
+    releaseSignature: startupPreparationReleaseSignature(entry.latest || entry.installed),
+    developerClientBypass: entry.developerClientBypass === true || entry.developerLocalFastPath === true,
     latest: entry.latest || entry.installed,
     installed: entry.installed,
     integrity: preparedIntegritySummaryForSnapshot(entry.integrity),
@@ -14001,6 +14200,12 @@ async function persistPreparedLaunchEntry(key, entry = {}, options = {}) {
     java8Runtime: entry.java8Runtime || null,
     minecraftAssets: entry.minecraftAssets || null
   };
+  if (managedSnapshot.complete) {
+    cachedEntry.managedFilePolicy = LAUNCH_PREPARATION_MANAGED_POLICY;
+    cachedEntry.managedFiles = managedSnapshot.managedFiles;
+    cachedEntry.managedFileStates = managedSnapshot.fileStates;
+    cachedEntry.managedFingerprint = managedSnapshot.fingerprint;
+  }
   const minecraftJavaPath = await minecraftJavaExecutable(
     entry.java8Runtime?.path || cachedEntry.launcherPaths.javaPath
   );
@@ -14031,6 +14236,25 @@ async function publishCompletedUpdatePreparation({
   }
   const key = target.id;
   clearLaunchPreparationResources(key);
+  let managedSnapshot = null;
+  if (!developerClientBypassAllowed()) {
+    const managedOptions = await managedIntegrityOptions(config, latest);
+    const managedFiles = preparedManagedFilesForSnapshot(managedOptions.managedFiles || []);
+    const fingerprintWithStates = await captureManagedIntegrityFingerprint(config.instanceDir, {
+      managedFiles,
+      ignoreLocalManaged: true,
+      includeFileStates: true
+    });
+    const fileStates = Array.isArray(fingerprintWithStates.fileStates)
+      ? fingerprintWithStates.fileStates
+      : [];
+    const fingerprint = { ...fingerprintWithStates };
+    delete fingerprint.fileStates;
+    managedSnapshot = { valid: fingerprint.pathsValid === true, managedFiles, fileStates, fingerprint };
+    if (!preparedManagedSnapshotFromEntry({}, managedSnapshot).complete) {
+      throw new Error('Update verification could not create a complete protected-file snapshot. Run Repair once.');
+    }
+  }
   const [launcherRoute, detectedJava] = await Promise.all([
     resolveMinecraftLauncherRoute(launcherConfig),
     java8RuntimeStatus(launcherConfig, { refresh: true })
@@ -14065,6 +14289,10 @@ async function publishCompletedUpdatePreparation({
     latest,
     installed,
     integrity,
+    managedFilePolicy: managedSnapshot ? LAUNCH_PREPARATION_MANAGED_POLICY : '',
+    managedFiles: managedSnapshot?.managedFiles || [],
+    managedFileStates: managedSnapshot?.fileStates || [],
+    managedFingerprint: managedSnapshot?.fingerprint || null,
     java8Runtime,
     minecraftProfile,
     launcherProof,
@@ -14075,13 +14303,17 @@ async function publishCompletedUpdatePreparation({
     completedAt: new Date().toISOString(),
     preparedByUpdate: true
   };
-  await confirmLaunchPreparationMutationMonitor(managedMutationMonitor, integrity?.fingerprint, {
+  await confirmLaunchPreparationMutationMonitor(
+    managedMutationMonitor,
+    managedSnapshot?.fingerprint || integrity?.fingerprint,
+    {
     changedMessage: 'A managed game file changed while Update was finalizing its quick startup snapshot.',
     monitoringMessage: 'Managed-file monitoring stopped while Update was finalizing its quick startup snapshot.'
-  });
+    }
+  );
   launchPreparationCache.set(key, entry);
   try {
-    await persistPreparedLaunchEntry(key, entry);
+    await persistPreparedLaunchEntry(key, entry, { managedSnapshot });
     managedMutationMonitor?.close?.();
     entry.managedMutationMonitor = null;
   } catch (error) {
@@ -14541,6 +14773,10 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
 
     const latest = reusable?.latest || cachedLatestRelease(config, Number.MAX_SAFE_INTEGER) || installed;
     const cachedInstalledVersionMatches = String(reusable?.installed?.version || '') === String(installed.version || '');
+    const reusableManagedSnapshot = cachedInstalledVersionMatches
+      && reusable?.managedFilePolicy === LAUNCH_PREPARATION_MANAGED_POLICY
+      ? preparedManagedSnapshotFromEntry(reusable)
+      : { complete: false, managedFiles: [], fileStates: [], fingerprint: null };
     let minecraftProfile = cachedInstalledVersionMatches
       ? preparedProfileForSnapshot(reusable?.minecraftProfile)
       : null;
@@ -14624,6 +14860,10 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       latest,
       installed,
       integrity,
+      managedFilePolicy: reusableManagedSnapshot.complete ? LAUNCH_PREPARATION_MANAGED_POLICY : '',
+      managedFiles: reusableManagedSnapshot.managedFiles,
+      managedFileStates: reusableManagedSnapshot.fileStates,
+      managedFingerprint: reusableManagedSnapshot.fingerprint,
       java8Runtime,
       minecraftProfile,
       launcherProof: null,
@@ -14933,12 +15173,21 @@ async function prepareLaunchForPack(packValue = 'stable', options = {}) {
     } catch (error) {
       console.warn(`Ignoring the unreadable startup prerequisite cache: ${error.message || error}`);
     }
-    return prepareStartupPrerequisiteEntry(descriptor, snapshot?.packs?.[key] || null, {
+    const entry = await prepareStartupPrerequisiteEntry(descriptor, snapshot?.packs?.[key] || null, {
       attempt,
       persist: options.persist !== false,
       startedAt: preparingEntry.startedAt,
       onProgress: typeof options.onProgress === 'function' ? options.onProgress : null
     });
+    if (options.force && entry?.state === 'ready' && !developerClientBypassAllowed()) {
+      try {
+        await verifyPreparedClientIntegrityAtPlay(target, entry);
+        await armLaunchPreparationWatcher(key, entry);
+      } catch {
+        return launchPreparationCache.get(key) || entry;
+      }
+    }
+    return entry;
   })().finally(() => {
     if (launchPreparationInFlight.get(key) === preparation) launchPreparationInFlight.delete(key);
   });
@@ -15041,8 +15290,17 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   attempt.runtimeConfig = prepared.launcherConfig;
   attempt.pack.installedVersion = String(prepared.installed?.version || '');
   attempt.pack.latestVersion = String(prepared.latest?.version || '');
-  attempt.minecraftSignalBaseline = prepared.attempt?.minecraftSignalBaseline || null;
-  attempt.minecraftInstanceSignalBaseline = prepared.attempt?.minecraftInstanceSignalBaseline || null;
+  // Draw the diagnostic boundary at the Play click, not at launcher startup.
+  // A prepared launcher can stay open for hours; reusing its startup snapshot
+  // would make unrelated errors written in that interval look like this launch.
+  const [playLauncherSignalBaseline, playInstanceSignalBaseline] = await Promise.all([
+    minecraftLaunchDiagnostic(prepared.launcherConfig)
+      .catch(() => prepared.attempt?.minecraftSignalBaseline || null),
+    minecraftInstanceSignalDiagnostic(prepared.config.instanceDir)
+      .catch(() => prepared.attempt?.minecraftInstanceSignalBaseline || null)
+  ]);
+  attempt.minecraftSignalBaseline = playLauncherSignalBaseline;
+  attempt.minecraftInstanceSignalBaseline = playInstanceSignalBaseline;
   await runLaunchStep(
     attempt,
     'preparation-cache',
@@ -15070,12 +15328,23 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
         launcherPath: prepared.launcherRoute.executablePath || prepared.launcherRoute.appPath || prepared.launcherRoute.rootDir || prepared.launcherRoute.cwd || ''
       };
     },
-    (value) => `${value.launcherKind} and Java 8 paths were reused from initialization; 0 pack files checked.`
+    (value) => `${value.launcherKind} and Java 8 paths were reused from initialization.`
+  );
+  const finalManagedIntegrity = await runLaunchStep(
+    attempt,
+    'protected-client-integrity',
+    'Verify protected client files before Play',
+    async () => verifyPreparedClientIntegrityAtPlay(target, prepared),
+    (value) => value.skipped
+      ? { status: 'NOT CHECKED', detail: 'The local developer client bypass is active.' }
+      : `${value.managedFilesChecked} protected files matched; ${value.hashedFiles} changed file${value.hashedFiles === 1 ? '' : 's'} required content hashing.`
   );
   attempt.finalHotIntegrity = {
-    skipped: true,
+    skipped: finalManagedIntegrity.skipped === true,
     policy: STARTUP_PREREQUISITE_POLICY,
-    managedFilesChecked: 0,
+    managedFilesChecked: finalManagedIntegrity.managedFilesChecked,
+    managedFilesHashed: finalManagedIntegrity.hashedFiles,
+    managedMetadataChanges: finalManagedIntegrity.metadataChanges,
     runtimeFilesChecked: 0,
     ...finalPrerequisites
   };

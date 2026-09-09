@@ -22,7 +22,8 @@ try {
     assert(!isVersionLockJarPath(name));
   }
   const helper = path.join(root, 'aht-version-lock-99.0.jar');
-  await fs.writeFile(helper, 'fallback must not be injected beside an existing lock');
+  const helperBytes = Buffer.from('authoritative release lock bytes');
+  await fs.writeFile(helper, helperBytes);
   for (const name of names) {
     for (const format of ['full', 'wrapped', 'legacy']) {
       const prefix = format === 'wrapped' ? 'A Hard Time Client/' : format === 'legacy' ? 'overrides/' : '';
@@ -36,21 +37,27 @@ try {
         zip.addFile(`${prefix}aht-client-pack.json`, Buffer.from(JSON.stringify({...metadata, format: 'aht-full-client-zip'})));
       }
       zip.addFile(`${prefix}mods/${name}`, bytes);
+      if (releases === 0) {
+        zip.addFile(`${prefix}mods/aht-version-lock-0.0.1.jar`, Buffer.from('second stale lock'));
+      }
       const packZip = path.join(root, `pack-${releases}.zip`);
       zip.writeZip(packZip);
       const outDir = path.join(root, `release-${releases}`);
       const release = await buildRelease({packZip, outDir, versionLockJar: helper});
-      const expected = format === 'legacy' ? `overrides/mods/${name}` : `mods/${name}`;
+      const expected = format === 'legacy' ? 'overrides/mods/aht-version-lock-99.0.jar' : 'mods/aht-version-lock-99.0.jar';
       assert.equal(release.latest.serverLock.clientModPath, expected, `${format}: ${name}`);
-      assert.equal(release.latest.serverLock.injected, false, 'Existing lock must not cause duplicate injection');
+      assert.equal(release.latest.serverLock.injected, false, 'Replacing an existing lock is not a new injection');
+      assert.equal(release.latest.serverLock.replaced, true, 'Existing lock must be replaced by the authoritative release lock');
       const built = new AdmZip(path.join(outDir, release.latest.zip.path));
       const locks = built.getEntries().filter(entry => !entry.isDirectory && isVersionLockJarPath(entry.entryName));
       assert.equal(locks.length, 1, 'Release must contain exactly one runtime lock');
-      assert.deepEqual(locks[0].getData(), bytes, 'Existing runtime lock bytes must be preserved');
+      const archiveExpected = format === 'wrapped' ? `${prefix}${expected}` : expected;
+      assert.equal(locks[0].entryName.replaceAll('\\', '/'), archiveExpected, 'Stale lock path survived replacement');
+      assert.deepEqual(locks[0].getData(), helperBytes, 'Release must contain the authoritative runtime lock bytes');
       releases++;
     }
   }
-  console.log(JSON.stringify({ok: true, releases, namingStyles: names, duplicateInjection: false}));
+  console.log(JSON.stringify({ok: true, releases, namingStyles: names, staleLocksReplaced: true, duplicateInjection: false}));
 } finally {
   await fs.rm(root, {recursive: true, force: true});
 }

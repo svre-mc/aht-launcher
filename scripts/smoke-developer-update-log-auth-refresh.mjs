@@ -543,8 +543,14 @@ try {
   ) {
     throw new Error(`Immediate launcher proof did not replace stale developer auth for every retry: ${JSON.stringify(launcherProofAuthHeaders)}`);
   }
-  const developerProofPath = launcherProofPath(stableInstanceDir, 'developer', {
+  const playDeveloperProofPath = launcherProofPath(stableInstanceDir, 'developer', {
     proofDir: launcherProofStorageDir(path.join(userData, '.aht-launcher'), stableInstanceDir)
+  });
+  if (fs.existsSync(playDeveloperProofPath)) {
+    throw new Error('A non-Play developer request created a Play-scoped launcher proof.');
+  }
+  const developerProofPath = launcherProofPath(stableInstanceDir, 'developer', {
+    proofDir: launcherProofStorageDir(path.join(userData, '.aht-launcher', 'social'), stableInstanceDir)
   });
   const refreshedLauncherProof = JSON.parse(fs.readFileSync(developerProofPath, 'utf8'));
   if (

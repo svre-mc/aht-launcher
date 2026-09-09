@@ -189,7 +189,9 @@ async function waitForNewsCarouselSettled(client, expectedIndex, label) {
       transform: card ? getComputedStyle(card).transform : ''
     };
     return proof.index === ${JSON.stringify(String(expectedIndex))} && proof.layers === 1 && !proof.switching ? proof : false;
-  })()`, label, 20);
+  // Electron can briefly throttle transition timers while the full release
+  // matrix is starting and stopping adjacent renderer processes.
+  })()`, label, 40);
 }
 
 async function captureScreenshot(client, name) {

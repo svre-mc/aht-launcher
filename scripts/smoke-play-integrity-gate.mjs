@@ -493,7 +493,7 @@ try {
       ? { title: button.title, copy: copy.textContent.trim() }
       : false;
   })()`, 'diagnostic Play after initial status failure');
-  if (!/create a support report/i.test(initialStatusFailure.title || '')) {
+  if (!/retry loading the launcher/i.test(initialStatusFailure.title || '')) {
     throw new Error(`Initial status failure did not explain the diagnostic Play action: ${JSON.stringify(initialStatusFailure)}`);
   }
   await evaluate(client, `(() => {
@@ -505,18 +505,14 @@ try {
   })()`);
   await waitFor(client, `document.querySelector('#legalOverlay')?.hidden === true`, 'legal acceptance after initial status failure');
   await waitFor(client, `!document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden`, 'post-consent launch preparation');
-  await evaluate(client, `document.querySelector('#playButton').click(); true`);
-  const initialPlayFailure = await waitFor(client, `(() => {
-    const button = document.querySelector('#playButton');
-    const toast = [...document.querySelectorAll('#toastStack .toast.error')]
-      .find((item) => /Launch failed/i.test(item.textContent));
-    const copy = toast?.querySelector('button.toast-copy-action');
-    return button?.getAttribute('aria-busy') === 'false'
-      && button?.getAttribute('aria-disabled') === 'false'
-      && copy?.textContent.trim() === 'Click here to copy'
-      ? { toast: toast.textContent.trim(), copy: copy.textContent.trim() }
-      : false;
-  })()`, 'failed Play report after initial status failure');
+  const initialPlayFailure = await evaluate(client, `
+    window.aht.play()
+      .then((result) => ({ ok: true, result }))
+      .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))
+  `);
+  if (initialPlayFailure.ok) {
+    throw new Error(`Blocked startup unexpectedly reached Play: ${JSON.stringify(initialPlayFailure)}`);
+  }
   const initialLaunchLogsDir = path.join(instanceDir, 'logs', 'launcher');
   const initialFailureReports = await waitForReportFiles(initialLaunchLogsDir, /^AHT-Launch-.*-FAILED-.*\.txt$/i, 1);
   if (initialFailureReports.length !== 1) {
@@ -524,7 +520,7 @@ try {
   }
   const initialFailureText = fs.readFileSync(path.join(initialLaunchLogsDir, initialFailureReports[0]), 'utf8');
   if (
-    !initialFailureText.includes('Failed step: Use startup-prepared launch state')
+    !initialFailureText.includes('Failed step: Verify protected client files before Play')
     || initialFailureText.includes('No launch steps were recorded.')
     || initialFailureText.includes('Failed step: Unknown')
   ) {
@@ -554,8 +550,10 @@ try {
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '2.8.2' ? status : false)
   `, 'release feed');
-  if (before.launchReady || !/Repair required.*managed file issue/i.test(before.launchBlockedReason || '')) {
-    throw new Error(`Startup preparation trusted a forged integrity cache instead of the authoritative scan: ${JSON.stringify(before)}`);
+  if (before.launchReady
+      || before.integrity?.source !== 'play-integrity-gate'
+      || before.integrity?.counts?.corrupted !== 1) {
+    throw new Error(`A forged local cache overrode the in-memory protected Play result: ${JSON.stringify(before)}`);
   }
 
   const playResult = await evaluate(client, `
@@ -563,11 +561,11 @@ try {
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
   `);
-  if (playResult.ok || !/Repair required.*managed file issue/i.test(playResult.message || '')) {
+  if (playResult.ok || !/Repair required before playing/i.test(playResult.message || '')) {
     throw new Error(`Play IPC failure path did not surface the corrupted managed files: ${JSON.stringify(playResult)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
-  if (after.launchReady || !/Repair required.*managed file issue/i.test(after.launchBlockedReason || '')) {
+  if (after.launchReady || !/Client files changed.*Run Repair/i.test(after.launchBlockedReason || '')) {
     throw new Error(`Status did not stay blocked after play integrity scan: ${JSON.stringify(after)}`);
   }
   const changedPaths = (after.integrity?.changed || []).map((entry) => entry.path).sort();
@@ -587,8 +585,8 @@ try {
   if (persistedIntegrity.source !== 'forged-local-cache' || persistedIntegrity.counts?.corrupted !== 0) {
     throw new Error(`Forged cache fixture unexpectedly changed before the in-memory gate was checked: ${JSON.stringify(persistedIntegrity)}`);
   }
-  if (after.integrity?.source !== 'play-check' || after.integrity?.checkMode !== 'full-hash' || after.integrity?.counts?.corrupted !== 1) {
-    throw new Error(`Startup preparation did not retain its authoritative full-hash result in memory: ${JSON.stringify(after.integrity)}`);
+  if (after.integrity?.source !== 'play-integrity-gate' || after.integrity?.checkMode !== 'full-hash' || after.integrity?.counts?.corrupted !== 1) {
+    throw new Error(`Play did not retain its authoritative full-hash result in memory: ${JSON.stringify(after.integrity)}`);
   }
 
   const launchLogsDir = path.join(instanceDir, 'logs', 'launcher');
@@ -597,7 +595,14 @@ try {
     throw new Error(`Direct failed Play did not write exactly one timestamped report: ${JSON.stringify(firstFailureReports)}`);
   }
   const firstFailureText = fs.readFileSync(path.join(launchLogsDir, firstFailureReports[0]), 'utf8');
-  for (const expected of ['Result: FAILED', 'LIKELY CAUSE', 'LAUNCH PROCESS', 'REQUIREMENTS', 'PC AND RUNTIME', 'Repair required. 1 managed file issue found']) {
+  for (const expected of [
+    'Result: FAILED',
+    'LIKELY CAUSE',
+    'LAUNCH PROCESS',
+    'REQUIREMENTS',
+    'PC AND RUNTIME',
+    'Client files changed. Run Repair before playing.'
+  ]) {
     if (!firstFailureText.includes(expected)) {
       throw new Error(`Failed Play report is missing ${expected}: ${firstFailureText.slice(0, 1200)}`);
     }
@@ -824,7 +829,7 @@ try {
     const missingPlay = await evaluate(client, `window.aht.play('stable')
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || '') }))`);
-    if (missingPlay.ok || !missingPlay.message.endsWith('Minecraft not installed. Install Minecraft.') || Date.now() - missingPlayStartedAt >= 1000 || fs.existsSync(curseForgeSpawnCapture)) {
+    if (missingPlay.ok || !missingPlay.message.endsWith('Minecraft Launcher is required to play.') || Date.now() - missingPlayStartedAt >= 1000 || fs.existsSync(curseForgeSpawnCapture)) {
       throw new Error(`Missing Minecraft Play was not an immediate no-spawn failure: ${JSON.stringify({ missingPlay, durationMs: Date.now() - missingPlayStartedAt })}`);
     }
 
@@ -867,7 +872,7 @@ try {
     if (!curseForgePreparation?.launchReady || curseForgePreparation?.minecraftLauncherRoute !== 'curseforge') {
       throw new Error(`CurseForge route was not fully prepared before Play: ${JSON.stringify(curseForgePreparation)}`);
     }
-    const curseForgeProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
+    let curseForgeProof = null;
     const proofRequestsBeforeInstantPlay = launcherProofRequests.length;
 
     const curseForgePlayStartedAt = Date.now();
@@ -899,9 +904,6 @@ try {
     if (!Number.isFinite(curseForgeSpawnLatencyMs) || curseForgeSpawnLatencyMs < 0 || curseForgeSpawnLatencyMs >= 500) {
       throw new Error(`Prepared Play did not hand off to CurseForge within 500 ms: ${JSON.stringify({ curseForgeSpawnLatencyMs, immediateSpawnCapture })}`);
     }
-    if (launcherProofRequests.length !== proofRequestsBeforeInstantPlay) {
-      throw new Error(`Prepared Play made a redundant Worker proof request before spawning CurseForge: ${JSON.stringify({ before: proofRequestsBeforeInstantPlay, after: launcherProofRequests.length })}`);
-    }
     const completedPlayUi = await waitFor(client, `(() => {
       const button = document.querySelector('#playButton');
       const success = [...document.querySelectorAll('#toastStack .toast.success')]
@@ -926,6 +928,10 @@ try {
     if (curseForgePlayDurationMs >= 1000) {
       throw new Error(`Prepared CurseForge Play took too long (${curseForgePlayDurationMs}ms).`);
     }
+    curseForgeProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
+    if (launcherProofRequests.length !== proofRequestsBeforeInstantPlay + 1) {
+      throw new Error(`Play did not issue exactly one fresh one-time Worker proof: ${JSON.stringify({ before: proofRequestsBeforeInstantPlay, after: launcherProofRequests.length })}`);
+    }
     const handoffReportsBeforeCopy = (await waitForReportFiles(launchLogsDir, /^AHT-Launch-.*-HANDOFF.*\.txt$/i, 3))
       .sort((left, right) => fs.statSync(path.join(launchLogsDir, left)).mtimeMs - fs.statSync(path.join(launchLogsDir, right)).mtimeMs);
     const latestHandoffReport = handoffReportsBeforeCopy.at(-1);
@@ -935,8 +941,8 @@ try {
     const initialHandoffText = fs.readFileSync(path.join(launchLogsDir, latestHandoffReport), 'utf8');
     if (
       !initialHandoffText.includes('completed its handoff to a verified Minecraft Launcher window')
-      || !initialHandoffText.includes('0 changed-metadata files rehashed.')
-      || !initialHandoffText.includes('no network refresh was needed.')
+      || !initialHandoffText.includes('0 changed files required content hashing.')
+      || !initialHandoffText.includes('Fresh one-time launch')
       || initialHandoffText.includes(stalePreLaunchSignal)
       || initialHandoffText.includes(staleInstanceSignal)
     ) {
@@ -1084,10 +1090,9 @@ try {
       throw new Error(`Play did not prepare Minecraft Launcher Home safely: ${launcherUiStateRaw}`);
     }
     const verifiedIntegrity = await evaluate(client, 'window.aht.getStatus().then((status) => status.integrity)');
-    if (verifiedIntegrity?.checkMode !== 'full-hash' || verifiedIntegrity?.source !== 'play-check') {
-      throw new Error(`Prepared Play did not retain the authoritative initialization hash result: ${JSON.stringify(verifiedIntegrity)}`);
+    if (verifiedIntegrity?.checkMode !== 'metadata-first' || verifiedIntegrity?.source !== 'play-integrity-gate') {
+      throw new Error(`Prepared Play did not retain the authoritative protected-file result: ${JSON.stringify(verifiedIntegrity)}`);
     }
-    const retryProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     const retryUi = await evaluate(client, `(() => {
       const button = document.querySelector('#playButton');
       button.click();
@@ -1102,6 +1107,7 @@ try {
         && button.getAttribute('aria-disabled') === 'false'
         && button.textContent.trim() === 'Play';
     })()`, 'completed Play retry');
+    const retryProof = JSON.parse(fs.readFileSync(launcherProofStatePath, 'utf8'));
     const retryCapture = JSON.parse(fs.readFileSync(curseForgeSpawnCapture, 'utf8'));
     if (retryCapture.captureCount !== 2) {
       throw new Error(`A later legitimate Play click did not spawn exactly one more launcher: ${JSON.stringify(retryCapture)}`);
@@ -1245,10 +1251,14 @@ try {
     if (!Number.isFinite(cachedPlaySpawnLatencyMs) || cachedPlaySpawnLatencyMs < 0 || cachedPlaySpawnLatencyMs >= 500) {
       throw new Error(`Cached Play waited for the delayed Worker proof before opening CurseForge: ${JSON.stringify({ cachedPlaySpawnLatencyMs, cachedSpawnCapture })}`);
     }
-    if (launcherProofRequests.length <= proofRequestsBeforeCachedStartup || launcherProofResponses !== proofResponsesBeforeCachedStartup) {
-      throw new Error(`Cached Play did not start exactly at the proof boundary while the delayed response remained pending: ${JSON.stringify({ proofRequestsBeforeCachedStartup, proofRequests: launcherProofRequests.length, proofResponsesBeforeCachedStartup, proofResponses: launcherProofResponses })}`);
+    if (launcherProofResponses !== proofResponsesBeforeCachedStartup) {
+      throw new Error(`Cached Play waited for a delayed proof response before opening CurseForge: ${JSON.stringify({ proofRequestsBeforeCachedStartup, proofRequests: launcherProofRequests.length, proofResponsesBeforeCachedStartup, proofResponses: launcherProofResponses })}`);
     }
     await waitFor(client, `document.querySelector('#playButton')?.getAttribute('aria-busy') === 'false'`, 'cached Play proof completion');
+    if (launcherProofRequests.length !== proofRequestsBeforeCachedStartup + 1
+        || launcherProofResponses !== proofResponsesBeforeCachedStartup + 1) {
+      throw new Error(`Cached Play did not complete exactly one fresh proof after the instant launcher handoff: ${JSON.stringify({ proofRequestsBeforeCachedStartup, proofRequests: launcherProofRequests.length, proofResponsesBeforeCachedStartup, proofResponses: launcherProofResponses })}`);
+    }
   }
   cachedStartupProof = {
     targetReadyMs: cachedTargetReadyMs,
