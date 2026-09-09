@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { sameInstalledRelease, releaseForInstalledPack, preparedRuntimeMatchesInstalled } from '../src/launchPreparationPolicy.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -78,6 +79,9 @@ try {
     const installed = { version: 'fixture', packId: 'aht' };
     const profile = { profileId: 'aht', versionId: plan.versionId, profileExists: true, loaderInstalled: true };
     const context = {
+      sameInstalledRelease, releaseForInstalledPack, preparedRuntimeMatchesInstalled,
+      writeTestStartupProbe: () => {},
+      cachedLatestRelease: () => null,
       process: { platform: 'win32' }, Date, STARTUP_PREREQUISITE_POLICY: policy,
       LAUNCH_PREPARATION_MANAGED_POLICY: managedPolicy,
       developerClientBypassAllowed: () => false,
@@ -103,7 +107,7 @@ try {
       launcherRoute: { executablePath: 'MinecraftLauncher.exe' }, minecraftProfile: { ...profile, loaderInstalled: warm },
       java8Runtime: { usable: true, path: 'java.exe' }, identity: { installId: 'fixture' }
     });
-    assert.equal(repairs, warm ? 0 : 1, 'Warm verified startup reuses readiness; incomplete startup repairs assets');
+    assert.equal(repairs, warm ? 0 : 1, `Warm verified startup reuses readiness; incomplete startup repairs assets: ${result.error || ''}`);
     assert.equal(result.state, fail ? 'blocked' : 'ready');
     if (!fail) assert.equal(result.launcherProof, null, 'asset recovery cannot bypass account authorization');
   }
