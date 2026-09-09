@@ -25,6 +25,12 @@ import {
 } from '../src/clientPackFormat.js';
 import { installPack } from '../src/installer.js';
 import {
+  sameInstalledRelease,
+  releaseForInstalledPack,
+  preparedRuntimeMatchesInstalled,
+  matchingManagedFileStates
+} from '../src/launchPreparationPolicy.js';
+import {
   captureManagedIntegrityFingerprint,
   launchCriticalManagedFiles,
   scanLocalChanges,
@@ -135,6 +141,7 @@ import {
   buildWindowsMinecraftProcessSnapshotPowerShell,
   isKnownWindowsMinecraftLauncher,
   normalizeWindowsLauncherRecord,
+  scopeWindowsLauncherTarget,
   windowsLauncherRecordHasUsableWindow,
   windowsLauncherRecordLooksLikeLauncherUi,
   windowsLauncherRecordMatchesTarget,
@@ -196,6 +203,7 @@ function writeTestStartupProbe(stage, extra = {}) {
     if (dir) fsSync.mkdirSync(dir, { recursive: true });
     const payload = {
       stage,
+      processElapsedMs: Math.round(process.uptime() * 1000),
       argv: process.argv,
       execPath: process.execPath,
       cwd: process.cwd(),
@@ -6067,8 +6075,9 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   let launchPreparedAt = '';
   if (prepared?.state === 'ready') {
     const sameInstalledVersion = String(prepared.installed?.version || '') === String(installed?.version || '');
-    const sameLatestVersion = String(prepared.latest?.version || '') === String(launchLatest?.version || '');
-    if (!sameInstalledVersion || !sameLatestVersion) {
+    // Discovering a release must not discard the installed pack's prepared
+    // runtime. The update button/policy handles availability separately.
+    if (!sameInstalledVersion) {
       invalidateLaunchPreparation(target.id);
     } else {
       effectiveMinecraftProfile = prepared.minecraftProfile || minecraftProfile;
@@ -12674,11 +12683,7 @@ async function confirmWindowsMinecraftLauncherActivation(result, target = {}, ti
   };
   while (Date.now() < deadline) {
     const snapshot = await windowsMinecraftLauncherProcessSnapshot(snapshotOptions);
-    const scopedTarget = {
-      ...target,
-      sessionId: target.sessionId ?? snapshot.currentSessionId,
-      storeRoots: target.storeRoots?.length ? target.storeRoots : snapshot.packageRoots
-    };
+    const scopedTarget = scopeWindowsLauncherTarget(target, snapshot);
     lastSeen = snapshot.records.filter((record) => windowsLauncherRecordMatchesTarget(record, scopedTarget));
     if (lastSeen.length) matchingLauncherObserved = true;
     const spawnedCandidate = lastSeen.find((record) => (
@@ -14011,35 +14016,47 @@ function managedIntegrityStateFromPlaySnapshot(snapshot = null, checkMode = 'met
 }
 
 async function verifyPreparedClientIntegrityAtPlay(target, prepared) {
+  const integrityStarted = Date.now();
+  const integrityTiming = (stage, extra = {}) => writeTestStartupProbe(`play-integrity-${stage}`, {
+    elapsedMs: Date.now() - integrityStarted, ...extra
+  });
   if (developerClientBypassAllowed()) {
     return { skipped: true, managedFilesChecked: 0, hashedFiles: 0, metadataChanges: 0 };
   }
-  let trusted = preparedManagedSnapshotFromEntry(prepared);
+  let trusted = sameInstalledRelease(prepared.latest, prepared.installed)
+    ? preparedManagedSnapshotFromEntry(prepared)
+    : { complete: false, managedFiles: [], fileStates: [], fingerprint: null };
   let managedFiles = trusted.managedFiles;
+  let previousFileStates = trusted.complete ? trusted.fileStates : [];
   if (!managedFiles.length) {
     let releaseForManifest = prepared.latest;
-    if (!releaseForManifest?.clientManifest?.url) {
-      const currentRelease = cachedLatestRelease(prepared.config, Number.MAX_SAFE_INTEGER)
-        || await readLatest(prepared.config);
+    if (!sameInstalledRelease(releaseForManifest, prepared.installed)
+        || !(releaseForManifest?.clientManifest?.url || releaseForManifest?.clientManifest?.path)) {
+      const cachedRelease = cachedLatestRelease(prepared.config, Number.MAX_SAFE_INTEGER);
+      const currentRelease = sameInstalledRelease(cachedRelease, prepared.installed)
+        ? cachedRelease : await readLatest(prepared.config);
       releaseForManifest = validateLatestReleaseFeed(currentRelease, `${target.name} protected Play gate`);
-      if (String(releaseForManifest.version || '') !== String(prepared.installed?.version || '')) {
+      if (!sameInstalledRelease(releaseForManifest, prepared.installed)) {
         throw new Error(`Update ${target.name} before playing.`);
       }
       prepared.latest = releaseForManifest;
     }
     const managedOptions = await managedIntegrityOptions(prepared.config, releaseForManifest);
     managedFiles = preparedManagedFilesForSnapshot(managedOptions.managedFiles || []);
+    previousFileStates = matchingManagedFileStates(prepared.previousManagedSnapshot, managedFiles);
     trusted = { complete: false, managedFiles, fileStates: [], fingerprint: null };
   }
+  integrityTiming('manifest', { files: managedFiles.length, reusedStates: previousFileStates.length });
   if (!managedFiles.length) {
     throw new Error('Repair required. The protected client manifest is unavailable.');
   }
   const snapshot = await verifyManagedIntegritySnapshot(prepared.config.instanceDir, {
     managedFiles,
     ignoreLocalManaged: true,
-    previousFileStates: trusted.complete ? trusted.fileStates : [],
-    forceAll: !trusted.complete
+    previousFileStates,
+    forceAll: !trusted.complete && !previousFileStates.length
   });
+  integrityTiming('verified', { valid: snapshot.valid, hashedFiles: snapshot.hashedFiles, timings: snapshot.timings });
   if (snapshot.valid !== true) {
     const error = managedIntegrityVerificationError(target, snapshot);
     const integrity = managedIntegrityStateFromPlaySnapshot(
@@ -14056,6 +14073,7 @@ async function verifyPreparedClientIntegrityAtPlay(target, prepared) {
   prepared.managedFiles = snapshot.managedFiles;
   prepared.managedFileStates = snapshot.fileStates;
   prepared.managedFingerprint = snapshot.fingerprint;
+  prepared.previousManagedSnapshot = null;
   prepared.integrity = {
     ...(prepared.integrity || {}),
     valid: true,
@@ -14076,6 +14094,7 @@ async function verifyPreparedClientIntegrityAtPlay(target, prepared) {
       || trusted.fingerprint?.digest !== snapshot.fingerprint?.digest) {
     await persistPreparedLaunchEntry(target.id, prepared, { managedSnapshot: snapshot });
   }
+  integrityTiming('persisted');
   return {
     skipped: false,
     managedFilesChecked: snapshot.managedFiles.length,
@@ -14109,7 +14128,9 @@ function preparedLauncherRouteForSnapshot(route = null) {
     cwd: String(route.cwd || ''),
     rootDir: String(route.rootDir || ''),
     appPath: String(route.appPath || ''),
-    sessionId: Number(route.sessionId) || 0,
+    // Windows logon sessions are not durable launcher paths. Session 0 is the
+    // service session, not a fallback for a missing interactive-session ID.
+    sessionId: null,
     storeRoots: (Array.isArray(route.storeRoots) ? route.storeRoots : [])
       .map((item) => String(item || '').trim())
       .filter(Boolean),
@@ -14794,7 +14815,10 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
   attempt.instanceDir = config.instanceDir;
   attempt.minecraftRoot = config.minecraftLauncher?.rootDir || '';
   attempt.runtimeConfig = config;
-  const reportProgress = (phase, percent) => options.onProgress?.({ phase, percent });
+  const reportProgress = (phase, percent) => {
+    writeTestStartupProbe('startup-prerequisite-phase', { pack: target.id, phase });
+    options.onProgress?.({ phase, percent });
+  };
   try {
     reportProgress(`Checking ${target.name} launcher paths`, 10);
     const legal = await launcherLegalStatus();
@@ -14847,17 +14871,23 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       }
     };
 
-    const latest = reusable?.latest || cachedLatestRelease(config, Number.MAX_SAFE_INTEGER) || installed;
-    const cachedInstalledVersionMatches = String(reusable?.installed?.version || '') === String(installed.version || '');
+    const latest = releaseForInstalledPack(installed, reusable?.latest, cachedLatestRelease(config, Number.MAX_SAFE_INTEGER));
+    const cachedInstalledVersionMatches = sameInstalledRelease(reusable?.installed, installed)
+      && sameInstalledRelease(reusable?.latest, installed);
+    cacheNeedsPersist ||= !cachedInstalledVersionMatches;
+    const cachedRuntimeMatches = preparedRuntimeMatchesInstalled(reusable, installed);
+    const previousManagedSnapshot = !cachedInstalledVersionMatches
+      && reusable?.managedFilePolicy === LAUNCH_PREPARATION_MANAGED_POLICY
+      ? preparedManagedSnapshotFromEntry(reusable) : null;
     const reusableManagedSnapshot = cachedInstalledVersionMatches
       && reusable?.managedFilePolicy === LAUNCH_PREPARATION_MANAGED_POLICY
       ? preparedManagedSnapshotFromEntry(reusable)
       : { complete: false, managedFiles: [], fileStates: [], fingerprint: null };
-    let minecraftProfile = cachedInstalledVersionMatches
+    let minecraftProfile = cachedRuntimeMatches
       ? preparedProfileForSnapshot(reusable?.minecraftProfile)
       : null;
     const cachedProfileComplete = Boolean(
-      cachedInstalledVersionMatches
+      cachedRuntimeMatches
       && minecraftProfile?.profileId
       && minecraftProfile?.versionId
     );
@@ -14872,7 +14902,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
     }
     let minecraftAssets = reusable?.minecraftAssets || null;
     const validateMinecraftRuntime = process.platform === 'win32' && !developerLocalFastPath
-      && (!reusable || !cachedInstalledVersionMatches || !minecraftProfile?.loaderInstalled);
+      && (!reusable || !cachedRuntimeMatches || !minecraftProfile?.loaderInstalled);
     if (validateMinecraftRuntime) {
       reportProgress('Checking Minecraft runtime', 70);
       const runtime = await inspectMinecraftLauncherRuntime({ config: launcherConfig, latest, installed, profile: minecraftProfile });
@@ -14891,7 +14921,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
 
     const identity = reusable?.identity || await loadIdentity();
     if (!reusable?.identity) cacheNeedsPersist = true;
-    const integrity = preparedIntegritySummaryForSnapshot(reusable?.integrity);
+    const integrity = cachedInstalledVersionMatches ? preparedIntegritySummaryForSnapshot(reusable?.integrity) : null;
     if (integrity && (integrity.valid !== true || Number(integrity.counts?.corrupted || 0) > 0)) {
       throw new Error(integrityBlockReason(integrity) || `${target.name} needs Repair because its last explicit file scan failed.`);
     }
@@ -14940,6 +14970,7 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       managedFiles: reusableManagedSnapshot.managedFiles,
       managedFileStates: reusableManagedSnapshot.fileStates,
       managedFingerprint: reusableManagedSnapshot.fingerprint,
+      previousManagedSnapshot,
       java8Runtime,
       minecraftProfile,
       launcherProof: null,
@@ -14953,7 +14984,11 @@ async function prepareStartupPrerequisiteEntry(descriptor = {}, cached = null, o
       developerLocalFastPath
     };
     launchPreparationCache.set(target.id, entry);
-    if (options.persist !== false && cacheNeedsPersist) await persistPreparedLaunchEntry(target.id, entry);
+    // Keep the signed prior baseline until the new manifest has been verified;
+    // otherwise a restart between Update and Play discards all reusable hashes.
+    if (options.persist !== false && cacheNeedsPersist && !previousManagedSnapshot?.complete) {
+      await persistPreparedLaunchEntry(target.id, entry);
+    }
     reportProgress(`${target.name} launcher paths are ready`, 100);
     return entry;
   } catch (error) {

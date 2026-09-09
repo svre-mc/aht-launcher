@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.14",
-  "ahtLauncherVersion": "0.2.14",
+  "version": "0.2.15",
+  "ahtLauncherVersion": "0.2.15",
   "phoenixAntiCheatVersion": "1.1.0",
   "private": true,
   "type": "module",
@@ -14,6 +14,7 @@
     "email": "launcher@aht.local"
   },
   "scripts": {
+    "test:release-transition": "node scripts/test-launch-preparation-release-transition.mjs",
     "test:player-runtime-state": "node scripts/test-player-runtime-state.mjs",
     "test:asset-recovery": "node scripts/test-asset-recovery.mjs",
     "test:account-migration": "node scripts/test-account-migration.mjs",

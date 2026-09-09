@@ -5008,6 +5008,13 @@ async function renderPreparedStartupStatuses(preparation = {}, results = null, o
 }
 
 async function prepareStartupAndRender(options = {}) {
+  const preparationStarted = performance.now();
+  const markPreparation = (phase) => {
+    if (window.__ahtStartupTaskTimings) {
+      window.__ahtStartupTaskTimings.preparation ||= {};
+      window.__ahtStartupTaskTimings.preparation[phase] = Math.round(performance.now() - preparationStarted);
+    }
+  };
   const initialState = options.initialState || await window.aht.getStartupPreparationState();
   renderStartupPreparationState(initialState);
   const unsubscribe = window.aht.onStartupPreparationProgress((progress) => {
@@ -5022,7 +5029,9 @@ async function prepareStartupAndRender(options = {}) {
     let newsStatusResults;
     if (initialState.initialized && !initialState.firstInitialization) {
       preparation = await window.aht.prepareStartup();
+      markPreparation("prerequisites");
       newsStatusResults = await loadNewsStatusResults(true);
+      markPreparation("newsArtwork");
     } else {
       [preparation, newsStatusResults] = await Promise.all([
         window.aht.prepareStartup(),
@@ -5030,7 +5039,9 @@ async function prepareStartupAndRender(options = {}) {
       ]);
     }
     renderStartupPreparationState({ ...preparation, firstInitialization: Boolean(preparation.firstInitialization), percent: 100 });
-    return renderPreparedStartupStatuses(preparation, newsStatusResults, { artworkHydrated: true });
+    const rendered = await renderPreparedStartupStatuses(preparation, newsStatusResults, { artworkHydrated: true });
+    markPreparation("rendered");
+    return rendered;
   } finally {
     unsubscribe?.();
   }
@@ -5202,8 +5213,9 @@ async function bootstrapLauncher() {
   };
   const remaining = bootDeveloperMode ? 0 : Math.max(0, STARTUP_MIN_VISIBLE_MS - (performance.now() - startedAt));
   if (remaining) await waitForUiDelay(remaining);
-  await waitForNextPaint();
-  await waitForNextPaint();
+  // All required assets and DOM state are ready. Waiting for two animation
+  // frames here adds seconds when Windows occludes/throttles this window.
+  // Reveal in this task so the very next paint contains the finished launcher.
   revealLauncher();
   window.setTimeout(() => {
     if (!bootDeveloperMode && !startupFirstInitialization) {

@@ -66,6 +66,18 @@ export function windowsLauncherRecordMatchesTarget(record = {}, target = {}) {
   return Boolean(expectedPath && normalized.pathKey === expectedPath);
 }
 
+export function scopeWindowsLauncherTarget(target = {}, snapshot = {}) {
+  const sessionId = Number(snapshot.currentSessionId);
+  if (snapshot.currentSessionId == null || !Number.isInteger(sessionId) || sessionId < 0) {
+    throw new Error('The current Windows session could not be identified.');
+  }
+  return {
+    ...target,
+    sessionId,
+    storeRoots: target.storeRoots?.length ? target.storeRoots : (snapshot.packageRoots || [])
+  };
+}
+
 export function windowsLauncherRecordHasUsableWindow(record = {}) {
   const normalized = normalizeWindowsLauncherRecord(record);
   return normalized.image !== 'gamelaunchhelper.exe'

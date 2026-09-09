@@ -498,6 +498,7 @@ function fingerprintStateChangedAfter(state = null, sinceMs = Number.NaN) {
 }
 
 export async function verifyManagedIntegritySnapshot(instanceDir, options = {}) {
+  const startedAt = performance.now();
   const managed = launchCriticalManagedFiles(await loadManaged(instanceDir, options));
   const fingerprintWithStates = await captureIntegrityFingerprintFromManaged(instanceDir, managed, {
     ...options,
@@ -508,6 +509,7 @@ export async function verifyManagedIntegritySnapshot(instanceDir, options = {}) 
     : [];
   const fingerprint = { ...fingerprintWithStates };
   delete fingerprint.fileStates;
+  const fingerprintMs = performance.now() - startedAt;
 
   const previousStates = Array.isArray(options.previousFileStates) ? options.previousFileStates : [];
   const previousByPath = new Map(previousStates.map((item) => [normalizeRelPath(String(item?.path || '')), item]));
@@ -560,6 +562,7 @@ export async function verifyManagedIntegritySnapshot(instanceDir, options = {}) 
     managedFiles: managed,
     metadataChanges: candidates.length,
     hashedFiles: candidates.length,
+    timings: { fingerprintMs, contentVerificationMs: performance.now() - startedAt - fingerprintMs },
     issues
   };
 }

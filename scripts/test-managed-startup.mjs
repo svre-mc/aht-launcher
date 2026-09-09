@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import vm from 'node:vm';
+import { sameInstalledRelease, releaseForInstalledPack, preparedRuntimeMatchesInstalled } from '../src/launchPreparationPolicy.js';
 import { createLaunchAttempt, setLaunchRequirement } from '../src/launchDiagnostics.js';
 import { verifyRepairedJava } from '../src/runtimeRepair.js';
 
@@ -8,17 +9,19 @@ const source = await fs.readFile(new URL('../desktop/main.js', import.meta.url),
 const startupSource = source.slice(source.indexOf('async function prepareStartupPrerequisiteEntry('), source.indexOf('async function hydrateLaunchPreparationFromSnapshot('));
 const config = { instanceDir: 'C:\\AHT\\Client', minecraftLauncher: { rootDir: 'C:\\Minecraft', javaPath: 'C:\\OldJava\\java.exe' } };
 const target = { id: 'stable', name: 'A Hard Time' };
-const installed = { packId: 'aht', version: '2.8.62' };
+const installed = { packId: 'aht', version: '2.8.62', minecraft: { version: '1.12.2', modLoaders: [{ id: 'forge-14.23.5.2860', primary: true }] } };
 const profile = { profileId: 'aht', versionId: '1.12.2-forge-14.23.5.2860', profileExists: true, loaderInstalled: true };
 const policy = source.match(/const STARTUP_PREREQUISITE_POLICY = '([^']+)'/)[1];
 const managedPolicy = source.match(/const LAUNCH_PREPARATION_MANAGED_POLICY = '([^']+)'/)[1];
 
-async function scenario({ cached = true, healthy = false, failRepair = false, missingJava = false, developer = false } = {}) {
+async function scenario({ cached = true, healthy = false, failRepair = false, missingJava = false, developer = false, previousRelease = false } = {}) {
   let repairs = 0;
   let javaChecks = 0;
   let profileChecks = 0;
   let runtimeChecks = 0;
   const context = {
+    sameInstalledRelease, releaseForInstalledPack, preparedRuntimeMatchesInstalled,
+    writeTestStartupProbe: () => {},
     process: { platform: 'win32' }, Date,
     developerClientBypassAllowed: () => developer,
     STARTUP_PREREQUISITE_POLICY: policy,
@@ -68,7 +71,16 @@ async function scenario({ cached = true, healthy = false, failRepair = false, mi
     minecraftProfile: { ...profile }, java8Runtime: { usable: true, path: config.minecraftLauncher.javaPath },
     identity: { installId: 'test' }, integrity: { valid: true, counts: { corrupted: 0 } }
   } : null;
+  if (previousRelease) {
+    cachedEntry.installed = { ...installed, version: '2.8.61' };
+    cachedEntry.latest = cachedEntry.installed;
+    cachedEntry.integrity = { valid: false, counts: { corrupted: 1 } };
+  }
   const result = await context.prepare({ target, config, installed }, cachedEntry);
+  if (previousRelease) {
+    assert.equal(result.latest.version, installed.version, 'A previous release must not supply the current file manifest.');
+    assert.equal(result.integrity, null, 'A previous release failure must not block the updated installation.');
+  }
   assert.equal(javaChecks, cached ? 0 : 1,
     'Warm startup must reuse the existing Java executable instead of re-hashing or re-probing its runtime.');
   assert.equal(profileChecks, missingJava ? 0 : (cached ? 0 : 1),
@@ -104,6 +116,7 @@ await scenario({ cached: false });
 await scenario({ cached: false, failRepair: true });
 await scenario({ cached: false, missingJava: true });
 await scenario({ developer: true });
+await scenario({ previousRelease: true });
 
 const finalizationSource = source.slice(source.indexOf('async function publishCompletedUpdatePreparation('), source.indexOf('function launchPreparationKey('));
 for (const missingAtDetection of [true, false]) {

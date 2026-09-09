@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   buildWindowsMinecraftProcessSnapshotPowerShell,
   isWindowsStoreMinecraftLauncherPath,
+  scopeWindowsLauncherTarget,
   windowsLauncherRecordHasUsableWindow,
   windowsLauncherRecordIdentity,
   windowsLauncherRecordLooksLikeLauncherUi,
@@ -31,6 +32,12 @@ const base = {
   windowVisible: true,
   windowMinimized: false
 };
+
+for (const staleSession of [undefined, null, 0, 19]) {
+  const scoped = scopeWindowsLauncherTarget({ kind: 'root', executablePath: curseForgeLauncher, sessionId: staleSession }, { currentSessionId: 4 });
+  if (!windowsLauncherRecordMatchesTarget(base, scoped)) throw new Error('Cached session ID hid the real current-session launcher.');
+  if (windowsLauncherRecordMatchesTarget({ ...base, sessionId: 19 }, scoped)) throw new Error('Another user session was accepted.');
+}
 
 if (!windowsLauncherRecordMatchesAllowedPath(base, {
   allowedPaths: [curseForgeLauncher, desktopLauncher],

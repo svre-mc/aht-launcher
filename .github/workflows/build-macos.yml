@@ -108,6 +108,9 @@ jobs:
       - name: Test join-fix publication and player-state update regressions
         run: npm run test:version-lock-release && npm run test:delta-update && npm run test:player-runtime-state && npm run test:managed-security
 
+      - name: Test startup, release transition, and Windows session handoff
+        run: node scripts/test-managed-startup.mjs && npm run test:release-transition && npm run test:launch-preparation-snapshot && node scripts/test-windows-minecraft-handoff.mjs
+
       - name: Test asset recovery and legacy account migration
         run: npm run test:asset-recovery && npm run test:account-migration
 
