@@ -113,9 +113,7 @@ public final class PreWorldAdmission {
         close(manager, "launcher proof");
     }
     static String failureMessage(String stage) {
-        if ("runtime protection".equals(stage))
-            return "Phoenix verification did not finish. Close Minecraft, then start it again from AHT Launcher.";
-        return "Client verification could not be completed. Open AHT Launcher, repair, and reconnect.";
+        return "Error";
     }
     private static void close(NetworkManager manager, String stage) {
         if (manager.isChannelOpen()) {
