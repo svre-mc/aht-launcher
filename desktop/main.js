@@ -3732,7 +3732,8 @@ async function bundledPhoenixManifest() {
   if (process.platform !== 'win32') return null;
   if (!bundledPhoenixManifestPromise) bundledPhoenixManifestPromise = (async () => {
     try {
-      const manifest = JSON.parse(await fs.readFile(path.join(app.getAppPath(), 'build', 'native-guard', 'manifest.json'), 'utf8'));
+      const resource = app.isPackaged ? ['config', 'phoenix', 'manifest.json'] : ['build', 'native-guard', 'manifest.json'];
+      const manifest = JSON.parse(await fs.readFile(path.join(app.getAppPath(), ...resource), 'utf8'));
       phoenixReleaseFromManifest(manifest, 'https://api.ahardtime.net', String(launcherPackageMetadata.phoenixAntiCheatVersion || ''));
       return manifest;
     } catch (error) {

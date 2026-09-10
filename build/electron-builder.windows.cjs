@@ -8,7 +8,7 @@ const playerConfig = regularPlayerConfig({
 module.exports = {
   ...playerConfig,
   // Hash/size/version only. Phoenix itself remains a separate consented download.
-  files: [...playerConfig.files, 'build/native-guard/manifest.json'],
+  files: [...playerConfig.files, { from: 'build/native-guard', to: 'config/phoenix', filter: ['manifest.json'] }],
   beforePack: async () => { await import('../scripts/prepare-bundled-java.mjs'); },
   extraResources: [{ from: 'build/runtime/java', to: 'java', filter: ['*.zip', 'NOTICE.txt'] }],
   win: {
