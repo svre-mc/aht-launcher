@@ -16,6 +16,8 @@ import {
 const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aht-launcher-update-manifest-'));
 const artifacts = path.join(root, 'artifacts');
 const out = path.join(root, 'out');
+const { phoenixAntiCheatVersion } = JSON.parse(await fsp.readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const phoenixFileName = `Phoenix-Anti-cheat-Windows-x64-${phoenixAntiCheatVersion}.exe`;
 
 async function writeArtifact(name, text) {
   const file = path.join(artifacts, name);
@@ -30,7 +32,7 @@ await writeArtifact('AHT-Launcher-macOS-universal-7.8.9.zip', 'mac-universal-upd
 await writeArtifact('AHT-Launcher-macOS-universal-7.8.9.dmg', 'mac-universal-installer');
 await writeArtifact('AHT-Launcher-Linux-x64-7.8.9.deb', 'linux-compatibility-deb');
 await writeArtifact('AHT-Launcher-Linux-x64-7.8.9.AppImage', 'linux-appimage');
-await writeArtifact('Phoenix-Anti-cheat-Windows-x64-1.1.0.exe', 'phoenix-anticheat');
+await writeArtifact(phoenixFileName, 'phoenix-anticheat');
 
 const result = await prepareLauncherUpdate({
   artifactsDir: artifacts,
@@ -173,9 +175,9 @@ assert(result.plan.uploads.some((item) => item.rel.endsWith('.dmg')), 'DMG insta
 assert(result.plan.uploads.some((item) => item.rel.endsWith('.deb')), 'Linux compatibility DEB must be uploaded for pre-0.2.02 clients');
 assert(result.plan.uploads.some((item) => item.rel.endsWith('.AppImage')), 'Portable Linux AppImage must be uploaded');
 assert(manifest.antiCheat?.product === 'phoenix-anticheat', 'launcher manifest must publish the separately installed Phoenix Anti-cheat');
-assert(manifest.antiCheat?.version === '1.1.0', 'Phoenix Anti-cheat release version must come from package metadata');
+assert(manifest.antiCheat?.version === phoenixAntiCheatVersion, 'Phoenix Anti-cheat release version must come from package metadata');
 assert(manifest.antiCheat?.protocol === 'AHT-GUARD-1', 'Phoenix Anti-cheat protocol must remain bound to launcher proof verification');
-assert(manifest.antiCheat?.path === 'launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.1.0.exe', 'Phoenix Anti-cheat must use its isolated R2 namespace');
+assert(manifest.antiCheat?.path === `launcher/anticheat/win32-x64/${phoenixFileName}`, 'Phoenix Anti-cheat must use its isolated R2 namespace');
 assert(/^[a-f0-9]{64}$/i.test(manifest.antiCheat?.sha256 || '') && manifest.antiCheat?.size > 0, 'Phoenix Anti-cheat must be hash and size pinned');
 assert(result.plan.uploads.some((item) => item.rel === manifest.antiCheat.path), 'Phoenix Anti-cheat must upload before launcher/latest.json');
 assert(['linux-x64', 'linux', 'ubuntu-x64', 'ubuntu'].every((key) => manifest.platforms[key]?.kind === 'deb'), 'manifest must retain every legacy Linux runtime alias');
