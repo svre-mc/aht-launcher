@@ -204,7 +204,10 @@ internal static class Guard {
         }
     }
     static void Serve(TcpListener listener) {
-        long nextRequest=0;
+        // Serialize signing at a bounded rate without discarding a legitimate
+        // admission measurement when a launcher status probe arrives alongside it.
+        // The listener backlog and socket deadlines bound queued work.
+        var requestClock=Stopwatch.StartNew();long nextRequest=0;
         while(!stopping) {
             try {
                 if(!listener.Pending()){Thread.Sleep(50);continue;}
@@ -214,7 +217,6 @@ internal static class Guard {
                         var line=ReadLine(stream,256);if(line==null)continue;
                         string[] parts=line.Split('|');
                         if(parts.Length==2 && Same(parts[0],probeSessionKey) && parts[1]=="INFO") {byte[] info=Encoding.UTF8.GetBytes(Info()+"\n");stream.Write(info,0,info.Length);continue;}
-                        if(Now()<nextRequest)continue;nextRequest=Now()+100;
                         string nonce="",pidText="";
                         // Launcher management requests require the ephemeral in-memory key. The game-side
                         // challenge is independently restricted to the one discovered AHT JVM and yields
@@ -224,6 +226,12 @@ internal static class Guard {
                         else if(parts.Length==2){nonce=parts[0];pidText=parts[1];}
                         else continue;
                         int pid;if(!Int32.TryParse(pidText,out pid)||pid<=0)continue;
+                        // Invalid local requests must not consume the valid game's slot.
+                        if(!System.Text.RegularExpressions.Regex.IsMatch(nonce??"",@"\A[a-f0-9]{48}\z") || targetPid==0 || targetPid!=pid)continue;
+                        int delay=(int)Math.Max(0,Math.Min(100,nextRequest-requestClock.ElapsedMilliseconds));
+                        if(delay>0)Thread.Sleep(delay);
+                        if(stopping)continue;
+                        nextRequest=requestClock.ElapsedMilliseconds+100;
                         byte[] response=Encoding.UTF8.GetBytes(Answer(nonce,pid,diagnostics)+"\n");stream.Write(response,0,response.Length);
                     }
                 }

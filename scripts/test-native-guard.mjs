@@ -18,7 +18,7 @@ function verify(reply,info,nonce) {
  assert(crypto.verify('sha256',bytes,key,Buffer.from(reply.signature,'base64url')));return fields;
 }
 const java=spawn(path.join(output,'java.exe'),['--gameDir',output],{cwd:output,windowsHide:true,stdio:['pipe','pipe','pipe']});
-const guardian=spawn(path.join(root,'build/native-guard/Phoenix Anti-cheat.exe'),[],{cwd:root,windowsHide:true,stdio:['pipe','pipe','pipe']});
+const guardian=spawn(process.env.AHT_HANDOFF_GUARD || path.join(root,'build/native-guard/Phoenix Anti-cheat.exe'),[],{cwd:root,windowsHide:true,stdio:['pipe','pipe','pipe']});
 const evidence=[];
 const signedFixtures=[];
 let decoy;
