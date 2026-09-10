@@ -18,6 +18,7 @@ const releaseFile = path.join(
   `Phoenix-Anti-cheat-Windows-x64-${antiCheatVersion}.exe`
 );
 const developmentManifest = JSON.parse(await fs.readFile(path.join(root, 'build/native-guard/manifest.json'), 'utf8'));
+const packagedManifest = JSON.parse(packagedFile('config/phoenix/manifest.json'));
 const binary = await fs.readFile(releaseFile);
 const packagedMain = packagedFile('desktop/main.js').toString();
 const packagedRenderer = packagedFile('desktop/renderer/app.js').toString();
@@ -55,6 +56,7 @@ assert.equal(developmentManifest.version, antiCheatVersion);
 assert.equal(developmentManifest.file, 'Phoenix Anti-cheat.exe');
 assert.equal(crypto.createHash('sha256').update(binary).digest('hex'), developmentManifest.sha256);
 assert.equal(binary.length, developmentManifest.bytes);
+assert.deepEqual(packagedManifest, developmentManifest, 'The packaged Phoenix pin must match the separately published helper exactly');
 
 const result = {
   passed: true,
@@ -63,6 +65,7 @@ const result = {
   antiCheatSha256: developmentManifest.sha256,
   antiCheatBytes: binary.length,
   embeddedInLauncher: false,
+  packagedHelperPinVerified: true,
   firstPlayConsentWired: true,
   attachDisabled: true
 };
