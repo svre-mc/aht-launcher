@@ -233,6 +233,18 @@ public class PackVersionLock {
         return player != null && player.connection != null && SESSIONS.isAccepted(player.getUniqueID(), player.connection.netManager);
     }
 
+    /** Cross-mod authority for an expired initial proof's signed reconnect window. */
+    public static boolean verifyCurrentConnectionProof(EntityPlayerMP player, String token) {
+        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
+        if (server == null || !server.isDedicatedServer() || server.isServerStopped()
+                || !accepted(player) || !player.connection.netManager.isChannelOpen()
+                || PreWorldAdmission.find(server, player.getUniqueID()) != player) return false;
+        // Verify this exact token against the live signed policy, including its account binding,
+        // version, access decision and reconnect expiry. Exempt membership alone is insufficient.
+        return LocalProofVerifier.verifyCurrent(token, player.getName(), player.getUniqueID(),
+                requiredPackId, remoteIp(player), POLICY_SNAPSHOTS).accepted;
+    }
+
     static void clearPlayer(UUID playerId) {
         SESSIONS.clear(playerId);
     }
@@ -310,7 +322,7 @@ public class PackVersionLock {
         if (acceptWhitelisted(player)) return;
         if (result.accepted) {
             if (SESSIONS.accept(playerId, connectionId)) {
-                LOG.info("{} passed signed local launcher verification (current {}, necessary {}, policy {}).",
+                LOG.debug("{} passed signed local launcher verification (current {}, necessary {}, policy {}).",
                         player.getName(), result.currentLauncherVersion, result.necessaryLauncherVersion,
                         result.policyRevision.substring(0, 12));
                 sendControl(player, true);

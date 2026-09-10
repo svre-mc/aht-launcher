@@ -39,8 +39,11 @@ public final class PreWorldAdmission {
             pipeline.addBefore(anchor, HANDLER, pending);
             player.connection = handler;
             PackVersionLock.watchPlayer(player);
-            PackVersionLock.LOG.info("AHT admission pending for {}; world entry is withheld.", player.getName());
-        } catch (Throwable failure) { abandon(pending); }
+            pending.log.pending(player.getName());
+        } catch (Throwable failure) {
+            pending.log.failure(player.getName(), "connection setup", "verification unavailable", failure);
+            abandon(pending);
+        }
     }
 
     static EntityPlayerMP find(UUID id) {
@@ -56,25 +59,36 @@ public final class PreWorldAdmission {
     }
     static void tick() {
         for (Pending pending : PENDING.values()) {
-            if (!pending.manager.isChannelOpen() || System.nanoTime() - pending.started >= DEADLINE_NANOS) { abandon(pending); continue; }
+            if (!pending.manager.isChannelOpen()) { abandon(pending); continue; }
+            if (System.nanoTime() - pending.started >= DEADLINE_NANOS) {
+                pending.log.failure(pending.player.getName(), pending.stage, "timed out", null);
+                abandon(pending); continue;
+            }
             if (!PackVersionLock.accepted(pending.player)) continue;
             try {
+                pending.stage = "client audit";
                 if (pending.begin == null) {
                     Class<?> bridge = Class.forName("com.aht.anticheat.AhtAntiCheat");
                     pending.begin = bridge.getMethod("beginPreWorldAdmission", EntityPlayerMP.class);
                     pending.ready = bridge.getMethod("isPreWorldAdmissionReady", EntityPlayerMP.class);
                     pending.clear = bridge.getMethod("cancelPreWorldAdmission", EntityPlayerMP.class);
+                    pending.auditAccepted = bridge.getMethod("s1", EntityPlayerMP.class);
                     pending.begin.invoke(null, pending.player);
                 }
+                if (Boolean.TRUE.equals(pending.auditAccepted.invoke(null, pending.player))) pending.stage = "runtime protection";
                 if (!Boolean.TRUE.equals(pending.ready.invoke(null, pending.player))) continue;
                 if (!pending.manager.isChannelOpen() || !PENDING.remove(pending.manager, pending)) continue;
                 // Keep the filter until JoinGame reaches the socket. Main-thread
                 // packets queued before this point can still be awaiting Netty;
                 // releasing them here would send abilities before the world exists.
                 pending.worldEntryAuthorized = true;
+                pending.stage = "world entry";
                 enterWorld(pending.players, pending.manager, pending.player, pending.handler);
-                PackVersionLock.LOG.info("AHT admission accepted for {}; verified before world entry.", pending.player.getName());
-            } catch (Throwable failure) { abandon(pending); }
+                pending.log.accepted(pending.player.getName());
+            } catch (Throwable failure) {
+                pending.log.failure(pending.player.getName(), pending.stage, "verification unavailable", failure);
+                abandon(pending);
+            }
         }
     }
     static void clearAll() { for (Pending pending : PENDING.values()) abandon(pending); }
@@ -93,11 +107,19 @@ public final class PreWorldAdmission {
         PENDING.remove(pending.manager, pending);
         PackVersionLock.clearPlayer(pending.player);
         try { if (pending.clear != null) pending.clear.invoke(null, pending.player); } catch (ReflectiveOperationException ignored) { }
-        close(pending.manager);
+        close(pending.manager, pending.stage);
     }
     private static void close(NetworkManager manager) {
+        close(manager, "launcher proof");
+    }
+    static String failureMessage(String stage) {
+        if ("runtime protection".equals(stage))
+            return "Phoenix verification did not finish. Close Minecraft, then start it again from AHT Launcher.";
+        return "Client verification could not be completed. Open AHT Launcher, repair, and reconnect.";
+    }
+    private static void close(NetworkManager manager, String stage) {
         if (manager.isChannelOpen()) {
-            TextComponentString reason = new TextComponentString("Client verification could not be completed. Open AHT Launcher, repair, and reconnect.");
+            TextComponentString reason = new TextComponentString(failureMessage(stage));
             manager.sendPacket(new SPacketDisconnect(reason), future -> manager.closeChannel(reason));
         }
     }
@@ -133,8 +155,10 @@ public final class PreWorldAdmission {
     static final class Pending extends ChannelDuplexHandler {
         final PlayerList players; final NetworkManager manager; final EntityPlayerMP player; final NetHandlerPlayServer handler;
         final long started = System.nanoTime(); final AdmissionBudget budget = new AdmissionBudget();
+        final AdmissionLog log = new AdmissionLog();
+        String stage = "launcher proof";
         volatile boolean admitted, worldEntryAuthorized;
-        Method begin, ready, clear;
+        Method begin, ready, clear, auditAccepted;
         Pending(PlayerList players, NetworkManager manager, EntityPlayerMP player, NetHandlerPlayServer handler) {
             this.players=players; this.manager=manager; this.player=player; this.handler=handler;
         }

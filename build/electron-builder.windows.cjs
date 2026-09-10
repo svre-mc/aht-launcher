@@ -1,11 +1,14 @@
 const { launcherReleaseVersion, regularPlayerConfig } = require('./electron-builder.common.cjs');
 
-module.exports = {
-  ...regularPlayerConfig({
+const playerConfig = regularPlayerConfig({
     productName: 'A Hard Time Launcher Windows',
     output: 'release-builds/windows',
     target: 'windows'
-  }),
+  });
+module.exports = {
+  ...playerConfig,
+  // Hash/size/version only. Phoenix itself remains a separate consented download.
+  files: [...playerConfig.files, 'build/native-guard/manifest.json'],
   beforePack: async () => { await import('../scripts/prepare-bundled-java.mjs'); },
   extraResources: [{ from: 'build/runtime/java', to: 'java', filter: ['*.zip', 'NOTICE.txt'] }],
   win: {

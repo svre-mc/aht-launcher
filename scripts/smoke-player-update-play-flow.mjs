@@ -352,7 +352,7 @@ await writeJson(defaultsPath, {
   curseforge: { proxyBaseUrl: '', apiKeyEnv: 'CURSEFORGE_API_KEY' },
   sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-attestation-v2' },
-  launcherUpdate: { enabled: false, latestUrl: '' },
+  launcherUpdate: { enabled: false, latestUrl: `${workerEndpoint}/launcher/latest.json` },
   packs: {
     ptb: {
       instanceDir: ptbInstanceDir,
@@ -395,13 +395,19 @@ await writeJson(path.join(userData, 'device-identity.json'), {
   createdAt: fixtureDeviceCredential.createdAt,
   protectedBy: 'explicit-test-fallback'
 });
-await installPhoenixTestFixture(userData);
+const phoenixFixtureBinaryPath = await installPhoenixTestFixture(userData);
 await writeJson(path.join(mcRoot, 'versions', versionId, `${versionId}.json`), {});
 await writeJson(path.join(syncedMcRoot, 'versions', versionId, `${versionId}.json`), {});
 
 const registeredUsers = new Map();
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, workerEndpoint);
+  if (url.pathname.startsWith('/launcher/anticheat/win32-x64/')) {
+    const bytes = fs.readFileSync(path.resolve('build/native-guard/Phoenix Anti-cheat.exe'));
+    response.writeHead(200, { 'Content-Length': bytes.length, 'Content-Type': 'application/octet-stream' });
+    setTimeout(() => response.end(bytes), 700);
+    return;
+  }
   if (url.pathname === '/latest.json') {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -487,6 +493,7 @@ function spawnPlayerLauncher(debugPort = port, options = {}) {
       ...process.env,
       AHT_APP_DEFAULTS: options.defaultsPath || defaultsPath,
       AHT_TEST_HOOKS: '1',
+      AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE: '1',
       AHT_TEST_USER_DATA: profileUserData,
       AHT_ALLOW_UNENCRYPTED_DEVICE_KEY: '1',
       AHT_TEST_ALLOW_MINECRAFT_OPEN_COMMAND: options.forceMinecraftMissing ? '0' : '1',
@@ -780,6 +787,19 @@ try {
   const phoenixStatusBeforePlay = await evaluate(client, 'window.aht.getPhoenixAntiCheatStatus()');
   if (process.platform === 'win32' && (!phoenixStatusBeforePlay?.installed || !phoenixStatusBeforePlay?.valid)) {
     throw new Error(`The verified Phoenix test installation was not visible before Play: ${JSON.stringify(phoenixStatusBeforePlay)}`);
+  }
+  if (process.platform === 'win32') {
+    await fsp.rm(phoenixFixtureBinaryPath);
+    await evaluate(client, 'window.__phoenixRecovery = ensurePhoenixAntiCheatBeforePlay(); true');
+    await waitFor(client, `!document.querySelector('#phoenixAntiCheatOverlay').hidden && phoenixAntiCheatInstalling`, 'visible Phoenix recovery');
+    if (process.env.AHT_PHOENIX_RECOVERY_SCREENSHOT) {
+      const screenshot = await client.call('Page.captureScreenshot', { format: 'png' });
+      await fsp.writeFile(process.env.AHT_PHOENIX_RECOVERY_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+    }
+    if (!(await evaluate(client, 'window.__phoenixRecovery'))) throw new Error('Consented Phoenix recovery did not continue Play');
+    const recoveredStatus = await evaluate(client, 'window.aht.getPhoenixAntiCheatStatus()');
+    if (!recoveredStatus.valid || !recoveredStatus.consented) throw new Error('Phoenix recovery was not verified');
+    checkpoint('deleted Phoenix restored through visible player UI');
   }
   const playResult = await evaluate(client, `
     window.aht.play()
@@ -1193,7 +1213,7 @@ try {
     curseforge: { proxyBaseUrl: '', apiKeyEnv: 'CURSEFORGE_API_KEY' },
     sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
     launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-attestation-v2' },
-    launcherUpdate: { enabled: false, latestUrl: '' },
+    launcherUpdate: { enabled: false, latestUrl: `${workerEndpoint}/launcher/latest.json` },
     minecraftLauncher: {
       enabled: true,
       rootDir: missingLauncherMcRoot,

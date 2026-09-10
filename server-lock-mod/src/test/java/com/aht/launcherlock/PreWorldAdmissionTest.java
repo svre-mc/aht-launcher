@@ -9,6 +9,14 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class PreWorldAdmissionTest {
+    @Test public void unavailableRuntimeDoesNotTellAnAlreadyAuditedPlayerToRepairFiles() {
+        String message = PreWorldAdmission.failureMessage("runtime protection");
+        assertTrue(message.contains("Close Minecraft"));
+        assertTrue(message.contains("AHT Launcher"));
+        assertFalse(message.toLowerCase(java.util.Locale.ROOT).contains("repair"));
+        assertTrue(PreWorldAdmission.failureMessage("client audit").contains("repair"));
+        assertTrue(PreWorldAdmission.failureMessage("launcher proof").contains("repair"));
+    }
     @Test public void pendingConnectionReceivesNoWorldOrGameplayAndCannotMove() {
         EmbeddedChannel channel = new EmbeddedChannel(new PreWorldAdmission.Pending(null,null,null,null));
         assertFalse(channel.writeOutbound(new SPacketJoinGame()));

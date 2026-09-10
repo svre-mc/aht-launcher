@@ -718,6 +718,7 @@ const els = {
   phoenixAntiCheatOverlay: $("#phoenixAntiCheatOverlay"),
   phoenixAntiCheatDialog: $(".phoenix-anticheat-dialog"),
   phoenixAntiCheatSummary: $("#phoenixAntiCheatSummary"),
+  phoenixAntiCheatRequirement: $(".phoenix-anticheat-requirement"),
   phoenixAntiCheatProgress: $("#phoenixAntiCheatProgress"),
   phoenixAntiCheatProgressLabel: $("#phoenixAntiCheatProgressLabel"),
   phoenixAntiCheatProgressCount: $("#phoenixAntiCheatProgressCount"),
@@ -5476,6 +5477,7 @@ function finishPhoenixAntiCheatPrompt(continuePlay = false) {
 function openPhoenixAntiCheatPrompt(status = {}) {
   if (!els.phoenixAntiCheatOverlay) return Promise.resolve(false);
   phoenixAntiCheatInstalling = false;
+  if (els.phoenixAntiCheatRequirement) els.phoenixAntiCheatRequirement.textContent = 'Install Phoenix to continue, or Cancel to return to the launcher.';
   els.phoenixAntiCheatDialog?.classList.remove('is-installing');
   els.phoenixAntiCheatProgress.hidden = true;
   els.phoenixAntiCheatProgressBar.style.width = '0%';
@@ -5505,12 +5507,18 @@ async function ensurePhoenixAntiCheatBeforePlay() {
   if (bootDeveloperMode || typeof window.aht?.getPhoenixAntiCheatStatus !== 'function') return true;
   const status = await window.aht.getPhoenixAntiCheatStatus();
   if (!status?.required || (status.installed && status.valid)) return true;
-  return openPhoenixAntiCheatPrompt(status);
+  const answer = openPhoenixAntiCheatPrompt(status);
+  if (status.consented) {
+    els.phoenixAntiCheatSummary.textContent = 'Restoring Phoenix Anti-cheat for protected play.';
+    void installPhoenixAntiCheatFromPrompt();
+  }
+  return answer;
 }
 
 async function installPhoenixAntiCheatFromPrompt() {
   if (phoenixAntiCheatInstalling) return;
   phoenixAntiCheatInstalling = true;
+  if (els.phoenixAntiCheatRequirement) els.phoenixAntiCheatRequirement.textContent = 'Phoenix will be verified before Play continues.';
   els.phoenixAntiCheatDialog?.classList.add('is-installing');
   els.phoenixAntiCheatCancelButton.disabled = true;
   els.phoenixAntiCheatInstallButton.disabled = true;
@@ -5530,7 +5538,8 @@ async function installPhoenixAntiCheatFromPrompt() {
     els.phoenixAntiCheatCancelButton.disabled = false;
     els.phoenixAntiCheatInstallButton.disabled = false;
     els.phoenixAntiCheatInstallButton.innerHTML = '<span class="button-icon icon-download" aria-hidden="true"></span>Retry install';
-    els.phoenixAntiCheatError.textContent = 'Phoenix Anti-cheat could not be installed. Your launcher was not changed.';
+    els.phoenixAntiCheatError.textContent = 'Phoenix Anti-cheat could not be installed. Retry, or close Minecraft and try again.';
+    if (els.phoenixAntiCheatRequirement) els.phoenixAntiCheatRequirement.textContent = 'Retry installation, or Cancel to return to the launcher.';
     els.phoenixAntiCheatError.hidden = false;
     showToast('Anti-cheat install failed', playerSafeErrorMessage(error), 'error', {
       context: 'anticheat:install',

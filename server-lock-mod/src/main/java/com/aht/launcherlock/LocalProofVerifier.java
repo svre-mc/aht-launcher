@@ -94,19 +94,25 @@ final class LocalProofVerifier {
             return CompletableFuture.completedFuture(Result.denied("INVALID_LAUNCHER_PROOF", ""));
         }
         try {
-            return CompletableFuture.supplyAsync(() -> {
-                for (int attempt = 0; attempt < 3; attempt++) {
-                    ServerPolicySnapshot snapshot = snapshots.current();
-                    if (snapshot == null) return Result.unavailable();
-                    Result result = verifyNow(token, expectedUsername, expectedUuid, expectedPackId,
-                            remoteIp, snapshot, System.currentTimeMillis());
-                    if (snapshot.revision.equals(snapshots.currentRevision())) return result;
-                }
-                return Result.unavailable();
-            }, EXECUTOR);
+            return CompletableFuture.supplyAsync(() -> verifyCurrent(token, expectedUsername,
+                    expectedUuid, expectedPackId, remoteIp, snapshots), EXECUTOR);
         } catch (RejectedExecutionException ignored) {
             return CompletableFuture.completedFuture(Result.unavailable());
         }
+    }
+
+    /** Uses the already-delivered signed state only; never performs network I/O. */
+    static Result verifyCurrent(String token, String expectedUsername, UUID expectedUuid,
+                                String expectedPackId, String remoteIp, SnapshotProvider snapshots) {
+        if (!LauncherProofMessage.isTokenShapeValid(token) || snapshots == null) return Result.unavailable();
+        for (int attempt = 0; attempt < 3; attempt++) {
+            ServerPolicySnapshot snapshot = snapshots.current();
+            if (snapshot == null) return Result.unavailable();
+            Result result = verifyNow(token, expectedUsername, expectedUuid, expectedPackId,
+                    remoteIp, snapshot, System.currentTimeMillis());
+            if (snapshot.revision.equals(snapshots.currentRevision())) return result;
+        }
+        return Result.unavailable();
     }
 
     static Result verifyForTests(String token, String expectedUsername, UUID expectedUuid,

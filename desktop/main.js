@@ -63,6 +63,9 @@ import {
   ensureNativeGuard,
   installPhoenixAntiCheat,
   phoenixAntiCheatStatus,
+  phoenixReleaseFromManifest,
+  rememberPhoenixConsent,
+  withPhoenixRecovery,
   nativeGuardReadyForLauncherExit,
   probeNativeGuard,
   verifyNativeGuardSession,
@@ -3611,15 +3614,20 @@ function isLauncherProofAuthenticationError(error) {
 
 async function launcherNativeGuard(config) {
   if (isDeveloperMode() || process.platform !== 'win32' || config.launcherProof?.enabled === false) return null;
-  return ensureNativeGuard({
+  return withPhoenixRecovery({
+    getStatus: currentPhoenixAntiCheatStatus,
+    install: (consentAcceptedAt) => installCurrentPhoenixAntiCheat(mainWindow?.webContents, consentAcceptedAt),
+    start: async () => ensureNativeGuard({
     gameDir: config.instanceDir,
     javaPath: config.minecraftLauncher?.javaPath || '',
     installDir: path.join(app.getPath('userData'), 'Phoenix Anti-cheat'),
     developmentRuntimeDir: path.join(app.getAppPath(), 'build', 'native-guard'),
     developerMode: isDeveloperMode(),
     requiredVersion: String(launcherPackageMetadata.phoenixAntiCheatVersion || ''),
+    expectedHash: (await bundledPhoenixManifest())?.sha256 || '',
     launcherSessionId: launcherProcessSessionId,
     launcherPid: process.pid
+    })
   });
 }
 
@@ -3719,14 +3727,35 @@ function phoenixAntiCheatInstallDir() {
   return path.join(app.getPath('userData'), 'Phoenix Anti-cheat');
 }
 
+let bundledPhoenixManifestPromise;
+async function bundledPhoenixManifest() {
+  if (process.platform !== 'win32') return null;
+  if (!bundledPhoenixManifestPromise) bundledPhoenixManifestPromise = (async () => {
+    try {
+      const manifest = JSON.parse(await fs.readFile(path.join(app.getAppPath(), 'build', 'native-guard', 'manifest.json'), 'utf8'));
+      phoenixReleaseFromManifest(manifest, 'https://api.ahardtime.net', String(launcherPackageMetadata.phoenixAntiCheatVersion || ''));
+      return manifest;
+    } catch (error) {
+      if (!app.isPackaged && error?.code === 'ENOENT') return null;
+      throw new Error('Phoenix Anti-cheat recovery information is unavailable. Reinstall AHT Launcher.');
+    }
+  })();
+  return bundledPhoenixManifestPromise;
+}
+
 async function currentPhoenixAntiCheatStatus() {
-  return phoenixAntiCheatStatus({
+  const status = await phoenixAntiCheatStatus({
     installDir: phoenixAntiCheatInstallDir(),
+    consentFile: path.join(app.getPath('userData'), 'phoenix-consent.json'),
     developmentRuntimeDir: path.join(app.getAppPath(), 'build', 'native-guard'),
     developerMode: isDeveloperMode(),
     requiredVersion: String(launcherPackageMetadata.phoenixAntiCheatVersion || ''),
+    expectedHash: (await bundledPhoenixManifest())?.sha256 || '',
     platform: process.platform
   });
+  // Migrate a valid legacy receipt before the component folder can be removed.
+  await rememberPhoenixConsent(path.join(app.getPath('userData'), 'phoenix-consent.json'), status).catch(() => {});
+  return status;
 }
 
 function phoenixAntiCheatForRenderer(status = {}) {
@@ -3735,6 +3764,7 @@ function phoenixAntiCheatForRenderer(status = {}) {
     supported: Boolean(status.supported),
     installed: Boolean(status.installed),
     valid: Boolean(status.valid),
+    consented: Boolean(status.consented),
     state: String(status.state || ''),
     version: String(status.version || ''),
     installedAt: String(status.installedAt || ''),
@@ -3743,6 +3773,10 @@ function phoenixAntiCheatForRenderer(status = {}) {
 }
 
 async function phoenixAntiCheatRelease(config = {}) {
+  const bundled = await bundledPhoenixManifest();
+  if (bundled) return phoenixReleaseFromManifest(bundled, new URL(launcherLatestUrlForConfig(config)).origin,
+    String(launcherPackageMetadata.phoenixAntiCheatVersion || ''),
+    { allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1' });
   const update = await readLauncherUpdate(config);
   if (update.error && !update.manifest) {
     throw new Error('Phoenix Anti-cheat download is temporarily unavailable.');
@@ -3757,7 +3791,7 @@ async function phoenixAntiCheatRelease(config = {}) {
   return release;
 }
 
-async function installCurrentPhoenixAntiCheat(sender) {
+async function installCurrentPhoenixAntiCheat(sender, consentAcceptedAt = '') {
   if (phoenixAntiCheatInstallPromise) return phoenixAntiCheatInstallPromise;
   phoenixAntiCheatInstallPromise = (async () => {
     if (process.platform !== 'win32') return phoenixAntiCheatForRenderer(await currentPhoenixAntiCheatStatus());
@@ -3765,6 +3799,8 @@ async function installCurrentPhoenixAntiCheat(sender) {
     const descriptor = await phoenixAntiCheatRelease(config);
     const status = await installPhoenixAntiCheat({
       installDir: phoenixAntiCheatInstallDir(),
+      consentFile: path.join(app.getPath('userData'), 'phoenix-consent.json'),
+      consentAcceptedAt: consentAcceptedAt || (await currentPhoenixAntiCheatStatus()).consentAcceptedAt || new Date().toISOString(),
       descriptor,
       allowInsecureLocalhost: process.env.AHT_TEST_ALLOW_INSECURE_LAUNCHER_UPDATE === '1',
       onProgress: (progress) => {
