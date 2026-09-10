@@ -83,6 +83,20 @@ test('runtime-data cache catches new deep entries, case variants and links witho
   assert.equal((await f.verify()).valid, true);
 });
 
+test('Repair invalidates runtime-data findings even when directory timestamps do not advance', async (t) => {
+  const f = await fixture(t);
+  await f.write('mods/OpenTerrainGenerator/worlds/good.bo4', 'terrain');
+  await f.write('mods/OpenTerrainGenerator/worlds/extra.jar', 'unauthorized');
+  assert.equal((await f.verify()).valid, false);
+  const parent = path.join(f.instance, 'mods/OpenTerrainGenerator/worlds');
+  const stat = await fs.lstat(parent, { bigint: true });
+  const lstat = fs.lstat.bind(fs);
+  t.mock.method(fs, 'lstat', (target, options) =>
+    path.resolve(target) === parent && options?.bigint ? Promise.resolve(stat) : lstat(target, options));
+  assert.deepEqual(await removeUnapprovedPreservedModData(f.instance), ['mods/OpenTerrainGenerator/worlds/extra.jar']);
+  assert.equal((await f.verify()).valid, true);
+});
+
 test('real full Repair removes extras and restores bytes without losing player data', async (t) => {
   const f = await fixture(t);
   const archive = new AdmZip();

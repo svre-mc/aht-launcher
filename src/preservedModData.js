@@ -77,6 +77,10 @@ export async function removeUnapprovedPreservedModData(instanceDir) {
       if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error('Repair stopped: client directory changed.');
     }
     const target = safeJoin(instanceDir, issue.path);
+    // A successful unlink need not produce a distinct directory timestamp on
+    // every filesystem. Never reuse the findings we just repaired (or attempted).
+    directoryCache.delete(path.dirname(target));
+    directoryCache.delete(target);
     const stat = await lstatOrMissing(target);
     if (!stat) continue;
     if (stat.isDirectory() && !stat.isSymbolicLink()) throw new Error('Repair stopped: unexpected directory change.');
