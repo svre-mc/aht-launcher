@@ -14395,6 +14395,14 @@ async function publishCompletedUpdatePreparation({
     memoryMb: launcherConfig.minecraftLauncher?.memoryMb || DEFAULT_MINECRAFT_MEMORY_MB,
     probe: preflightJava8Runtime
   });
+  // The runtime probe uses java.exe, while the Windows game profile uses
+  // javaw.exe. Publish the same game executable to Play/Phoenix immediately;
+  // normalizing only the disk snapshot leaves this process with a stale pin.
+  const preparedJavaPath = await minecraftJavaExecutable(java8Runtime.path) || java8Runtime.path;
+  launcherConfig = {
+    ...launcherConfig,
+    minecraftLauncher: { ...(launcherConfig.minecraftLauncher || {}), javaPath: preparedJavaPath }
+  };
   const attempt = createLaunchDiagnosticAttempt(target);
   setLaunchRequirement(attempt, 'installed', 'PASS', `Installed version ${installed.version || 'unknown'}.`);
   setLaunchRequirement(attempt, 'integrity', 'PASS', `${Number(integrity?.counts?.managed || 0)} managed files passed.`);

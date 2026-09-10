@@ -145,6 +145,44 @@ for (const missingAtDetection of [true, false]) {
     'Repair must not publish a ready state based on stale profile Java metadata');
 }
 
+// A completed Install/Repair must publish the game executable in memory, not
+// merely fix it in the persisted snapshot for the next launcher restart.
+for (const gameJava of ['C:\\Java\\bin\\javaw.exe', '/runtime/java8/bin/java']) {
+  const probeJava = gameJava.replace('javaw.exe', 'java.exe');
+  const updateConfig = { ...config, minecraftLauncher: { javaPath: probeJava, memoryMb: 4096 } };
+  let persistedEntry;
+  const readyContext = {
+    clearLaunchPreparationResources() {}, developerClientBypassAllowed: () => true,
+    resolveMinecraftLauncherRoute: async () => ({ kind: 'desktop' }),
+    java8RuntimeStatus: async () => ({ usable: true, path: probeJava }),
+    selectPreparedMinecraftLauncherProfile: async (value) => value,
+    verifyRepairedJava, DEFAULT_MINECRAFT_MEMORY_MB: 4096,
+    preflightJava8Runtime: async (selected) => {
+      assert.equal(selected, gameJava);
+      return { usable: true, javaPath: probeJava, heapReady: true };
+    },
+    minecraftJavaExecutable: async (selected) => { assert.equal(selected, probeJava); return gameJava; },
+    createLaunchDiagnosticAttempt: createLaunchAttempt, setLaunchRequirement,
+    createLaunchPreparationMutationMonitor: async () => null,
+    confirmLaunchPreparationMutationMonitor: async () => {},
+    launchPreparationCache: new Map(),
+    persistPreparedLaunchEntry: async (_key, entry) => { persistedEntry = entry; },
+    invalidateLaunchPreparation() {}, Date
+  };
+  vm.createContext(readyContext);
+  vm.runInContext(`${finalizationSource}\nglobalThis.finalize = publishCompletedUpdatePreparation;`, readyContext);
+  const entry = await readyContext.finalize({ target, config: updateConfig, launcherConfig: updateConfig,
+    latest: installed, installed, integrity: { valid: true, counts: {} },
+    minecraftProfile: { ...profile, javaPath: gameJava }
+  });
+  assert.equal(entry.launcherConfig.minecraftLauncher.javaPath, gameJava,
+    'Immediate Play/Phoenix must use the same Java executable as the repaired game profile');
+  assert.equal(entry.attempt.runtimeConfig.minecraftLauncher.javaPath, gameJava);
+  assert.equal(readyContext.launchPreparationCache.get(target.id), entry);
+  assert.equal(persistedEntry, entry);
+  assert.equal(updateConfig.minecraftLauncher.javaPath, probeJava, 'Do not mutate the caller config');
+}
+
 const events = [];
 const queueContext = {
   ensureMinecraftLauncherProfile: async ({ installed }) => { events.push(`profile:${installed.version}`); return { version: installed.version }; },
