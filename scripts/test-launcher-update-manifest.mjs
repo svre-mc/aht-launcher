@@ -58,6 +58,12 @@ assert(validation.ok, `generated launcher manifest failed reusable validation: $
 assert(compareLauncherReleaseVersions('7.8.10', '7.8.9') === 1, 'launcher version comparison must be numeric, not lexical');
 assert(compareLauncherReleaseVersions('7.8.9', '7.8.9') === 0, 'equal launcher versions must compare equal');
 assertLauncherReleaseAdvance({ ...manifest, version: '7.8.10' }, manifest);
+for (const change of [{ sha256: 'f'.repeat(64) }, { size: manifest.antiCheat.size + 1 }]) {
+  let rejected = false;
+  try { assertLauncherReleaseAdvance({ ...manifest, version: '7.8.10', antiCheat: { ...manifest.antiCheat, ...change } }, manifest); }
+  catch (error) { rejected = error.message.includes('Phoenix release bytes are immutable'); }
+  assert(rejected, 'A launcher version bump must not overwrite a published Phoenix binary');
+}
 for (const candidateVersion of ['7.8.9', '7.8.8']) {
   let immutableRejected = false;
   try {

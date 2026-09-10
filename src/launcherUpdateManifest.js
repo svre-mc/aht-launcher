@@ -52,6 +52,13 @@ export function assertLauncherReleaseAdvance(candidate = {}, live = {}) {
       `Launcher ${live.version} is already published. Refusing to replace it with ${candidate.version}; bump package.json and publish a new version.`
     );
   }
+  const nextPhoenix = candidate.antiCheat;
+  const previousPhoenix = live.antiCheat;
+  if (nextPhoenix && previousPhoenix
+      && (nextPhoenix.version === previousPhoenix.version || nextPhoenix.path === previousPhoenix.path)
+      && (nextPhoenix.sha256 !== previousPhoenix.sha256 || Number(nextPhoenix.size) !== Number(previousPhoenix.size))) {
+    throw new Error('Phoenix release bytes are immutable. Reuse the published binary or bump phoenixAntiCheatVersion before publishing.');
+  }
   return { ok: true, candidateVersion: candidate.version, liveVersion: live.version };
 }
 

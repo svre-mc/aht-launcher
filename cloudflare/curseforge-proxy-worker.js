@@ -478,6 +478,9 @@ function contentTypeForKey(key) {
 }
 
 function cacheControlForKey(key) {
+  // Historical Phoenix releases reused their versioned filename after a rebuild.
+  // Never serve an old edge copy that conflicts with the launcher's pinned hash.
+  if (key.startsWith('launcher/anticheat/')) return 'private, no-store';
   if (key.endsWith('latest.json') || key.endsWith('release-report.json')) {
     return 'public, max-age=60, must-revalidate';
   }

@@ -169,7 +169,7 @@ results.push(await check('launcher installer', new Request('https://worker.test/
 results.push(await check('separate Phoenix Anti-cheat', new Request('https://worker.test/launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.0.0.exe'), {
   status: 200,
   contentType: 'application/vnd.microsoft.portable-executable',
-  cacheControl: 'public, max-age=31536000, immutable',
+  cacheControl: 'private, no-store',
   contentDisposition: 'attachment; filename="Phoenix-Anti-cheat-Windows-x64-1.0.0.exe"',
   length: '4'
 }));

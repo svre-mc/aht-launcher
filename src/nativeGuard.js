@@ -313,6 +313,7 @@ export async function installPhoenixAntiCheat({
   try {
     const response = await fetchImpl(release.url, {
       method: 'GET',
+      cache: 'no-store',
       redirect: 'error',
       signal: controller.signal,
       headers: { Accept: 'application/vnd.microsoft.portable-executable, application/octet-stream' }

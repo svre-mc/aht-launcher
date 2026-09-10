@@ -133,6 +133,7 @@ jobs:
         run: |
           node node_modules/electron/install.js
           node scripts/test-desktop-http.mjs
+          node scripts/test-phoenix-native-http-cache.cjs
 
       - name: Test updater handoff and refreshed account state
         run: node scripts/test-launcher-restart-state.mjs && node scripts/test-live-account-status.mjs && node scripts/test-mod-director-icon.mjs
