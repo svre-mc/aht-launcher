@@ -4,6 +4,8 @@ import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.SocketTimeoutException;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -24,6 +26,44 @@ public class ServerStateClientFrameTest {
         expectRejected(new byte[] { (byte) 0x81, (byte) 0x80, 0, 0, 0, 0 });
         expectRejected(new byte[] { (byte) 0x81, 3, 'a', 'b' });
         expectRejected(frame(new byte[ServerStateClient.MAX_MESSAGE_BYTES + 1]));
+    }
+
+    @Test
+    public void heartbeatTimeoutAtEveryFrameBoundaryPreservesTheMessage() throws Exception {
+        byte[] payload = new byte[160];
+        for (int i = 0; i < payload.length; i++) payload[i] = (byte) (i * 13);
+        byte[] wire = frame(payload);
+        for (int offset = 0; offset < wire.length; offset++) {
+            final int pauseAt = offset;
+            InputStream delayed = new InputStream() {
+                int at; boolean paused;
+                @Override public int read() throws IOException {
+                    if (!paused && at == pauseAt) { paused = true; throw new SocketTimeoutException("fixture idle"); }
+                    return at == wire.length ? -1 : wire[at++] & 255;
+                }
+                @Override public int read(byte[] b, int off, int len) throws IOException {
+                    if (len == 0) return 0;
+                    int value = read(); if (value < 0) return -1; b[off] = (byte) value; return 1;
+                }
+            };
+            ByteArrayOutputStream sent = new ByteArrayOutputStream();
+            assertArrayEquals(payload, ServerStateClient.readHeartbeatFrameForTests(delayed, sent));
+            assertEquals(14, sent.size()); // one masked eight-byte ping, no duplicate or payload replay
+            assertEquals(0x89, sent.toByteArray()[0] & 255);
+        }
+    }
+
+    @Test
+    public void missingPongStopsTheReaderInsteadOfWaitingForever() throws Exception {
+        InputStream silent = new InputStream() {
+            @Override public int read() throws IOException { throw new SocketTimeoutException("fixture idle"); }
+        };
+        try {
+            ServerStateClient.readHeartbeatFrameForTests(silent, new ByteArrayOutputStream());
+            fail("silent state channel stayed available");
+        } catch (IOException expected) {
+            assertEquals("state channel heartbeat timed out", expected.getMessage());
+        }
     }
 
     private static byte[] frame(byte[] payload) throws IOException {

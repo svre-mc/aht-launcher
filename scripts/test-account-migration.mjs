@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import worker from '../cloudflare/curseforge-proxy-worker.js';
 import { recoverLegacyMinecraftAccount } from '../cloudflare/minecraft-account-recovery.js';
 import { proveMinecraftAccountOwnership } from '../src/minecraftAccountRecovery.js';
-import { readWindowsMinecraftSession } from '../src/windowsMinecraftSession.js';
+import { readWindowsMinecraftSession, readWindowsMinecraftSessions } from '../src/windowsMinecraftSession.js';
 import { createDeviceAssertion, createDeviceCredential } from '../src/deviceIdentity.js';
 
 const username = 'LegacyRig';
@@ -95,7 +95,14 @@ try {
     return new Response(null, { status: 204 });
   } }), { verified: true });
   assert.equal(calls, 1);
-  await assert.rejects(proveMinecraftAccountOwnership({ ...prove, fetchImpl: async () => new Response('private upstream content', { status: 403 }) }),
+  await fs.writeFile(path.join(root, 'launcher_accounts.json'), JSON.stringify({ accounts: {
+    selected: { remoteId: 'selected-xuid', accessToken: token, minecraftProfile: { name: username, id: minecraftUuid } }
+  } }));
+  assert.equal((await proveMinecraftAccountOwnership({ ...prove,
+    readWindowsSession: async () => { throw new Error('Unnecessary protected-cache access'); },
+    fetchImpl: async url => { assert.equal(url, 'https://sessionserver.mojang.com/session/minecraft/join'); return new Response(null, { status: 204 }); }
+  })).verified, true, 'A valid direct session avoids protected-cache access entirely');
+  await assert.rejects(proveMinecraftAccountOwnership({ ...prove, readWindowsSession: async () => [], fetchImpl: async () => new Response('private upstream content', { status: 403 }) }),
     error => /fresh Minecraft session/.test(error.message) && !error.message.includes(token));
   await assert.rejects(proveMinecraftAccountOwnership({ ...prove, username: 'OtherPlayer' }), /fresh Minecraft session/);
 
@@ -123,6 +130,20 @@ try {
   } };
   assert.equal((await proveMinecraftAccountOwnership(protectedOptions)).verified, true);
   assert.equal(protectedRequests.length, 3);
+  assert.equal((await proveMinecraftAccountOwnership({ ...protectedOptions,
+    readWindowsSession: async () => [
+      { token: 'revoked-xsts', userHash: 'fixture-userhash' },
+      { token: 'fixture-xsts', userHash: 'fixture-userhash' }
+    ], fetchImpl: async (url, options) => options.body?.includes('revoked-xsts')
+      ? new Response(null, { status: 401 }) : protectedOptions.fetchImpl(url, options)
+  })).verified, true, 'A rejected Xbox session must not hide a later valid session');
+  assert.equal((await proveMinecraftAccountOwnership({ ...protectedOptions,
+    readWindowsSession: async () => [
+      { token: 'unavailable-xsts', userHash: 'fixture-userhash' },
+      { token: 'fixture-xsts', userHash: 'fixture-userhash' }
+    ], fetchImpl: async (url, options) => options.body?.includes('unavailable-xsts')
+      ? new Response(null, { status: 503 }) : protectedOptions.fetchImpl(url, options)
+  })).verified, true, 'A failed exchange must not mask a usable candidate');
   await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async () => new Response(null, { status: 503 }) }), /Try account sync again shortly/);
   await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async url =>
     new Response(JSON.stringify(url.endsWith('/minecraft/profile') ? { name: 'WrongOwner', id: minecraftUuid } : { access_token: 'fixture' })) }), /fresh Minecraft session/);
@@ -138,6 +159,22 @@ try {
     const credential = await readWindowsMinecraftSession({ file: cacheFile, remoteId: 'selected-xuid' });
     assert.equal(credential?.token, 'fake-dpapi-token');
     assert.equal(credential?.userHash, 'fake-userhash');
+    assert.equal(await readWindowsMinecraftSession({ file: cacheFile, remoteId: 'other-account' }), null);
+    const validEntry = JSON.parse(cache.credentials['selected-xuid']['Xal.test.RETAIL.User.fixture']).tokens[0];
+    const expiredEntry = structuredClone(validEntry);
+    expiredEntry.TokenData.Token = 'expired-token';
+    expiredEntry.TokenData.NotAfter = new Date(Date.now() - 60_000).toISOString();
+    cache.credentials['selected-xuid'] = {
+      'Xal.bad.RETAIL.User.fixture': '{broken json',
+      'Xal.old.RETAIL.User.fixture': JSON.stringify({ tokens: [expiredEntry,
+        { RelyingParty: validEntry.RelyingParty, TokenData: {} }] }),
+      'Xal.test.RETAIL.User.fixture': JSON.stringify({ tokens: [expiredEntry, validEntry] })
+    };
+    execFileSync(path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-Command', "Add-Type -AssemblyName System.Security; $r=[Console]::In.ReadToEnd()|ConvertFrom-Json; $b=[Text.Encoding]::UTF8.GetBytes($r.cache); [IO.File]::WriteAllBytes($r.file,[Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser))"],
+      { windowsHide: true, input: JSON.stringify({ file: cacheFile, cache: JSON.stringify(cache) }), timeout: 10_000 });
+    assert.deepEqual((await readWindowsMinecraftSessions({ file: cacheFile, remoteId: 'selected-xuid' })).map(entry => entry.token),
+      ['fake-dpapi-token'], 'Malformed fields and expired tokens must not mask the selected account’s valid session');
     assert.equal(await readWindowsMinecraftSession({ file: cacheFile, remoteId: 'other-account' }), null);
   }
 

@@ -28,6 +28,7 @@ public class ServerEvents {
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END || !isDedicatedServer()) return;
         PackVersionLock.expirePendingPlayers(FMLCommonHandler.instance().getMinecraftServerInstance());
+        PreWorldAdmission.tick();
     }
 
     private static boolean isDedicatedServer() {

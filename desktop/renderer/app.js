@@ -950,7 +950,6 @@ let releaseBusy = false;
 let developerSecretSaveTimer = null;
 let launcherSocialLinksState = { links: { ...DEFAULT_LAUNCHER_SOCIAL_LINKS }, source: "default", publishedAt: "", fetchedAt: "", error: "" };
 let developerSocialLinksLoaded = false;
-let launcherUpdateAutoStarted = false;
 let lastStatusRefreshAt = 0;
 let statusRefreshGeneration = 0;
 let accountSyncRetryBusy = false;
@@ -3208,7 +3207,7 @@ function setLauncherUpdateButton({ restartReady = false, instantRestartReady = f
 
 function renderLauncherUpdateOverlay(status = currentStatus, state = lastLauncherUpdateState) {
   if (!els.launcherUpdateOverlay) return;
-  const update = status?.launcherUpdate || {};
+  const update = lastLauncherUpdateCheck || status?.launcherUpdate || {};
   const developerReinstall = Boolean(
     update.developerReinstall
     || state?.purpose === "developer-reinstall"
@@ -3216,11 +3215,11 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
     || state?.lastResult?.purpose === "developer-reinstall"
     || state?.lastResult?.developerReinstall
   );
-  const required = Boolean(update.updateRequired || developerReinstall);
-  els.launcherUpdateOverlay.hidden = !required;
-  document.body.classList.toggle("launcher-update-open", required);
-  if (!required) {
-    launcherUpdateAutoStarted = false;
+  const required = Boolean(update.updateRequired || developerReinstall || state?.running || state?.lastResult?.restartRequired);
+  const visible = required && !document.body.classList.contains("is-booting");
+  els.launcherUpdateOverlay.hidden = !visible;
+  document.body.classList.toggle("launcher-update-open", visible);
+  if (!visible) {
     lastLauncherUpdateVisualState = "";
     return;
   }
@@ -3245,7 +3244,7 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
     ? restartReady ? "The prepared update is safe. Try the restart again." : "Your current launcher is unchanged. Retry when ready."
     : restarting ? "Opening the prepared launcher now."
       : restartReady ? externalPackageInstall ? "The verified package is ready to open." : "The verified update is staged and ready."
-        : state?.running ? "Download, verification, and staging happen automatically." : "A new version is ready to download.";
+        : state?.running ? "Downloading and preparing your update." : "A new version is available. Choose Update now to begin.";
   const percent = launcherUpdatePercent(state);
   const phase = launcherUpdatePhaseLabel(state, restartReady, externalPackageInstall);
   els.launcherUpdateProgressLabel.textContent = phase;
@@ -3275,10 +3274,6 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   if (developerReinstall && developerAuthenticated && !state && !launcherUpdatePoll) {
     launcherUpdatePoll = setInterval(pollLauncherUpdate, 125);
     window.setTimeout(() => pollLauncherUpdate(), 0);
-  }
-  if (!developerReinstall && !launcherUpdateAutoStarted && !state?.running && !state?.lastResult) {
-    launcherUpdateAutoStarted = true;
-    window.setTimeout(() => startLauncherSelfUpdate(), 500);
   }
 }
 
@@ -3461,7 +3456,7 @@ function renderPrimaryAction(status = currentStatus) {
       : ""))
     : "";
   setLaunchActionStatus(launcherUpdateRequired
-    ? "Update the launcher to continue. The launcher update is starting automatically."
+    ? "Update the launcher to continue. Choose Update now when you are ready."
     : retryReason);
   els.playButton.title = installMode
     ? (status?.updateBlockedReason || (updateRunning ? "Installing the selected AHT pack" : "Install the selected AHT pack"))
@@ -5057,6 +5052,7 @@ function showLauncherPreparation() {
   els.appFrame?.setAttribute("aria-hidden", "true");
   document.body.classList.remove("is-launcher-ready");
   document.body.classList.add("is-booting");
+  renderLauncherUpdateOverlay();
 }
 
 function revealLauncher() {
@@ -5066,6 +5062,7 @@ function revealLauncher() {
   els.startupLoader?.setAttribute("aria-hidden", "true");
   document.body.classList.add("is-launcher-ready");
   document.body.classList.remove("is-booting");
+  renderLauncherUpdateOverlay();
   window.setTimeout(() => {
     if (els.startupLoader) els.startupLoader.hidden = true;
   }, STARTUP_FADE_MS);

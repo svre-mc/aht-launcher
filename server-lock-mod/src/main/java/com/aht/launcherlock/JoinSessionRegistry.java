@@ -77,6 +77,12 @@ final class JoinSessionRegistry {
         return transport != null && accepted.get(playerId) == transport;
     }
 
+    synchronized boolean acceptExempt(LauncherWhitelist policy,String name,UUID playerId,Object transport,int timeoutTicks) {
+        if(policy==null || !policy.allows(name) || playerId==null || transport==null)return false;
+        UUID connection=begin(playerId,transport,timeoutTicks);
+        return connection==null?isAccepted(playerId,transport):accept(playerId,connection);
+    }
+
     synchronized List<UUID> requestsDue() {
         List<UUID> result = new ArrayList<UUID>();
         for (Map.Entry<UUID, PendingSession> entry : pending.entrySet()) {

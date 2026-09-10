@@ -18,6 +18,12 @@ const pendingUpdatePath = path.join(userData, 'launcher-updates', 'pending-launc
 const startupProbePath = path.join(root, 'startup-probe.jsonl');
 const screenshotDir = String(process.env.AHT_SMOKE_SCREENSHOT_DIR || '').trim();
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
+if (smokeExe && !process.env.AHT_SMOKE_DEDICATED_INSTALL_ROOT) {
+  throw new Error('Packaged updater tests require an explicitly isolated test installation, never the user’s installed launcher.');
+}
+if (smokeExe && !path.resolve(smokeExe).startsWith(path.resolve(process.env.AHT_SMOKE_DEDICATED_INSTALL_ROOT) + path.sep)) {
+  throw new Error('Test executable is outside the dedicated test installation.');
+}
 const publicUpdateVersion = '9.9.09';
 const packageUpdateVersion = '9.9.9';
 const artifactName = process.platform === 'win32'
@@ -229,6 +235,7 @@ await writeJson(path.join(userData, 'identity.json'), {
 let releaseArtifactDownload = () => {};
 let markArtifactRequestStarted = () => {};
 let launcherUpdatePublished = false;
+let artifactRequests = 0;
 const artifactDownloadGate = new Promise((resolve) => { releaseArtifactDownload = resolve; });
 const artifactRequestStarted = new Promise((resolve) => { markArtifactRequestStarted = resolve; });
 
@@ -326,6 +333,7 @@ const server = http.createServer((request, response) => {
       return;
     }
     const midpoint = Math.max(1, Math.floor(artifactBytes.length / 2));
+    artifactRequests++;
     response.write(artifactBytes.subarray(0, midpoint));
     markArtifactRequestStarted();
     artifactDownloadGate.then(() => response.end(artifactBytes.subarray(midpoint))).catch(() => response.destroy());
@@ -372,13 +380,42 @@ try {
   }
   const initiallyHidden = await evaluate(client, "document.querySelector('#launcherUpdateOverlay').hidden");
   if (!initiallyHidden) throw new Error('Launcher update overlay opened before the update was published.');
+  await waitFor(client, "!document.body.classList.contains('is-booting')", 'initial startup complete');
+  // Re-enter the same preparation gate used by startup/terms acceptance, then
+  // publish while it owns the screen. Exercise rendering, not just CSS strings.
+  await evaluate(client, 'showLauncherPreparation()');
   const publishedAt = Date.now();
   launcherUpdatePublished = true;
-  await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false", 'launcher update overlay visible');
+  await waitFor(client, "lastLauncherUpdateCheck?.updateRequired", 'live update detected during preparation');
   const liveDetectionMs = Date.now() - publishedAt;
   if (liveDetectionMs > 12_000) {
     throw new Error(`Open launcher took ${liveDetectionMs}ms to detect the published update.`);
   }
+  const loadingProof = await evaluate(client, `({
+    booting: document.body.classList.contains('is-booting'),
+    loader: getComputedStyle(document.querySelector('#startupLoader')).visibility,
+    updateHidden: document.querySelector('#launcherUpdateOverlay').hidden
+  })`);
+  if (!loadingProof.booting || loadingProof.loader !== 'visible' || !loadingProof.updateHidden || artifactRequests !== 0) {
+    throw new Error('Update interrupted preparation or began without consent: ' + JSON.stringify(loadingProof));
+  }
+  await evaluate(client, 'revealLauncher()');
+  await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false", 'update prompt after preparation');
+  await sleep(1500);
+  const idleState = await evaluate(client, 'window.aht.getLauncherUpdateState()');
+  if (artifactRequests !== 0 || idleState.running || idleState.lastResult?.restartRequired) {
+    throw new Error('Launcher downloaded or staged an update without confirmation.');
+  }
+  await captureScreenshot(client, 'launcher-update-confirmation.png');
+  const updatePoint = await evaluate(client, `(() => {
+    const button = document.querySelector('#launcherUpdateNowButton');
+    const bounds = button.getBoundingClientRect();
+    const x = bounds.x + bounds.width / 2, y = bounds.y + bounds.height / 2;
+    return { x, y, hit: document.elementFromPoint(x, y)?.closest('button')?.id || '' };
+  })()`);
+  if (updatePoint.hit !== 'launcherUpdateNowButton') throw new Error('Update confirmation button is not clickable.');
+  await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: updatePoint.x, y: updatePoint.y, button: 'left', clickCount: 1 });
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: updatePoint.x, y: updatePoint.y, button: 'left', clickCount: 1 });
   await Promise.race([
     artifactRequestStarted,
     sleep(30_000).then(() => { throw new Error('launcher update artifact request did not start'); })
@@ -398,6 +435,8 @@ try {
   }
   await waitFor(client, "document.querySelector('#launcherUpdateOverlay').hidden === false && document.querySelector('#launcherUpdateTitle').textContent === 'Updating launcher'", 'visible launcher download progress');
   await sleep(200);
+  await evaluate(client, `renderLauncherUpdateOverlay({}); renderLauncherUpdateOverlay({ launcherUpdate: { error: 'temporary check failure' } })`);
+  if (await evaluate(client, "document.querySelector('#launcherUpdateOverlay').hidden")) throw new Error('A partial status hid the active update.');
   await captureScreenshot(client, 'launcher-update-downloading.png');
   releaseArtifactDownload();
   try {
@@ -662,6 +701,8 @@ try {
       downloadedPath: proof.state.lastResult.downloadedPath,
       latestVersion: proof.status.launcherUpdate.latestVersion,
       liveDetectionMs,
+      confirmationRequired: true,
+      loadingProof,
       restartDispatchMs: proof.state.lastResult.restartDispatchMs,
       launcherStrategy: proof.state.lastResult.launched?.strategy || 'direct',
       pendingInstallReopenExit: guardExit

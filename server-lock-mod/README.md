@@ -2,6 +2,18 @@
 
 Forge 1.12.2 reconnect gate for private A Hard Time servers.
 
+Version 1.2.2 intercepts Forge's final admission call before PlayerList/world
+registration. Pending connections receive only bounded verification/control
+traffic and keepalive responses; gameplay and world packets are withheld.
+Signed launcher proof, the matching anti-cheat runtime audit and any required
+Phoenix response must pass before the first JoinGame packet releases the gate.
+There is no playable grace period. The existing crash-containment wrapper is
+preserved. A timeout denies entry; it does not prove the player was cheating.
+
+Deploy the matching anti-cheat client/server build with this version. Unit tests
+cover both mapped/production Forge bytecode, crash-guard composition and packet
+ordering; real packaged-runtime tests are also required for publication.
+
 Install the same `aht-version-lock-*.jar` on the client pack and dedicated server. The client sends only a compact Worker-signed token. The dedicated server verifies that token locally against a signed in-memory state snapshot delivered over one authenticated WebSocket.
 
 The game server never asks the Worker to verify individual players. R2 emits one Queue event when `launcher/latest.json` changes; the Queue refreshes one Durable Object; the Durable Object revision-deduplicates the event and pushes the new signed floor to the connected server. Registration changes and access decisions use the same channel. A reconnect also receives a fresh full snapshot so an offline server cannot miss an update.

@@ -10,6 +10,7 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLServerStartedEvent;
+import net.minecraftforge.fml.common.event.FMLServerStartingEvent;
 import net.minecraftforge.fml.common.event.FMLServerStoppingEvent;
 import net.minecraftforge.fml.common.network.NetworkRegistry;
 import net.minecraftforge.fml.common.network.simpleimpl.SimpleNetworkWrapper;
@@ -33,7 +34,7 @@ import java.util.concurrent.CompletableFuture;
 public class PackVersionLock {
     public static final String MODID = "ahtversionlock";
     public static final String NAME = "AHT Launcher Lock";
-    public static final String VERSION = "1.2.1";
+    public static final String VERSION = "1.2.2";
 
     private static final String DEFAULT_STATE_WEBSOCKET_URL =
             "wss://api.ahardtime.net/server/launcher-state";
@@ -51,6 +52,7 @@ public class PackVersionLock {
     public static SimpleNetworkWrapper NETWORK;
 
     private static final JoinSessionRegistry SESSIONS = new JoinSessionRegistry();
+    private static LauncherWhitelist whitelist;
     private static final LocalProofVerifier.SnapshotProvider POLICY_SNAPSHOTS =
             new LocalProofVerifier.SnapshotProvider() {
                 @Override
@@ -80,6 +82,9 @@ public class PackVersionLock {
         LOG = event.getModLog();
         if (event.getSide().isServer()) {
             loadConfig(new File(event.getModConfigurationDirectory(), "aht_version_lock.cfg"));
+            whitelist=new LauncherWhitelist(new File(event.getModConfigurationDirectory(),"aht-launcher-lock/whitelist.txt").toPath());
+            try { whitelist.initialize(new File(event.getModConfigurationDirectory(),"aht-server-utilities/launcher-proof-whitelist.txt").toPath()); }
+            catch(java.io.IOException | IllegalArgumentException failure){LOG.error("Launcher whitelist could not be loaded; proof remains required for everyone.",failure);}
         }
         NETWORK = NetworkRegistry.INSTANCE.newSimpleChannel(MODID);
         NETWORK.registerMessage(LauncherProofMessageHandler.class, LauncherProofMessage.class, 0, Side.SERVER);
@@ -93,6 +98,12 @@ public class PackVersionLock {
         } else {
             MinecraftForge.EVENT_BUS.register(new ClientEvents());
         }
+    }
+
+    @Mod.EventHandler
+    public void serverStarting(FMLServerStartingEvent event) {
+        if(event.getServer().isDedicatedServer() && whitelist!=null)
+            event.registerServerCommand(new CommandAhtWhitelist(whitelist));
     }
 
     @Mod.EventHandler
@@ -112,6 +123,7 @@ public class PackVersionLock {
 
     @Mod.EventHandler
     public void serverStopping(FMLServerStoppingEvent event) {
+        PreWorldAdmission.clearAll();
         SESSIONS.clearAll();
         LocalProofVerifier.cancelQueuedWork();
         ServerStateClient.stop();
@@ -212,8 +224,13 @@ public class PackVersionLock {
     static void watchPlayer(EntityPlayerMP player) {
         if (player == null || player.connection == null) return;
         if (rejectOutdatedClient(player)) return;
+        if (acceptWhitelisted(player)) return;
         SESSIONS.begin(player.getUniqueID(), player.connection.netManager, timeoutTicks);
         sendControl(player, SESSIONS.isAccepted(player.getUniqueID(), player.connection.netManager));
+    }
+
+    static boolean accepted(EntityPlayerMP player) {
+        return player != null && player.connection != null && SESSIONS.isAccepted(player.getUniqueID(), player.connection.netManager);
     }
 
     static void clearPlayer(UUID playerId) {
@@ -231,9 +248,10 @@ public class PackVersionLock {
                 || !player.connection.netManager.isChannelOpen()) return;
         MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
         EntityPlayerMP current = server == null || server.getPlayerList() == null
-                ? null : server.getPlayerList().getPlayerByUUID(player.getUniqueID());
+                ? null : PreWorldAdmission.find(server, player.getUniqueID());
         if (current != null && current != player) return;
         if (rejectOutdatedClient(player)) return;
+        if (acceptWhitelisted(player)) return;
         final UUID playerId = player.getUniqueID();
         SESSIONS.begin(playerId, player.connection.netManager, timeoutTicks);
         if (SESSIONS.isAccepted(playerId, player.connection.netManager)) {
@@ -283,12 +301,13 @@ public class PackVersionLock {
     private static void completeVerification(MinecraftServer server, UUID playerId, UUID connectionId,
                                              LocalProofVerifier.Result result) {
         EntityPlayerMP player = server.getPlayerList() == null
-                ? null : server.getPlayerList().getPlayerByUUID(playerId);
+                ? null : PreWorldAdmission.find(server, playerId);
         if (player == null || player.connection == null) {
             SESSIONS.fail(playerId, connectionId);
             return;
         }
         if (!SESSIONS.current(playerId, connectionId)) return;
+        if (acceptWhitelisted(player)) return;
         if (result.accepted) {
             if (SESSIONS.accept(playerId, connectionId)) {
                 LOG.info("{} passed signed local launcher verification (current {}, necessary {}, policy {}).",
@@ -319,11 +338,13 @@ public class PackVersionLock {
     static void expirePendingPlayers(MinecraftServer server) {
         if (server == null || server.getPlayerList() == null) return;
         for (UUID playerId : SESSIONS.requestsDue()) {
-            sendControl(server.getPlayerList().getPlayerByUUID(playerId), false);
+            EntityPlayerMP player=PreWorldAdmission.find(server, playerId);
+            if(!acceptWhitelisted(player))sendControl(player, false);
         }
         for (Map.Entry<UUID, String> expired : SESSIONS.tickAndCollectExpired().entrySet()) {
-            EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(expired.getKey());
+            EntityPlayerMP player = PreWorldAdmission.find(server, expired.getKey());
             if (player != null && player.connection != null) {
+                if(acceptWhitelisted(player))continue;
                 boolean deliveryTimeout = "PROOF_DELIVERY_TIMEOUT".equals(expired.getValue());
                 disconnect(player,
                         deliveryTimeout
@@ -345,6 +366,13 @@ public class PackVersionLock {
                 && VERSION.equals(dispatcher.getModList().get(MODID))) {
             NETWORK.sendTo(new LauncherProofControl(accepted), player);
         }
+    }
+
+    private static boolean acceptWhitelisted(EntityPlayerMP player) {
+        if(player==null || player.connection==null || !SESSIONS.acceptExempt(whitelist,
+                player.getName(),player.getUniqueID(),player.connection.netManager,timeoutTicks))return false;
+        sendControl(player,true);
+        return true;
     }
 
     private static boolean rejectOutdatedClient(EntityPlayerMP player) {

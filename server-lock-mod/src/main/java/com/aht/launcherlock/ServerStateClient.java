@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -102,6 +103,17 @@ final class ServerStateClient {
         return snapshot == null ? "" : snapshot.revision;
     }
 
+    static String statusText() {
+        ServerPolicySnapshot snapshot = currentSnapshot();
+        if (snapshot == null) return "unavailable; waiting for a fresh signed policy";
+        return "connected; signed policy " + snapshot.revision.substring(0, 12)
+                + "; activity " + Math.max(0L, System.currentTimeMillis() - lastActivityMillis) + " ms ago";
+    }
+
+    private static boolean active(Config config) {
+        return RUNNING.get() && activeConfig == config;
+    }
+
     static boolean isEndpointAllowedForTests(String endpoint) {
         try {
             parseEndpoint(endpoint);
@@ -119,7 +131,7 @@ final class ServerStateClient {
     private static void runLoop(Config config) {
         long retryMillis = 1000L;
         long lastWarningAt = 0L;
-        while (RUNNING.get()) {
+        while (active(config)) {
             try {
                 connectAndRead(config);
                 retryMillis = 1000L;
@@ -129,7 +141,7 @@ final class ServerStateClient {
                 // reconnect delay across otherwise healthy long-lived sessions.
                 if (connected) retryMillis = 1000L;
                 long now = System.currentTimeMillis();
-                if (now - lastWarningAt >= 60000L && PackVersionLock.LOG != null) {
+                if (active(config) && now - lastWarningAt >= 60000L && PackVersionLock.LOG != null) {
                     PackVersionLock.LOG.warn(
                             "AHT Launcher Lock state channel is disconnected; new joins fail closed until it recovers ({}).",
                             safeError(error)
@@ -137,14 +149,11 @@ final class ServerStateClient {
                     lastWarningAt = now;
                 }
             } finally {
-                connected = false;
-                SSLSocket socket = activeSocket;
-                activeSocket = null;
-                if (socket != null) {
-                    try { socket.close(); } catch (IOException ignored) {}
+                synchronized (ServerStateClient.class) {
+                    if (activeConfig == config) connected = false;
                 }
             }
-            if (!RUNNING.get()) break;
+            if (!active(config)) break;
             try {
                 Thread.sleep(retryMillis);
             } catch (InterruptedException ignored) {
@@ -157,7 +166,11 @@ final class ServerStateClient {
 
     private static void connectAndRead(Config config) throws Exception {
         SSLSocket socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
-        activeSocket = socket;
+        synchronized (ServerStateClient.class) {
+            if (!active(config)) { socket.close(); return; }
+            activeSocket = socket;
+        }
+        try {
         socket.connect(new InetSocketAddress(config.endpoint.getHost(), config.port), config.connectTimeoutMillis);
         socket.setSoTimeout(config.connectTimeoutMillis);
         SSLParameters ssl = socket.getSSLParameters();
@@ -181,24 +194,17 @@ final class ServerStateClient {
         output.flush();
         verifyHandshake(readHttpHeaders(input), websocketKey);
         socket.setSoTimeout(config.heartbeatMillis);
+        HeartbeatInput heartbeat = new HeartbeatInput(input, output);
 
         ByteArrayOutputStream fragmented = null;
-        boolean waitingForPong = false;
-        while (RUNNING.get()) {
-            Frame frame;
-            try {
-                frame = readFrame(input);
-            } catch (SocketTimeoutException timeout) {
-                if (waitingForPong) throw new IOException("state channel heartbeat timed out");
-                byte[] nonce = new byte[8];
-                RANDOM.nextBytes(nonce);
-                writeFrame(output, 0x9, nonce);
-                waitingForPong = true;
-                continue;
-            }
+        while (active(config)) {
+            // Handle idle timeouts inside the read operation. Retrying readFrame
+            // after a timeout would interpret a partial payload as a new header.
+            Frame frame = readFrame(heartbeat);
+            if (!active(config)) return;
             lastActivityMillis = System.currentTimeMillis();
             if (frame.opcode == 0xA) {
-                waitingForPong = false;
+                heartbeat.pong(frame.payload);
                 continue;
             }
             if (frame.opcode == 0x9) {
@@ -226,15 +232,50 @@ final class ServerStateClient {
             ServerPolicySnapshot snapshot = ServerPolicySnapshot.verifyMessage(
                     message, config.expectedKeyFingerprint, config.expectedPackId, System.currentTimeMillis()
             );
-            ServerPolicySnapshot previous = CURRENT.getAndSet(snapshot);
-            connected = true;
-            waitingForPong = false;
-            if (PackVersionLock.LOG != null && (previous == null || !previous.revision.equals(snapshot.revision))) {
+            ServerPolicySnapshot previous;
+            boolean recovered;
+            synchronized (ServerStateClient.class) {
+                if (!active(config)) return;
+                previous = CURRENT.getAndSet(snapshot);
+                recovered = !connected;
+                connected = true;
+            }
+            heartbeat.responsive();
+            if (PackVersionLock.LOG != null && (recovered || previous == null || !previous.revision.equals(snapshot.revision))) {
                 PackVersionLock.LOG.info(
-                        "AHT Launcher Lock received signed policy revision {} (necessary launcher {}).",
+                        "AHT Launcher Lock state channel connected; received signed policy revision {} (necessary launcher {}). New joins can be verified.",
                         snapshot.revision.substring(0, 12), snapshot.necessaryLauncherVersion
                 );
             }
+        }
+        } finally {
+            try { socket.close(); } catch (IOException ignored) { }
+            synchronized (ServerStateClient.class) {
+                if (activeSocket == socket) activeSocket = null;
+            }
+        }
+    }
+
+    static byte[] readHeartbeatFrameForTests(InputStream input, OutputStream output) throws IOException {
+        return readFrame(new HeartbeatInput(input, output)).payload;
+    }
+
+    private static final class HeartbeatInput extends InputStream {
+        private final InputStream input;
+        private final OutputStream output;
+        private byte[] pending;
+        HeartbeatInput(InputStream input, OutputStream output) { this.input = input; this.output = output; }
+        private void idle() throws IOException {
+            if (pending != null) throw new IOException("state channel heartbeat timed out");
+            pending = new byte[8]; RANDOM.nextBytes(pending); writeFrame(output, 0x9, pending);
+        }
+        void pong(byte[] payload) { if (pending != null && Arrays.equals(pending, payload)) pending = null; }
+        void responsive() { pending = null; }
+        @Override public int read() throws IOException {
+            while (true) try { return input.read(); } catch (SocketTimeoutException timeout) { idle(); }
+        }
+        @Override public int read(byte[] bytes, int off, int len) throws IOException {
+            while (true) try { return input.read(bytes, off, len); } catch (SocketTimeoutException timeout) { idle(); }
         }
     }
 
