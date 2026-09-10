@@ -19,6 +19,7 @@ import net.minecraft.util.text.TextComponentString;
 public final class PreWorldAdmission {
     private static final String HANDLER = "aht:pre_world";
     private static final Map<NetworkManager,Pending> PENDING = new ConcurrentHashMap<NetworkManager,Pending>();
+    private static final AdmissionSaveState SAVES = new AdmissionSaveState();
     // Slow cold audits keep waiting outside the world, never in a playable grace period.
     private static final long DEADLINE_NANOS = 180_000_000_000L;
     private PreWorldAdmission() { }
@@ -28,6 +29,9 @@ public final class PreWorldAdmission {
             enterWorld(players, manager, player, handler);
             return;
         }
+        // Even duplicate/capacity-rejected handlers can run vanilla logout. Their
+        // blank temporary player must never overwrite the saved character.
+        SAVES.track(player);
         if (PENDING.size() >= 128 || PENDING.containsKey(manager)) { close(manager); return; }
         // Repeated connections for the same UUID must never replace an active admission's state.
         if (find(player.getUniqueID()) != null) { close(manager); return; }
@@ -92,6 +96,17 @@ public final class PreWorldAdmission {
         }
     }
     static void clearAll() { for (Pending pending : PENDING.values()) abandon(pending); }
+    public static boolean skipUnadmittedSave(PlayerList players, EntityPlayerMP player) {
+        return player != null && SAVES.blocked(player, players.getPlayerByUUID(player.getUniqueID()) == player);
+    }
+    public static boolean skipUnadmittedLogout(PlayerList players, EntityPlayerMP player) {
+        if (!skipUnadmittedSave(players, player)) return false;
+        Pending pending = player.connection == null ? null : PENDING.get(player.connection.netManager);
+        if (pending != null && pending.player == player) abandon(pending);
+        // Leave the weak save fence in place for late callbacks on this exact
+        // discarded object. Never emit world logout events for an unjoined player.
+        return true;
+    }
     private static void enterWorld(PlayerList players, NetworkManager manager, EntityPlayerMP player, NetHandlerPlayServer handler) {
         try {
             Class<?> containment = Class.forName("com.aht.crashexploitfixer112.guard.ServerFaultContainment");

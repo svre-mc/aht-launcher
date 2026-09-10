@@ -10,6 +10,34 @@ import static org.junit.Assert.*;
 
 public class AdmissionTransformerTest {
     private static final String TARGET="net.minecraftforge.fml.common.network.handshake.NetworkDispatcher";
+    @Test public void saveAndLogoutAreGuardedInMappedAndProductionNamespaces() throws Exception {
+        String playerList="net.minecraft.server.management.PlayerList";
+        ClassReader source=new ClassReader(getClass().getClassLoader().getResourceAsStream(playerList.replace('.','/')+".class"));
+        for (boolean production : new boolean[] {false,true}) {
+            ClassWriter original=new ClassWriter(0);
+            if (production) {
+                Map<String,String> names=new HashMap<String,String>();
+                names.put("net/minecraft/server/management/PlayerList","pl");
+                names.put("net/minecraft/entity/player/EntityPlayerMP","oq");
+                names.put("net/minecraft/server/management/PlayerList.writePlayerData(Lnet/minecraft/entity/player/EntityPlayerMP;)V","b");
+                names.put("net/minecraft/server/management/PlayerList.playerLoggedOut(Lnet/minecraft/entity/player/EntityPlayerMP;)V","e");
+                source.accept(new ClassRemapper(original,new SimpleRemapper(names)),0);
+            } else source.accept(original,0);
+            AdmissionTransformer transformer=new AdmissionTransformer();
+            byte[] once=transformer.transform(playerList,playerList,original.toByteArray());
+            assertArrayEquals(once,transformer.transform(playerList,playerList,once));
+            ClassNode node=new ClassNode();new ClassReader(once).accept(node,0);
+            Set<String> guards=new HashSet<String>();
+            for(MethodNode method:node.methods) for(AbstractInsnNode instruction:method.instructions.toArray()) if(instruction instanceof MethodInsnNode) {
+                MethodInsnNode call=(MethodInsnNode)instruction;
+                if(call.owner.equals("com/aht/launcherlock/PreWorldAdmission") && call.name.startsWith("skipUnadmitted")) {
+                    assertTrue(guards.add(call.name));
+                    assertEquals(production?"(Lpl;Loq;)Z":"(Lnet/minecraft/server/management/PlayerList;Lnet/minecraft/entity/player/EntityPlayerMP;)Z",call.desc);
+                }
+            }
+            assertEquals(new HashSet<String>(Arrays.asList("skipUnadmittedSave","skipUnadmittedLogout")),guards);
+        }
+    }
     @Test public void dispatcherCannotEnterWorldWithoutAdmissionCall() throws Exception {
         String resource=TARGET.replace('.','/')+".class";
         ClassReader source=new ClassReader(getClass().getClassLoader().getResourceAsStream(resource));
