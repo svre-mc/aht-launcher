@@ -116,6 +116,9 @@ jobs:
       - name: Test startup, release transition, and Windows session handoff
         run: node scripts/test-managed-startup.mjs && npm run test:release-transition && npm run test:launch-preparation-snapshot && node scripts/test-windows-minecraft-handoff.mjs
 
+      - name: Test Phoenix readiness and automatic launcher close
+        run: node scripts/test-native-guard-exit-readiness.mjs && node scripts/test-launcher-close-guard.mjs
+
       - name: Test asset recovery and legacy account migration
         run: npm run test:asset-recovery && npm run test:account-migration
 

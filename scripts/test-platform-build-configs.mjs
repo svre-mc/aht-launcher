@@ -1236,7 +1236,7 @@ assert(
   desktopMain.includes('function armCloseLauncherWhenGameStarts')
   && desktopMain.includes('minecraftLauncherSignalStartsConfiguredModpack')
   && desktopMain.includes('minecraftInstanceLogAdvancedAfterBaseline')
-  && smokePlayerUpdatePlay.includes('A fresh modpack game-start signal did not close AHT Launcher'),
+  && smokePlayerUpdatePlay.includes('Unmeasured game-start signal closed AHT Launcher'),
   'Close-on-game-start must wait for a fresh modpack startup signal and have an end-to-end Play-flow proof.'
 );
 assert(desktopMain.includes('javaCacheDir') || forgeInstaller.includes('ensureManagedJava8Runtime'), 'Forge installer must have managed Java 8 fallback for stale jre-legacy certificates.');

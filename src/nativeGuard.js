@@ -391,7 +391,7 @@ function verifyNativeGuardProbe(reply, descriptor, nonce, gamePid) {
   };
 }
 
-export async function probeNativeGuard(descriptor = {}) {
+export async function verifyNativeGuardSession(descriptor = {}) {
   const expected = validateNativeGuardDescriptor(descriptor);
   const live = await readInfo(expected);
   if (live.keyHash !== expected.keyHash
@@ -401,6 +401,11 @@ export async function probeNativeGuard(descriptor = {}) {
       || live.guardPid !== expected.guardPid) {
     throw new Error('Phoenix Anti-cheat live session identity changed');
   }
+  return live;
+}
+
+export async function probeNativeGuard(descriptor = {}) {
+  const live = await verifyNativeGuardSession(descriptor);
   if (!live.gamePid) {
     return { live, measurement: { state: 'pending', gamePid: 0 }, signedProbe: null };
   }
@@ -408,6 +413,18 @@ export async function probeNativeGuard(descriptor = {}) {
   const signedProbe = JSON.parse(await readGuardLine(live.port, `${live.sessionKey}|${nonce}|${live.gamePid}`));
   const measurement = verifyNativeGuardProbe(signedProbe, live, nonce, live.gamePid);
   return { live, measurement, signedProbe };
+}
+
+export async function nativeGuardReadyForLauncherExit(descriptor, probe = probeNativeGuard) {
+  if (!descriptor) return false;
+  try {
+    const result = await probe(descriptor);
+    return result.live.gamePid > 0
+      && result.measurement.gamePid === result.live.gamePid
+      && result.measurement.state === 'clean';
+  } catch {
+    return false;
+  }
 }
 
 export async function ensureNativeGuard({
@@ -455,7 +472,9 @@ export async function ensureNativeGuard({
         }
       } catch {}
     }
-    const child = spawn(binary, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], detached: false });
+    // Independent process group lets the read-only monitor outlive an automatic
+    // launcher close. The native lifecycle still ends with its exact game.
+    const child = spawn(binary, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     try {
       const info = await new Promise((resolve, reject) => {
         let text = '';

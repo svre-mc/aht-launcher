@@ -63,7 +63,9 @@ import {
   ensureNativeGuard,
   installPhoenixAntiCheat,
   phoenixAntiCheatStatus,
+  nativeGuardReadyForLauncherExit,
   probeNativeGuard,
+  verifyNativeGuardSession,
   validatePhoenixAntiCheatRelease
 } from '../src/nativeGuard.js';
 import { proveMinecraftAccountOwnership } from '../src/minecraftAccountRecovery.js';
@@ -322,6 +324,8 @@ let mainWindow = null;
 let applicationQuitting = false;
 let testRendererActivityBlockerId = null;
 let closeOnGameStartWatchGeneration = 0;
+// Session authentication stays in memory and out of persisted launch diagnostics.
+const launchNativeGuards = new WeakMap();
 let updateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateCheckPromise = null;
@@ -1016,6 +1020,8 @@ function armCloseLauncherWhenGameStarts(config = {}, attempt = {}) {
         attempt.startedAt
       );
       if (!gameStartedFromLauncher && !gameStartedFromInstance) continue;
+      const nativeGuard = launchNativeGuards.get(attempt);
+      if (nativeGuard && !await nativeGuardReadyForLauncherExit(nativeGuard)) continue;
       if (generation === closeOnGameStartWatchGeneration) app.quit();
       return;
     }
@@ -15508,6 +15514,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       ? 'Phoenix Anti-cheat is verified and bound to this Play session.'
       : { status: 'NOT CHECKED', detail: 'Phoenix Anti-cheat is not required on this platform.' }
   );
+  if (nativeGuard) launchNativeGuards.set(attempt, nativeGuard);
   const launcherOpening = openMinecraftLauncher(prepared.launcherConfig, {
     route: prepared.launcherRoute,
     attempt
@@ -15583,6 +15590,13 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       return `${activation} activation confirmed for ${processImage}${processId ? ` (process ${processId})` : ''}.`;
     }
   );
+  if (nativeGuard) {
+    // A successful installation/startup check can become stale during handoff.
+    // A pending game is valid here, but a dead or replaced session cannot pass Play.
+    await runLaunchStep(attempt, 'phoenix-handoff', 'Verify Phoenix is active after the launcher handoff',
+      async () => { await verifyNativeGuardSession(nativeGuard); return true; },
+      'Phoenix is active for this Play session.');
+  }
   setLaunchRequirement(
     attempt,
     'minecraftLauncher',

@@ -17,7 +17,7 @@ using System.Reflection;
 [assembly: AssemblyDescription("Launch-scoped A Hard Time runtime integrity monitor")]
 [assembly: AssemblyCompany("A Hard Time")]
 [assembly: AssemblyProduct("Phoenix Anti-cheat")]
-[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
 internal static class Guard {
     const int MaxImage = 96 * 1024 * 1024;
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
@@ -247,10 +247,12 @@ internal static class Guard {
             var server=new Thread(()=>Serve(listener));server.IsBackground=true;server.Start();
             while(!stopping) {
                 if(target!=null && target.HasExited)break;
-                if(target==null && (launcher==null||launcher.HasExited))break;
                 if(targetPid==0 && Now()-started>30*60*1000)break;
+                // AHT can close as soon as Minecraft starts, between discovery passes.
+                // Bind that exact new game before deciding the launch was abandoned.
                 if(DiscoverGame())Scan();
                 else lock(Gate) {state="incomplete";detail="";checkedModules=0;checkedBytes=0;mismatchStreak=0;lastScan=Now();sequence++;}
+                if(target==null && (launcher==null||launcher.HasExited))break;
                 Thread.Sleep(2000);
             }
             return 0;

@@ -1064,14 +1064,16 @@ try {
     `[${new Date().toISOString()}] Starting game in folder ${instanceDir}\n`,
     'utf8'
   );
-  const closeResult = await Promise.race([
-    childExitPromise,
-    sleep(5000).then(() => null)
-  ]);
-  if (!closeResult) {
-    throw new Error('A fresh modpack game-start signal did not close AHT Launcher when the saved preference was enabled.');
+  await sleep(2500);
+  if (child.exitCode !== null) {
+    throw new Error('Unmeasured game-start signal closed AHT Launcher before Phoenix bound to a game.');
   }
-  checkpoint('close-on-game-start verified');
+  // This UI fixture provides log signals, not a running JVM. Live signed game
+  // handoff and automatic close are exercised by the native and close-watcher tests.
+  await evaluate(client, 'setTimeout(() => window.aht.appExit(), 100); true');
+  const closeResult = await Promise.race([childExitPromise, sleep(5000).then(() => null)]);
+  if (!closeResult) throw new Error('Explicit exit did not close the isolated test launcher.');
+  checkpoint('close-on-game-start held for unavailable game measurement');
 
   client.close();
   client = null;
@@ -1326,7 +1328,7 @@ try {
       unrelatedConfigFilesIgnored: 1_500,
       launcherMetadataUnchangedByPlay: true
     },
-    closeWhenGameStarts: { enabled: true, exit: closeResult },
+    closeWhenGameStarts: { enabled: true, heldWhileUnmeasured: true, explicitExit: closeResult },
     launchCommand: playResult.result.command,
     profileSwitch: {
       stable: 'a-hard-time-dregora',
