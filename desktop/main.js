@@ -700,8 +700,8 @@ function playerPublicErrorMessage(error = null, channel = '') {
   if (/Update package is not ready/i.test(message)) {
     return 'The verified AHT update package is not available yet.';
   }
-  if (/Repair required|needs Repair|managed file issue|Client files changed|files changed after initialization|corrupt/i.test(message)) {
-    return 'Repair required before playing.';
+  if (/Modified client|Repair required|needs Repair|managed file issue|Client files changed|files changed after initialization|corrupt/i.test(message)) {
+    return 'Modified client. Repair.';
   }
   if (/is not installed|Install the pack before playing/i.test(message)) {
     return 'Install the modpack before playing.';
@@ -13958,7 +13958,7 @@ function preparedManagedSnapshotFromEntry(entry = {}, supplied = null) {
 
 function managedIntegrityVerificationError(target, snapshot = null) {
   const issues = Array.isArray(snapshot?.issues) ? snapshot.issues : [];
-  const error = new Error('Client files changed. Run Repair before playing.');
+  const error = new Error('Modified client. Repair.');
   error.name = 'AhtManagedIntegrityError';
   error.code = 'AHT_MANAGED_CLIENT_CHANGED';
   error.subsystem = 'managed-client-integrity';

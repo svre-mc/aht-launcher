@@ -561,11 +561,11 @@ try {
       .then((result) => ({ ok: true, result }))
       .catch((error) => ({ ok: false, message: String(error?.message || error || "") }))
   `);
-  if (playResult.ok || !/Repair required before playing/i.test(playResult.message || '')) {
+  if (playResult.ok || !/Modified client\. Repair\./.test(playResult.message || '')) {
     throw new Error(`Play IPC failure path did not surface the corrupted managed files: ${JSON.stringify(playResult)}`);
   }
   const after = await evaluate(client, 'window.aht.getStatus()');
-  if (after.launchReady || !/Client files changed.*Run Repair/i.test(after.launchBlockedReason || '')) {
+  if (after.launchReady || after.launchBlockedReason !== 'Modified client. Repair.') {
     throw new Error(`Status did not stay blocked after play integrity scan: ${JSON.stringify(after)}`);
   }
   const changedPaths = (after.integrity?.changed || []).map((entry) => entry.path).sort();
@@ -577,7 +577,7 @@ try {
     const button = document.querySelector('#playButton');
     return { disabled: button.getAttribute('aria-disabled') === 'true', title: button.title };
   })()`);
-  if (blockedPlayUi.disabled || !/Repair required/i.test(blockedPlayUi.title || '')) {
+  if (blockedPlayUi.disabled || !/Modified client\. Repair\./.test(blockedPlayUi.title || '')) {
     throw new Error(`Blocked Play must stay clickable while explaining the preflight problem: ${JSON.stringify(blockedPlayUi)}`);
   }
 
@@ -601,7 +601,7 @@ try {
     'LAUNCH PROCESS',
     'REQUIREMENTS',
     'PC AND RUNTIME',
-    'Client files changed. Run Repair before playing.'
+    'Modified client. Repair.'
   ]) {
     if (!firstFailureText.includes(expected)) {
       throw new Error(`Failed Play report is missing ${expected}: ${firstFailureText.slice(0, 1200)}`);

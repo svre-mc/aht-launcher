@@ -22,7 +22,7 @@ const outputsDir = path.resolve(rootDir, '..', '..', 'outputs');
 const releaseDir = path.join(rootDir, 'release-builds');
 const checks = [];
 const forbiddenPublicManifestValuePattern = /workers\.dev|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2})(?:[:/]|$)|[?&](?:aht_player|aht_uuid|aht_username|email|token|secret|key)=|ADMIN_(?:USERNAME|PASSWORD|TOKEN)|CURSEFORGE_API_KEY|LAUNCHER_PROOF_SECRET|resetAt|download-(?:limit|remaining|reset)/i;
-const developerOnlyAsarSourcePattern = /^src\/(?:releaseBuilder|clientModpackZip|serverTransfer|githubActions|r2DirectUpload)\.js$/;
+const developerOnlyAsarSourcePattern = /^src\/(?:releaseBuilder|clientModpackZip|serverTransfer|githubActions|r2DirectUpload|r2StorageBudget|r2RollbackArchive)\.js$/;
 const developerOnlyAsarDependencyPattern = /^node_modules\/(?:@aws-sdk|@smithy|@aws-crypto|ssh2|yazl)(?:\/|$)/;
 const forbiddenPublicAsarRootPattern = /^(?:cloudflare|server-lock-mod)(?:\/|$)/;
 const privateServerTransferFragments = [

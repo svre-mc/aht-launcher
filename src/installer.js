@@ -20,6 +20,7 @@ import {
   isManagedClientPackPath
 } from './clientPackFormat.js';
 import { getHash, getModFile, getModFileDownloadUrl } from './curseforge.js';
+import { removeUnapprovedPreservedModData } from './preservedModData.js';
 import {
   downloadToFile,
   ensureDir,
@@ -293,7 +294,7 @@ async function removeEmptyDirs(root, options = {}) {
 
 async function removeUnexpectedModFiles(instanceDir, nextManagedSet) {
   const modsDir = safeJoin(instanceDir, 'mods');
-  const removed = [];
+  const removed = await removeUnapprovedPreservedModData(instanceDir);
   const skipPreservedModDirectory = (relPath) => isPreservedUnmanagedModPath(`mods/${relPath}`);
   const skipPreservedModDirectoryAbs = (absPath) => PRESERVED_UNMANAGED_MOD_DIRS
     .some((dirName) => path.resolve(absPath).toLowerCase() === path.resolve(modsDir, dirName).toLowerCase());
@@ -497,6 +498,8 @@ async function movePathIfPresent(source, dest) {
 }
 
 async function movePreservedRuntimeDataFromBackup(backupDir, instanceDir, logger) {
+  const removed = await removeUnapprovedPreservedModData(backupDir);
+  if (removed.length) logger?.log?.(`Removed ${removed.length} unapproved runtime-data file(s) during Repair.`);
   const preserved = [];
   for (const relPath of PLAYER_PRESERVED_MOD_DIRS) {
     const source = safeJoin(backupDir, relPath);

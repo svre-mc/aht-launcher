@@ -5,7 +5,9 @@ const developerOnlySourceFiles = [
   'src/githubActions.js',
   'src/githubModpackRelease.js',
   'src/githubPublishRequest.js',
-  'src/r2DirectUpload.js'
+  'src/r2DirectUpload.js',
+  'src/r2StorageBudget.js',
+  'src/r2RollbackArchive.js'
 ];
 const developerOnlyNodeModules = [
   'node_modules/@aws-sdk/**',

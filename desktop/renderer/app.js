@@ -1108,7 +1108,7 @@ function cleanErrorMessage(error) {
   if (/No usable 64-bit Java 8|Java 8 (?:path|runtime)|initialized Java 8/i.test(value)) return "A 64-bit Java 8 runtime is required to play.";
   if (/Review and accept the current Terms|Terms and Privacy/i.test(value)) return "Review and accept the Terms and Privacy notice to continue.";
   if (/Update package is not ready|verified AHT update package is not available/i.test(value)) return "The verified AHT update package is not available yet.";
-  if (/Repair required|needs Repair|managed file issue|Client files changed|files changed after initialization|corrupt/i.test(value)) return "Repair required before playing.";
+  if (/Modified client|Repair required|needs Repair|managed file issue|Client files changed|files changed after initialization|corrupt/i.test(value)) return "Modified client. Repair.";
   if (/is not installed|Install the pack before playing/i.test(value)) return "Install the modpack before playing.";
   if (/launcher (?:session|preparation|setup).*?(?:no longer|not ready|changed)/i.test(value)) return "Launcher setup could not be refreshed. Click Play again.";
   if (/(?:download|429|Too Many Requests)/i.test(value)) return "Download failed.";

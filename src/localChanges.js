@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { hashFile, normalizeRelPath, pathExists, readJsonFile, safeJoin } from './utils.js';
 import { CLIENT_UPDATE_PRESERVED_FILES } from './clientPackFormat.js';
+import { inspectPreservedModData } from './preservedModData.js';
 
 const MODS_ONLY_MONITORED_ROOTS = Object.freeze(['mods']);
 const LAUNCH_CRITICAL_MONITORED_ROOTS = Object.freeze([
@@ -160,7 +161,7 @@ function managedDirectoryPrefixes(managedSet) {
 }
 
 async function scanAddedModFiles(instanceDir, managedSet, limit, options = {}) {
-  const added = [];
+  const added = (await inspectPreservedModData(instanceDir)).map((issue) => ({ ...issue, size: 0 }));
   const yieldEvery = Math.max(1, Number(options.yieldEvery) || 25);
   let visited = 0;
 
@@ -296,10 +297,7 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
     : MODS_ONLY_MONITORED_ROOTS;
   for (const root of monitoredRoots) {
     const rootPath = safeJoin(instanceDir, root);
-    const entries = await fs.readdir(rootPath, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      pending.push({ abs: path.join(rootPath, entry.name), rel: normalizeRelPath(`${root}/${entry.name}`) });
-    }
+    pending.push({ abs: rootPath, rel: normalizeRelPath(root) });
   }
 
   const traversalConcurrency = Math.max(1, Number(options.fingerprintConcurrency) || 48);
@@ -331,7 +329,7 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
       };
       const children = [];
       if (type === 'directory') {
-        const entries = await fs.readdir(current.abs, { withFileTypes: true }).catch(() => []);
+        const entries = await fs.readdir(current.abs, { withFileTypes: true });
         for (const entry of entries) {
           children.push({
             abs: path.join(current.abs, entry.name),
@@ -370,7 +368,8 @@ async function captureFingerprintFromManaged(instanceDir, managed = [], options 
   const digest = createHash('sha256')
     .update(`managed\n${expected.join('\n')}\nactual\n${actual.join('\n')}\n`)
     .digest('hex');
-  const unexpectedEntry = contentEntries.some((item) => {
+  const preservedDataIssues = await inspectPreservedModData(instanceDir);
+  const unexpectedEntry = preservedDataIssues.length > 0 || contentEntries.some((item) => {
     if (item.type === 'manifest') return false;
     if (item.type === 'file') return !managedSet.has(item.path);
     return true;
@@ -698,7 +697,7 @@ export async function scanManagedIntegrity(instanceDir, options = {}) {
   return {
     generatedAt: new Date().toISOString(),
     instanceDir,
-    valid: managed.length > 0 && corruptCount === 0,
+    valid: managed.length > 0 && corruptCount === 0 && fingerprint.pathsValid === true,
     counts: {
       managed: managed.length,
       checked,

@@ -37,6 +37,8 @@ on:
       - "scripts/verify-packaged-native-guard.mjs"
       - "scripts/check-launcher-release-immutability.mjs"
       - "scripts/upload-r2-plan.mjs"
+      - "src/r2StorageBudget.js"
+      - "src/r2RollbackArchive.js"
       - "scripts/test-github-workflow-dispatch.mjs"
       - "scripts/test-launcher-update-manifest.mjs"
       - "scripts/validate-launcher-update-manifest.mjs"
@@ -107,6 +109,9 @@ jobs:
 
       - name: Test join-fix publication and player-state update regressions
         run: npm run test:version-lock-release && npm run test:delta-update && npm run test:player-runtime-state && npm run test:managed-security
+
+      - name: Test modified-client Play and Repair
+        run: node --test scripts/test-modified-client-repair.mjs
 
       - name: Test startup, release transition, and Windows session handoff
         run: node scripts/test-managed-startup.mjs && npm run test:release-transition && npm run test:launch-preparation-snapshot && node scripts/test-windows-minecraft-handoff.mjs
@@ -745,6 +750,9 @@ jobs:
   publish-launcher-update:
     name: Publish Launcher Update
     runs-on: windows-latest
+    concurrency:
+      group: aht-r2-storage-writers
+      cancel-in-progress: false
     defaults:
       run:
         shell: bash
@@ -757,6 +765,10 @@ jobs:
       AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
       AHT_RELEASE_BASE_URL: https://api.ahardtime.net
       AHT_LAUNCHER_UPDATE_URL: https://api.ahardtime.net/launcher/latest.json
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_INVENTORY_ACCESS_KEY_ID: ${{ secrets.R2_INVENTORY_ACCESS_KEY_ID }}
+      R2_INVENTORY_SECRET_ACCESS_KEY: ${{ secrets.R2_INVENTORY_SECRET_ACCESS_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -772,6 +784,9 @@ jobs:
 
       - name: Test launcher update manifest
         run: npm run test:launcher-update-manifest
+
+      - name: Test R2 storage guard
+        run: node --test scripts/test-launcher-storage-preflight.mjs
 
       - name: Download launcher artifacts
         uses: actions/download-artifact@v4
@@ -806,6 +821,10 @@ jobs:
             live_manifest_args=(--live-manifest ci-current-launcher/latest.json)
           fi
           node scripts/check-launcher-release-immutability.mjs --candidate ci-launcher-update/launcher/latest.json --latest-url "$AHT_LAUNCHER_UPDATE_URL" "${live_manifest_args[@]}"
+
+      - name: Check projected R2 storage before publication
+        if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        run: node scripts/upload-r2-plan.mjs --plan ci-launcher-update/upload-plan.json --bucket "$AHT_R2_BUCKET" --check-only
 
       - name: Deploy tracked universal-download Worker contract
         if: (github.event_name == 'push' || inputs.publish_to_r2 == true) && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
