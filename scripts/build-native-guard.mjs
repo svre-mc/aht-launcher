@@ -14,7 +14,11 @@ if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(version)) {
 
 const pin = JSON.parse(await fs.readFile(path.join(root, 'native-guard', 'release.json'), 'utf8'));
 const source = await fs.readFile(path.join(root, 'native-guard', 'Guard.cs'), 'utf8');
-const publishedBytes = await reusePhoenixRelease(pin, version, source);
+// Published binaries are immutable build inputs. Do not depend on public edge
+// access from CI runners or regenerate an already released executable.
+const publishedBytes = await reusePhoenixRelease(pin, version, source, async () => new Response(
+  await fs.readFile(path.join(root, 'native-guard', 'releases', `Phoenix-Anti-cheat-Windows-x64-${version}.exe`))
+));
 
 const buildDir = path.join(root, 'build', 'native-guard');
 const releaseDir = path.join(root, 'release-builds', 'phoenix-anticheat');
