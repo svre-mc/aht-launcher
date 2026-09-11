@@ -34,6 +34,8 @@ on:
       - "src/**"
       - "scripts/prepare-launcher-update.mjs"
       - "scripts/build-native-guard.mjs"
+      - "scripts/phoenix-release-artifact.mjs"
+      - "scripts/test-phoenix-release-artifact.mjs"
       - "scripts/verify-packaged-native-guard.mjs"
       - "scripts/check-launcher-release-immutability.mjs"
       - "scripts/upload-r2-plan.mjs"
@@ -117,7 +119,7 @@ jobs:
         run: node scripts/test-managed-startup.mjs && npm run test:release-transition && npm run test:launch-preparation-snapshot && node scripts/test-windows-minecraft-handoff.mjs
 
       - name: Test Phoenix readiness and automatic launcher close
-        run: node scripts/test-native-guard-exit-readiness.mjs && node scripts/test-launcher-close-guard.mjs
+        run: node scripts/test-native-guard-exit-readiness.mjs && node scripts/test-launcher-close-guard.mjs && node scripts/test-phoenix-release-artifact.mjs
 
       - name: Test asset recovery and legacy account migration
         run: npm run test:asset-recovery && npm run test:account-migration

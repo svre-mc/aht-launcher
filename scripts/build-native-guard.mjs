@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { reusePhoenixRelease } from './phoenix-release-artifact.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageMetadata = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
@@ -10,6 +11,10 @@ const version = String(packageMetadata.phoenixAntiCheatVersion || '').trim();
 if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(version)) {
   throw new Error('package.json phoenixAntiCheatVersion must be a numeric release version.');
 }
+
+const pin = JSON.parse(await fs.readFile(path.join(root, 'native-guard', 'release.json'), 'utf8'));
+const source = await fs.readFile(path.join(root, 'native-guard', 'Guard.cs'), 'utf8');
+const publishedBytes = await reusePhoenixRelease(pin, version, source);
 
 const buildDir = path.join(root, 'build', 'native-guard');
 const releaseDir = path.join(root, 'release-builds', 'phoenix-anticheat');
@@ -21,7 +26,9 @@ const compiler = path.join(process.env.SystemRoot || 'C:/Windows', 'Microsoft.NE
 const developmentBinary = path.join(buildDir, 'Phoenix Anti-cheat.exe');
 const releaseBinary = path.join(releaseDir, `Phoenix-Anti-cheat-Windows-x64-${version}.exe`);
 await fs.copyFile(path.join(root, 'native-guard', 'NOTICE.txt'), path.join(buildDir, 'NOTICE.txt'));
-execFileSync(compiler, [
+if (publishedBytes) {
+  await fs.writeFile(developmentBinary, publishedBytes);
+} else execFileSync(compiler, [
   '/nologo',
   '/target:exe',
   '/platform:x64',
