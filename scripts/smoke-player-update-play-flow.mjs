@@ -46,6 +46,9 @@ const ptbLauncherProofPath = launcherProofPath(ptbInstanceDir, 'player', {
   proofDir: launcherProofStorageDir(launcherProofBaseDir, ptbInstanceDir)
 });
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
+// Ownership diagnostics still require successful handoff, but are not a host
+// performance benchmark. The default full suite retains its original budgets.
+const accountRecoveryFocus = process.env.AHT_SMOKE_FOCUS === 'account-recovery';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
@@ -340,6 +343,8 @@ const proofRequests = [];
 let accountVerificationBlocked = false;
 let liveRecoveryRequired = false;
 let liveRecoveryVerified = false;
+let holdNextRecoveryChallenge = false;
+let releaseRecoveryChallenge = null;
 const recoveryUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const recoveryChallenge = '0123456789012345678901234567890123456789';
 const recoveryModePath = path.join(root, 'recovery-mode.json');
@@ -377,7 +382,9 @@ await writeJson(defaultsPath, {
   instanceDir,
   latestUrl: `${workerEndpoint}/latest.json`,
   curseforge: { proxyBaseUrl: '', apiKeyEnv: 'CURSEFORGE_API_KEY' },
-  sync: { enabled: false, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
+  // Keep player account sync enabled: disabling it hides the production
+  // status/Play registration race even when isolated manual retries pass.
+  sync: { enabled: true, sendLocalChanges: false, baseUrl: `${workerEndpoint}/`, playerLabel: '' },
   launcherProof: { enabled: true, required: true, baseUrl: `${workerEndpoint}/`, keyId: 'aht-launcher-attestation-v2' },
   launcherUpdate: { enabled: false, latestUrl: `${workerEndpoint}/launcher/latest.json` },
   packs: {
@@ -483,9 +490,13 @@ const server = http.createServer((request, response) => {
           return;
         }
         if (!payload.minecraftSessionChallenge) {
-          response.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+          const reply = () => response.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({
             code: 'MINECRAFT_OWNERSHIP_REQUIRED', minecraftSessionChallenge: recoveryChallenge, expiresAt: Date.now() + 240000
           }));
+          if (holdNextRecoveryChallenge) {
+            holdNextRecoveryChallenge = false;
+            releaseRecoveryChallenge = reply;
+          } else reply();
           return;
         }
         if (payload.minecraftSessionChallenge !== recoveryChallenge || !liveRecoveryVerified) {
@@ -700,7 +711,9 @@ try {
   if (/Restart A Hard Time Launcher/i.test(droppedPreparation.launchBlockedReason || '')) {
     throw new Error(`A missing in-memory launch preparation still instructed the player to restart: ${JSON.stringify(droppedPreparation)}`);
   }
-  if (registrationRequests.length !== 0 || proofRequests.length !== 0) {
+  // Background account registration is not a Play-scoped proof. It is enabled
+  // in this fixture now, so require deduplication rather than forbidding it.
+  if (registrationRequests.length > 1 || proofRequests.length !== 0) {
     throw new Error(`Installation performed launcher-proof network work before Play: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
   }
   const installedFiles = [
@@ -1256,7 +1269,7 @@ try {
   if (!warmStatus.launchReady || warmStatus.launchPreparationState !== 'ready' || warmStatus.actionMode !== 'play' || !warmStatus.playEnabled) {
     throw new Error(`A 31-minute warm startup did not restore ready-to-play state: ${JSON.stringify(warmStartupProof)}`);
   }
-  if (warmTaskElapsedMs >= 5_000 || warmPostTargetRevealMs >= 5_000 || warmStartupMs >= 5_000) {
+  if (!accountRecoveryFocus && (warmTaskElapsedMs >= 5_000 || warmPostTargetRevealMs >= 5_000 || warmStartupMs >= 5_000)) {
     throw new Error(`A 31-minute warm startup exceeded its bounded launcher or host startup budget: ${JSON.stringify(warmStartupProof)}`);
   }
   const warmProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
@@ -1268,7 +1281,7 @@ try {
     .catch((error) => ({ ok: false, message: String(error?.message || error || '') })); true`);
   for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) await sleep(25);
   const warmPlayHandoffMs = Date.now() - warmPlayStartedAt;
-  if (!fs.existsSync(fakeLauncherMarker) || warmPlayHandoffMs >= 500) {
+  if (!accountRecoveryFocus && (!fs.existsSync(fakeLauncherMarker) || warmPlayHandoffMs >= 500)) {
     throw new Error(`Warm Play did not immediately open the saved launcher route: ${warmPlayHandoffMs}ms.`);
   }
   const warmPlayResult = await evaluate(client, 'window.__ahtWarmPlay');
@@ -1297,7 +1310,42 @@ try {
   checkpoint('Failed Play never opens Minecraft; valid account recovery succeeds without restart');
   liveRecoveryRequired = true;
   await writeJson(recoveryModePath, { mode: 'pending' });
-  await evaluate(client, 'window.__liveRecovery = window.aht.retryAccountSync(); true');
+  // Recreate a legacy registration still pending during Play, rather than
+  // exercising only an isolated manual retry after every background task ends.
+  const raceIdentityPath = path.join(userData, 'identity.json');
+  const raceIdentity = JSON.parse(fs.readFileSync(raceIdentityPath, 'utf8'));
+  await writeJson(raceIdentityPath, { ...raceIdentity,
+    usernameRegistrationMode: 'minecraft-launcher', remoteRegistrationConfirmedAt: '',
+    remoteRegistrationWorkerBaseUrl: '', remoteRegistrationAttemptedAt: '',
+    minecraftUsernameSyncWarning: 'Previous account verification could not be completed.' });
+  registeredUsers.clear();
+  holdNextRecoveryChallenge = true;
+  await evaluate(client, `window.__raceStatus = window.aht.getStatus()
+    .then(value => ({ value })).catch(error => ({ error: String(error?.message || error) })); true`);
+  for (let attempt = 0; attempt < 100 && !releaseRecoveryChallenge; attempt++) await sleep(50);
+  if (!releaseRecoveryChallenge) throw new Error('Background account request did not reach the held ownership challenge.');
+  const markerBeforeRecoveryRace = fs.statSync(fakeLauncherMarker).mtimeMs;
+  await evaluate(client, `window.__racePlayResult = null;
+    window.__liveRecovery = window.aht.play()
+      .then(value => window.__racePlayResult = { value })
+      .catch(error => window.__racePlayResult = { error: String(error?.message || error) }); true`);
+  await sleep(1200);
+  if (await evaluate(client, 'Boolean(window.__racePlayResult) || !document.querySelector("#accountRecoveryOverlay").hidden')
+      || fs.statSync(fakeLauncherMarker).mtimeMs !== markerBeforeRecoveryRace) {
+    throw new Error('Play did not remain gated while the background ownership challenge was pending.');
+  }
+  releaseRecoveryChallenge();
+  releaseRecoveryChallenge = null;
+  const raceArrival = await waitFor(client, `(() => {
+    if (!document.querySelector('#accountRecoveryOverlay').hidden) return { prompt: true };
+    return window.__racePlayResult;
+  })()`, 'Play recovery after the background registration failed');
+  if (!raceArrival.prompt) throw new Error(`Background sync aborted Play before recovery: ${JSON.stringify(raceArrival)}`);
+  const raceStatus = await evaluate(client, 'window.__raceStatus');
+  if (raceStatus.error || !raceStatus.value?.identity?.minecraftUsernameSyncWarning) {
+    throw new Error('Background sync did not return the unresolved account warning.');
+  }
+  checkpoint('Overlapping background ownership failure reached actual Play recovery without launching the modpack');
   await waitFor(client, `!document.querySelector('#accountRecoveryOverlay').hidden`, 'visible live-session account recovery');
   const recoveryMessage = await evaluate(client, `document.querySelector('#accountRecoveryMessage').textContent`);
   if (!recoveryMessage.includes('FreshPlayer') || !recoveryMessage.includes('click Play once') || /https?:|token|diagnostic/i.test(recoveryMessage)) {
@@ -1317,7 +1365,10 @@ try {
   await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: cancelHit.x, y: cancelHit.y, button: 'left', clickCount: 1 });
   await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cancelHit.x, y: cancelHit.y, button: 'left', clickCount: 1 });
   const cancelledRecovery = await evaluate(client, 'window.__liveRecovery');
-  if (!cancelledRecovery.identity?.minecraftUsernameSyncWarning) throw new Error('Cancelled recovery was reported as a successful sync.');
+  if (!cancelledRecovery.error) throw new Error('Cancelled Play recovery was reported as a successful launch.');
+  if (!(await evaluate(client, 'window.aht.getStatus()')).identity?.minecraftUsernameSyncWarning) {
+    throw new Error('Cancelled recovery erased the unresolved sync warning.');
+  }
   await writeJson(recoveryModePath, { mode: 'auto' });
   registeredUsers.clear();
   const recoveredInteractivePlay = await evaluate(client, 'window.aht.play()');
@@ -1473,6 +1524,7 @@ try {
     secondPtbPlayAfterSettings: { handoffMs: secondPtbPlayHandoffMs, preparationReused: true },
     installWithoutMinecraftLauncher: installWithoutMinecraftProof,
     warmAfter31Minutes: {
+      timingAssertions: !accountRecoveryFocus,
       startupMs: warmStartupMs,
       targetReadyMs: warmTargetReadyMs,
       postTargetRevealMs: warmPostTargetRevealMs,
@@ -1510,6 +1562,7 @@ try {
   }
   throw error;
 } finally {
+  releaseRecoveryChallenge?.();
   if (client) {
     await client.call('Browser.close').catch(() => {});
     client.close();

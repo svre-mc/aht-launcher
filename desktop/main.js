@@ -4318,16 +4318,12 @@ async function registerMinecraftUsernameInFlight(config = {}, identity = {}, use
 async function refreshRemoteMinecraftRegistration(config = {}, identity = {}) {
   if (!remoteRegistrationNeedsRefresh(config, identity)) return identity;
   const username = normalizeMinecraftUsername(identity.minecraftUsername);
-  const key = remoteRegistrationKey(config, identity, username);
-  const running = remoteRegistrationRefreshes.get(key);
-  if (running) {
-    await running;
-    return loadIdentity();
-  }
-
   const refresh = (async () => {
     const attemptedAt = new Date().toISOString();
     try {
+      // The registration helper already joins concurrent requests. Keep shared
+      // failures inside this warning boundary too: a raw background rejection
+      // must not abort explicit Play before it can offer ownership recovery.
       await registerMinecraftUsernameInFlight(config, identity, username, {
         mode: identity.usernameRegistrationMode || 'registration-refresh',
         minecraftUuid: identity.minecraftUuid || identity.minecraftUUID || '',
