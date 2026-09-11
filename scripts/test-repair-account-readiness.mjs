@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import * as runtimeRepair from '../src/runtimeRepair.js';
 
-const main = fs.readFileSync(new URL('../desktop/main.js', import.meta.url), 'utf8');
+const main = fs.readFileSync(process.env.AHT_TEST_MAIN_SOURCE || new URL('../desktop/main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 test('public account warnings stay concise while local diagnostics remain available', () => {
   const publicError = main.slice(main.indexOf('function playerPublicErrorMessage('), main.indexOf('\nfunction errorForRenderer('));
   const publicIdentity = main.slice(main.indexOf('function identityForRenderer('), main.indexOf('\nfunction minecraftLauncherHandoffForRenderer('));
@@ -76,7 +76,10 @@ test('Repair requires confirmed registration; initial install and developer scop
 
 test('failed Play authorization never opens Minecraft Launcher; successful proof opens once', async () => {
   const play = main.slice(main.indexOf("ipcMain.handle('play:start'"));
-  const section = play.slice(play.indexOf('  const nativeGuard = await runLaunchStep('), play.indexOf('  if (nativeGuard) {\n    // A successful installation/startup check'));
+  const start = play.indexOf('  const nativeGuard = await runLaunchStep(');
+  const end = play.indexOf('  if (nativeGuard) {\n    // A successful installation/startup check');
+  assert(start >= 0 && end > start, 'Missing Play handoff boundaries');
+  const section = play.slice(start, end);
   assert(section.includes('const launchResult = await runLaunchStep('));
   for (const fail of [true, false]) {
     const calls = [];
