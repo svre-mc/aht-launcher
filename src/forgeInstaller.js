@@ -461,7 +461,10 @@ async function javaMajorFromReleaseFile(javaPath = '') {
 }
 
 async function isJava8Candidate(file = '') {
-  return isJava8Path(file) || await javaMajorFromReleaseFile(file) === 8;
+  // Explicit runtime metadata outranks a path hint; ancestor names may contain
+  // "8u" or "jdk8" even when this executable is a modern Java installation.
+  const releaseMajor = await javaMajorFromReleaseFile(file);
+  return releaseMajor ? releaseMajor === 8 : isJava8Path(file);
 }
 
 function javaVersionFromOutput(output = '') {

@@ -533,7 +533,8 @@ const altForgeInstall = await findInstalledForgeVersion({ ...forgePlan, rootDir:
 if (!altForgeInstall.installed || altForgeInstall.versionId !== altForgeVersionId) {
   throw new Error(`Expected alternate Forge profile detection, got ${JSON.stringify(altForgeInstall)}`);
 }
-const fakeRuntimeRoot = path.join(root, 'fake-minecraft-runtime');
+// Parent-folder text is not runtime version evidence (CI once generated *8u*).
+const fakeRuntimeRoot = path.join(root, 'unrelated-8u-parent', 'fake-minecraft-runtime');
 const fakeLegacyJava = path.join(fakeRuntimeRoot, 'jre-legacy', 'windows-x64', 'jre-legacy', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 const fakeModernJava = path.join(fakeRuntimeRoot, 'java-runtime-gamma', 'windows-x64', 'java-runtime-gamma', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
 await fs.mkdir(path.dirname(fakeLegacyJava), { recursive: true });
@@ -542,7 +543,9 @@ await fs.writeFile(fakeModernJava, 'modern');
 await fs.writeFile(fakeLegacyJava, 'legacy');
 await fs.writeFile(path.join(path.dirname(path.dirname(fakeModernJava)), 'release'), 'JAVA_VERSION="17.0.10"\n');
 await fs.writeFile(path.join(path.dirname(path.dirname(fakeLegacyJava)), 'release'), 'JAVA_VERSION="1.8.0_999"\n');
-const resolvedJava = await resolveJavaPath(created, { javaRoots: [fakeRuntimeRoot] });
+const resolvedJava = await resolveJavaPath(created, {
+  javaRoots: [fakeRuntimeRoot], includeDefaultJavaRoots: false, includeEnvironmentJava: false
+});
 if (resolvedJava !== fakeLegacyJava) {
   throw new Error(`Expected legacy Minecraft Java runtime, got ${resolvedJava}`);
 }
