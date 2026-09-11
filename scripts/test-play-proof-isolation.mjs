@@ -67,4 +67,18 @@ assert(social.includes("'.aht-launcher', 'social'"), 'Social API proofs must use
 const playHandler = source.slice(source.indexOf("ipcMain.handle('play:start'"), source.indexOf("ipcMain.handle('dialog:zip'"));
 assert(playHandler.includes("proof?.nativeGuard?.protocol !== 'AHT-GUARD-1'"), 'Play must reject a proof without the live Phoenix descriptor');
 
-console.log('PASS: Play proof remains isolated from social requests and wins any unguarded refresh race.');
+let issuedAfterInteractiveWait = false;
+context.releaseTarget = id => ({ id });
+context.verifyPreparedClientIntegrityAtPlay = async (target, candidate) => {
+  assert.equal(target.id, 'stable');
+  assert.equal(candidate, entry);
+  throw new Error('Modified client. Repair.');
+};
+context.writeSerializedRegisteredLauncherProof = async ({ beforeInteractiveRecoveryCompletes }) => {
+  assert.equal(typeof beforeInteractiveRecoveryCompletes, 'function');
+  await beforeInteractiveRecoveryCompletes();
+  issuedAfterInteractiveWait = true;
+};
+await assert.rejects(context.refreshPreparedLauncherProof('stable', entry, nativeGuard, { allowInteractiveRecovery: true }), /Modified client/);
+assert.equal(issuedAfterInteractiveWait, false, 'Changing the client during interactive recovery must not grant Play authorization.');
+console.log('PASS: isolated Play proof, guarded refresh races and post-recovery integrity revalidation.');

@@ -3373,6 +3373,10 @@ body.dev-mode .button.strong.is-disabled {
   z-index: 34;
 }
 
+#accountRecoveryOverlay {
+  z-index: 12000;
+}
+
 .repair-prompt-dialog,
 .friends-dialog,
 .legal-dialog,

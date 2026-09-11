@@ -1,0 +1,2 @@
+# Recovery helper source is hash-pinned identically on every build host.
+account-recovery/**/*.java text eol=lf

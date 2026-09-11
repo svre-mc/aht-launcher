@@ -103,8 +103,11 @@ try {
     fetchImpl: async url => { assert.equal(url, 'https://sessionserver.mojang.com/session/minecraft/join'); return new Response(null, { status: 204 }); }
   })).verified, true, 'A valid direct session avoids protected-cache access entirely');
   await assert.rejects(proveMinecraftAccountOwnership({ ...prove, readWindowsSession: async () => [], fetchImpl: async () => new Response('private upstream content', { status: 403 }) }),
-    error => /fresh Minecraft session/.test(error.message) && !error.message.includes(token));
-  await assert.rejects(proveMinecraftAccountOwnership({ ...prove, username: 'OtherPlayer' }), /fresh Minecraft session/);
+    error => error.code === 'MINECRAFT_SESSION_REQUIRED' && error.diagnostics.joinAttempts === 1
+      && error.diagnostics.joinRejected === 1 && !error.message.includes(token)
+      && !error.message.includes('private upstream content'));
+  await assert.rejects(proveMinecraftAccountOwnership({ ...prove, username: 'OtherPlayer' }),
+    error => error.code === 'MINECRAFT_SESSION_REQUIRED' && error.diagnostics.matchedAccounts === 0);
 
   await fs.writeFile(path.join(root, 'launcher_accounts.json'), JSON.stringify({ accounts: {
     active: { remoteId: 'selected-xuid', accessToken: '', minecraftProfile: { name: username, id: minecraftUuid } }
@@ -146,7 +149,8 @@ try {
   })).verified, true, 'A failed exchange must not mask a usable candidate');
   await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async () => new Response(null, { status: 503 }) }), /Try account sync again shortly/);
   await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async url =>
-    new Response(JSON.stringify(url.endsWith('/minecraft/profile') ? { name: 'WrongOwner', id: minecraftUuid } : { access_token: 'fixture' })) }), /fresh Minecraft session/);
+    new Response(JSON.stringify(url.endsWith('/minecraft/profile') ? { name: 'WrongOwner', id: minecraftUuid } : { access_token: 'fixture' })) }),
+    error => error.code === 'MINECRAFT_SESSION_REQUIRED' && error.diagnostics.profileMismatch === 1);
   if (process.platform === 'win32') {
     const cacheFile = path.join(root, 'protected-fixture.bin');
     const cache = { credentials: { 'selected-xuid': { 'Xal.test.RETAIL.User.fixture': JSON.stringify({ tokens: [{

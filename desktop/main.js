@@ -57,7 +57,8 @@ import {
   preflightJava8Runtime
 } from '../src/forgeInstaller.js';
 import { ensureBundledJava8 } from '../src/bundledJava8.js';
-import { prepareRuntimeOnlyRepair, verifyRepairedJava } from '../src/runtimeRepair.js';
+import { prepareRuntimeOnlyRepair, verifyRepairedJava, verifyRepairedAccount } from '../src/runtimeRepair.js';
+import { createMinecraftInteractiveRecovery } from '../src/minecraftInteractiveRecovery.js';
 import { cleanJavaEnvironment } from '../src/javaEnvironment.js';
 import {
   ensureNativeGuard,
@@ -324,6 +325,11 @@ function loadR2DirectUploadModule() {
   return r2DirectUploadModulePromise;
 }
 let mainWindow = null;
+const minecraftInteractiveRecovery = createMinecraftInteractiveRecovery({
+  onState: state => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('account:recoveryState', state);
+  }
+});
 let applicationQuitting = false;
 let testRendererActivityBlockerId = null;
 let closeOnGameStartWatchGeneration = 0;
@@ -692,6 +698,20 @@ function playerPublicErrorMessage(error = null, channel = '') {
   const message = String(error?.message || error || 'The launcher could not complete this action.').trim();
   if (isDeveloperMode()) return message;
   const code = String(error?.code || '');
+  if (/Select [A-Za-z0-9_]{3,16} in Minecraft Launcher, then retry account sync/.test(message)) {
+    return 'Select the matching Minecraft account, then retry account sync.';
+  }
+  if (code === 'AHT_ACCOUNT_RECOVERY_CANCELLED') return 'Account verification cancelled.';
+  if (code === 'AHT_ACCOUNT_RECOVERY_FAILED') return 'Account verification did not finish. Retry account sync.';
+  if (code === 'MINECRAFT_SESSION_REQUIRED' || /fresh Minecraft session|available session data/i.test(message)) {
+    return 'Minecraft account verification failed. Retry account sync.';
+  }
+  if (code === 'MINECRAFT_OWNERSHIP_UNAVAILABLE' || /Minecraft ownership verification is temporarily unavailable/i.test(message)) {
+    return 'Minecraft account verification is temporarily unavailable. Please retry.';
+  }
+  if (code === 'AHT_ACCOUNT_SYNC_REQUIRED') {
+    return 'Account verification is incomplete. Retry account sync, then Repair.';
+  }
   if (code === 'AHT_MINECRAFT_NOT_INSTALLED' || /Minecraft not installed/i.test(message)) {
     return 'Minecraft Launcher is required to play.';
   }
@@ -3883,7 +3903,7 @@ async function clearUnavailableMinecraftUsername(username = '', message = 'That 
   });
 }
 
-async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null, nativeGuard = null } = {}) {
+async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest = null, installed = null, nativeGuard = null, allowInteractiveRecovery = false, beforeInteractiveRecoveryCompletes } = {}) {
   const deviceCredential = await loadDeviceCredential();
   const proofIdentity = launcherProofIdentity(runtimeIdentity({
     ...identity,
@@ -3925,6 +3945,8 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
         minecraftUuid: identity.minecraftUuid || identity.minecraftUUID || '',
         skipLauncherAuthSync: true,
         forceRemoteRegistration: registrationCanRepairProof,
+        allowInteractiveRecovery,
+        beforeInteractiveRecoveryCompletes,
         reuseCompletedRegistration: !registrationCanRepairProof
       });
     } catch (refreshError) {
@@ -3932,7 +3954,9 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
         await clearUnavailableMinecraftUsername(username, refreshError.message || String(refreshError));
         throw new Error('That Minecraft account could not be registered. Sign into a different account in Minecraft Launcher and retry.');
       }
-      throw new Error(`Launcher proof registration refresh failed: ${refreshError.message || refreshError}`);
+      throw Object.assign(new Error(`Launcher proof registration refresh failed: ${refreshError.message || refreshError}`), {
+        code: refreshError?.code || 'AHT_ACCOUNT_SYNC_REQUIRED'
+      });
     }
     const refreshedIdentity = runtimeIdentity(await loadIdentity());
     const refreshedRecoverySecret = await accountRecoverySecret(config, username);
@@ -3958,6 +3982,8 @@ async function writeSerializedRegisteredLauncherProof({
   latest = null,
   installed = null,
   nativeGuard = null,
+  allowInteractiveRecovery = false,
+  beforeInteractiveRecoveryCompletes,
   minValidityMs = 2 * 60 * 1000
 } = {}) {
   const expectedIdentity = launcherProofIdentity(runtimeIdentity({
@@ -3979,7 +4005,7 @@ async function writeSerializedRegisteredLauncherProof({
   const previous = launcherProofRefreshes.get(key);
   const refresh = (async () => {
     if (previous) await previous.catch(() => {});
-    return writeRegisteredLauncherProof({ config, identity, latest, installed, nativeGuard });
+    return writeRegisteredLauncherProof({ config, identity, latest, installed, nativeGuard, allowInteractiveRecovery, beforeInteractiveRecoveryCompletes });
   })().finally(() => {
     if (launcherProofRefreshes.get(key) === refresh) launcherProofRefreshes.delete(key);
   });
@@ -4091,7 +4117,9 @@ async function identityPayload(config = null, options = {}) {
             : (sameUsername ? 'minecraft-launcher-uuid' : 'minecraft-launcher'),
           minecraftUuid: detectedMinecraftUuid,
           skipLauncherAuthSync: true,
-          forceRemoteRegistration: forceAccountSync
+          forceRemoteRegistration: forceAccountSync,
+          allowInteractiveRecovery: forceAccountSync,
+          beforeInteractiveRecoveryCompletes: options.beforeInteractiveRecoveryCompletes
         });
         nextIdentity = await loadIdentity();
         nextIdentity.minecraftUsernameSyncWarning = '';
@@ -4144,7 +4172,9 @@ async function identityPayload(config = null, options = {}) {
         mode: 'account-sync-retry',
         minecraftUuid: nextIdentity.minecraftUuid || nextIdentity.minecraftUUID || '',
         skipLauncherAuthSync: true,
-        forceRemoteRegistration: true
+        forceRemoteRegistration: true,
+        allowInteractiveRecovery: true,
+        beforeInteractiveRecoveryCompletes: options.beforeInteractiveRecoveryCompletes
       });
       nextIdentity = await loadIdentity();
     } catch (error) {
@@ -4235,6 +4265,7 @@ function remoteRegistrationSatisfiesRequest(config = {}, identity = {}, username
   const confirmedBase = remoteRegistrationBaseUrl({ sync: { baseUrl: identity.remoteRegistrationWorkerBaseUrl || '' } });
   return Boolean(
     normalizedUsername
+    && !String(identity.minecraftUsernameSyncWarning || '').trim()
     && normalizeMinecraftUsername(identity.minecraftUsername).toLowerCase() === normalizedUsername
     && (!requestedUuid || savedUuid === requestedUuid)
     && Number.isFinite(confirmedAt)
@@ -4245,7 +4276,13 @@ function remoteRegistrationSatisfiesRequest(config = {}, identity = {}, username
 async function registerMinecraftUsernameInFlight(config = {}, identity = {}, username = '', options = {}) {
   const key = remoteRegistrationKey(config, identity, username);
   const running = remoteRegistrationRefreshes.get(key);
-  if (running) return running;
+  if (running) {
+    if (!options.allowInteractiveRecovery) return running;
+    try { return await running; } catch {
+      // An explicit retry can upgrade a failed background/cache-only attempt.
+      return registerMinecraftUsernameInFlight(config, identity, username, options);
+    }
+  }
   const registration = (async () => {
     // Startup, renderer status, and background telemetry can arrive one after
     // another instead of overlapping perfectly. Re-read the durable identity
@@ -4527,7 +4564,27 @@ async function registerMinecraftUsername(username, options = {}) {
           roots: [config.minecraftLauncher?.rootDir, ...(config.minecraftLauncher?.syncRoots || []),
             ...minecraftRootCandidates(process.platform, { ...process.env,
               HOME: process.env.HOME || app.getPath('home'), USERPROFILE: process.env.USERPROFILE || app.getPath('home') })],
-          username: normalizedUsername, minecraftUuid, serverId: recoveryBody.minecraftSessionChallenge
+          username: normalizedUsername, minecraftUuid, serverId: recoveryBody.minecraftSessionChallenge,
+          expiresAt: recoveryBody.expiresAt,
+          interactiveRecovery: options.allowInteractiveRecovery ? async challenge => {
+            try {
+              const verified = await minecraftInteractiveRecovery.run({
+                ...challenge, config,
+                journalPath: path.join(app.getPath('userData'), 'pending-account-recovery.json'),
+                openLauncher: recoveryConfig => openMinecraftLauncher(recoveryConfig)
+              });
+              // Verification is interactive: recheck the selected protected client
+              // after that wait and before issuing any Play authorization.
+              await options.beforeInteractiveRecoveryCompletes?.();
+              return verified;
+            } finally {
+              for (const prepared of launchPreparationCache.values()) {
+                if (prepared.minecraftProfile && samePath(prepared.launcherConfig?.minecraftLauncher?.rootDir, config.minecraftLauncher?.rootDir)) {
+                  prepared.minecraftProfile.selectionPrepared = false;
+                }
+              }
+            }
+          } : undefined
         });
         recoveryPayload.minecraftSessionChallenge = recoveryBody.minecraftSessionChallenge;
         recoveryResponse = await requestRecovery();
@@ -6016,6 +6073,12 @@ async function identityForStatus(launcherConfig, prepared, allowProtectedStorage
 
 function identityForRenderer(identity = {}) {
   const { devicePublicKey: _devicePublicKey, ...safeIdentity } = identity;
+  if (safeIdentity.minecraftUsernameSyncWarning && !isDeveloperMode()) {
+    safeIdentity.minecraftUsernameSyncWarning = playerPublicErrorMessage({
+      message: safeIdentity.minecraftUsernameSyncWarning,
+      code: 'AHT_ACCOUNT_SYNC_REQUIRED'
+    }, 'account-sync');
+  }
   return safeIdentity;
 }
 
@@ -6355,9 +6418,26 @@ async function runUpdate(forceRepair = false, options = {}) {
       }
     });
     const storedIntegrity = await writeIntegrityState(config, integrity, forceRepair ? 'repair' : 'install');
-    const preparedIntegrity = developerClientBypassAllowed()
+    let preparedIntegrity = developerClientBypassAllowed()
       ? { ...storedIntegrity, source: 'developer-update-bypass', developerClientBypass: true }
       : storedIntegrity;
+    if (forceRepair && !isDeveloperMode()) {
+      updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying Minecraft account', percent: 99 };
+      identity = await identityPayload(launcherConfig, {
+        forceAccountSync: true,
+        beforeInteractiveRecoveryCompletes: async () => {
+          const afterRecovery = await scanCurrentManagedIntegrity(config, latestAfterInstall);
+          if (!afterRecovery.valid || Number(afterRecovery.counts?.corrupted || 0) !== 0) throw new Error('Modified client. Repair.');
+          preparedIntegrity = await writeIntegrityState(config, afterRecovery, 'repair');
+        }
+      });
+      verifyRepairedAccount({
+        identity,
+        registrationConfirmed: remoteRegistrationSatisfiesRequest(
+          launcherConfig, identity, identity.minecraftUsername, identity.minecraftUuid || identity.minecraftUUID
+        )
+      });
+    }
     try {
       await publishCompletedUpdatePreparation({
         target,
@@ -13210,6 +13290,8 @@ ipcMain.handle('account:retrySync', async (_event, payload = {}) => getStatus(
   payload?.packKey || payload || 'stable',
   { preferCache: true, includeUpdateLogs: false, forceAccountSync: true, allowProtectedStorage: true }
 ));
+ipcMain.handle('account:recoveryState', () => minecraftInteractiveRecovery.state());
+ipcMain.handle('account:cancelRecovery', () => { minecraftInteractiveRecovery.cancel(); return { ok: true }; });
 ipcMain.handle('news:refresh', async (_event, payload = {}) => refreshNewsStatus(payload?.packKey || payload || 'stable'));
 // Launcher updates must not wait for pack preparation or the optional News feed.
 ipcMain.handle('launcher:checkUpdate', async () => launcherUpdateForRenderer(await checkLauncherUpdateNow()));
@@ -14565,12 +14647,15 @@ function startupPackPreparationForRenderer(descriptor, entry = null) {
   };
 }
 
-async function refreshPreparedLauncherProof(key, expectedEntry, nativeGuard = null) {
+async function refreshPreparedLauncherProof(key, expectedEntry, nativeGuard = null, { allowInteractiveRecovery = false } = {}) {
   const current = launchPreparationCache.get(key);
   if (current !== expectedEntry || current?.state !== 'ready') return null;
   if (current.proofRefreshInFlight) {
-    const inFlight = await current.proofRefreshInFlight;
-    if (!nativeGuard || inFlight?.payload?.nativeGuardKeyHash === nativeGuard.keyHash) return inFlight;
+    const inFlight = await current.proofRefreshInFlight.catch(error => {
+      if (!allowInteractiveRecovery) throw error;
+      return null;
+    });
+    if (inFlight && (!nativeGuard || inFlight?.payload?.nativeGuardKeyHash === nativeGuard.keyHash)) return inFlight;
     if (launchPreparationCache.get(key) !== current || current?.state !== 'ready') return null;
   }
   const refresh = (async () => {
@@ -14587,6 +14672,10 @@ async function refreshPreparedLauncherProof(key, expectedEntry, nativeGuard = nu
     }
     const launcherProof = await writeSerializedRegisteredLauncherProof({
       config: current.launcherConfig,
+      allowInteractiveRecovery,
+      beforeInteractiveRecoveryCompletes: allowInteractiveRecovery
+        ? async () => verifyPreparedClientIntegrityAtPlay(releaseTarget(key), current)
+        : undefined,
       identity: current.identity,
       latest: current.latest,
       installed: current.installed,
@@ -15450,6 +15539,13 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     );
   }
   attempt.instanceDir = prepared.config.instanceDir;
+  if (await minecraftInteractiveRecovery.cleanup({
+    config: prepared.launcherConfig,
+    journalPath: path.join(app.getPath('userData'), 'pending-account-recovery.json')
+  })) {
+    // An interrupted verification must not leave its temporary installation selected.
+    if (prepared.minecraftProfile) prepared.minecraftProfile.selectionPrepared = false;
+  }
   if (process.platform === 'linux') await ensureModDirectorIcon(prepared.config.instanceDir);
   attempt.minecraftRoot = prepared.launcherConfig.minecraftLauncher?.rootDir || '';
   attempt.runtimeConfig = prepared.launcherConfig;
@@ -15563,13 +15659,6 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       : { status: 'NOT CHECKED', detail: 'Phoenix Anti-cheat is not required on this platform.' }
   );
   if (nativeGuard) launchNativeGuards.set(attempt, nativeGuard);
-  const launcherOpening = openMinecraftLauncher(prepared.launcherConfig, {
-    route: prepared.launcherRoute,
-    attempt
-  }).then(
-    (value) => ({ ok: true, value }),
-    (error) => ({ ok: false, error })
-  );
   try {
     prepared.launcherProof = await runLaunchStep(
       attempt,
@@ -15592,7 +15681,7 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
             || !proof?.trusted
             || (nativeGuard && proof?.payload?.nativeGuardKeyHash !== nativeGuard.keyHash)
             || (proof?.payload?.launchId && proof.payload.launchId === prepared.lastUsedLauncherProofId)) {
-          proof = await refreshPreparedLauncherProof(key, prepared, nativeGuard);
+          proof = await refreshPreparedLauncherProof(key, prepared, nativeGuard, { allowInteractiveRecovery: true });
         }
         if (!proof?.usable
             || !proof?.trusted
@@ -15610,7 +15699,8 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
         : `Initialized one-time launch ${value?.payload?.launchId || 'session'} is ready; no network refresh was needed.`
     );
   } catch (error) {
-    await launcherOpening;
+    prepared.launcherProof = null;
+    prepared.proofPreparedThisSession = false;
     throw error;
   }
   retainActiveLauncherProof(prepared.launcherProof);
@@ -15619,6 +15709,18 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     launcherProof: prepared.launcherProof,
     nativeGuard
   });
+  // A failed account recovery must not open Minecraft without an authorized
+  // session. Startup preparation still reuses verified Java/profile paths.
+  if (prepared.minecraftProfile?.selectionPrepared === false) {
+    prepared.minecraftProfile = await selectPreparedMinecraftLauncherProfile(prepared.minecraftProfile);
+  }
+  const launcherOpening = openMinecraftLauncher(prepared.launcherConfig, {
+    route: prepared.launcherRoute,
+    attempt
+  }).then(
+    (value) => ({ ok: true, value }),
+    (error) => ({ ok: false, error })
+  );
   const launchResult = await runLaunchStep(
     attempt,
     'open-launcher',
@@ -16113,6 +16215,7 @@ if (!singleInstanceLock) {
     }
   });
   app.on('before-quit', () => {
+    minecraftInteractiveRecovery.cancel();
     applicationQuitting = true;
     stopLauncherUpdateMonitor();
     invalidateAllLaunchPreparations();

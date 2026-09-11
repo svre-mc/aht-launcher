@@ -306,6 +306,12 @@ export function diagnoseLaunchFailure(attempt) {
       actions: ['Rerun the AHT installer and select the Adoptium Java 8 option, or install 64-bit Adoptium Java 8.', 'Run Update once, then try Play again.']
     };
   }
+  if (/fresh Minecraft session|available session data/i.test(message)) {
+    return {
+      cause: 'Minecraft account ownership could not be verified with the available local session. Client integrity and Phoenix are separate checks.',
+      actions: ['Leave Minecraft Launcher open on the matching account and retry account sync in AHT.', 'If verification still fails, copy this report for support. Do not delete account credentials or player data.']
+    };
+  }
   if (/Secure launcher recovery|recovery credential/i.test(message)) {
     return {
       cause: 'The player service could not verify this installation against the account’s saved launcher credentials.',

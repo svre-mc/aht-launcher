@@ -158,13 +158,17 @@ jobs:
         if: matrix.id == 'windows'
         run: node scripts/verify-packaged-native-guard.mjs
 
-      - name: Set up Java 8 for Phoenix runtime verification
-        if: matrix.id == 'windows'
+      - name: Set up Java 8 for account recovery and Phoenix verification
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '8'
           architecture: x64
+
+      - name: Test interactive account recovery and authenticated Play
+        env:
+          AHT_RECOVERY_JAVA_HOME: ${{ env.JAVA_HOME }}
+        run: node --test scripts/test-repair-account-readiness.mjs && node scripts/test-interactive-account-recovery.mjs && node scripts/test-play-proof-isolation.mjs
 
       - name: Test overlapping Phoenix launcher and game measurements
         if: matrix.id == 'windows'

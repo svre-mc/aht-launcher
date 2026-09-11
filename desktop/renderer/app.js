@@ -6627,3 +6627,24 @@ window.addEventListener("online", () => void checkLauncherUpdateQuietly());
 window.setInterval(() => {
   refreshQuietly();
 }, 60_000);
+
+// Push-only progress: account recovery must not add network work or status polling to startup.
+let accountRecoveryReturnFocus = null;
+function renderAccountRecovery(state = {}) {
+  const overlay = document.getElementById('accountRecoveryOverlay');
+  if (!overlay) return;
+  const wasVisible = !overlay.hidden;
+  overlay.hidden = !state.running;
+  document.getElementById('accountRecoveryMessage').textContent = state.message || '';
+  if (state.running && !wasVisible) {
+    accountRecoveryReturnFocus = document.activeElement;
+    document.getElementById('accountRecoveryCancel').focus();
+  } else if (!state.running && wasVisible) accountRecoveryReturnFocus?.focus?.();
+}
+window.aht.onAccountRecoveryState?.(renderAccountRecovery);
+window.aht.getAccountRecoveryState?.().then(renderAccountRecovery).catch(() => {});
+document.getElementById('accountRecoveryCancel')?.addEventListener('click', () => window.aht.cancelAccountRecovery());
+document.getElementById('accountRecoveryOverlay')?.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); void window.aht.cancelAccountRecovery(); }
+  if (event.key === 'Tab') { event.preventDefault(); document.getElementById('accountRecoveryCancel').focus(); }
+});

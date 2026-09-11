@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -337,8 +337,35 @@ let latest = legacyLatest;
 const packRequests = [];
 const registrationRequests = [];
 const proofRequests = [];
+let accountVerificationBlocked = false;
+let liveRecoveryRequired = false;
+let liveRecoveryVerified = false;
+const recoveryUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const recoveryChallenge = '0123456789012345678901234567890123456789';
+const recoveryModePath = path.join(root, 'recovery-mode.json');
+const recoveryJar = path.resolve('src/resources/account-recovery.jar');
+const recoveryJavaHome = process.env.AHT_RECOVERY_JAVA_HOME || (process.platform === 'win32' ? 'C:/AHTDEV/Toolchains/Java-8' : process.env.JAVA_HOME);
+if (!recoveryJavaHome) throw new Error('Set AHT_RECOVERY_JAVA_HOME to the Java 8 test toolchain.');
+const recoveryJava = path.join(recoveryJavaHome, process.platform === 'win32' ? 'bin/java.exe' : 'bin/java');
+execFileSync(path.join(recoveryJavaHome, process.platform === 'win32' ? 'bin/javac.exe' : 'bin/javac'), ['-cp', recoveryJar, '-d', root,
+  'account-recovery/test/net/ahardtime/recovery/TestDriver.java'], { windowsHide: true, stdio: 'pipe' });
 
-const fakeLauncherScript = 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), disableRtss: process.env.DISABLE_RTSS_LAYER || "", disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || "" }, null, 2))';
+const fakeLauncherScript = `
+const fs = require('fs'), path = require('path');
+fs.writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), disableRtss: process.env.DISABLE_RTSS_LAYER || '', disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || '' }, null, 2));
+const profiles = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(mcRoot, 'launcher_profiles.json'))}, 'utf8'));
+const recovery = Object.entries(profiles.profiles || {}).find(([id]) => /^aht-account-recovery-[a-f0-9]{24}$/.test(id));
+if (recovery && fs.existsSync(${JSON.stringify(recoveryModePath)}) && JSON.parse(fs.readFileSync(${JSON.stringify(recoveryModePath)}, 'utf8')).mode === 'auto') {
+  const id = recovery[0];
+  const version = JSON.parse(fs.readFileSync(path.join(${JSON.stringify(mcRoot)}, 'versions', id, id + '.json'), 'utf8'));
+  const args = version.minecraftArguments.split(' ').map(arg => ({
+    ['\${auth_player_name}']: 'FreshPlayer', ['\${auth_uuid}']: ${JSON.stringify(recoveryUuid.replaceAll('-', ''))},
+    ['\${auth_access_token}']: 'synthetic-recovery-session'
+  })[arg] || arg);
+  setTimeout(() => require('child_process').execFile(${JSON.stringify(recoveryJava)},
+    ['-cp', ${JSON.stringify(`${root}${path.delimiter}${recoveryJar}`)}, 'net.ahardtime.recovery.TestDriver', ${JSON.stringify(workerEndpoint)}, ...args],
+    { windowsHide: true }, () => {}), 1000);
+}`;
 await fsp.mkdir(path.dirname(fakeJavaPath), { recursive: true });
 await fsp.writeFile(fakeJavaPath, 'fake Java 8 executable\n', 'utf8');
 if (process.platform === 'win32') {
@@ -368,7 +395,7 @@ await writeJson(defaultsPath, {
     javaPath: fakeJavaPath,
     syncRoots: [syncedMcRoot],
     syncDefaultRoots: false,
-    autoImportAccount: false,
+    autoImportAccount: true,
     openCommand: process.execPath,
     openArgs: ['-e', fakeLauncherScript, fakeLauncherMarker]
   },
@@ -378,9 +405,13 @@ await writeJson(path.join(userData, 'identity.json'), {
   installId: 'fresh-player-install',
   createdAt: new Date().toISOString(),
   minecraftUsername: 'FreshPlayer',
+  minecraftUuid: recoveryUuid,
   usernameRegisteredAt: new Date().toISOString(),
   usernameRegistrationMode: 'minecraft-launcher'
 });
+await writeJson(path.join(mcRoot, 'launcher_accounts.json'), { activeAccountLocalId: 'fixture', accounts: {
+  fixture: { minecraftProfile: { name: 'FreshPlayer', id: recoveryUuid.replaceAll('-', '') } }
+} });
 const fixtureDeviceCredential = createDeviceCredential();
 await writeJson(path.join(userData, 'device-identity.json'), {
   schemaVersion: fixtureDeviceCredential.schemaVersion,
@@ -446,6 +477,29 @@ const server = http.createServer((request, response) => {
         return;
       }
       registrationRequests.push({ username, installId });
+      if (liveRecoveryRequired) {
+        if (!payload.recoverExistingUsername) {
+          response.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'That username is not available.' }));
+          return;
+        }
+        if (!payload.minecraftSessionChallenge) {
+          response.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+            code: 'MINECRAFT_OWNERSHIP_REQUIRED', minecraftSessionChallenge: recoveryChallenge, expiresAt: Date.now() + 240000
+          }));
+          return;
+        }
+        if (payload.minecraftSessionChallenge !== recoveryChallenge || !liveRecoveryVerified) {
+          response.writeHead(403).end(JSON.stringify({ error: 'Minecraft ownership verification failed.' }));
+          return;
+        }
+        liveRecoveryRequired = false;
+      }
+      if (accountVerificationBlocked) {
+        response.statusCode = 403;
+        response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.end(JSON.stringify({ error: 'AHT could not verify Minecraft account ownership using the available session data.' }));
+        return;
+      }
       registeredUsers.set(username.toLowerCase(), installId);
       response.statusCode = 200;
       response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -459,6 +513,17 @@ const server = http.createServer((request, response) => {
     response.end(JSON.stringify({ logs: [] }));
     return;
   }
+  if (url.pathname === '/test/mojang-join') {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      const value = JSON.parse(body);
+      liveRecoveryVerified = value.accessToken === 'synthetic-recovery-session'
+        && value.selectedProfile === recoveryUuid.replaceAll('-', '') && value.serverId === recoveryChallenge;
+      response.writeHead(liveRecoveryVerified ? 204 : 403).end();
+    });
+    return;
+  }
   if (url.pathname === '/api/launcher-proof') {
     let body = '';
     request.on('data', (chunk) => { body += String(chunk); });
@@ -467,7 +532,7 @@ const server = http.createServer((request, response) => {
       proofRequests.push(payload);
       const username = String(payload.minecraftUsername || '').trim().toLowerCase();
       const installId = String(payload.installId || '').trim();
-      if (!username || registeredUsers.get(username) !== installId) {
+      if (accountVerificationBlocked || !username || registeredUsers.get(username) !== installId) {
         response.statusCode = 403;
         response.setHeader('Content-Type', 'application/json; charset=utf-8');
         response.end(JSON.stringify({ error: 'Minecraft username is not registered to this launcher install.' }));
@@ -695,8 +760,26 @@ try {
   fs.writeFileSync(baseMetadataFile, JSON.stringify({ id: '1.12.2', assets: 'legacy', libraries: [] }));
   await evaluate(client, 'refresh().then(() => true)');
   await waitFor(client, `!updatePoll && !lastUpdateState?.running`, 'completed install UI before runtime repair');
+  accountVerificationBlocked = true;
+  const blockedRepair = await evaluate(client, `window.aht.startUpdate({ forceRepair: true, runtimeOnly: true })
+    .then(() => ({ ok: true }))
+    .catch(error => ({ ok: false, message: String(error?.message || error) }))`);
+  const blockedRepairState = await evaluate(client, 'window.aht.getUpdateState()');
+  if (blockedRepair.ok || !/account verification failed/i.test(blockedRepair.message)
+      || blockedRepairState.running || !blockedRepairState.error || blockedRepairState.lastResult) {
+    throw new Error(`Repair reported success without verified account ownership: ${JSON.stringify({ blockedRepair, blockedRepairState })}`);
+  }
+  // Status must not erase this failure using the older registration timestamp.
+  await evaluate(client, 'refresh().then(() => true)');
+  const unresolvedAccount = await evaluate(client, 'window.aht.getStatus()');
+  if (!unresolvedAccount.identity?.minecraftUsernameSyncWarning) {
+    throw new Error('Status cleared an unresolved account failure using stale confirmation.');
+  }
+  accountVerificationBlocked = false;
+  checkpoint('Repair rejects unresolved account verification and preserves the warning');
   await evaluate(client, `document.querySelector('#scanButton').click(); true`);
   await waitFor(client, `window.aht.getUpdateState().then((state) => {
+    if (state.startedAt === ${JSON.stringify(blockedRepairState.startedAt)}) return false;
     if (state.error) throw new Error(state.error);
     return !state.running && state.lastResult?.runtimeOnly === true ? state.lastResult : false;
   })`, 'Repair button runtime repair with clean modpack', 180);
@@ -801,6 +884,9 @@ try {
     if (!recoveredStatus.valid || !recoveredStatus.consented) throw new Error('Phoenix recovery was not verified');
     checkpoint('deleted Phoenix restored through visible player UI');
   }
+  // Successful Repair now confirms registration. Simulate its later revocation
+  // explicitly so Play still exercises the stale-registration recovery path.
+  registeredUsers.clear();
   const playResult = await evaluate(client, `
     window.aht.play()
       .then((result) => ({ ok: true, result }))
@@ -1196,6 +1282,54 @@ try {
   if (warmProfilesAfterPlay.some((hash, index) => hash !== warmProfilesBeforePlay[index])) {
     throw new Error('Warm Play rewrote launcher metadata instead of reusing initialization state.');
   }
+  accountVerificationBlocked = true;
+  const markerBeforeBlockedPlay = fs.statSync(fakeLauncherMarker).mtimeMs;
+  const blockedPlay = await evaluate(client, `window.aht.play()
+    .then(() => ({ ok: true }))
+    .catch(error => ({ ok: false, message: String(error?.message || error) }))`);
+  if (blockedPlay.ok || !/account verification failed/i.test(blockedPlay.message)
+      || fs.statSync(fakeLauncherMarker).mtimeMs !== markerBeforeBlockedPlay) {
+    throw new Error(`Failed account authorization opened Minecraft: ${JSON.stringify(blockedPlay)}`);
+  }
+  accountVerificationBlocked = false;
+  const recoveredPlay = await evaluate(client, 'window.aht.play()');
+  if (!recoveredPlay?.ok) throw new Error('Account recovery required restarting AHT before Play.');
+  checkpoint('Failed Play never opens Minecraft; valid account recovery succeeds without restart');
+  liveRecoveryRequired = true;
+  await writeJson(recoveryModePath, { mode: 'pending' });
+  await evaluate(client, 'window.__liveRecovery = window.aht.retryAccountSync(); true');
+  await waitFor(client, `!document.querySelector('#accountRecoveryOverlay').hidden`, 'visible live-session account recovery');
+  const recoveryMessage = await evaluate(client, `document.querySelector('#accountRecoveryMessage').textContent`);
+  if (!recoveryMessage.includes('FreshPlayer') || !recoveryMessage.includes('click Play once') || /https?:|token|diagnostic/i.test(recoveryMessage)) {
+    throw new Error('Recovery prompt did not provide concise, credential-free instructions.');
+  }
+  if (process.env.AHT_ACCOUNT_RECOVERY_SCREENSHOT) {
+    const screenshot = await client.call('Page.captureScreenshot', { format: 'png' });
+    await fsp.writeFile(process.env.AHT_ACCOUNT_RECOVERY_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+  }
+  const cancelHit = await evaluate(client, `(() => {
+    const button = document.querySelector('#accountRecoveryCancel');
+    const box = button.getBoundingClientRect();
+    const x = box.left + box.width / 2, y = box.top + box.height / 2;
+    return { x, y, hit: document.elementFromPoint(x, y) === button };
+  })()`);
+  if (!cancelHit.hit) throw new Error('The visible recovery Cancel button is covered by another layer.');
+  await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: cancelHit.x, y: cancelHit.y, button: 'left', clickCount: 1 });
+  await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cancelHit.x, y: cancelHit.y, button: 'left', clickCount: 1 });
+  const cancelledRecovery = await evaluate(client, 'window.__liveRecovery');
+  if (!cancelledRecovery.identity?.minecraftUsernameSyncWarning) throw new Error('Cancelled recovery was reported as a successful sync.');
+  await writeJson(recoveryModePath, { mode: 'auto' });
+  registeredUsers.clear();
+  const recoveredInteractivePlay = await evaluate(client, 'window.aht.play()');
+  if (!recoveredInteractivePlay?.ok) throw new Error('Interactive ownership recovery did not resume Play.');
+  const liveRecoveredStatus = await evaluate(client, 'window.aht.getStatus()');
+  if (!liveRecoveryVerified || liveRecoveryRequired || liveRecoveredStatus.identity?.minecraftUsernameSyncWarning) {
+    throw new Error('Real Java live-session callback did not recover the account through actual Electron IPC.');
+  }
+  if (Object.keys(JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8')).profiles)
+    .some(id => id.startsWith('aht-account-recovery-'))) throw new Error('Temporary recovery profile remained after success.');
+  if (!(await evaluate(client, 'window.aht.play()'))?.ok) throw new Error('Recovered account could not Play without restarting AHT.');
+  checkpoint('Live session recovery: actual Electron cancellation/retry, Java helper, ownership check and subsequent Play passed');
   await evaluate(client, 'window.aht?.windowClose?.(); true').catch(() => {});
   client.close();
   client = null;

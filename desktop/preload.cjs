@@ -16,6 +16,13 @@ const playerApi = {
     includeUpdateLogs: Boolean(options.includeUpdateLogs)
   }),
   retryAccountSync: (packKey = 'aht') => ipcRenderer.invoke('account:retrySync', { packKey }),
+  getAccountRecoveryState: () => ipcRenderer.invoke('account:recoveryState'),
+  cancelAccountRecovery: () => ipcRenderer.invoke('account:cancelRecovery'),
+  onAccountRecoveryState: listener => {
+    const handler = (_event, state) => listener(state);
+    ipcRenderer.on('account:recoveryState', handler);
+    return () => ipcRenderer.removeListener('account:recoveryState', handler);
+  },
   refreshNews: (packKey = 'aht') => ipcRenderer.invoke('news:refresh', { packKey }),
   copyErrorReport: (payload) => ipcRenderer.invoke('diagnostics:copyErrorReport', payload || {}),
   saveSettings: (config, packKey = 'aht') => ipcRenderer.invoke('settings:save', { config, packKey }),

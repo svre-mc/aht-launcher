@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.23",
-  "ahtLauncherVersion": "0.2.23",
+  "version": "0.2.24",
+  "ahtLauncherVersion": "0.2.24",
   "phoenixAntiCheatVersion": "1.1.4",
   "private": true,
   "type": "module",
