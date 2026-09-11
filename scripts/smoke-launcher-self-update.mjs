@@ -380,7 +380,9 @@ try {
   }
   const initiallyHidden = await evaluate(client, "document.querySelector('#launcherUpdateOverlay').hidden");
   if (!initiallyHidden) throw new Error('Launcher update overlay opened before the update was published.');
-  await waitFor(client, "!document.body.classList.contains('is-booting')", 'initial startup complete');
+  // The watchdog can reveal the window while startup is still settling. Wait
+  // for the real bootstrap completion before re-entering its gate in this test.
+  await waitFor(client, "window.__ahtStartupTaskTimings?.readiness && !document.body.classList.contains('is-booting') && document.querySelector('#startupLoader').hidden", 'initial startup complete');
   // Re-enter the same preparation gate used by startup/terms acceptance, then
   // publish while it owns the screen. Exercise rendering, not just CSS strings.
   await evaluate(client, 'showLauncherPreparation()');

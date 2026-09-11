@@ -6058,6 +6058,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   let latestError = null;
   let updateLogs = [];
   let updateLogsError = null;
+  let updateLogsRefreshed = false;
   try {
     latest = options.preferCache
       ? (cachedLatestRelease(config, Number.MAX_SAFE_INTEGER) || prepared?.latest || null)
@@ -6069,6 +6070,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
   if (!options.preferCache || options.includeUpdateLogs) {
     try {
       updateLogs = await readUpdateLogs(config, 12, { preferCache: options.preferCache });
+      updateLogsRefreshed = true;
     } catch (error) {
       updateLogsError = error.message;
     }
@@ -6216,6 +6218,7 @@ async function getStatus(configOverride = null, packValue = 'stable', options = 
     latestError,
     updateLogs,
     updateLogsError,
+    updateLogsRefreshed,
     launcherUpdate: launcherUpdateForRenderer(launcherUpdate),
     installed,
     integrity: effectiveIntegrity,

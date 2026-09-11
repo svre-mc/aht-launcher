@@ -479,6 +479,45 @@ try {
   await client.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting') && document.querySelector('#startupLoader')?.hidden", 'fully revealed player DOM');
   await waitFor(client, "document.querySelectorAll('#updateLogGrid .feature-card').length === 3", 'three update-log cards');
+  // Use the actual fast IPC refresh used by successful modpack Update/Repair.
+  // The old implementation returned an unrequested empty feed and cleared both views.
+  const updateRefreshProof = await evaluate(client, `(async () => {
+    const before = currentStatus.updateLogs.map(log => log.id);
+    await refresh(activeSidebarPack, { preferCache: true });
+    const after = currentStatus.updateLogs.map(log => log.id);
+    const gameCards = document.querySelectorAll('#updateLogGrid .feature-card').length;
+    activateTab('news');
+    const newsCards = document.querySelectorAll('#newsFeedGrid .news-feed-card').length;
+    const emptyHidden = document.querySelector('#newsEmptyState').hidden;
+    return { before, after, gameCards, newsCards, emptyHidden };
+  })()`);
+  if (JSON.stringify(updateRefreshProof.before) !== JSON.stringify(updateRefreshProof.after)
+      || updateRefreshProof.gameCards !== 3 || updateRefreshProof.newsCards < 3 || !updateRefreshProof.emptyHidden) {
+    throw new Error('Modpack completion erased News: ' + JSON.stringify(updateRefreshProof));
+  }
+  screenshots.push(await captureScreenshot(client, 'news-after-modpack-refresh'));
+  const newsMergeProof = await evaluate(client, `(async () => {
+    const original = currentStatus;
+    renderStatus({ ...original, updateLogsRefreshed: false, updateLogs: [], updateLogsError: 'temporary fixture error' });
+    const failedRefreshRetained = currentStatus.updateLogs.length === original.updateLogs.length;
+    renderStatus({ ...original, updateLogsRefreshed: true, updateLogs: [] });
+    const confirmedEmptyCleared = document.querySelectorAll('#newsFeedGrid .news-feed-card').length === 0;
+    await refreshStartupNewsQuietly(activeSidebarPack);
+    const refreshedFeedRestored = currentStatus.updateLogs.length === original.updateLogs.length;
+    const otherPack = original.activePack === 'ptb' ? 'aht' : 'ptb';
+    const other = packStatusCache.get(otherPack);
+    packStatusCache.delete(otherPack);
+    const isolated = mergeStatusNews({ activePack: otherPack, updateLogsRefreshed: false, updateLogs: [] });
+    if (other) packStatusCache.set(otherPack, other);
+    renderStatus(original);
+    activateTab('player');
+    return { failedRefreshRetained, confirmedEmptyCleared, refreshedFeedRestored, noCrossPackLeak: isolated.updateLogs.length === 0 };
+  })()`);
+  if (Object.values(newsMergeProof).some(value => value !== true)) throw new Error('News merge regression: ' + JSON.stringify(newsMergeProof));
+  screenshots.push(await captureScreenshot(client, 'game-after-modpack-refresh'));
+  if (process.env.AHT_NEWS_UPDATE_ONLY === '1') {
+    console.log(JSON.stringify({ ok: true, root, screenshots, updateRefreshProof, newsMergeProof }, null, 2));
+  } else {
   await clearInteractionFocus(client, ['#updateLogGrid .home-news-card']);
   await waitForActualPointerRest(
     client,
@@ -1150,6 +1189,7 @@ try {
     playable: proof.cards.map((card) => card.playable),
     hidden: proof.hidden
   }, null, 2));
+  }
 } finally {
   if (client) {
     await client.call('Browser.close').catch(() => {});

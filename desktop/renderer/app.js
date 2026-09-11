@@ -4450,7 +4450,20 @@ function fillSettings(status) {
   updateReleaseUploadState();
 }
 
+function mergeStatusNews(status) {
+  // Fast install/preparation status deliberately skips news. Only a successful
+  // feed read (including a genuinely empty feed) may replace the per-pack news.
+  if (status.updateLogsRefreshed !== false) return status;
+  const previous = packStatusCache.get(status.activePack || activeSidebarPack || "aht");
+  return {
+    ...status,
+    updateLogs: Array.isArray(previous?.updateLogs) ? previous.updateLogs : [],
+    updateLogsError: status.updateLogsError || previous?.updateLogsError || null
+  };
+}
+
 function renderStatus(status) {
+  status = mergeStatusNews(status);
   if (launcherUpdateCheckCanReplaceCurrent(status.launcherUpdate)) lastLauncherUpdateCheck = status.launcherUpdate;
   if (lastLauncherUpdateCheck) status = { ...status, launcherUpdate: lastLauncherUpdateCheck };
   currentStatus = status;
@@ -4625,7 +4638,7 @@ async function refreshQuietly() {
 async function refreshPackQuietly(packKey = activeSidebarPack) {
   if (updatePoll || launcherUpdatePoll) return;
   try {
-    const rawStatus = await window.aht.getStatus(packKey);
+    const rawStatus = mergeStatusNews(await window.aht.getStatus(packKey));
     const [hydratedResult] = await preloadStartupNewsArtwork([{ status: "fulfilled", value: rawStatus }]);
     const status = hydratedResult?.status === "fulfilled" ? hydratedResult.value : rawStatus;
     const statusPack = status.activePack || packKey;
@@ -4657,6 +4670,7 @@ async function refreshStartupNewsQuietly(packKey = activeSidebarPack) {
       status.latestError = news.latestError;
     }
     if (news.updateLogsRefreshed) {
+      status.updateLogsRefreshed = true;
       status.updateLogs = Array.isArray(news.updateLogs) ? news.updateLogs : [];
       status.updateLogsError = news.updateLogsError || null;
     } else if (news.updateLogsError) {
