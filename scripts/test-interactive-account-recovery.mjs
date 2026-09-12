@@ -100,8 +100,23 @@ try {
   });
   assert(validMojangSession && joinCalls === 1);
   await assertClean();
+  // Reproduce Play's failure with an unavailable cached Xbox exchange, then
+  // run the real Java helper with a fresh session against the fixture service.
+  const accountsFile = path.join(mc, 'launcher_accounts.json');
+  await fs.writeFile(accountsFile, JSON.stringify({ accounts: { selected: {
+    remoteId: 'fixture-account', minecraftProfile: { name: username, id: uuid }
+  } } }));
+  await proveMinecraftAccountOwnership({ roots: [mc], username, minecraftUuid, serverId: challenge,
+    readWindowsSession: async () => [{ userHash: 'fixture', token: 'unavailable-fixture-session' }],
+    fetchImpl: async () => new Response(null, { status: 503 }),
+    interactiveRecovery: request => recovery.run({ ...options, ...request,
+      openLauncher: async () => helper(await recoveryArgs()) })
+  });
+  assert.equal(joinCalls, 2, 'Fresh-session helper must run after the cached exchange fails.');
+  await assertClean();
+  await fs.unlink(accountsFile);
   await assert.rejects(recovery.run({ ...options, openLauncher: async () => helper(await recoveryArgs(), 'WrongPlayer') }), /Select RecoveryPlayer/);
-  assert.equal(joinCalls, 1, 'Wrong accounts must never send their credentials to Mojang for another player.');
+  assert.equal(joinCalls, 2, 'Wrong accounts must never send their credentials to Mojang for another player.');
   await assertClean();
   await assert.rejects(recovery.run({ ...options, openLauncher: async () => recovery.cancel() }), /cancelled/);
   await assertClean();

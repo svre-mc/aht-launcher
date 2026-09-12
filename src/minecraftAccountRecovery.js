@@ -101,12 +101,15 @@ export async function proveMinecraftAccountOwnership({ roots, username, minecraf
       } catch { serviceUnavailable = true; }
     }
   }
-  if (serviceUnavailable) throw Object.assign(new Error('Minecraft ownership verification is temporarily unavailable. Try account sync again shortly.'), {
-    code: 'MINECRAFT_OWNERSHIP_UNAVAILABLE'
-  });
+  // Cached-session exchange/profile failures do not establish that the official
+  // launcher's fresh session cannot complete the challenge. Only explicit user
+  // actions supply this fallback; its result still needs Worker verification.
   if (interactiveRecovery) {
     return interactiveRecovery({ username, minecraftUuid, serverId, expiresAt });
   }
+  if (serviceUnavailable) throw Object.assign(new Error('Minecraft ownership verification is temporarily unavailable. Try account sync again shortly.'), {
+    code: 'MINECRAFT_OWNERSHIP_UNAVAILABLE'
+  });
   // These counts distinguish an unreadable/unsupported cache from rejected
   // sessions. Never infer that the player is logged out or expose credentials.
   throw Object.assign(new Error(`AHT could not verify Minecraft account ownership using the available session data. Session diagnostics: ${JSON.stringify(diagnostics)}`), {

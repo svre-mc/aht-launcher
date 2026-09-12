@@ -148,6 +148,35 @@ try {
       ? new Response(null, { status: 503 }) : protectedOptions.fetchImpl(url, options)
   })).verified, true, 'A failed exchange must not mask a usable candidate');
   await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async () => new Response(null, { status: 503 }) }), /Try account sync again shortly/);
+  // An exchange outage in a cached credential must not prevent an explicit
+  // action from trying the official launcher's fresh session. Background sync
+  // still fails closed, and cancellation must remain cancellation.
+  for (const failure of [429, 503, 'network']) {
+    for (const stage of ['exchange', 'profile', 'join']) {
+      const failingFetch = async (url, options) => {
+        const failsHere = stage === 'exchange' ? url.endsWith('/login_with_xbox')
+          : stage === 'profile' ? url.endsWith('/minecraft/profile') : url.endsWith('/join');
+        if (!failsHere) return protectedOptions.fetchImpl(url, options);
+        if (failure === 'network') throw new Error('private upstream transport detail');
+        return new Response(null, { status: failure });
+      };
+      const failedCache = { ...protectedOptions, fetchImpl: failingFetch };
+      await assert.rejects(proveMinecraftAccountOwnership(failedCache),
+        error => error.code === 'MINECRAFT_OWNERSHIP_UNAVAILABLE');
+      let recoveryCalls = 0;
+      assert.deepEqual(await proveMinecraftAccountOwnership({ ...failedCache, interactiveRecovery: async request => {
+        recoveryCalls++;
+        assert.equal(request.username, username);
+        assert.equal(request.minecraftUuid, minecraftUuid);
+        assert.equal(request.serverId, challenge);
+        return { verified: true, interactive: true };
+      } }), { verified: true, interactive: true }, `${stage} ${failure} must allow fresh-session recovery`);
+      assert.equal(recoveryCalls, 1);
+      const cancelled = Object.assign(new Error('Account verification cancelled.'), { code: 'AHT_ACCOUNT_RECOVERY_CANCELLED' });
+      await assert.rejects(proveMinecraftAccountOwnership({ ...failedCache, interactiveRecovery: async () => { throw cancelled; } }),
+        error => error === cancelled);
+    }
+  }
   await assert.rejects(proveMinecraftAccountOwnership({ ...protectedOptions, fetchImpl: async url =>
     new Response(JSON.stringify(url.endsWith('/minecraft/profile') ? { name: 'WrongOwner', id: minecraftUuid } : { access_token: 'fixture' })) }),
     error => error.code === 'MINECRAFT_SESSION_REQUIRED' && error.diagnostics.profileMismatch === 1);
