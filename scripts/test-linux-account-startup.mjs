@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { inspectMinecraftLauncherAuth, ensureMinecraftLauncherProfile } from '../src/minecraftLauncherProfile.js';
+import { accountWarningState, sameAccountSnapshot } from '../src/accountIdentityState.js';
 
 const source = await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8');
 function declaration(start, end) {
@@ -34,6 +35,12 @@ const context = vm.createContext({
   firstExistingCurseForgeMinecraftRoot: () => { throw new Error('Linux must not auto-select a CurseForge root'); },
   minecraftRootCandidates: () => [nativeRoot], samePath: (a, b) => path.resolve(a) === path.resolve(b),
   inspectMinecraftLauncherAuth, loadIdentity: async () => ({ ...savedIdentity }),
+  accountWarningState, sameAccountSnapshot,
+  updateIdentity: async (update, options) => {
+    assert.equal(options.expectedInstallId, savedIdentity.installId);
+    savedIdentity = await update({ ...savedIdentity });
+    return { ...savedIdentity };
+  },
   normalizeMinecraftUsername: (value) => String(value || '').trim(),
   normalizeMinecraftUuid: (value) => value || '',
   registerMinecraftUsernameInFlight: async (_config, identity, username, options) => {
@@ -50,7 +57,8 @@ const context = vm.createContext({
   scheduleLaunchPreparationProofRefresh: () => {}
 });
 vm.runInContext(
-  declaration('async function minecraftLauncherRuntimeConfig(', '\nfunction localReleaseCandidates(')
+  declaration('function recordAccountSyncWarning(', '\nfunction developerClientBypassAllowed(')
+  + declaration('async function minecraftLauncherRuntimeConfig(', '\nfunction localReleaseCandidates(')
   + declaration('async function identityPayload(', '\nfunction normalizeMinecraftUsername(')
   + declaration('async function refreshPreparedLauncherProof(', '\nfunction scheduleLaunchPreparationProofRefresh('), context
 );
@@ -75,6 +83,8 @@ assert.equal((await inspectMinecraftLauncherAuth(nativeRoot)).preferredUsername,
 savedIdentity = { installId: 'fixture-install' }; signedIdentity = null; registrationError = 'Account registration was rejected';
 await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), /Account registration was rejected/);
 assert.equal(signedIdentity, null, 'Registration failure must never bypass the server proof gate');
+assert.equal(savedIdentity.minecraftUsernameSyncWarning, registrationError, 'Persist the actual registration warning for Retry');
+assert.equal(savedIdentity.minecraftLauncherDetectedUsername, 'NativePlayer');
 registrationError = ''; config.minecraftLauncher.autoImportAccount = false; savedIdentity = { installId: 'fixture-install' };
 await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), /Sign in to your Minecraft account/);
 console.log('PASS: Linux automatic root migration, manual roots, uncached active account/UUID import, published profile path, and fail-closed registration.');
