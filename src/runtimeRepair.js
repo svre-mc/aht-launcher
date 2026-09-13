@@ -1,20 +1,6 @@
 import path from 'node:path';
 import { readJsonFile } from './utils.js';
 
-// File repair cannot certify an account whose ownership recovery failed. Keep
-// Play proofs launch-scoped; this gate verifies registration, not a reusable token.
-export function verifyRepairedAccount({ identity = {}, registrationConfirmed = false } = {}) {
-  const warning = String(identity.minecraftUsernameSyncWarning || '').trim();
-  const username = String(identity.minecraftUsername || '').trim();
-  if (warning || !/^[A-Za-z0-9_]{3,16}$/.test(username) || !registrationConfirmed) {
-    const message = warning || 'Minecraft account verification is incomplete. Retry account sync, then Repair.';
-    throw Object.assign(new Error(message), {
-      code: /fresh Minecraft session|available session data/i.test(message) ? 'MINECRAFT_SESSION_REQUIRED' : 'AHT_ACCOUNT_SYNC_REQUIRED'
-    });
-  }
-  return identity;
-}
-
 // A profile's earlier javaRuntime result is not proof that its executable still
 // exists. The final Repair gate must execute the selected Java again.
 export async function verifyRepairedJava({ runtime, profile, memoryMb, probe }) {

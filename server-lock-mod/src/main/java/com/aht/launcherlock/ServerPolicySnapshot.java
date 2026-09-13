@@ -26,6 +26,7 @@ final class ServerPolicySnapshot {
     private static final int MAX_DENIALS = 5000;
 
     final String revision;
+    final long issuedAtMillis;
     final String packId;
     final String necessaryLauncherVersion;
     final boolean blockLikelyVpn;
@@ -34,11 +35,12 @@ final class ServerPolicySnapshot {
     private final Map<String, String> accountBindings;
     private final Map<String, Set<String>> accessDenials;
 
-    private ServerPolicySnapshot(String revision, String packId, String necessaryLauncherVersion,
+    private ServerPolicySnapshot(String revision, long issuedAtMillis, String packId, String necessaryLauncherVersion,
                                  boolean blockLikelyVpn, RSAPublicKey publicKey, String keyFingerprint,
                                  Map<String, String> accountBindings,
                                  Map<String, Set<String>> accessDenials) {
         this.revision = revision;
+        this.issuedAtMillis = issuedAtMillis;
         this.packId = packId;
         this.necessaryLauncherVersion = necessaryLauncherVersion;
         this.blockLikelyVpn = blockLikelyVpn;
@@ -122,6 +124,7 @@ final class ServerPolicySnapshot {
         boolean blockLikelyVpn = SignedTokenSupport.readBoolean(payload, "blockLikelyVpn", true);
         return new ServerPolicySnapshot(
                 revision,
+                issuedAt,
                 packId,
                 necessaryLauncherVersion,
                 blockLikelyVpn,

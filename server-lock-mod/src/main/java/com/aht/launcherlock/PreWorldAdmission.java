@@ -14,6 +14,7 @@ import net.minecraft.network.play.server.*;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.management.PlayerList;
 import net.minecraft.util.text.TextComponentString;
+import net.minecraftforge.fml.common.network.internal.FMLProxyPacket;
 
 /** Pending players have no player-list/world membership and receive no world packets. */
 public final class PreWorldAdmission {
@@ -23,6 +24,21 @@ public final class PreWorldAdmission {
     // Slow cold audits keep waiting outside the world, never in a playable grace period.
     private static final long DEADLINE_NANOS = 180_000_000_000L;
     private PreWorldAdmission() { }
+
+    /** Fence at handler construction, including failures inside the Forge handshake. */
+    public static void trackConnectionPlayer(EntityPlayerMP player) {
+        MinecraftServer server = player.getServer();
+        if (server != null && server.isDedicatedServer() && player.connection != null
+                && !player.connection.netManager.isLocalChannel()
+                && server.getPlayerList().getPlayerByUUID(player.getUniqueID()) != player) SAVES.track(player);
+    }
+
+    /** Transport may tick while admission waits; the unloaded character must not. */
+    public static void tickAdmittedPlayer(EntityPlayerMP player) {
+        MinecraftServer server = player.getServer();
+        if (server != null && skipUnadmittedSave(server.getPlayerList(), player)) return;
+        player.onUpdateEntity();
+    }
 
     public static void initialize(PlayerList players, NetworkManager manager, EntityPlayerMP player, NetHandlerPlayServer handler) {
         if (!players.getServerInstance().isDedicatedServer() || manager.isLocalChannel()) {
@@ -89,6 +105,7 @@ public final class PreWorldAdmission {
                 pending.stage = "world entry";
                 enterWorld(pending.players, pending.manager, pending.player, pending.handler);
                 pending.log.accepted(pending.player.getName());
+                PackVersionLock.authenticatedJoinCompleted(pending.player);
             } catch (Throwable failure) {
                 pending.log.failure(pending.player.getName(), pending.stage, "verification unavailable", failure);
                 abandon(pending);
@@ -144,6 +161,7 @@ public final class PreWorldAdmission {
     private static void release(Object message) {
         if (message instanceof CPacketCustomPayload) ReferenceCountUtil.release(((CPacketCustomPayload)message).getBufferData());
         else if (message instanceof SPacketCustomPayload) ReferenceCountUtil.release(ServerPayload.value(ServerPayload.DATA, message));
+        else if (message instanceof FMLProxyPacket) ReferenceCountUtil.release(((FMLProxyPacket)message).payload());
         else ReferenceCountUtil.release(message);
     }
     // Vanilla marks the outgoing payload getters client-only; dedicated servers
@@ -171,6 +189,10 @@ public final class PreWorldAdmission {
         final AdmissionLog log = new AdmissionLog();
         String stage = "launcher proof";
         volatile boolean admitted, worldEntryAuthorized;
+        static final int MAX_SETUP_PACKETS = 256;
+        static final int MAX_SETUP_BYTES = 4 * 1024 * 1024;
+        private final ArrayDeque<DeferredSetup> setup = new ArrayDeque<>();
+        private int setupBytes;
         Method begin, ready, clear, auditAccepted;
         Pending(PlayerList players, NetworkManager manager, EntityPlayerMP player, NetHandlerPlayServer handler) {
             this.players=players; this.manager=manager; this.player=player; this.handler=handler;
@@ -185,13 +207,57 @@ public final class PreWorldAdmission {
         }
         public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) throws Exception {
             if (worldEntryAuthorized && message instanceof SPacketJoinGame) {
+                // Forge fires ServerConnectionFromClientEvent before JoinGame.
+                // CreativeCore sends ItemPhysic's authoritative configuration there.
+                // Keep those packets, but deliver them only after the client has
+                // its world/player. Never replay the event or allow pending traffic.
                 admitted = true;
+                context.write(message, promise);
+                while (!setup.isEmpty()) {
+                    DeferredSetup next = setup.removeFirst();
+                    context.write(next.message, next.promise);
+                }
+                setupBytes = 0;
                 context.pipeline().remove(this);
+                return;
             }
+            if (message instanceof SPacketDisconnect) discardSetup();
             if (admitted || message instanceof SPacketDisconnect || message instanceof SPacketKeepAlive
                 || (message instanceof SPacketCustomPayload && control((String)ServerPayload.value(ServerPayload.CHANNEL, message)))) {
                 context.write(message, promise);
+            } else if (worldEntryAuthorized && (message instanceof SPacketCustomPayload || message instanceof FMLProxyPacket)) {
+                int bytes = message instanceof FMLProxyPacket ? ((FMLProxyPacket)message).payload().readableBytes()
+                    : ((PacketBuffer)ServerPayload.value(ServerPayload.DATA, message)).readableBytes();
+                if (setup.size() >= MAX_SETUP_PACKETS || bytes > MAX_SETUP_BYTES - setupBytes) {
+                    release(message);
+                    promise.tryFailure(new IllegalStateException("Admission setup exceeds its bounded buffer."));
+                    discardSetup();
+                    context.close();
+                    return;
+                }
+                setup.addLast(new DeferredSetup(message, promise));
+                setupBytes += bytes;
             } else { release(message); promise.trySuccess(); }
+        }
+        @Override public void channelInactive(ChannelHandlerContext context) throws Exception {
+            discardSetup();
+            super.channelInactive(context);
+        }
+        @Override public void handlerRemoved(ChannelHandlerContext context) throws Exception {
+            discardSetup();
+            super.handlerRemoved(context);
+        }
+        private void discardSetup() {
+            while (!setup.isEmpty()) {
+                DeferredSetup next = setup.removeFirst();
+                release(next.message);
+                next.promise.tryFailure(new java.nio.channels.ClosedChannelException());
+            }
+            setupBytes = 0;
+        }
+        private static final class DeferredSetup {
+            final Object message; final ChannelPromise promise;
+            DeferredSetup(Object message, ChannelPromise promise) { this.message = message; this.promise = promise; }
         }
     }
 }

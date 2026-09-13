@@ -7,6 +7,7 @@ import org.objectweb.asm.tree.*;
 /** Divert Forge's one world-entry call, leaving the ordinary handshake intact. */
 public final class AdmissionTransformer implements IClassTransformer {
     public byte[] transform(String name, String transformedName, byte[] bytes) {
+        if ("net.minecraft.network.NetHandlerPlayServer".equals(transformedName)) return guardConnectionLifecycle(bytes);
         if ("net.minecraft.server.management.PlayerList".equals(transformedName)) return guardPersistence(bytes);
         if (!"net.minecraftforge.fml.common.network.handshake.NetworkDispatcher".equals(transformedName)) return bytes;
         ClassNode type = new ClassNode();
@@ -43,6 +44,47 @@ public final class AdmissionTransformer implements IClassTransformer {
         ClassWriter writer = new ClassWriter(0);
         type.accept(writer);
         return writer.toByteArray();
+    }
+    private byte[] guardConnectionLifecycle(byte[] bytes) {
+        ClassNode type = new ClassNode();
+        new ClassReader(bytes).accept(type, 0);
+        int constructors = 0, ticks = 0;
+        for (MethodNode method : type.methods) {
+            boolean constructor = "<init>".equals(method.name)
+                && ("(Lnet/minecraft/server/MinecraftServer;Lnet/minecraft/network/NetworkManager;Lnet/minecraft/entity/player/EntityPlayerMP;)V".equals(method.desc)
+                    || "(Lnet/minecraft/server/MinecraftServer;Lgw;Loq;)V".equals(method.desc));
+            if (constructor) {
+                constructors++;
+                boolean existing = false;
+                for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction instanceof MethodInsnNode) {
+                    MethodInsnNode call = (MethodInsnNode) instruction;
+                    if ("com/aht/launcherlock/PreWorldAdmission".equals(call.owner) && "trackConnectionPlayer".equals(call.name)) existing = true;
+                }
+                if (!existing) for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction.getOpcode() == Opcodes.RETURN) {
+                    InsnList fence = new InsnList();
+                    fence.add(new VarInsnNode(Opcodes.ALOAD, 3));
+                    String player = Type.getArgumentTypes(method.desc)[2].getDescriptor();
+                    fence.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "com/aht/launcherlock/PreWorldAdmission", "trackConnectionPlayer", "(" + player + ")V", false));
+                    method.instructions.insertBefore(instruction, fence);
+                }
+            }
+            if (!"()V".equals(method.desc) || !("update".equals(method.name) || "func_73660_a".equals(method.name) || "e".equals(method.name))) continue;
+            for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction instanceof MethodInsnNode) {
+                MethodInsnNode call = (MethodInsnNode) instruction;
+                if ("com/aht/launcherlock/PreWorldAdmission".equals(call.owner) && "tickAdmittedPlayer".equals(call.name)) { ticks++; continue; }
+                boolean mapped = "net/minecraft/entity/player/EntityPlayerMP".equals(call.owner)
+                    && ("onUpdateEntity".equals(call.name) || "func_71127_g".equals(call.name));
+                boolean production = "oq".equals(call.owner) && "k_".equals(call.name);
+                if (call.getOpcode() != Opcodes.INVOKEVIRTUAL || !"()V".equals(call.desc) || (!mapped && !production)) continue;
+                call.desc = "(L" + call.owner + ";)V";
+                call.owner = "com/aht/launcherlock/PreWorldAdmission";
+                call.name = "tickAdmittedPlayer"; call.setOpcode(Opcodes.INVOKESTATIC); call.itf = false;
+                ticks++;
+            }
+        }
+        if (constructors != 1 || ticks != 1) throw new IllegalStateException("AHT unloaded-player lifecycle boundaries are unavailable; refusing unsafe admission.");
+        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        type.accept(writer); return writer.toByteArray();
     }
     private byte[] guardPersistence(byte[] bytes) {
         ClassNode type = new ClassNode();

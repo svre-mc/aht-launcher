@@ -30,6 +30,11 @@ final class SignedStateTestSupport {
     }
 
     static String stateMessage(String necessaryVersion, JsonArray denials, boolean blockVpn) throws Exception {
+        return stateMessage(necessaryVersion, denials, blockVpn, System.currentTimeMillis());
+    }
+
+    static String stateMessage(String necessaryVersion, JsonArray denials, boolean blockVpn,
+                               long issuedAtMillis) throws Exception {
         JsonObject binding = new JsonObject();
         binding.addProperty("accountDigest", SignedTokenSupport.sha256Hex("account\0" + USERNAME.toLowerCase()));
         binding.addProperty("bindingDigest", bindingDigest(INSTALL_ID));
@@ -52,7 +57,7 @@ final class SignedStateTestSupport {
         payload.add("accessDenials", denials == null ? new JsonArray() : denials);
         String revision = SignedTokenSupport.sha256Hex(payload.toString());
         payload.addProperty("revision", revision);
-        payload.addProperty("issuedAt", Instant.now().toString());
+        payload.addProperty("issuedAt", Instant.ofEpochMilli(issuedAtMillis).toString());
 
         JsonObject envelope = new JsonObject();
         envelope.addProperty("type", "launcher-server-state");
@@ -127,7 +132,7 @@ final class SignedStateTestSupport {
         );
     }
 
-    private static String sign(String type, JsonObject payload) throws Exception {
+    static String sign(String type, JsonObject payload) throws Exception {
         JsonObject header = new JsonObject();
         header.addProperty("alg", "RS256");
         header.addProperty("typ", type);

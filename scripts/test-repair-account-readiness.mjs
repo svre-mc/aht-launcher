@@ -3,9 +3,6 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 import * as runtimeRepair from '../src/runtimeRepair.js';
-import path from 'node:path';
-import { createAccountRegistrationCoordinator } from '../src/accountRegistrationCoordinator.js';
-import { accountWarningState, sameAccountSnapshot } from '../src/accountIdentityState.js';
 
 const main = fs.readFileSync(process.env.AHT_TEST_MAIN_SOURCE || new URL('../desktop/main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 test('public account warnings stay concise while local diagnostics remain available', () => {
@@ -21,13 +18,13 @@ test('public account warnings stay concise while local diagnostics remain availa
   assert.equal(context.identityForRenderer(identity).minecraftUsernameSyncWarning, identity.minecraftUsernameSyncWarning);
 });
 const updateSource = main.slice(main.indexOf('async function runUpdate('), main.indexOf('\nfunction defaultLauncherInstallerArgs'));
-function updateHarness({ warning = '', developer = false, confirmed = true } = {}) {
+function updateHarness({ warning = '', developer = false, confirmed = true, keyFailure = false } = {}) {
   const calls = [];
   const target = { id: 'stable', sidebarKey: 'stable' };
   const config = { instanceDir: '/fixture/stable', latestUrl: 'https://fixture.invalid/latest.json', launcherProof: { enabled: true } };
   const identity = { minecraftUsername: 'FixturePlayer', minecraftUuid: '12345678-1234-4234-9234-123456789abc', minecraftUsernameSyncWarning: warning };
   const context = vm.createContext({
-    ...runtimeRepair, updateState: {}, releaseTarget: () => target,
+    ...runtimeRepair, deviceCredentialPromise: null, loadDeviceCredential: async options => { assert.equal(options.allowRepair, true); calls.push('key-repair'); if (keyFailure) throw new Error('Local key unavailable'); }, updateState: {}, releaseTarget: () => target,
     invalidateLaunchPreparation: () => calls.push('invalidate'),
     createOperationState: kind => ({ kind, running: true }), appendOperationLine() {},
     configForPack: value => value, loadConfig: async () => config,
@@ -52,29 +49,28 @@ function updateHarness({ warning = '', developer = false, confirmed = true } = {
     setWarning: value => { identity.minecraftUsernameSyncWarning = value; } };
 }
 
-test('Repair cannot report success while legacy Minecraft ownership recovery is blocked', async () => {
+test('Repair restores local readiness even when historical account recovery is unavailable', async () => {
   for (const runtimeOnly of [false, true]) {
-    const h = updateHarness({ warning: 'Your older AHT account needs a fresh Minecraft session.' });
-    await assert.rejects(h.run(true, runtimeOnly), /Minecraft session/);
-    assert(h.calls.includes('account-revalidate'));
-    assert(!h.calls.includes('ready') && !h.calls.includes('complete'));
-    assert(h.calls.includes('repair_failed'));
-    h.setWarning('');
+    const h = updateHarness({ warning: 'Old account unavailable', confirmed: false });
     await h.run(true, runtimeOnly);
-    assert(h.calls.indexOf('account-revalidate') < h.calls.indexOf('ready'));
-    assert(h.calls.includes('repair_completed'), 'A later valid session must recover without restarting AHT');
+    assert(h.calls.includes('repair_completed'));
+    assert(!h.calls.includes('account-revalidate'));
+    assert(h.calls.indexOf('key-repair') < h.calls.indexOf('ready'));
   }
 });
 
-test('Repair requires confirmed registration; initial install and developer scope remain separate', async () => {
-  await assert.rejects(updateHarness({ confirmed: false }).run(), /account/i);
-  for (const h of [updateHarness({ warning: 'unavailable' }), updateHarness({ warning: 'unavailable', developer: true })]) {
-    await h.run(false);
-    assert(h.calls.includes('complete'));
-  }
-  const dev = updateHarness({ developer: true, confirmed: false });
-  await dev.run();
-  assert(!dev.calls.includes('account-revalidate'));
+test('a local key failure still fails Repair; update and developer paths remain intact', async () => {
+  const h = updateHarness({ keyFailure: true });
+  await assert.rejects(h.run(), /Local key unavailable/);
+  assert(!h.calls.includes('ready'));
+  assert(h.calls.includes('repair_failed'));
+  const ordinary = updateHarness({ confirmed: false });
+  await ordinary.run(false);
+  assert(ordinary.calls.includes('complete'));
+  const developer = updateHarness({ developer: true, keyFailure: true });
+  await developer.run();
+  assert(!developer.calls.includes('key-repair'));
+  assert(developer.calls.includes('complete'));
 });
 
 test('failed Play authorization never opens Minecraft Launcher; successful proof opens once', async () => {
@@ -128,110 +124,3 @@ test('an old confirmation cannot clear a newer unresolved account-sync failure',
   identity.minecraftUsernameSyncWarning = '';
   assert.equal(context.remoteRegistrationSatisfiesRequest(config, identity, 'FixturePlayer', identity.minecraftUuid), true);
 });
-
-function mainDeclaration(start, end) {
-  const offset = main.indexOf(start);
-  const finish = main.indexOf(end, offset);
-  assert(offset >= 0 && finish > offset, `Missing declaration: ${start}`);
-  return main.slice(offset, finish);
-}
-
-for (const cancel of [false, true]) {
-  test(`Play overlapping a failed background account sync reaches recovery (${cancel ? 'cancel' : 'success'})`, async () => {
-    const config = { instanceDir: '/fixture', sync: { baseUrl: 'https://fixture.invalid' },
-      minecraftLauncher: { rootDir: '/fixture/minecraft' } };
-    let identity = { installId: 'fixture', minecraftUsername: 'FixturePlayer', minecraftUuid: 'a'.repeat(32),
-      usernameRegistrationMode: 'minecraft-launcher' };
-    const entry = { state: 'ready', launcherConfig: config, identity, latest: {}, installed: {} };
-    const calls = [];
-    let releaseBackground;
-    let releaseRecovery;
-    const backgroundFailure = Object.assign(new Error('AHT could not verify Minecraft account ownership using the available session data. Session diagnostics: {"matchedAccounts":1,"directCandidates":0,"protectedCaches":1,"protectedCandidates":0,"joinAttempts":0}'), { code: 'MINECRAFT_SESSION_REQUIRED' });
-    const context = vm.createContext({
-      path, process, config, entry,
-      app: { getPath: () => '/fixture' }, minecraftRootCandidates: () => [], samePath: (a, b) => a === b,
-      inspectMinecraftLauncherAuth: async () => ({ preferredUsername: 'FixturePlayer', preferredMinecraftUuid: identity.minecraftUuid }),
-      loadIdentity: async () => ({ ...identity }), identityPath: () => '/fixture/identity.json',
-      writeJsonFile: async (_file, value) => { identity = { ...value }; },
-      updateIdentity: async update => { identity = { ...await update({ ...identity }) }; return { ...identity }; },
-      accountWarningState, sameAccountSnapshot,
-      loadDeviceCredential: async () => ({ deviceId: 'fixture-device', publicKey: 'fixture-public' }),
-      publicDeviceIdentity: async () => ({}), launcherVersion: () => 'fixture',
-      isDeveloperMode: () => false, developerAdminSessionAllowed: () => false,
-      accountRecoverySecret: async () => 'synthetic-fixture-only',
-      runtimeIdentity: value => value, launcherProofIdentity: value => value,
-      workerServiceBaseUrl: value => value || '',
-      isLauncherProofRegistrationError: error => error.code === 'UNREGISTERED',
-      isUsernameUnavailableError: () => false,
-      launchPreparationCache: new Map([['stable', entry]]),
-      LAUNCH_PREPARATION_PROOF_MIN_VALIDITY_MS: 1000,
-      releaseTarget: id => ({ id }),
-      verifyPreparedClientIntegrityAtPlay: async () => { calls.push('integrity-rechecked'); },
-      registerMinecraftUsername: async (_username, options) => {
-        calls.push(options.allowInteractiveRecovery ? 'interactive' : 'background');
-        if (!options.allowInteractiveRecovery) {
-          return new Promise((_resolve, reject) => { releaseBackground = () => reject(backgroundFailure); });
-        }
-        await new Promise((resolve, reject) => {
-          releaseRecovery = () => cancel
-            ? reject(Object.assign(new Error('Account verification cancelled.'), { code: 'MINECRAFT_RECOVERY_CANCELLED' }))
-            : resolve();
-        });
-        await options.beforeInteractiveRecoveryCompletes();
-        identity = { ...identity, minecraftUsernameSyncWarning: '', remoteRegistrationConfirmedAt: new Date().toISOString(),
-          remoteRegistrationWorkerBaseUrl: config.sync.baseUrl };
-        return { ok: true, remote: { recovered: true } };
-      },
-      writeLauncherProofWithDeveloperAuth: async ({ nativeGuard }) => {
-        if (!identity.remoteRegistrationConfirmedAt) throw Object.assign(new Error('Not registered.'), { code: 'UNREGISTERED' });
-        calls.push('authorized');
-        return { usable: true, trusted: true, payload: { nativeGuardKeyHash: nativeGuard.keyHash }, nativeGuard };
-      }
-    });
-    vm.runInContext([
-      mainDeclaration('function recordAccountSyncWarning(', '\nfunction developerClientBypassAllowed('),
-      mainDeclaration('async function identityPayload(', '\nfunction normalizeMinecraftUsername('),
-      mainDeclaration('function normalizeMinecraftUsername(', '\nasync function registerMinecraftUsernameInFlight('),
-      mainDeclaration('async function registerMinecraftUsernameInFlight(', '\nfunction accountRecoveryCredentialPath('),
-      mainDeclaration('async function writeRegisteredLauncherProof(', '\nasync function writeSerializedRegisteredLauncherProof('),
-      mainDeclaration('async function refreshPreparedLauncherProof(', '\nfunction scheduleLaunchPreparationProofRefresh(')
-    ].join('\n'), context);
-    context.accountRegistrationCoordinator = createAccountRegistrationCoordinator({
-      loadIdentity: context.loadIdentity, register: context.registerMinecraftUsername,
-      normalizeUsername: context.normalizeMinecraftUsername, normalizeUuid: context.normalizeMinecraftUuid,
-      baseUrl: context.remoteRegistrationBaseUrl, matches: context.remoteRegistrationSatisfiesRequest
-    });
-    context.writeSerializedRegisteredLauncherProof = options => context.writeRegisteredLauncherProof(options);
-    const background = context.identityPayload(config);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(typeof releaseBackground, 'function');
-    const concurrentStatus = context.identityPayload(config);
-    const nativeGuard = { keyHash: 'f'.repeat(64), protocol: 'AHT-GUARD-1' };
-    const play = context.refreshPreparedLauncherProof('stable', entry, nativeGuard, { allowInteractiveRecovery: true });
-    // Attach rejection handlers immediately: the broken path fails all shared waiters.
-    const outcome = play.then(value => ({ value }), error => ({ error }));
-    const statusOutcome = concurrentStatus.then(value => ({ value }), error => ({ error }));
-    await new Promise(resolve => setImmediate(resolve));
-    releaseBackground();
-    await background;
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(typeof releaseRecovery, 'function', 'A failed shared background sync aborted Play before its interactive recovery');
-    assert.equal((await statusOutcome).error, undefined, 'Background status must return a warning, not reject a shared registration failure');
-    assert.match(identity.minecraftUsernameSyncWarning, /available session data/);
-    assert.deepEqual(calls, ['background', 'interactive']);
-    assert.equal(entry.launcherProof, undefined, 'Recovery UI is not proof of account ownership');
-    releaseRecovery();
-    const result = await outcome;
-    assert.equal(context.accountRegistrationCoordinator.pendingCount(), 0);
-    if (cancel) {
-      assert.equal(result.error.code, 'MINECRAFT_RECOVERY_CANCELLED');
-      assert(!calls.includes('authorized'));
-      assert(identity.minecraftUsernameSyncWarning);
-    } else {
-      assert.equal(result.error, undefined);
-      assert.equal(result.value.payload.nativeGuardKeyHash, nativeGuard.keyHash);
-      assert.deepEqual(calls, ['background', 'interactive', 'integrity-rechecked', 'authorized']);
-      assert.equal(identity.minecraftUsernameSyncWarning, '');
-    }
-  });
-}

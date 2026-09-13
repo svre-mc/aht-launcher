@@ -5,6 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { inspectMinecraftLauncherAuth, ensureMinecraftLauncherProfile } from '../src/minecraftLauncherProfile.js';
 import { accountWarningState, sameAccountSnapshot } from '../src/accountIdentityState.js';
+import { selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY } from '../src/minecraftSessionIdentity.js';
 
 const source = await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8');
 function declaration(start, end) {
@@ -27,9 +28,11 @@ await account(curseForgeRoot, 'OldPackPlayer');
 let savedIdentity = { installId: 'fixture-install' };
 let signedIdentity = null;
 let registrationError = '';
+let proofError = '';
 const cache = new Map();
 const context = vm.createContext({
   process: { platform: 'linux', env: {} }, path,
+  isDeveloperMode: () => false, selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY,
   app: { getPath: () => directory }, launcherProofStorageDir: (value) => value,
   trustedMinecraftOpenCommandAllowed: () => false, defaultMinecraftRoot: () => nativeRoot,
   firstExistingCurseForgeMinecraftRoot: () => { throw new Error('Linux must not auto-select a CurseForge root'); },
@@ -53,13 +56,13 @@ const context = vm.createContext({
   refreshRemoteMinecraftRegistration: async (_config, identity) => identity,
   publicDeviceIdentity: async () => ({ deviceId: 'fixture-device' }), launcherVersion: () => '0.2.07',
   launchPreparationCache: cache, LAUNCH_PREPARATION_PROOF_MIN_VALIDITY_MS: 1000,
-  writeSerializedRegisteredLauncherProof: async ({ identity }) => { signedIdentity = identity; return { usable: true, trusted: true }; },
+  writeSerializedRegisteredLauncherProof: async ({ identity }) => { if (proofError) throw new Error(proofError); signedIdentity = identity; return { usable: true, trusted: true }; },
   scheduleLaunchPreparationProofRefresh: () => {}
 });
 vm.runInContext(
   declaration('function recordAccountSyncWarning(', '\nfunction developerClientBypassAllowed(')
   + declaration('async function minecraftLauncherRuntimeConfig(', '\nfunction localReleaseCandidates(')
-  + declaration('async function identityPayload(', '\nfunction normalizeMinecraftUsername(')
+  + declaration('async function minecraftSessionIdentityPayload(', '\nfunction normalizeMinecraftUsername(')
   + declaration('async function refreshPreparedLauncherProof(', '\nfunction scheduleLaunchPreparationProofRefresh('), context
 );
 const configured = { instanceDir: path.join(directory, 'Published AHT'), minecraftLauncher: { rootDir: curseForgeRoot, rootSelection: 'automatic', profileId: 'a-hard-time-dregora' } };
@@ -81,10 +84,14 @@ assert.match(profiles.profiles['a-hard-time-dregora'].lastVersionId, /1\.12\.2.*
 assert.equal((await inspectMinecraftLauncherAuth(nativeRoot)).preferredUsername, 'NativePlayer');
 
 savedIdentity = { installId: 'fixture-install' }; signedIdentity = null; registrationError = 'Account registration was rejected';
-await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), /Account registration was rejected/);
-assert.equal(signedIdentity, null, 'Registration failure must never bypass the server proof gate');
-assert.equal(savedIdentity.minecraftUsernameSyncWarning, registrationError, 'Persist the actual registration warning for Retry');
+await context.refreshPreparedLauncherProof('stable', entry);
+assert.equal(signedIdentity.minecraftUsername, 'NativePlayer', 'Legacy AHT registration must not block the active Minecraft profile');
+assert.equal(savedIdentity.minecraftUsernameSyncWarning, '');
 assert.equal(savedIdentity.minecraftLauncherDetectedUsername, 'NativePlayer');
+proofError = 'Client authorization rejected'; signedIdentity = null;
+await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), /Client authorization rejected/);
+assert.equal(signedIdentity, null, 'Installation-proof rejection must still fail Play');
+proofError = '';
 registrationError = ''; config.minecraftLauncher.autoImportAccount = false; savedIdentity = { installId: 'fixture-install' };
 await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), /Sign in to your Minecraft account/);
-console.log('PASS: Linux automatic root migration, manual roots, uncached active account/UUID import, published profile path, and fail-closed registration.');
+console.log('PASS: Linux root/profile selection, legacy-registration-independent Play and fail-closed client authorization.');

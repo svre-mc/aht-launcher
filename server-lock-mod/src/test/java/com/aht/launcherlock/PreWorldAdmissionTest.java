@@ -5,10 +5,79 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import net.minecraft.network.PacketBuffer;
 import net.minecraft.network.play.client.*;
 import net.minecraft.network.play.server.*;
+import net.minecraftforge.fml.common.network.internal.FMLProxyPacket;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class PreWorldAdmissionTest {
+    @Test public void unverifiedModSetupIsNotQueuedAndIsReleased() {
+        PreWorldAdmission.Pending pending = new PreWorldAdmission.Pending(null,null,null,null);
+        EmbeddedChannel channel = new EmbeddedChannel(pending);
+        PacketBuffer data = new PacketBuffer(Unpooled.buffer().writeByte(3));
+        assertFalse(channel.writeOutbound(new FMLProxyPacket(data, "CreativeCore")));
+        assertEquals(0, data.refCnt());
+        pending.worldEntryAuthorized = true;
+        SPacketJoinGame join = new SPacketJoinGame();
+        channel.writeOutbound(join);
+        assertSame(join, channel.readOutbound());
+        assertNull(channel.readOutbound());
+        channel.finishAndReleaseAll();
+    }
+    @Test public void queuedSetupIsReleasedOnDisconnectOrHandlerRemoval() {
+        for (boolean remove : new boolean[]{false,true}) {
+            PreWorldAdmission.Pending pending = new PreWorldAdmission.Pending(null,null,null,null);
+            EmbeddedChannel channel = new EmbeddedChannel(pending);
+            pending.worldEntryAuthorized = true;
+            PacketBuffer data = new PacketBuffer(Unpooled.buffer().writeByte(3));
+            io.netty.channel.ChannelPromise promise = channel.newPromise();
+            channel.pipeline().write(new FMLProxyPacket(data, "CreativeCore"), promise);
+            assertFalse(promise.isDone());
+            if (remove) channel.pipeline().remove(pending); else channel.close();
+            assertEquals(0, data.refCnt());
+            assertTrue(promise.isDone()); assertFalse(promise.isSuccess());
+            channel.finishAndReleaseAll();
+        }
+    }
+    @Test public void setupFloodHasPacketAndByteLimits() {
+        for (boolean large : new boolean[]{false,true}) {
+            PreWorldAdmission.Pending pending = new PreWorldAdmission.Pending(null,null,null,null);
+            EmbeddedChannel channel = new EmbeddedChannel(pending);
+            pending.worldEntryAuthorized = true;
+            java.util.List<PacketBuffer> held = new java.util.ArrayList<>();
+            int count = large ? 2 : PreWorldAdmission.Pending.MAX_SETUP_PACKETS+1;
+            int size = large ? PreWorldAdmission.Pending.MAX_SETUP_BYTES : 1;
+            for (int i=0; i<count; i++) {
+                PacketBuffer data = new PacketBuffer(Unpooled.buffer(size).writeZero(size)); held.add(data);
+                // An explicit promise lets the test observe fail-closed overflow
+                // without EmbeddedChannel rethrowing the expected failed write.
+                channel.pipeline().write(new FMLProxyPacket(data,"CreativeCore"), channel.newPromise());
+            }
+            assertFalse(channel.isOpen());
+            for (PacketBuffer data : held) assertEquals(0,data.refCnt());
+            channel.finishAndReleaseAll();
+        }
+    }
+    @Test public void forgeConnectionConfigurationSurvivesButWaitsForJoinGame() {
+        PreWorldAdmission.Pending pending = new PreWorldAdmission.Pending(null,null,null,null);
+        EmbeddedChannel channel = new EmbeddedChannel(pending);
+        pending.worldEntryAuthorized = true;
+        PacketBuffer forgeData = new PacketBuffer(Unpooled.buffer().writeByte(7));
+        FMLProxyPacket config = new FMLProxyPacket(forgeData, "CreativeCore");
+        PacketBuffer vanillaData = new PacketBuffer(Unpooled.buffer().writeByte(8));
+        SPacketCustomPayload extra = new SPacketCustomPayload("setup", vanillaData);
+        assertFalse(channel.writeOutbound(config));
+        assertFalse(channel.writeOutbound(extra));
+        assertFalse(channel.writeInbound(new CPacketPlayer()));
+        SPacketJoinGame join = new SPacketJoinGame();
+        assertTrue(channel.writeOutbound(join));
+        assertSame(join, channel.readOutbound());
+        assertSame("Forge fires connection config before JoinGame; it must not be discarded", config, channel.readOutbound());
+        assertSame(extra, channel.readOutbound());
+        assertEquals(7, forgeData.readByte());
+        assertEquals(8, vanillaData.readByte());
+        forgeData.release(); vanillaData.release();
+        channel.finishAndReleaseAll();
+    }
     @Test public void unavailableVerificationKeepsDetailsInServerDiagnosticsOnly() {
         for (String stage : new String[] {"runtime protection", "client audit", "launcher proof", "world entry", null})
             assertEquals("Error", PreWorldAdmission.failureMessage(stage));

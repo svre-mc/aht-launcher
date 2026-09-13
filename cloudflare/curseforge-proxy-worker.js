@@ -1,5 +1,6 @@
 import { isLegacyMinecraftAccount, recoverMinecraftAccount } from './minecraft-account-recovery.js';
 import { LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH } from './launcher-download-policy.js';
+import { MINECRAFT_SESSION_AUTHORITY, sessionAccountLinked, bindAuthenticatedMinecraftSession } from './minecraft-session-authority.js';
 
 const CURSEFORGE_BASE = 'https://api.curseforge.com/v1';
 const RELEASE_PATHS = new Set([
@@ -2107,6 +2108,10 @@ async function createLauncherProof(request, env, origin) {
   if (developerModeRequested && !developerAuthorized) {
     return privateJson({ error: 'Developer launcher proof requires developer authentication.' }, 401, origin);
   }
+  const sessionIdentity = body.identityAuthority === MINECRAFT_SESSION_AUTHORITY;
+  if (body.identityAuthority && (!sessionIdentity || !v2Requested || developerModeRequested)) {
+    return privateJson({ error: 'Invalid launcher identity authority.' }, 400, origin);
+  }
   const reportedLauncherVersion = cleanString(body.launcherVersion || '', 40);
   const reportedAppVersion = cleanString(body.appVersion || '', 40);
   if (v2Requested && (!parsedLauncherVersion(reportedLauncherVersion)
@@ -2132,8 +2137,12 @@ async function createLauncherProof(request, env, origin) {
     return privateJson(failure, failure.status, origin);
   }
   const requestedMinecraftUuid = normalizeMinecraftUuid(body.minecraftUuid);
+  if (sessionIdentity && !requestedMinecraftUuid) {
+    return privateJson({ error: 'Select a Minecraft account in Minecraft Launcher.', code: 'MINECRAFT_PROFILE_REQUIRED' }, 400, origin);
+  }
   const requestedDeviceId = cleanString(body.deviceId || '', 80).toLowerCase();
   const device = await verifyDeviceAssertion(body, 'launcher-proof', {
+    ...(sessionIdentity ? { identityAuthority: MINECRAFT_SESSION_AUTHORITY } : {}),
     ...(body.nativeGuardKeyHash ? { nativeGuardKeyHash: cleanString(body.nativeGuardKeyHash,64) } : {}),
     protocol: requestedProtocol || LEGACY_LAUNCHER_PROOF_PROTOCOL,
     launchId: cleanString(body.launchId || '', 80),
@@ -2158,6 +2167,7 @@ async function createLauncherProof(request, env, origin) {
   if (env.AHT_DATA && !developerAuthorized) {
     const existing = await env.AHT_DATA.get(minecraftUsernameKey(minecraftUsername));
     existingRecord = existing ? await existing.json().catch(() => null) : null;
+    if (!sessionIdentity) {
     if (!existingRecord || existingRecord.installId !== installId) {
       return privateJson({ error: 'Minecraft username is not registered to this launcher install.' }, 403, origin);
     }
@@ -2178,13 +2188,14 @@ async function createLauncherProof(request, env, origin) {
         return privateJson({ error: 'Minecraft username is not registered to this launcher install with verified account recovery.' }, 403, origin);
       }
     }
+    }
   }
 
   const clientIp = requestIpv4(request);
   const network = await requestNetworkAssessment(request, env, clientIp);
   const access = await evaluateAccess(env, {
     username: minecraftUsername,
-    minecraftUuid: developerAuthorized ? requestedMinecraftUuid : normalizeMinecraftUuid(existingRecord?.minecraftUuid),
+    minecraftUuid: developerAuthorized || sessionIdentity ? requestedMinecraftUuid : normalizeMinecraftUuid(existingRecord?.minecraftUuid),
     deviceId: device.ok ? device.deviceId : normalizedAccessValue('device', existingRecord?.deviceId),
     ip: clientIp.ip,
     ipv4: clientIp.ipv4,
@@ -2192,7 +2203,18 @@ async function createLauncherProof(request, env, origin) {
   });
   if (!access.allowed) return accessDeniedResponse(access, origin);
 
-  if (existingRecord && !developerAuthorized) {
+  // Repair cannot clear a restriction by replacing the installation's key.
+  // Issuing an installation proof does not modify an AHT account record.
+  if (sessionIdentity && existingRecord && (!existingRecord.minecraftUuid
+      || normalizeMinecraftUuid(existingRecord.minecraftUuid) === requestedMinecraftUuid)) {
+    const previousAccess = await evaluateAccess(env, {
+      username: minecraftUsername, minecraftUuid: requestedMinecraftUuid,
+      deviceId: normalizedAccessValue('device', existingRecord.deviceId)
+    });
+    if (!previousAccess.allowed) return accessDeniedResponse(previousAccess, origin);
+  }
+
+  if (existingRecord && !developerAuthorized && !sessionIdentity) {
     const connectionAvailable = clientIp.available;
     existingRecord = {
       ...existingRecord,
@@ -2232,7 +2254,7 @@ async function createLauncherProof(request, env, origin) {
 
   const issuedAtMs = Date.now();
   const launchId = v2Requested ? crypto.randomUUID() : cleanString(body.launchId || crypto.randomUUID(), 80);
-  const minecraftUuid = developerAuthorized
+  const minecraftUuid = developerAuthorized || sessionIdentity
     ? normalizeMinecraftUuid(body.minecraftUuid)
     : normalizeMinecraftUuid(existingRecord?.minecraftUuid);
   if (v2Requested && !minecraftUuid) {
@@ -2260,6 +2282,13 @@ async function createLauncherProof(request, env, origin) {
     ...(v2Requested ? { minecraftUuid } : {}),
     installId,
     deviceId: device.ok ? device.deviceId : normalizedAccessValue('device', existingRecord?.deviceId),
+    ...(sessionIdentity ? {
+      identityAuthority: MINECRAFT_SESSION_AUTHORITY,
+      devicePublicKey: device.publicKey,
+      accountLinked: sessionAccountLinked(existingRecord, {
+        minecraftUsername, minecraftUuid, installId, deviceId: device.deviceId, devicePublicKey: device.publicKey
+      })
+    } : {}),
     appVersion: cleanString(body.appVersion, 40),
     launcherVersion: currentLauncherVersion,
     launcherVersionAuthority: v2Requested && device.ok
@@ -2449,12 +2478,24 @@ async function verifyLauncherProofRequest(request, env, options = {}) {
   if (!launcherVersionAccepted(currentLauncherVersion, versionPolicy)) {
     return launcherVersionFailure(currentLauncherVersion, versionPolicy);
   }
-  if (env.AHT_DATA && !developerProof) {
+  const sessionIdentity = payload.identityAuthority === MINECRAFT_SESSION_AUTHORITY;
+  if (payload.identityAuthority && (!sessionIdentity || !v2 || developerProof)) {
+    return { ok: false, status: 401, error: 'A valid AHT Launcher session is required.' };
+  }
+  const serverIdentityLink = sessionIdentity && options.serverAuthenticatedSession === true;
+  // Account authority comes from the current server-confirmed record below,
+  // not the launch-time accountLinked hint. This also enables verified Phoenix
+  // reporting in the first game session immediately after authenticated admission.
+  if (sessionIdentity && !env.AHT_DATA) {
+    return { ok: false, status: 503, error: 'AHT Proxy is temporarily unavailable.' };
+  }
+  if (env.AHT_DATA && !developerProof && !serverIdentityLink) {
     const registration = await env.AHT_DATA.get(minecraftUsernameKey(username));
     const record = registration ? await registration.json().catch(() => null) : null;
     const registeredDeviceId = normalizedAccessValue('device', record?.deviceId);
     if (!record || record.installId !== installId
         || (v2 && normalizeMinecraftUuid(record.minecraftUuid) !== minecraftUuid)
+        || (sessionIdentity && !sessionAccountLinked(record, payload))
         || (registeredDeviceId && registeredDeviceId !== deviceId)) {
       return { ok: false, status: 403, error: 'This Minecraft username is not registered to this launcher install.' };
     }
@@ -2479,6 +2520,62 @@ async function verifyLauncherProofRequest(request, env, options = {}) {
       source: versionPolicy.source
     }
   };
+}
+
+async function linkAuthenticatedMinecraftSession(request, env, origin) {
+  const configured = String(env.AHT_LAUNCHER_STATE_SERVER_TOKEN || '');
+  const supplied = (request.headers.get('Authorization') || '').replace(/^Bearer /, '');
+  if (configured.length < 32 || supplied.length > 512 || !(await secureStringEqual(supplied, configured))) {
+    return privateJson({ error: 'Unauthorized' }, 401, origin);
+  }
+  if (!env.AHT_DATA) return privateJson({ error: 'Service unavailable.' }, 503, origin);
+  const body = await readBody(request, 12_288);
+  const verified = await verifyLauncherProofRequest(new Request(request.url, {
+    headers: { Authorization: `Bearer ${cleanString(body.proof, 8192)}` }
+  }), env, { serverAuthenticatedSession: true });
+  if (!verified.ok) return privateJson({ error: 'Session unavailable.' }, verified.status, origin);
+  const proof = verified.payload;
+  if (proof.identityAuthority !== MINECRAFT_SESSION_AUTHORITY || proof.launcherChannel !== 'player') {
+    return privateJson({ error: 'Invalid session.' }, 400, origin);
+  }
+  const key = minecraftUsernameKey(proof.minecraftUsername);
+  const stored = await env.AHT_DATA.get(key);
+  const record = stored ? await stored.json() : null;
+  let next;
+  try {
+    next = bindAuthenticatedMinecraftSession(record, proof, {
+      username: normalizeMinecraftUsername(body.username), minecraftUuid: normalizeMinecraftUuid(body.minecraftUuid)
+    });
+  } catch {
+    return privateJson({ error: 'Account identity conflict.' }, 409, origin);
+  }
+  for (const deviceId of new Set([proof.deviceId, record?.deviceId].filter(Boolean))) {
+    const access = await evaluateAccess(env, { username: proof.minecraftUsername, minecraftUuid: proof.minecraftUuid, deviceId });
+    if (!access.allowed) return privateJson({ error: 'Access restricted.' }, 403, origin);
+  }
+  if (!sessionAccountLinked(record, proof)) {
+    if (stored && !stored.etag) return privateJson({ error: 'Service unavailable.' }, 503, origin);
+    const committed = await env.AHT_DATA.put(key, JSON.stringify(next), {
+      httpMetadata: { contentType: 'application/json' },
+      onlyIf: stored ? { etagMatches: stored.etag } : { etagDoesNotMatch: '*' }
+    });
+    if (!committed) return privateJson({ error: 'Account changed. Retry.' }, 409, origin);
+  } else {
+    next = record;
+  }
+  // Repeatable after a partial metadata/index failure; never runs on a game thread.
+  await indexAccountIdentity(env, next);
+  if (next.launcherStateBindingPending) {
+    await notifyLauncherServerState(env, 'minecraft-session-linked', true);
+    const current = await env.AHT_DATA.get(key);
+    const currentRecord = current ? await current.json() : null;
+    if (current?.etag && sessionAccountLinked(currentRecord, proof) && currentRecord.launcherStateBindingPending) {
+      await env.AHT_DATA.put(key, JSON.stringify({ ...currentRecord, launcherStateBindingPending: false }), {
+        httpMetadata: { contentType: 'application/json' }, onlyIf: { etagMatches: current.etag }
+      });
+    }
+  }
+  return new Response(null, { status: 204, headers: { 'Cache-Control': 'private, no-store' } });
 }
 
 function boundedPhoenixInteger(value, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
@@ -4093,6 +4190,9 @@ export default {
       }
       if (request.method === 'POST' && url.pathname === '/api/launcher-proof') {
         return await createLauncherProof(request, env, origin);
+      }
+      if (request.method === 'POST' && url.pathname === '/server/minecraft-session') {
+        return await linkAuthenticatedMinecraftSession(request, env, origin);
       }
       if ((request.method === 'GET' || request.method === 'POST') && url.pathname === '/api/launcher-proof/verify') {
         return await verifyLauncherProofEndpoint(request, env, origin);

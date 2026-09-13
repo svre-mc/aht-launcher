@@ -57,11 +57,12 @@ import {
   preflightJava8Runtime
 } from '../src/forgeInstaller.js';
 import { ensureBundledJava8 } from '../src/bundledJava8.js';
-import { prepareRuntimeOnlyRepair, verifyRepairedJava, verifyRepairedAccount } from '../src/runtimeRepair.js';
+import { prepareRuntimeOnlyRepair, verifyRepairedJava } from '../src/runtimeRepair.js';
 import { createMinecraftInteractiveRecovery } from '../src/minecraftInteractiveRecovery.js';
 import { createAccountRegistrationCoordinator } from '../src/accountRegistrationCoordinator.js';
 import { createLauncherIdentityStore } from '../src/launcherIdentityStore.js';
 import { accountWarningState, registeredAccountState, sameAccountSnapshot } from '../src/accountIdentityState.js';
+import { MINECRAFT_SESSION_AUTHORITY, selectedMinecraftSessionState } from '../src/minecraftSessionIdentity.js';
 import { createAccountStatusRefresh } from '../src/accountStatusRefresh.js';
 import { registerMinecraftAccount } from '../src/minecraftRegistrationService.js';
 import { requestServiceJson } from '../src/serviceTransport.js';
@@ -1991,8 +1992,8 @@ async function persistDeviceCredential(file, created, recovery = {}) {
   return created;
 }
 
-async function recoverDeveloperDeviceCredential(file, cause) {
-  if (!isDeveloperMode() || !safeStorageAvailable()) throw cause;
+async function recoverDeveloperDeviceCredential(file, cause, allowRepair = false) {
+  if ((!isDeveloperMode() && !allowRepair) || !safeStorageAvailable()) throw cause;
   const recoveryDir = path.join(app.getPath('userData'), 'recovery-backups');
   await ensureDir(recoveryDir);
   const backupName = `device-identity-unreadable-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`;
@@ -2000,14 +2001,14 @@ async function recoverDeveloperDeviceCredential(file, cause) {
   await fs.copyFile(file, backupFile, fsSync.constants.COPYFILE_EXCL);
   const created = createDeviceCredential();
   await persistDeviceCredential(file, created, {
-    recoveredFrom: 'unreadable-developer-device-identity',
+    recoveredFrom: 'unreadable-device-identity',
     previousIdentityBackup: backupFile
   });
-  console.warn('Developer device identity was unreadable and was securely recreated after preserving the original file.');
+  console.warn('Device identity was securely recreated after preserving the unreadable original.');
   return created;
 }
 
-async function loadDeviceCredential() {
+async function loadDeviceCredential({ allowRepair = false } = {}) {
   if (deviceCredentialPromise) return deviceCredentialPromise;
   deviceCredentialPromise = (async () => {
     const file = deviceIdentityPath();
@@ -2026,7 +2027,7 @@ async function loadDeviceCredential() {
         });
       } catch (error) {
         const wrapped = new Error(`Device identity could not be decrypted: ${error.message || error}`);
-        return recoverDeveloperDeviceCredential(file, wrapped);
+        return recoverDeveloperDeviceCredential(file, wrapped, allowRepair);
       }
     }
     if (process.env.AHT_ALLOW_UNENCRYPTED_DEVICE_KEY !== '1' && !safeStorageAvailable()) {
@@ -3862,6 +3863,26 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
     devicePublicKey: deviceCredential.publicKey
   }), { requireNativeGuard: Boolean(nativeGuard) });
   const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
+  if (!isDeveloperMode()) {
+    if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || !normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID)) {
+      throw Object.assign(new Error('Select your account in Minecraft Launcher, then click Play again.'), { code: 'MINECRAFT_PROFILE_REQUIRED' });
+    }
+    const proof = await writeLauncherProofWithDeveloperAuth({
+      config, identity: { ...proofIdentity, identityAuthority: MINECRAFT_SESSION_AUTHORITY },
+      latest, installed, deviceCredential, nativeGuard
+    });
+    // Remote linking is optional metadata; it cannot turn a valid Play into a failure.
+    if (typeof proof.payload?.accountLinked === 'boolean') {
+      await updateIdentity(current => {
+        if (!sameAccountSnapshot(current, identity)) return current;
+        const linked = proof.payload.accountLinked;
+        if (!linked && !current.remoteRegistrationConfirmedAt && !current.remoteRegistrationWorkerBaseUrl) return current;
+        return { ...current, remoteRegistrationConfirmedAt: linked ? new Date().toISOString() : '',
+          remoteRegistrationWorkerBaseUrl: linked ? remoteRegistrationBaseUrl(config) : '' };
+      }, { expectedInstallId: identity.installId }).catch(() => {});
+    }
+    return proof;
+  }
   const recoverySecret = developerAdminSessionAllowed() || !username
     ? ''
     : await accountRecoverySecret(config, username);
@@ -4017,7 +4038,27 @@ async function acceptLauncherLegal(payload = {}) {
   return { ok: true, acceptedAt: record.acceptedAt };
 }
 
+async function minecraftSessionIdentityPayload(config = null) {
+  const expected = await loadIdentity();
+  let selected = {};
+  if (config?.minecraftLauncher?.rootDir && config.minecraftLauncher.autoImportAccount !== false) {
+    const auth = await inspectMinecraftLauncherAuth(config.minecraftLauncher.rootDir, {
+      extraRoots: [...(config.minecraftLauncher.syncRoots || []), ...minecraftRootCandidates(process.platform, {
+        ...process.env, HOME: process.env.HOME || app.getPath('home'), USERPROFILE: process.env.USERPROFILE || app.getPath('home')
+      })].filter(root => !samePath(root, config.minecraftLauncher.rootDir))
+    });
+    selected = { username: normalizeMinecraftUsername(auth.preferredUsername), minecraftUuid: normalizeMinecraftUuid(auth.preferredMinecraftUuid) };
+  }
+  const proposed = selectedMinecraftSessionState(expected, expected, selected);
+  const current = JSON.stringify(proposed) === JSON.stringify(expected) ? expected
+    : await updateIdentity(identity => selectedMinecraftSessionState(identity, expected, selected), { expectedInstallId: expected.installId });
+  return { ...current, ...await publicDeviceIdentity(),
+    minecraftLauncherDetectedUuid: selected.minecraftUuid || '', identityAuthority: MINECRAFT_SESSION_AUTHORITY,
+    appVersion: launcherVersion(), platform: process.platform, arch: process.arch };
+}
+
 async function identityPayload(config = null, options = {}) {
+  if (!isDeveloperMode()) return minecraftSessionIdentityPayload(config);
   const allowProtectedStorage = options.allowProtectedStorage !== false;
   const allowRemoteSync = options.allowRemoteSync !== false;
   const forceAccountSync = options.forceAccountSync === true;
@@ -6232,21 +6273,10 @@ async function runUpdate(forceRepair = false, options = {}) {
       ? { ...storedIntegrity, source: 'developer-update-bypass', developerClientBypass: true }
       : storedIntegrity;
     if (forceRepair && !isDeveloperMode()) {
-      updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying Minecraft account', percent: 99 };
-      identity = await identityPayload(launcherConfig, {
-        forceAccountSync: true,
-        beforeInteractiveRecoveryCompletes: async () => {
-          const afterRecovery = await scanCurrentManagedIntegrity(config, latestAfterInstall);
-          if (!afterRecovery.valid || Number(afterRecovery.counts?.corrupted || 0) !== 0) throw new Error('Modified client. Repair.');
-          preparedIntegrity = await writeIntegrityState(config, afterRecovery, 'repair');
-        }
-      });
-      verifyRepairedAccount({
-        identity,
-        registrationConfirmed: remoteRegistrationSatisfiesRequest(
-          launcherConfig, identity, identity.minecraftUsername, identity.minecraftUuid || identity.minecraftUUID
-        )
-      });
+      updateState.progress = { ...(updateState.progress || {}), phase: 'Finishing repair', percent: 99 };
+      deviceCredentialPromise = null;
+      await loadDeviceCredential({ allowRepair: true });
+      identity = await identityPayload(launcherConfig);
     }
     try {
       await publishCompletedUpdatePreparation({

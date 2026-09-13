@@ -8,6 +8,7 @@ test('explicit account retry reads restored recovery credentials instead of a st
   const identity = { installId: 'fixture-install', minecraftUsername: 'AuditAlpha', minecraftUuid: 'a'.repeat(32) };
   let stored = 'old-fixture-credential'; let observed = ''; let reads = 0;
   const context = vm.createContext({ process, accountRecoverySecretPromises: new Map(),
+    isDeveloperMode: () => true,
     normalizeMinecraftUsername: value => String(value || '').trim(), normalizeMinecraftUuid: value => value,
     resolveAccountRecoverySecret: async () => { reads++; return stored; }, loadIdentity: async () => ({ ...identity }),
     publicDeviceIdentity: async () => ({}), launcherVersion: () => 'fixture',

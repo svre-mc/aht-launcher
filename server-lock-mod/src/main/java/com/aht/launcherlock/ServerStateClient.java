@@ -11,6 +11,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CodingErrorAction;
@@ -25,7 +26,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 final class ServerStateClient {
     private static final String STATE_PATH = "/server/launcher-state";
@@ -34,14 +34,9 @@ final class ServerStateClient {
     static final int MAX_MESSAGE_BYTES = 1900 * 1024;
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final AtomicBoolean RUNNING = new AtomicBoolean(false);
-    private static final AtomicReference<ServerPolicySnapshot> CURRENT =
-            new AtomicReference<ServerPolicySnapshot>();
-
-    private static volatile boolean connected;
-    private static volatile long lastActivityMillis;
-    private static volatile SSLSocket activeSocket;
-    private static volatile Thread workerThread;
     private static volatile Config activeConfig;
+
+    interface ChannelSocketFactory { Socket create() throws IOException; }
 
     private ServerStateClient() {
     }
@@ -49,11 +44,27 @@ final class ServerStateClient {
     static synchronized void start(String endpoint, String serverToken, String expectedKeyFingerprint,
                                    String expectedPackId, int connectTimeoutMillis,
                                    int heartbeatMillis) {
+        start(endpoint, serverToken, expectedKeyFingerprint, expectedPackId, connectTimeoutMillis,
+                heartbeatMillis, new ChannelSocketFactory() {
+                    @Override public Socket create() throws IOException {
+                        return (SSLSocket) SSLSocketFactory.getDefault().createSocket();
+                    }
+                });
+    }
+
+    static synchronized void startForTests(String endpoint, String serverToken, String expectedKeyFingerprint,
+                                           String expectedPackId, ChannelSocketFactory sockets) {
+        start(endpoint, serverToken, expectedKeyFingerprint, expectedPackId, 1000, 10000, sockets);
+    }
+
+    private static void start(String endpoint, String serverToken, String expectedKeyFingerprint,
+                              String expectedPackId, int connectTimeoutMillis, int heartbeatMillis,
+                              ChannelSocketFactory sockets) {
         stop();
         Config config;
         try {
             config = new Config(endpoint, serverToken, expectedKeyFingerprint, expectedPackId,
-                    connectTimeoutMillis, heartbeatMillis);
+                    connectTimeoutMillis, heartbeatMillis, sockets);
         } catch (IllegalArgumentException error) {
             PackVersionLock.LOG.error("AHT Launcher Lock state channel configuration is invalid; reconnects will fail closed: {}",
                     error.getMessage());
@@ -61,41 +72,35 @@ final class ServerStateClient {
         }
         activeConfig = config;
         RUNNING.set(true);
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                runLoop(config);
-            }
-        }, "AHT-Launcher-State-Channel");
-        thread.setDaemon(true);
-        thread.setPriority(Thread.NORM_PRIORITY - 1);
-        workerThread = thread;
-        thread.start();
+        for (final Session session : config.sessions) {
+            Thread thread = new Thread(new Runnable() {
+                @Override public void run() { runLoop(config, session); }
+            }, "AHT-Launcher-State-Channel-" + (session.slot + 1));
+            thread.setDaemon(true);
+            thread.setPriority(Thread.NORM_PRIORITY - 1);
+            session.thread = thread;
+            thread.start();
+        }
     }
 
     static synchronized void stop() {
         RUNNING.set(false);
-        connected = false;
-        lastActivityMillis = 0L;
-        CURRENT.set(null);
-        SSLSocket socket = activeSocket;
-        activeSocket = null;
-        if (socket != null) {
-            try { socket.close(); } catch (IOException ignored) {}
-        }
-        Thread thread = workerThread;
-        workerThread = null;
-        if (thread != null) thread.interrupt();
+        Config config = activeConfig;
         activeConfig = null;
+        if (config == null) return;
+        for (Session session : config.sessions) {
+            config.connections.disconnected(session.slot);
+            Socket socket = session.socket;
+            if (socket != null) try { socket.close(); } catch (IOException ignored) {}
+            Thread thread = session.thread;
+            if (thread != null) thread.interrupt();
+        }
     }
 
     static ServerPolicySnapshot currentSnapshot() {
         Config config = activeConfig;
-        if (!RUNNING.get() || !connected || config == null) return null;
-        if (System.currentTimeMillis() - lastActivityMillis > config.heartbeatMillis * 3L) {
-            return null;
-        }
-        return CURRENT.get();
+        if (config == null || !active(config)) return null;
+        return config.connections.current(System.nanoTime());
     }
 
     static String currentRevision() {
@@ -106,8 +111,10 @@ final class ServerStateClient {
     static String statusText() {
         ServerPolicySnapshot snapshot = currentSnapshot();
         if (snapshot == null) return "unavailable; waiting for a fresh signed policy";
+        Config config = activeConfig;
         return "connected; signed policy " + snapshot.revision.substring(0, 12)
-                + "; activity " + Math.max(0L, System.currentTimeMillis() - lastActivityMillis) + " ms ago";
+                + "; healthy connections " + (config == null ? 0
+                : config.connections.healthyCount(System.nanoTime())) + "/2";
     }
 
     private static boolean active(Config config) {
@@ -128,55 +135,77 @@ final class ServerStateClient {
         return frame.payload;
     }
 
-    private static void runLoop(Config config) {
+    private static void runLoop(Config config, Session session) {
         long retryMillis = 1000L;
-        long lastWarningAt = 0L;
         while (active(config)) {
+            Exception failure = new IOException("WebSocket closed");
+            boolean established;
             try {
-                connectAndRead(config);
-                retryMillis = 1000L;
+                connectAndRead(config, session);
             } catch (Exception error) {
-                // A healthy channel ending in an I/O exception is not another
-                // failed connection attempt. Do not accumulate a 30-second
-                // reconnect delay across otherwise healthy long-lived sessions.
-                if (connected) retryMillis = 1000L;
-                long now = System.currentTimeMillis();
-                if (active(config) && now - lastWarningAt >= 60000L && PackVersionLock.LOG != null) {
-                    PackVersionLock.LOG.warn(
-                            "AHT Launcher Lock state channel is disconnected; new joins fail closed until it recovers ({}).",
-                            safeError(error)
-                    );
-                    lastWarningAt = now;
-                }
+                failure = error;
             } finally {
-                synchronized (ServerStateClient.class) {
-                    if (activeConfig == config) connected = false;
-                }
+                established = config.connections.established(session.slot);
+                config.connections.disconnected(session.slot);
+                reportState(config, failure);
             }
             if (!active(config)) break;
+            // Replace an established transport immediately while its peer stays live.
+            // Failed handshakes retain bounded backoff to avoid a reconnect storm.
+            long delay = established ? 0L : retryMillis + RANDOM.nextInt(201);
+            retryMillis = established ? 1000L : Math.min(30000L, retryMillis * 2L);
             try {
-                Thread.sleep(retryMillis);
+                if (delay > 0L) Thread.sleep(delay);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
                 break;
             }
-            retryMillis = Math.min(30000L, retryMillis * 2L);
         }
     }
 
-    private static void connectAndRead(Config config) throws Exception {
-        SSLSocket socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
+    private static synchronized void reportState(Config config, Exception error) {
+        if (!active(config)) return;
+        ServerPolicySnapshot snapshot = config.connections.current(System.nanoTime());
+        if (snapshot != null) {
+            if (PackVersionLock.LOG != null && (!config.reportedAvailable
+                    || !snapshot.revision.equals(config.reportedRevision))) {
+                PackVersionLock.LOG.info(
+                        "AHT Launcher Lock state channel connected; received signed policy revision {} (necessary launcher {}). New joins can be verified.",
+                        snapshot.revision.substring(0, 12), snapshot.necessaryLauncherVersion);
+            }
+            config.reportedAvailable = true;
+            config.reportedRevision = snapshot.revision;
+        } else {
+            long now = System.nanoTime();
+            if (error != null && PackVersionLock.LOG != null && (config.reportedAvailable
+                    || now - config.lastWarningNanos >= 60000000000L)) {
+                PackVersionLock.LOG.warn(
+                        "AHT Launcher Lock state channel has no healthy signed connection; new joins fail closed until it recovers ({}).",
+                        safeError(error));
+                config.lastWarningNanos = now;
+            }
+            config.reportedAvailable = false;
+        }
+    }
+
+    private static void connectAndRead(Config config, Session session) throws Exception {
+        Socket socket = config.sockets.create();
         synchronized (ServerStateClient.class) {
             if (!active(config)) { socket.close(); return; }
-            activeSocket = socket;
+            session.socket = socket;
         }
         try {
+        socket.setKeepAlive(true);
+        socket.setTcpNoDelay(true);
         socket.connect(new InetSocketAddress(config.endpoint.getHost(), config.port), config.connectTimeoutMillis);
         socket.setSoTimeout(config.connectTimeoutMillis);
-        SSLParameters ssl = socket.getSSLParameters();
-        ssl.setEndpointIdentificationAlgorithm("HTTPS");
-        socket.setSSLParameters(ssl);
-        socket.startHandshake();
+        if (socket instanceof SSLSocket) {
+            SSLSocket tls = (SSLSocket) socket;
+            SSLParameters ssl = tls.getSSLParameters();
+            ssl.setEndpointIdentificationAlgorithm("HTTPS");
+            tls.setSSLParameters(ssl);
+            tls.startHandshake();
+        }
 
         InputStream input = socket.getInputStream();
         OutputStream output = socket.getOutputStream();
@@ -202,13 +231,15 @@ final class ServerStateClient {
             // after a timeout would interpret a partial payload as a new header.
             Frame frame = readFrame(heartbeat);
             if (!active(config)) return;
-            lastActivityMillis = System.currentTimeMillis();
             if (frame.opcode == 0xA) {
-                heartbeat.pong(frame.payload);
+                if (heartbeat.pong(frame.payload)) {
+                    config.connections.responsive(session.slot, System.nanoTime());
+                }
                 continue;
             }
             if (frame.opcode == 0x9) {
                 writeFrame(output, 0xA, frame.payload);
+                config.connections.responsive(session.slot, System.nanoTime());
                 continue;
             }
             if (frame.opcode == 0x8) {
@@ -232,26 +263,17 @@ final class ServerStateClient {
             ServerPolicySnapshot snapshot = ServerPolicySnapshot.verifyMessage(
                     message, config.expectedKeyFingerprint, config.expectedPackId, System.currentTimeMillis()
             );
-            ServerPolicySnapshot previous;
-            boolean recovered;
             synchronized (ServerStateClient.class) {
                 if (!active(config)) return;
-                previous = CURRENT.getAndSet(snapshot);
-                recovered = !connected;
-                connected = true;
+                config.connections.signedPolicy(session.slot, snapshot, System.nanoTime());
             }
             heartbeat.responsive();
-            if (PackVersionLock.LOG != null && (recovered || previous == null || !previous.revision.equals(snapshot.revision))) {
-                PackVersionLock.LOG.info(
-                        "AHT Launcher Lock state channel connected; received signed policy revision {} (necessary launcher {}). New joins can be verified.",
-                        snapshot.revision.substring(0, 12), snapshot.necessaryLauncherVersion
-                );
-            }
+            reportState(config, null);
         }
         } finally {
             try { socket.close(); } catch (IOException ignored) { }
             synchronized (ServerStateClient.class) {
-                if (activeSocket == socket) activeSocket = null;
+                if (session.socket == socket) session.socket = null;
             }
         }
     }
@@ -269,7 +291,11 @@ final class ServerStateClient {
             if (pending != null) throw new IOException("state channel heartbeat timed out");
             pending = new byte[8]; RANDOM.nextBytes(pending); writeFrame(output, 0x9, pending);
         }
-        void pong(byte[] payload) { if (pending != null && Arrays.equals(pending, payload)) pending = null; }
+        boolean pong(byte[] payload) {
+            if (pending == null || !Arrays.equals(pending, payload)) return false;
+            pending = null;
+            return true;
+        }
         void responsive() { pending = null; }
         @Override public int read() throws IOException {
             while (true) try { return input.read(); } catch (SocketTimeoutException timeout) { idle(); }
@@ -456,6 +482,13 @@ final class ServerStateClient {
         }
     }
 
+    private static final class Session {
+        final int slot;
+        volatile Socket socket;
+        volatile Thread thread;
+        Session(int slot) { this.slot = slot; }
+    }
+
     private static final class Config {
         final URI endpoint;
         final int port;
@@ -464,9 +497,16 @@ final class ServerStateClient {
         final String expectedPackId;
         final int connectTimeoutMillis;
         final int heartbeatMillis;
+        final ChannelSocketFactory sockets;
+        final ServerStateConnections connections;
+        final Session[] sessions = {new Session(0), new Session(1)};
+        boolean reportedAvailable;
+        String reportedRevision = "";
+        long lastWarningNanos = Long.MIN_VALUE / 2;
 
         Config(String endpoint, String serverToken, String expectedKeyFingerprint,
-               String expectedPackId, int connectTimeoutMillis, int heartbeatMillis) {
+               String expectedPackId, int connectTimeoutMillis, int heartbeatMillis,
+               ChannelSocketFactory sockets) {
             this.endpoint = parseEndpoint(endpoint);
             this.port = this.endpoint.getPort() == -1 ? 443 : this.endpoint.getPort();
             this.serverToken = serverToken == null ? "" : serverToken.trim();
@@ -475,6 +515,8 @@ final class ServerStateClient {
             this.expectedPackId = expectedPackId == null ? "" : expectedPackId.trim();
             this.connectTimeoutMillis = Math.max(1000, Math.min(connectTimeoutMillis, 30000));
             this.heartbeatMillis = Math.max(10000, Math.min(heartbeatMillis, 300000));
+            this.sockets = sockets;
+            this.connections = new ServerStateConnections(this.heartbeatMillis * 3000000L);
             if (!this.serverToken.matches("[A-Za-z0-9_-]{32,512}")) {
                 throw new IllegalArgumentException("state server token is missing or invalid");
             }

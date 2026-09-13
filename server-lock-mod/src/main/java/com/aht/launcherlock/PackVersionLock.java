@@ -1,6 +1,7 @@
 package com.aht.launcherlock;
 
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.network.NetworkManager;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraftforge.common.MinecraftForge;
@@ -21,6 +22,7 @@ import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -34,7 +36,7 @@ import java.util.concurrent.CompletableFuture;
 public class PackVersionLock {
     public static final String MODID = "ahtversionlock";
     public static final String NAME = "AHT Launcher Lock";
-    public static final String VERSION = "1.2.2";
+    public static final String VERSION = "1.2.3";
 
     private static final String DEFAULT_STATE_WEBSOCKET_URL =
             "wss://api.ahardtime.net/server/launcher-state";
@@ -52,6 +54,8 @@ public class PackVersionLock {
     public static SimpleNetworkWrapper NETWORK;
 
     private static final JoinSessionRegistry SESSIONS = new JoinSessionRegistry();
+    private static final Map<NetworkManager, String> ACCEPTED_SESSION_TOKENS = new WeakHashMap<NetworkManager, String>();
+    private static boolean trustedLoopbackOnlineProxy = false;
     private static LauncherWhitelist whitelist;
     private static final LocalProofVerifier.SnapshotProvider POLICY_SNAPSHOTS =
             new LocalProofVerifier.SnapshotProvider() {
@@ -118,6 +122,7 @@ public class PackVersionLock {
                     stateConnectTimeoutMillis,
                     stateHeartbeatMillis
             );
+            MinecraftSessionLinkClient.start(stateWebSocketUrl, resolvedStateServerToken());
         }
     }
 
@@ -125,6 +130,8 @@ public class PackVersionLock {
     public void serverStopping(FMLServerStoppingEvent event) {
         PreWorldAdmission.clearAll();
         SESSIONS.clearAll();
+        ACCEPTED_SESSION_TOKENS.clear();
+        MinecraftSessionLinkClient.stop();
         LocalProofVerifier.cancelQueuedWork();
         ServerStateClient.stop();
     }
@@ -132,6 +139,8 @@ public class PackVersionLock {
     private static void loadConfig(File configFile) {
         Configuration config = new Configuration(configFile);
         config.load();
+        trustedLoopbackOnlineProxy = config.getBoolean("trustedLoopbackOnlineProxy", "general", false,
+                "Only enable on a loopback-bound backend behind an online-mode authenticated local proxy. Never enable on a public/offline server.");
         stateWebSocketUrl = config.getString(
                 "stateWebSocketUrl",
                 "general",
@@ -242,7 +251,23 @@ public class PackVersionLock {
         // Verify this exact token against the live signed policy, including its account binding,
         // version, access decision and reconnect expiry. Exempt membership alone is insufficient.
         return LocalProofVerifier.verifyCurrent(token, player.getName(), player.getUniqueID(),
-                requiredPackId, remoteIp(player), POLICY_SNAPSHOTS).accepted;
+                requiredPackId, remoteIp(player), POLICY_SNAPSHOTS, authenticatedMinecraftConnection(server, player)).accepted;
+    }
+
+    private static boolean authenticatedMinecraftConnection(MinecraftServer server, EntityPlayerMP player) {
+        return server != null && player != null && player.connection != null
+                && player.connection.netManager.isChannelOpen()
+                && MinecraftConnectionAuthority.authenticated(server.isServerInOnlineMode(), trustedLoopbackOnlineProxy,
+                    server.getServerHostname(), player.connection.netManager.channel().remoteAddress());
+    }
+
+    static void authenticatedJoinCompleted(EntityPlayerMP player) {
+        if (player == null || player.connection == null) return;
+        String token = ACCEPTED_SESSION_TOKENS.remove(player.connection.netManager);
+        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
+        if (token == null || !authenticatedMinecraftConnection(server, player) || !accepted(player)
+                || server.getPlayerList().getPlayerByUUID(player.getUniqueID()) != player) return;
+        MinecraftSessionLinkClient.link(token, player.getName(), player.getUniqueID());
     }
 
     static void clearPlayer(UUID playerId) {
@@ -252,6 +277,7 @@ public class PackVersionLock {
     static void clearPlayer(EntityPlayerMP player) {
         if (player != null && player.connection != null) {
             SESSIONS.clear(player.getUniqueID(), player.connection.netManager);
+            ACCEPTED_SESSION_TOKENS.remove(player.connection.netManager);
         }
     }
 
@@ -289,28 +315,32 @@ public class PackVersionLock {
                 playerId,
                 requiredPackId,
                 remoteIp(player),
-                POLICY_SNAPSHOTS
+                POLICY_SNAPSHOTS,
+                authenticatedMinecraftConnection(server, player)
         );
         verification.whenComplete((result, error) -> scheduleVerificationResult(
                 playerId,
                 connectionId,
+                message.token,
                 error == null && result != null ? result : LocalProofVerifier.Result.unavailable()
         ));
     }
 
     private static void scheduleVerificationResult(final UUID playerId, final UUID connectionId,
+                                                   final String token,
                                                    final LocalProofVerifier.Result result) {
         final MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
         if (server == null || !server.isDedicatedServer() || server.isServerStopped()) return;
         server.addScheduledTask(new Runnable() {
             @Override
             public void run() {
-                completeVerification(server, playerId, connectionId, result);
+                completeVerification(server, playerId, connectionId, token, result);
             }
         });
     }
 
     private static void completeVerification(MinecraftServer server, UUID playerId, UUID connectionId,
+                                             String token,
                                              LocalProofVerifier.Result result) {
         EntityPlayerMP player = server.getPlayerList() == null
                 ? null : PreWorldAdmission.find(server, playerId);
@@ -322,6 +352,7 @@ public class PackVersionLock {
         if (acceptWhitelisted(player)) return;
         if (result.accepted) {
             if (SESSIONS.accept(playerId, connectionId)) {
+                ACCEPTED_SESSION_TOKENS.put(player.connection.netManager, token);
                 LOG.debug("{} passed signed local launcher verification (current {}, necessary {}, policy {}).",
                         player.getName(), result.currentLauncherVersion, result.necessaryLauncherVersion,
                         result.policyRevision.substring(0, 12));

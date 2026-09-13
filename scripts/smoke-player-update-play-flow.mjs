@@ -552,10 +552,10 @@ const server = http.createServer((request, response) => {
       proofRequests.push(payload);
       const username = String(payload.minecraftUsername || '').trim().toLowerCase();
       const installId = String(payload.installId || '').trim();
-      if (accountVerificationBlocked || !username || registeredUsers.get(username) !== installId) {
+      if (accountVerificationBlocked || !username || (payload.identityAuthority !== 'minecraft-online-session' && registeredUsers.get(username) !== installId)) {
         response.statusCode = 403;
         response.setHeader('Content-Type', 'application/json; charset=utf-8');
-        response.end(JSON.stringify({ error: 'Minecraft username is not registered to this launcher install.' }));
+        response.end(JSON.stringify({ error: 'Client authorization unavailable.', code: 'AHT_LAUNCHER_PROOF_FAILED' }));
         return;
       }
       response.statusCode = 200;
@@ -792,18 +792,16 @@ try {
     .then(() => ({ ok: true }))
     .catch(error => ({ ok: false, message: String(error?.message || error) }))`);
   const blockedRepairState = await evaluate(client, 'window.aht.getUpdateState()');
-  if (blockedRepair.ok || !/account verification failed/i.test(blockedRepair.message)
-      || blockedRepairState.running || !blockedRepairState.error || blockedRepairState.lastResult) {
-    throw new Error(`Repair reported success without verified account ownership: ${JSON.stringify({ blockedRepair, blockedRepairState })}`);
+  if (!blockedRepair.ok || blockedRepairState.running || blockedRepairState.error || !blockedRepairState.lastResult?.ok) {
+    throw new Error(`Local Repair was blocked by remote authorization: ${JSON.stringify({ blockedRepair, blockedRepairState })}`);
   }
-  // Status must not erase this failure using the older registration timestamp.
   await evaluate(client, 'refresh().then(() => true)');
   const unresolvedAccount = await evaluate(client, 'window.aht.getStatus()');
-  if (!unresolvedAccount.identity?.minecraftUsernameSyncWarning) {
-    throw new Error('Status cleared an unresolved account failure using stale confirmation.');
+  if (unresolvedAccount.identity?.minecraftUsernameSyncWarning) {
+    throw new Error('Local Repair left a redundant account-sync warning.');
   }
   accountVerificationBlocked = false;
-  checkpoint('Repair rejects unresolved account verification and preserves the warning');
+  checkpoint('Local Repair completes independently of remote authorization availability');
   await evaluate(client, `document.querySelector('#scanButton').click(); true`);
   await waitFor(client, `window.aht.getUpdateState().then((state) => {
     if (state.startedAt === ${JSON.stringify(blockedRepairState.startedAt)}) return false;
@@ -911,8 +909,7 @@ try {
     if (!recoveredStatus.valid || !recoveredStatus.consented) throw new Error('Phoenix recovery was not verified');
     checkpoint('deleted Phoenix restored through visible player UI');
   }
-  // Successful Repair now confirms registration. Simulate its later revocation
-  // explicitly so Play still exercises the stale-registration recovery path.
+  // Stale remote registration cannot block a clean installation's Play proof.
   registeredUsers.clear();
   const playResult = await evaluate(client, `
     window.aht.play()
@@ -927,8 +924,9 @@ try {
     } catch {}
     throw new Error(`Clean player Play failed: ${JSON.stringify({ playResult, phoenixStatusBeforePlay })}${diagnosticText ? `\n${diagnosticText}` : ''}`);
   }
-  if (registrationRequests.filter((item) => item.username === 'FreshPlayer').length < 1 || proofRequests.length < 2) {
-    throw new Error(`Play did not recover stale launcher-proof registration after Worker rejection: ${JSON.stringify({ registrationRequests, proofRequests: proofRequests.map((item) => ({ username: item.minecraftUsername, installId: item.installId })) })}`);
+  if (registrationRequests.length !== 0 || proofRequests.length < 1
+      || proofRequests.some(item => item.identityAuthority !== 'minecraft-online-session')) {
+    throw new Error('Play did not separate installation authorization from legacy AHT registration.');
   }
   const recoveredPreparation = await evaluate(client, 'window.aht.getStatus()');
   if (!recoveredPreparation.launchReady || recoveredPreparation.launchPreparationState !== 'ready') {
@@ -1315,18 +1313,16 @@ try {
   const blockedPlay = await evaluate(client, `window.aht.play()
     .then(() => ({ ok: true }))
     .catch(error => ({ ok: false, message: String(error?.message || error) }))`);
-  if (blockedPlay.ok || !/account verification failed/i.test(blockedPlay.message)
+  if (blockedPlay.ok || !blockedPlay.message
       || fs.statSync(fakeLauncherMarker).mtimeMs !== markerBeforeBlockedPlay) {
-    throw new Error(`Failed account authorization opened Minecraft: ${JSON.stringify(blockedPlay)}`);
+    throw new Error(`Failed client authorization opened Minecraft: ${JSON.stringify(blockedPlay)}`);
   }
   accountVerificationBlocked = false;
   const recoveredPlay = await evaluate(client, 'window.aht.play()');
-  if (!recoveredPlay?.ok) throw new Error('Account recovery required restarting AHT before Play.');
-  checkpoint('Failed Play never opens Minecraft; valid account recovery succeeds without restart');
+  if (!recoveredPlay?.ok) throw new Error('Restored client authorization required restarting AHT before Play.');
+  checkpoint('Failed Play never opens Minecraft; restored authorization succeeds without restart');
   liveRecoveryRequired = true;
-  await writeJson(recoveryModePath, { mode: 'pending' });
-  // Recreate a legacy registration still pending during Play, rather than
-  // exercising only an isolated manual retry after every background task ends.
+  const registrationCountBeforeLegacy = registrationRequests.length;
   const raceIdentityPath = path.join(userData, 'identity.json');
   const raceIdentity = JSON.parse(fs.readFileSync(raceIdentityPath, 'utf8'));
   await writeJson(raceIdentityPath, { ...raceIdentity,
@@ -1334,68 +1330,20 @@ try {
     remoteRegistrationWorkerBaseUrl: '', remoteRegistrationAttemptedAt: '',
     minecraftUsernameSyncWarning: 'Previous account verification could not be completed.' });
   registeredUsers.clear();
-  holdNextRecoveryChallenge = true;
-  await evaluate(client, `window.__raceStatus = window.aht.getStatus()
-    .then(value => ({ value })).catch(error => ({ error: String(error?.message || error) })); true`);
-  for (let attempt = 0; attempt < 100 && !releaseRecoveryChallenge; attempt++) await sleep(50);
-  if (!releaseRecoveryChallenge) throw new Error('Background account request did not reach the held ownership challenge.');
-  const markerBeforeRecoveryRace = fs.statSync(fakeLauncherMarker).mtimeMs;
-  await evaluate(client, `window.__racePlayResult = null;
-    window.__liveRecovery = window.aht.play()
-      .then(value => window.__racePlayResult = { value })
-      .catch(error => window.__racePlayResult = { error: String(error?.message || error) }); true`);
-  await sleep(1200);
-  if (await evaluate(client, 'Boolean(window.__racePlayResult) || !document.querySelector("#accountRecoveryOverlay").hidden')
-      || fs.statSync(fakeLauncherMarker).mtimeMs !== markerBeforeRecoveryRace) {
-    throw new Error('Play did not remain gated while the background ownership challenge was pending.');
+  const legacyResults = await evaluate(client, `Promise.all([
+    window.aht.getStatus(), window.aht.retryAccountSync('aht'), window.aht.play()
+  ])`);
+  if (!legacyResults[2]?.ok || legacyResults.slice(0, 2).some(status => status.identity?.minecraftUsernameSyncWarning)) {
+    throw new Error('Stale AHT registration blocked status, local retry or Play.');
   }
-  releaseRecoveryChallenge();
-  releaseRecoveryChallenge = null;
-  const raceArrival = await waitFor(client, `(() => {
-    if (!document.querySelector('#accountRecoveryOverlay').hidden) return { prompt: true };
-    return window.__racePlayResult;
-  })()`, 'Play recovery after the background registration failed');
-  if (!raceArrival.prompt) throw new Error(`Background sync aborted Play before recovery: ${JSON.stringify(raceArrival)}`);
-  const raceStatus = await evaluate(client, 'window.__raceStatus');
-  if (raceStatus.error || !raceStatus.value?.identity?.minecraftUsernameSyncWarning) {
-    throw new Error('Background sync did not return the unresolved account warning.');
-  }
-  checkpoint('Overlapping background ownership failure reached actual Play recovery without launching the modpack');
-  await waitFor(client, `!document.querySelector('#accountRecoveryOverlay').hidden`, 'visible live-session account recovery');
-  const recoveryMessage = await evaluate(client, `document.querySelector('#accountRecoveryMessage').textContent`);
-  if (!recoveryMessage.includes('FreshPlayer') || !recoveryMessage.includes('click Play once') || /https?:|token|diagnostic/i.test(recoveryMessage)) {
-    throw new Error('Recovery prompt did not provide concise, credential-free instructions.');
-  }
-  if (process.env.AHT_ACCOUNT_RECOVERY_SCREENSHOT) {
-    const screenshot = await client.call('Page.captureScreenshot', { format: 'png' });
-    await fsp.writeFile(process.env.AHT_ACCOUNT_RECOVERY_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
-  }
-  const cancelHit = await evaluate(client, `(() => {
-    const button = document.querySelector('#accountRecoveryCancel');
-    const box = button.getBoundingClientRect();
-    const x = box.left + box.width / 2, y = box.top + box.height / 2;
-    return { x, y, hit: document.elementFromPoint(x, y) === button };
-  })()`);
-  if (!cancelHit.hit) throw new Error('The visible recovery Cancel button is covered by another layer.');
-  await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: cancelHit.x, y: cancelHit.y, button: 'left', clickCount: 1 });
-  await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cancelHit.x, y: cancelHit.y, button: 'left', clickCount: 1 });
-  const cancelledRecovery = await evaluate(client, 'window.__liveRecovery');
-  if (!cancelledRecovery.error) throw new Error('Cancelled Play recovery was reported as a successful launch.');
-  if (!(await evaluate(client, 'window.aht.getStatus()')).identity?.minecraftUsernameSyncWarning) {
-    throw new Error('Cancelled recovery erased the unresolved sync warning.');
-  }
-  await writeJson(recoveryModePath, { mode: 'auto' });
-  registeredUsers.clear();
-  const recoveredInteractivePlay = await evaluate(client, 'window.aht.play()');
-  if (!recoveredInteractivePlay?.ok) throw new Error('Interactive ownership recovery did not resume Play.');
-  const liveRecoveredStatus = await evaluate(client, 'window.aht.getStatus()');
-  if (!liveRecoveryVerified || liveRecoveryRequired || liveRecoveredStatus.identity?.minecraftUsernameSyncWarning) {
-    throw new Error('Real Java live-session callback did not recover the account through actual Electron IPC.');
+  if (registrationRequests.length !== registrationCountBeforeLegacy || !liveRecoveryRequired
+      || await evaluate(client, `!document.querySelector('#accountRecoveryOverlay').hidden`)) {
+    throw new Error('Player Play or local retry attempted the obsolete account ownership recovery.');
   }
   if (Object.keys(JSON.parse(fs.readFileSync(path.join(mcRoot, 'launcher_profiles.json'), 'utf8')).profiles)
-    .some(id => id.startsWith('aht-account-recovery-'))) throw new Error('Temporary recovery profile remained after success.');
-  if (!(await evaluate(client, 'window.aht.play()'))?.ok) throw new Error('Recovered account could not Play without restarting AHT.');
-  checkpoint('Live session recovery: actual Electron cancellation/retry, Java helper, ownership check and subsequent Play passed');
+    .some(id => id.startsWith('aht-account-recovery-'))) throw new Error('Player Play created a redundant recovery profile.');
+  if (!(await evaluate(client, 'window.aht.play()'))?.ok) throw new Error('Independent client authorization required a launcher restart.');
+  checkpoint('Stale account registration cannot block actual status, retry or Play; no ownership prompts or requests');
   await evaluate(client, 'window.aht?.windowClose?.(); true').catch(() => {});
   client.close();
   client = null;

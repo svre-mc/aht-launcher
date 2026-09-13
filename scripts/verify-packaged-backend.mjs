@@ -13,7 +13,7 @@ const modules = [
     'minecraftInteractiveRecovery', 'minecraftRecoveryProfile', 'recoveryResultChannel', 'minecraftAccountRecovery',
     'minecraftRegistrationService', 'windowsMinecraftSession', 'serviceTransport', 'boundedJson', 'launcherProof', 'launcherProofTransactions',
     'nativeGuard', 'nativeGuardTransport', 'nativeGuardSessions', 'phoenixInstallation', 'phoenixMonitor',
-    'developerAdminService', 'forgeInstaller'].map(name => `src/${name}.js`)
+    'developerAdminService', 'forgeInstaller', 'minecraftSessionIdentity', 'runtimeRepair'].map(name => `src/${name}.js`)
 ];
 for (const file of modules) {
   assert.deepEqual(extractFile(asar, file.split('/').join(path.sep)), await fs.readFile(path.join(root, file)),

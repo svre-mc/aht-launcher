@@ -90,12 +90,19 @@ final class LocalProofVerifier {
                                                  final UUID expectedUuid, final String expectedPackId,
                                                  final String remoteIp,
                                                  final SnapshotProvider snapshots) {
+        return verifyAsync(token, expectedUsername, expectedUuid, expectedPackId, remoteIp, snapshots, false);
+    }
+
+    static CompletableFuture<Result> verifyAsync(final String token, final String expectedUsername,
+                                                 final UUID expectedUuid, final String expectedPackId,
+                                                 final String remoteIp, final SnapshotProvider snapshots,
+                                                 final boolean authenticatedMinecraftConnection) {
         if (!LauncherProofMessage.isTokenShapeValid(token) || snapshots == null) {
             return CompletableFuture.completedFuture(Result.denied("INVALID_LAUNCHER_PROOF", ""));
         }
         try {
             return CompletableFuture.supplyAsync(() -> verifyCurrent(token, expectedUsername,
-                    expectedUuid, expectedPackId, remoteIp, snapshots), EXECUTOR);
+                    expectedUuid, expectedPackId, remoteIp, snapshots, authenticatedMinecraftConnection), EXECUTOR);
         } catch (RejectedExecutionException ignored) {
             return CompletableFuture.completedFuture(Result.unavailable());
         }
@@ -104,12 +111,18 @@ final class LocalProofVerifier {
     /** Uses the already-delivered signed state only; never performs network I/O. */
     static Result verifyCurrent(String token, String expectedUsername, UUID expectedUuid,
                                 String expectedPackId, String remoteIp, SnapshotProvider snapshots) {
+        return verifyCurrent(token, expectedUsername, expectedUuid, expectedPackId, remoteIp, snapshots, false);
+    }
+
+    static Result verifyCurrent(String token, String expectedUsername, UUID expectedUuid,
+                                String expectedPackId, String remoteIp, SnapshotProvider snapshots,
+                                boolean authenticatedMinecraftConnection) {
         if (!LauncherProofMessage.isTokenShapeValid(token) || snapshots == null) return Result.unavailable();
         for (int attempt = 0; attempt < 3; attempt++) {
             ServerPolicySnapshot snapshot = snapshots.current();
             if (snapshot == null) return Result.unavailable();
             Result result = verifyNow(token, expectedUsername, expectedUuid, expectedPackId,
-                    remoteIp, snapshot, System.currentTimeMillis());
+                    remoteIp, snapshot, System.currentTimeMillis(), authenticatedMinecraftConnection);
             if (snapshot.revision.equals(snapshots.currentRevision())) return result;
         }
         return Result.unavailable();
@@ -118,12 +131,18 @@ final class LocalProofVerifier {
     static Result verifyForTests(String token, String expectedUsername, UUID expectedUuid,
                                  String expectedPackId, String remoteIp,
                                  ServerPolicySnapshot snapshot, long nowMillis) {
-        return verifyNow(token, expectedUsername, expectedUuid, expectedPackId, remoteIp, snapshot, nowMillis);
+        return verifyNow(token, expectedUsername, expectedUuid, expectedPackId, remoteIp, snapshot, nowMillis, false);
+    }
+
+    static Result verifyForTests(String token, String expectedUsername, UUID expectedUuid,
+                                 String expectedPackId, String remoteIp, ServerPolicySnapshot snapshot,
+                                 long nowMillis, boolean authenticatedMinecraftConnection) {
+        return verifyNow(token, expectedUsername, expectedUuid, expectedPackId, remoteIp, snapshot, nowMillis, authenticatedMinecraftConnection);
     }
 
     private static Result verifyNow(String token, String expectedUsername, UUID expectedUuid,
                                     String expectedPackId, String remoteIp,
-                                    ServerPolicySnapshot state, long nowMillis) {
+                                    ServerPolicySnapshot state, long nowMillis, boolean authenticatedMinecraftConnection) {
         if (state == null || expectedUsername == null || expectedUuid == null || expectedPackId == null
                 || !expectedPackId.equals(state.packId)) return Result.unavailable();
         final JsonObject payload;
@@ -206,7 +225,11 @@ final class LocalProofVerifier {
                         "binding-v1\0" + normalizedUsername + "\0" + minecraftUuid + "\0"
                                 + installId + "\0" + deviceId
                 );
-                if (!SignedTokenSupport.constantEquals(state.accountBinding(accountDigest), bindingDigest)) {
+                String identityAuthority = SignedTokenSupport.readString(payload, "identityAuthority");
+                boolean minecraftSession = "minecraft-online-session".equals(identityAuthority);
+                if ((identityAuthority != null && !identityAuthority.isEmpty() && !minecraftSession)
+                        || (minecraftSession && !authenticatedMinecraftConnection)
+                        || (!minecraftSession && !SignedTokenSupport.constantEquals(state.accountBinding(accountDigest), bindingDigest))) {
                     return Result.denied("PROOF_IDENTITY_MISMATCH", state.revision);
                 }
                 String normalizedIp = normalizeConnectionIp(remoteIp);

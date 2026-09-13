@@ -193,6 +193,7 @@ function launcherProofFiles(config = {}, identity = {}) {
 
 export function launcherProofDeviceBinding(payload = {}) {
   return {
+    ...(payload.identityAuthority ? { identityAuthority: cleanString(payload.identityAuthority, 80) } : {}),
     ...(payload.nativeGuardKeyHash ? { nativeGuardKeyHash: cleanString(payload.nativeGuardKeyHash, 64) } : {}),
     protocol: cleanString(payload.protocol || '', 80),
     launchId: cleanString(payload.launchId || '', 80),
@@ -322,6 +323,7 @@ export function buildLauncherProofPayload({ config = {}, identity = {}, latest =
     installedVersion: cleanString(installed?.version || '', 80),
     minecraftUsername: cleanString(identity.minecraftUsername || config.sync?.playerLabel || '', 16),
     minecraftUuid: normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID || ''),
+    ...(identity.identityAuthority ? { identityAuthority: cleanString(identity.identityAuthority, 80) } : {}),
     installId: cleanString(identity.installId || '', 120),
     deviceId: cleanString(identity.deviceId || '', 80),
     appVersion: cleanString(identity.appVersion || '', 40),
@@ -398,6 +400,7 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
     mismatches.push('minecraftUuid');
   }
   compareString('installId', 120);
+  if (payload.identityAuthority) compareString('identityAuthority', 80);
   if (payload?.deviceId) compareString('deviceId', 80);
   compareString('instanceDirHash', 80);
   if (payload.nativeGuardKeyHash) compareString('nativeGuardKeyHash', 64);

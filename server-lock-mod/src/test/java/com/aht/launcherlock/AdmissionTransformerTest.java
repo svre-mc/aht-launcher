@@ -10,6 +10,34 @@ import static org.junit.Assert.*;
 
 public class AdmissionTransformerTest {
     private static final String TARGET="net.minecraftforge.fml.common.network.handshake.NetworkDispatcher";
+    @Test public void fencesHandshakeCharactersAndOnlyDivertsTheirEntityTick() throws Exception {
+        String target="net.minecraft.network.NetHandlerPlayServer";
+        ClassReader source=new ClassReader(getClass().getClassLoader().getResourceAsStream(target.replace('.','/')+".class"));
+        for(boolean production:new boolean[]{false,true}) {
+            Map<String,String> names=new HashMap<String,String>();
+            names.put("net/minecraft/entity/player/EntityPlayerMP","oq");
+            names.put("net/minecraft/network/NetworkManager","gw");
+            names.put("net/minecraft/network/NetHandlerPlayServer","pa");
+            names.put("net/minecraft/network/NetHandlerPlayServer.update()V","e");
+            names.put("net/minecraft/entity/player/EntityPlayerMP.onUpdateEntity()V","k_");
+            ClassWriter original=new ClassWriter(0);
+            if(production) source.accept(new ClassRemapper(original,new SimpleRemapper(names)),0); else source.accept(original,0);
+            AdmissionTransformer transformer=new AdmissionTransformer();
+            byte[] once=transformer.transform(target,target,original.toByteArray());
+            assertArrayEquals(once,transformer.transform(target,target,once));
+            ClassNode node=new ClassNode();new ClassReader(once).accept(node,0);
+            int fences=0,ticks=0,transportCalls=0;
+            for(MethodNode method:node.methods) for(AbstractInsnNode instruction:method.instructions.toArray()) if(instruction instanceof MethodInsnNode) {
+                MethodInsnNode call=(MethodInsnNode)instruction;
+                if(call.owner.equals("com/aht/launcherlock/PreWorldAdmission")) {
+                    assertEquals(production?"(Loq;)V":"(Lnet/minecraft/entity/player/EntityPlayerMP;)V",call.desc);
+                    if(call.name.equals("trackConnectionPlayer")){assertEquals("<init>",method.name);fences++;}
+                    if(call.name.equals("tickAdmittedPlayer")){assertEquals(production?"e":"update",method.name);ticks++;}
+                } else if(method.name.equals(production?"e":"update")) transportCalls++;
+            }
+            assertEquals(1,fences);assertEquals(1,ticks);assertTrue("Keep transport/keepalive updates",transportCalls>5);
+        }
+    }
     @Test public void saveAndLogoutAreGuardedInMappedAndProductionNamespaces() throws Exception {
         String playerList="net.minecraft.server.management.PlayerList";
         ClassReader source=new ClassReader(getClass().getClassLoader().getResourceAsStream(playerList.replace('.','/')+".class"));
