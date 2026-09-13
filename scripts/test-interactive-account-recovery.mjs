@@ -140,16 +140,20 @@ try {
   await assertClean();
   // A prior process may die before finally runs. Replay its bounded cleanup journal.
   const staleId = 'aht-account-recovery-' + 'a'.repeat(24);
+  const unconfiguredRoot = path.join(root, 'not-configured');
+  await fs.mkdir(unconfiguredRoot);
+  await fs.writeFile(path.join(unconfiguredRoot, 'sentinel.txt'), 'preserve');
   const staleProfiles = structuredClone(originalProfiles);
   staleProfiles.profiles[staleId] = { lastVersionId: staleId };
   staleProfiles.selectedProfile = staleId;
   await fs.writeFile(profilesFile, JSON.stringify(staleProfiles));
   await fs.mkdir(path.join(mc, 'versions', staleId), { recursive: true });
   await fs.writeFile(path.join(mc, 'versions', staleId, `${staleId}.json`), JSON.stringify({ id: staleId, mainClass: 'net.ahardtime.recovery.Main' }));
-  await fs.writeFile(journalPath, JSON.stringify({ id: staleId, roots: [{ root: mc, previousSelection: 'aht' }, { root: 'C:/', previousSelection: '' }] }));
+  await fs.writeFile(journalPath, JSON.stringify({ id: staleId, roots: [{ root: mc, previousSelection: 'aht' }, { root: unconfiguredRoot, previousSelection: '' }] }));
   assert.equal(await recovery.cleanup({ config, journalPath }), false, 'An unconfigured root remains journaled but is never followed');
   await assertClean(true);
-  assert.deepEqual(JSON.parse(await fs.readFile(journalPath, 'utf8')).roots, [{ root: 'C:/', previousSelection: '' }]);
+  assert.deepEqual(JSON.parse(await fs.readFile(journalPath, 'utf8')).roots, [{ root: unconfiguredRoot, previousSelection: '' }]);
+  assert.equal(await fs.readFile(path.join(unconfiguredRoot, 'sentinel.txt'), 'utf8'), 'preserve');
   assert.equal(await fs.stat(path.join(mc, 'versions', staleId)).then(() => true).catch(() => false), false);
   assert(!JSON.stringify(states).includes(challenge) && !JSON.stringify(states).includes('synthetic-recovery-session'));
   console.log(JSON.stringify({ ok: true, helperJava: 8, noCachedCredentials: true, actualJavaCallback: true,
