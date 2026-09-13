@@ -59,6 +59,15 @@ import {
 import { ensureBundledJava8 } from '../src/bundledJava8.js';
 import { prepareRuntimeOnlyRepair, verifyRepairedJava, verifyRepairedAccount } from '../src/runtimeRepair.js';
 import { createMinecraftInteractiveRecovery } from '../src/minecraftInteractiveRecovery.js';
+import { createAccountRegistrationCoordinator } from '../src/accountRegistrationCoordinator.js';
+import { createLauncherIdentityStore } from '../src/launcherIdentityStore.js';
+import { accountWarningState, registeredAccountState, sameAccountSnapshot } from '../src/accountIdentityState.js';
+import { createAccountStatusRefresh } from '../src/accountStatusRefresh.js';
+import { registerMinecraftAccount } from '../src/minecraftRegistrationService.js';
+import { requestServiceJson } from '../src/serviceTransport.js';
+import { createDeveloperAdminService } from '../src/developerAdminService.js';
+import { createPhoenixDetectionMonitor } from '../src/phoenixMonitor.js';
+import { createLauncherProofTransactions } from '../src/launcherProofTransactions.js';
 import { cleanJavaEnvironment } from '../src/javaEnvironment.js';
 import {
   ensureNativeGuard,
@@ -68,6 +77,7 @@ import {
   rememberPhoenixConsent,
   withPhoenixRecovery,
   nativeGuardReadyForLauncherExit,
+  nativeGuardSessionIsActive,
   probeNativeGuard,
   verifyNativeGuardSession,
   validatePhoenixAntiCheatRelease
@@ -339,9 +349,10 @@ let updateState = { running: false, lines: [], lastResult: null, error: null, pr
 let launcherUpdateState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let launcherUpdateCheckPromise = null;
 let phoenixAntiCheatInstallPromise = null;
-const phoenixDetectionMonitors = new Map();
-const phoenixDetectionReported = new Set();
-const PHOENIX_DETECTION_POLL_MS = 2500;
+const phoenixDetectionMonitor = createPhoenixDetectionMonitor({
+  probe: probeNativeGuard, report: reportPhoenixDetection, fingerprint: phoenixDetectionFingerprint,
+  isStopping: () => applicationQuitting, isSessionAlive: nativeGuardSessionIsActive, wait: sleep
+});
 let launcherUpdateMonitorTimer = null;
 let launcherUpdateMonitorSignature = '';
 let validatedPendingLauncherUpdateKey = '';
@@ -358,10 +369,10 @@ let developerLocalReinstallPromise = null;
 let serverTransferState = { running: false, lines: [], lastResult: null, error: null, progress: null };
 let uploadState = { running: false, total: 0, completed: 0, current: '', lines: [], lastResult: null, error: null, verification: null };
 let launcherDeployState = { running: false, lines: [], lastResult: null, error: null, progress: null };
-let adminToken = '';
-let adminTokenExpiresAt = 0;
-let adminTokenBaseUrl = '';
-const adminLoginPromises = new Map();
+const developerAdminService = createDeveloperAdminService({
+  baseUrl: remoteAdminBaseUrl, loadCredentials: loadDeveloperCredentials,
+  assertAuthenticated: assertDeveloperAuthenticated, loginTimeoutMs: remoteAdminLoginTimeoutMs
+});
 let developerSession = null;
 const latestReleaseCache = new Map();
 const updateLogsCache = new Map();
@@ -376,7 +387,7 @@ let launcherSocialLinksState = {
 };
 let launcherSocialLinksReadPromise = null;
 let launcherSocialLinksRefreshPromise = null;
-const launcherProofRefreshes = new Map();
+const launcherProofTransactions = createLauncherProofTransactions({ readIdentity: loadIdentity });
 const activeLauncherProofFiles = new Set();
 const launchPreparationCache = new Map();
 const launchPreparationInFlight = new Map();
@@ -395,8 +406,21 @@ let startupPreparationState = {
   error: ''
 };
 const launcherVersionTelemetryInFlight = new Map();
-const remoteRegistrationRefreshes = new Map();
-const remoteRegistrationsCompletedThisSession = new Map();
+const accountRegistrationCoordinator = createAccountRegistrationCoordinator({
+  loadIdentity, register: registerMinecraftUsername, normalizeUsername: normalizeMinecraftUsername,
+  normalizeUuid: normalizeMinecraftUuid, baseUrl: remoteRegistrationBaseUrl,
+  matches: remoteRegistrationSatisfiesRequest
+});
+const accountStatusRefresh = createAccountStatusRefresh({
+  readLocal: identityPayload, refreshRemote: identityPayload,
+  keyFor: (config, identity) => JSON.stringify([identity.installId,
+    normalizeMinecraftUsername(identity.minecraftLauncherDetectedUsername || identity.minecraftUsername).toLowerCase(),
+    normalizeMinecraftUuid(identity.minecraftLauncherDetectedUuid || identity.minecraftUuid), remoteRegistrationBaseUrl(config)]),
+  shouldRefresh: shouldRefreshAccountStatus,
+  onChanged: () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('account:changed');
+  }
+});
 const accountRecoverySecretPromises = new Map();
 const LATEST_RELEASE_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
 const UPDATE_LOGS_CACHE_MAX_AGE_MS = 15 * 1000;
@@ -3536,57 +3560,21 @@ async function applyRecommendedSetup() {
   return getStatus(nextConfig);
 }
 
-let identityLoadInFlight = null;
-function loadIdentity() {
-  if (!identityLoadInFlight) {
-    identityLoadInFlight = loadIdentityFromDisk().finally(() => { identityLoadInFlight = null; });
-  }
-  return identityLoadInFlight;
-}
-
-async function loadIdentityFromDisk() {
-  const file = identityPath();
-  const readIdentityCandidate = async (candidate) => {
-    if (!candidate || samePath(candidate, file) || !(await pathExists(candidate))) return null;
-    try {
-      const value = await readJsonFile(candidate);
-      return value && typeof value === 'object' && String(value.installId || '').trim() ? value : null;
-    } catch {
-      return null;
-    }
-  };
-  const legacyUserDataNames = isDeveloperMode()
+const launcherIdentityStore = createLauncherIdentityStore({
+  file: identityPath,
+  legacyFiles: () => (isDeveloperMode()
     ? ['aht-launcher-developer', 'A Hard Time Launcher Developer']
-    : ['A Hard Time Launcher Windows', 'A Hard Time Launcher', 'aht-launcher-stable'];
-  const legacyCandidates = legacyUserDataNames.map((name) => path.join(app.getPath('appData'), name, 'identity.json'));
-  let currentIdentity = null;
-  if (await pathExists(file)) {
-    try {
-      const identity = await readJsonFile(file);
-      if (identity && typeof identity === 'object' && String(identity.installId || '').trim()) {
-        currentIdentity = identity;
-        if (normalizeMinecraftUsername(identity.minecraftUsername)) return identity;
-      }
-    } catch {
-      // A corrupt identity is never overwritten; a legacy identity may still
-      // provide a safe, explicit migration source below.
-    }
-  }
-  for (const candidate of legacyCandidates) {
-    const migrated = await readIdentityCandidate(candidate);
-    if (migrated) {
-      const identity = currentIdentity ? { ...currentIdentity, ...migrated } : migrated;
-      await writeJsonFile(file, identity);
-      return identity;
-    }
-  }
-  if (currentIdentity) return currentIdentity;
-  const identity = {
-    installId: crypto.randomUUID(),
-    createdAt: new Date().toISOString()
-  };
-  await writeJsonFile(file, identity);
-  return identity;
+    : ['A Hard Time Launcher Windows', 'A Hard Time Launcher', 'aht-launcher-stable'])
+    .map(name => path.join(app.getPath('appData'), name, 'identity.json'))
+});
+
+function loadIdentity() { return launcherIdentityStore.read(); }
+function updateIdentity(update, options) { return launcherIdentityStore.mutate(update, options); }
+
+function recordAccountSyncWarning(identity, username, error, options = {}) {
+  return updateIdentity(current => accountWarningState(current, identity, {
+    username, message: error?.message || String(error), ...options
+  }), { expectedInstallId: identity.installId });
 }
 
 function developerClientBypassAllowed() {
@@ -3611,11 +3599,7 @@ function launcherProofIdentity(identity = {}, options = {}) {
 }
 
 function clearRemoteAdminToken(expectedBaseUrl = '', expectedToken = '') {
-  if (expectedBaseUrl && adminTokenBaseUrl !== expectedBaseUrl) return;
-  if (expectedToken && adminToken !== expectedToken) return;
-  adminToken = '';
-  adminTokenExpiresAt = 0;
-  adminTokenBaseUrl = '';
+  developerAdminService.clear(expectedBaseUrl, expectedToken);
 }
 
 async function launcherProofAuthToken(config = {}) {
@@ -3688,9 +3672,10 @@ async function reportPhoenixDetection(config = {}, launcherProof = {}, nativeGua
     throw new Error('Phoenix detection reporting is not available for this Play session.');
   }
   const url = new URL('api/session/report', base.endsWith('/') ? base : `${base}/`);
-  const response = await fetch(url, {
+  const response = await requestServiceJson(url, {
     method: 'POST',
-    redirect: 'error',
+    timeoutMs: 10_000,
+    maxBytes: 8192,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json'
@@ -3699,11 +3684,10 @@ async function reportPhoenixDetection(config = {}, launcherProof = {}, nativeGua
       schemaVersion: 1,
       antiCheatVersion: String(launcherPackageMetadata.phoenixAntiCheatVersion || ''),
       probe: probe.signedProbe
-    }),
-    signal: globalThis.AbortSignal?.timeout?.(10_000)
+    })
   });
   if (!response.ok) throw new Error('Session report was rejected.');
-  const result = await response.json().catch(() => ({}));
+  const result = response.body;
   if (!result?.ok) {
     throw new Error('Phoenix detection reporting returned an invalid acknowledgement.');
   }
@@ -3712,35 +3696,7 @@ async function reportPhoenixDetection(config = {}, launcherProof = {}, nativeGua
 
 function queuePhoenixDetectionMonitor({ config = {}, launcherProof = {}, nativeGuard = null } = {}) {
   if (isDeveloperMode() || process.platform !== 'win32' || !nativeGuard?.keyHash || !launcherProof?.token) return null;
-  const key = String(nativeGuard.keyHash);
-  if (phoenixDetectionMonitors.has(key)) return phoenixDetectionMonitors.get(key);
-  const operation = (async () => {
-    let consecutiveProbeFailures = 0;
-    while (!applicationQuitting) {
-      let probe;
-      try {
-        probe = await probeNativeGuard(nativeGuard);
-        consecutiveProbeFailures = 0;
-      } catch {
-        consecutiveProbeFailures += 1;
-        if (consecutiveProbeFailures >= 3) break;
-      }
-      if (probe?.measurement?.state === 'tampered' && probe.signedProbe) {
-        const fingerprint = phoenixDetectionFingerprint(nativeGuard, probe.measurement);
-        if (!phoenixDetectionReported.has(fingerprint)) {
-          try {
-            await reportPhoenixDetection(config, launcherProof, nativeGuard, probe);
-            phoenixDetectionReported.add(fingerprint);
-          } catch {}
-        }
-      }
-      await sleep(PHOENIX_DETECTION_POLL_MS);
-    }
-  })().catch(() => {}).finally(() => {
-    if (phoenixDetectionMonitors.get(key) === operation) phoenixDetectionMonitors.delete(key);
-  });
-  phoenixDetectionMonitors.set(key, operation);
-  return operation;
+  return phoenixDetectionMonitor.start({ config, launcherProof, nativeGuard });
 }
 
 function phoenixAntiCheatInstallDir() {
@@ -3884,19 +3840,14 @@ function isUsernameUnavailableError(error) {
   return /username is not available|That username is not available/i.test(error?.message || String(error || ''));
 }
 
-async function clearUnavailableMinecraftUsername(username = '', message = 'That username is not available.') {
+async function recordUnavailableMinecraftUsernameWarning(username = '', message = 'That username is not available.') {
   const normalizedUsername = normalizeMinecraftUsername(username);
   if (!normalizedUsername) {
     return;
   }
-  const current = await loadIdentity();
-  if (normalizeMinecraftUsername(current.minecraftUsername).toLowerCase() !== normalizedUsername.toLowerCase()) {
-    return;
-  }
-  await writeJsonFile(identityPath(), {
+  await updateIdentity(current => normalizeMinecraftUsername(current.minecraftUsername).toLowerCase() !== normalizedUsername.toLowerCase()
+    ? current : {
     ...current,
-    minecraftUsername: '',
-    usernameRegistrationMode: '',
     minecraftUsernameUnavailable: normalizedUsername,
     minecraftUsernameSyncWarning: message,
     minecraftUsernameSyncWarningUsername: normalizedUsername
@@ -3951,8 +3902,10 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
       });
     } catch (refreshError) {
       if (isUsernameUnavailableError(refreshError)) {
-        await clearUnavailableMinecraftUsername(username, refreshError.message || String(refreshError));
-        throw new Error('That Minecraft account could not be registered. Sign into a different account in Minecraft Launcher and retry.');
+        await recordUnavailableMinecraftUsernameWarning(username, refreshError.message || String(refreshError));
+        throw Object.assign(new Error('Minecraft account verification could not be completed. Retry account sync.'), {
+          code: refreshError?.code || 'AHT_ACCOUNT_SYNC_REQUIRED'
+        });
       }
       throw Object.assign(new Error(`Launcher proof registration refresh failed: ${refreshError.message || refreshError}`), {
         code: refreshError?.code || 'AHT_ACCOUNT_SYNC_REQUIRED'
@@ -4002,20 +3955,10 @@ async function writeSerializedRegisteredLauncherProof({
     ? launcherProofPath(config.instanceDir || '', expectedIdentity, { proofDir: config.launcherProof.proofDir })
     : legacyProofFile);
   const key = process.platform === 'win32' ? resolvedProofFile.toLowerCase() : resolvedProofFile;
-  const previous = launcherProofRefreshes.get(key);
-  const refresh = (async () => {
-    if (previous) await previous.catch(() => {});
-    return writeRegisteredLauncherProof({ config, identity, latest, installed, nativeGuard, allowInteractiveRecovery, beforeInteractiveRecoveryCompletes });
-  })().finally(() => {
-    if (launcherProofRefreshes.get(key) === refresh) launcherProofRefreshes.delete(key);
+  return launcherProofTransactions.run(key, identity, {
+    write: () => writeRegisteredLauncherProof({ config, identity, latest, installed, nativeGuard, allowInteractiveRecovery, beforeInteractiveRecoveryCompletes }),
+    inspect: inspectExpectedProof
   });
-  launcherProofRefreshes.set(key, refresh);
-  const result = await refresh;
-  const verified = await inspectExpectedProof();
-  if (!verified.usable) {
-    throw new Error(`Launcher proof changed before it could be used: ${verified.reason || 'proof no longer matches this launch'}.`);
-  }
-  return { ...result, ...verified, reused: false };
 }
 
 async function socialRequestContext() {
@@ -4076,11 +4019,16 @@ async function acceptLauncherLegal(payload = {}) {
 
 async function identityPayload(config = null, options = {}) {
   const allowProtectedStorage = options.allowProtectedStorage !== false;
+  const allowRemoteSync = options.allowRemoteSync !== false;
   const forceAccountSync = options.forceAccountSync === true;
+  // Retry/Repair is an explicit revalidation boundary. A credential restored on
+  // disk must not remain shadowed by a secret cached earlier in this process.
+  if (forceAccountSync && allowProtectedStorage && allowRemoteSync) accountRecoverySecretPromises.clear();
   const identity = await loadIdentity();
   let nextIdentity = identity;
   let accountSyncAttemptFailed = false;
   let detectedUsernameForSync = '';
+  let detectedUuidForSync = '';
   if (config?.minecraftLauncher?.rootDir && config.minecraftLauncher?.autoImportAccount !== false) {
     const auth = await inspectMinecraftLauncherAuth(config.minecraftLauncher.rootDir, {
       extraRoots: [...(config.minecraftLauncher.syncRoots || []), ...minecraftRootCandidates(process.platform, {
@@ -4092,21 +4040,18 @@ async function identityPayload(config = null, options = {}) {
     const detectedUsername = normalizeMinecraftUsername(auth.preferredUsername);
     detectedUsernameForSync = detectedUsername;
     const detectedMinecraftUuid = normalizeMinecraftUuid(auth.preferredMinecraftUuid);
+    detectedUuidForSync = detectedMinecraftUuid;
     const currentUsername = normalizeMinecraftUsername(nextIdentity.minecraftUsername);
     const currentMinecraftUuid = normalizeMinecraftUuid(nextIdentity.minecraftUuid || nextIdentity.minecraftUUID);
     const sameUsername = Boolean(detectedUsername && currentUsername.toLowerCase() === detectedUsername.toLowerCase());
     const uuidConflict = Boolean(sameUsername && detectedMinecraftUuid && currentMinecraftUuid && detectedMinecraftUuid !== currentMinecraftUuid);
     if (uuidConflict) {
       accountSyncAttemptFailed = true;
-      nextIdentity = {
-        ...nextIdentity,
-        minecraftLauncherDetectedUsername: detectedUsername,
-        minecraftUsernameSyncWarning: 'Minecraft account UUID does not match the saved launcher identity.',
-        minecraftUsernameSyncWarningUsername: detectedUsername
-      };
-      await writeJsonFile(identityPath(), nextIdentity);
+      nextIdentity = await recordAccountSyncWarning(nextIdentity, detectedUsername,
+        'Minecraft account UUID does not match the saved launcher identity.', { detectedUsername });
     } else if (
       allowProtectedStorage
+      && allowRemoteSync
       && detectedUsername
       && (forceAccountSync || !sameUsername || (detectedMinecraftUuid && !currentMinecraftUuid))
     ) {
@@ -4127,43 +4072,17 @@ async function identityPayload(config = null, options = {}) {
         nextIdentity.minecraftLauncherDetectedUsername = registered.username || detectedUsername;
       } catch (error) {
         accountSyncAttemptFailed = true;
-        nextIdentity = {
-          ...nextIdentity,
-          minecraftLauncherDetectedUsername: detectedUsername,
-          minecraftUsernameSyncWarning: error.message || String(error),
-          minecraftUsernameSyncWarningUsername: detectedUsername
-        };
-        await writeJsonFile(identityPath(), nextIdentity);
+        nextIdentity = await recordAccountSyncWarning(nextIdentity, detectedUsername, error, { detectedUsername });
       }
     } else if (detectedUsername) {
-      const registrationConfirmed = remoteRegistrationSatisfiesRequest(
-        config,
-        nextIdentity,
-        currentUsername,
-        currentMinecraftUuid
-      );
-      const warningResolved = Boolean(
-        nextIdentity.minecraftUsernameSyncWarning
-        && sameUsername
-        && registrationConfirmed
-      );
-      nextIdentity = {
-        ...nextIdentity,
-        minecraftLauncherDetectedUsername: detectedUsername,
-        ...(warningResolved ? {
-          minecraftUsernameSyncWarning: '',
-          minecraftUsernameSyncWarningUsername: ''
-        } : {})
-      };
-      if (
-        warningResolved
-        || normalizeMinecraftUsername(identity.minecraftLauncherDetectedUsername).toLowerCase() !== detectedUsername.toLowerCase()
-      ) {
-        await writeJsonFile(identityPath(), nextIdentity);
+      if (normalizeMinecraftUsername(nextIdentity.minecraftLauncherDetectedUsername).toLowerCase() !== detectedUsername.toLowerCase()) {
+        nextIdentity = await updateIdentity(current => sameAccountSnapshot(current, identity)
+          ? { ...current, minecraftLauncherDetectedUsername: detectedUsername } : current,
+        { expectedInstallId: identity.installId });
       }
     }
   }
-  if (allowProtectedStorage && forceAccountSync && !accountSyncAttemptFailed
+  if (allowProtectedStorage && allowRemoteSync && forceAccountSync && !accountSyncAttemptFailed
       && !detectedUsernameForSync
       && normalizeMinecraftUsername(nextIdentity.minecraftUsername)) {
     const username = normalizeMinecraftUsername(nextIdentity.minecraftUsername);
@@ -4179,22 +4098,17 @@ async function identityPayload(config = null, options = {}) {
       nextIdentity = await loadIdentity();
     } catch (error) {
       accountSyncAttemptFailed = true;
-      nextIdentity = {
-        ...nextIdentity,
-        remoteRegistrationAttemptedAt: new Date().toISOString(),
-        minecraftUsernameSyncWarning: error.message || String(error),
-        minecraftUsernameSyncWarningUsername: username
-      };
-      await writeJsonFile(identityPath(), nextIdentity);
+      nextIdentity = await recordAccountSyncWarning(nextIdentity, username, error);
     }
   }
-  if (allowProtectedStorage && !accountSyncAttemptFailed) {
+  if (allowProtectedStorage && allowRemoteSync && !accountSyncAttemptFailed) {
     nextIdentity = await refreshRemoteMinecraftRegistration(config, nextIdentity);
   }
   const device = await publicDeviceIdentity();
   return {
     ...nextIdentity,
     ...device,
+    ...(detectedUuidForSync ? { minecraftLauncherDetectedUuid: detectedUuidForSync } : {}),
     appVersion: launcherVersion(),
     platform: process.platform,
     arch: process.arch
@@ -4253,10 +4167,6 @@ function remoteRegistrationNeedsRefresh(config = {}, identity = {}) {
   return !Number.isFinite(attemptedAt) || Date.now() - attemptedAt >= REMOTE_REGISTRATION_RETRY_INTERVAL_MS;
 }
 
-function remoteRegistrationKey(config = {}, identity = {}, username = '') {
-  return `${identity.installId || ''}\0${normalizeMinecraftUsername(username).toLowerCase()}\0${remoteRegistrationBaseUrl(config)}`;
-}
-
 function remoteRegistrationSatisfiesRequest(config = {}, identity = {}, username = '', minecraftUuid = '') {
   const normalizedUsername = normalizeMinecraftUsername(username).toLowerCase();
   const requestedUuid = normalizeMinecraftUuid(minecraftUuid);
@@ -4274,45 +4184,7 @@ function remoteRegistrationSatisfiesRequest(config = {}, identity = {}, username
 }
 
 async function registerMinecraftUsernameInFlight(config = {}, identity = {}, username = '', options = {}) {
-  const key = remoteRegistrationKey(config, identity, username);
-  const running = remoteRegistrationRefreshes.get(key);
-  if (running) {
-    if (!options.allowInteractiveRecovery) return running;
-    try { return await running; } catch {
-      // An explicit retry can upgrade a failed background/cache-only attempt.
-      return registerMinecraftUsernameInFlight(config, identity, username, options);
-    }
-  }
-  const registration = (async () => {
-    // Startup, renderer status, and background telemetry can arrive one after
-    // another instead of overlapping perfectly. Re-read the durable identity
-    // inside the serialized operation so a caller holding the pre-import
-    // identity cannot register the same Minecraft account again after the
-    // first request has already completed.
-    const current = await loadIdentity();
-    const durableRegistrationMatches = remoteRegistrationSatisfiesRequest(config, current, username, options.minecraftUuid);
-    const completed = remoteRegistrationsCompletedThisSession.get(key);
-    if (completed && (options.reuseCompletedRegistration || (!options.forceRemoteRegistration && durableRegistrationMatches))) {
-      return completed;
-    }
-    if (!options.forceRemoteRegistration && durableRegistrationMatches) {
-      return {
-        ok: true,
-        username: current.minecraftUsername,
-        minecraftUuid: normalizeMinecraftUuid(current.minecraftUuid || current.minecraftUUID),
-        remote: { skipped: true, reason: 'registration already confirmed' }
-      };
-    }
-    const result = await registerMinecraftUsername(username, options);
-    if (!result?.remote?.skipped) remoteRegistrationsCompletedThisSession.set(key, result);
-    return result;
-  })().finally(() => {
-    if (remoteRegistrationRefreshes.get(key) === registration) {
-      remoteRegistrationRefreshes.delete(key);
-    }
-  });
-  remoteRegistrationRefreshes.set(key, registration);
-  return registration;
+  return accountRegistrationCoordinator.run(config, identity, username, options);
 }
 
 async function refreshRemoteMinecraftRegistration(config = {}, identity = {}) {
@@ -4331,15 +4203,9 @@ async function refreshRemoteMinecraftRegistration(config = {}, identity = {}) {
       });
       return await loadIdentity();
     } catch (error) {
-      const current = await loadIdentity();
-      const nextIdentity = {
-        ...current,
-        remoteRegistrationAttemptedAt: attemptedAt,
-        minecraftUsernameSyncWarning: `Player data sync unavailable: ${error.message || error}`,
-        minecraftUsernameSyncWarningUsername: username
-      };
-      await writeJsonFile(identityPath(), nextIdentity);
-      return nextIdentity;
+      return recordAccountSyncWarning(identity, username, error, {
+        attemptedAt, message: `Player data sync unavailable: ${error.message || error}`
+      });
     }
   })();
   return refresh;
@@ -4474,8 +4340,11 @@ async function canRecoverMinecraftUsernameFromLauncher(username, config = {}, op
 async function registerMinecraftUsername(username, options = {}) {
   const normalizedUsername = normalizeMinecraftUsername(username);
   assertMinecraftUsername(normalizedUsername);
-  const config = await loadConfig();
+  const config = options.config || await loadConfig();
   const identity = await loadIdentity();
+  if (options.expectedInstallId != null && identity.installId !== options.expectedInstallId) {
+    throw Object.assign(new Error('The Minecraft account changed. Retry account sync.'), { code: 'AHT_ACCOUNT_CHANGED' });
+  }
   const suppliedMinecraftUuidText = String(options.minecraftUuid || '').trim();
   const suppliedMinecraftUuid = normalizeMinecraftUuid(suppliedMinecraftUuidText);
   if (suppliedMinecraftUuidText && !suppliedMinecraftUuid) {
@@ -4499,7 +4368,6 @@ async function registerMinecraftUsername(username, options = {}) {
   };
 
   if (base && !developerLocalOnly) {
-    const url = new URL('api/users/register', base.endsWith('/') ? base : `${base}/`);
     const recoverySecret = await accountRecoverySecret(config, normalizedUsername);
     const deviceCredential = await loadDeviceCredential();
     const registrationPayload = {
@@ -4522,46 +4390,14 @@ async function registerMinecraftUsername(username, options = {}) {
         deviceId: deviceCredential.deviceId
       }
     });
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-AHT-Launcher-Recovery': recoverySecret
-      },
-      body: JSON.stringify(registrationPayload),
-      signal: AbortSignal.timeout(20_000)
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = body.error || `${response.status} ${response.statusText}`;
-      if (!isUsernameUnavailableError(message) || !(await canRecoverMinecraftUsernameFromLauncher(normalizedUsername, config, options))) {
-        throw new Error(message);
-      }
-      const recoveryPayload = {
-        ...registrationPayload,
-        recoverExistingUsername: true,
-        minecraftAccountMatched: true,
-        supportsMinecraftSessionRecovery: true,
-        recoveryReason: 'minecraft-launcher-account-match'
-      };
-      const requestRecovery = () => fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-AHT-Launcher-Recovery': recoverySecret
-        },
-        body: JSON.stringify(recoveryPayload),
-        signal: AbortSignal.timeout(20_000)
-      });
-      let recoveryResponse = await requestRecovery();
-      let recoveryBody = await recoveryResponse.json().catch(() => ({}));
-      if (recoveryResponse.status === 409 && recoveryBody.code === 'MINECRAFT_OWNERSHIP_REQUIRED') {
-        await proveMinecraftAccountOwnership({
+    remote = await registerMinecraftAccount({
+      baseUrl: base, registrationPayload, recoverySecret,
+      canRecover: () => canRecoverMinecraftUsernameFromLauncher(normalizedUsername, config, options),
+      proveOwnership: ({ serverId, expiresAt }) => proveMinecraftAccountOwnership({
           roots: [config.minecraftLauncher?.rootDir, ...(config.minecraftLauncher?.syncRoots || []),
             ...minecraftRootCandidates(process.platform, { ...process.env,
               HOME: process.env.HOME || app.getPath('home'), USERPROFILE: process.env.USERPROFILE || app.getPath('home') })],
-          username: normalizedUsername, minecraftUuid, serverId: recoveryBody.minecraftSessionChallenge,
-          expiresAt: recoveryBody.expiresAt,
+          username: normalizedUsername, minecraftUuid, serverId, expiresAt,
           interactiveRecovery: options.allowInteractiveRecovery ? async challenge => {
             try {
               const verified = await minecraftInteractiveRecovery.run({
@@ -4581,18 +4417,8 @@ async function registerMinecraftUsername(username, options = {}) {
               }
             }
           } : undefined
-        });
-        recoveryPayload.minecraftSessionChallenge = recoveryBody.minecraftSessionChallenge;
-        recoveryResponse = await requestRecovery();
-        recoveryBody = await recoveryResponse.json().catch(() => ({}));
-      }
-      if (!recoveryResponse.ok) {
-        throw new Error(recoveryBody.error || message);
-      }
-      remote = { ...recoveryBody, recovered: true };
-    } else {
-      remote = body;
-    }
+      })
+    });
   }
 
   const remoteMinecraftUuidText = String(remote.minecraftUuid || '').trim();
@@ -4603,27 +4429,10 @@ async function registerMinecraftUsername(username, options = {}) {
   if (remoteMinecraftUuid && minecraftUuid && remoteMinecraftUuid !== minecraftUuid) {
     throw new Error('Minecraft UUID does not match this registered player.');
   }
-  const nextIdentity = {
-    ...identity,
-    minecraftUsername: remote.username || normalizedUsername,
-    minecraftUuid: remoteMinecraftUuid || minecraftUuid,
-    usernameRegisteredAt: identity.usernameRegisteredAt || new Date().toISOString(),
-    usernameRegistrationMode: options.mode || (remote.recovered ? 'minecraft-launcher-recovery' : (remote.skipped ? 'local' : 'worker')),
-    remoteRegistrationAttemptedAt: remote.skipped
-      ? identity.remoteRegistrationAttemptedAt || ''
-      : new Date().toISOString(),
-    remoteRegistrationConfirmedAt: remote.skipped
-      ? identity.remoteRegistrationConfirmedAt || ''
-      : new Date().toISOString(),
-    remoteRegistrationWorkerBaseUrl: remote.skipped
-      ? identity.remoteRegistrationWorkerBaseUrl || ''
-      : remoteRegistrationBaseUrl(config),
-    minecraftLauncherDetectedUsername: (String(options.mode || '').startsWith('minecraft-launcher') || remote.recovered) ? normalizedUsername : identity.minecraftLauncherDetectedUsername || '',
-    minecraftUsernameUnavailable: '',
-    minecraftUsernameSyncWarning: '',
-    minecraftUsernameSyncWarningUsername: ''
-  };
-  await writeJsonFile(identityPath(), nextIdentity);
+  const nextIdentity = await updateIdentity(current => registeredAccountState(current, identity, {
+    username: normalizedUsername, minecraftUuid: remoteMinecraftUuid || minecraftUuid, remote,
+    mode: options.mode, baseUrl: remoteRegistrationBaseUrl(config)
+  }), { expectedInstallId: identity.installId });
   return {
     ok: true,
     username: nextIdentity.minecraftUsername,
@@ -4668,24 +4477,19 @@ async function reportCurrentLauncherVersion(config = {}, identity = {}) {
     return { skipped: true, reason: 'player data service does not support launcher update records yet' };
   }
 
-  const current = await loadIdentity();
-  if (
-    String(current.installId || '').trim() !== installId
-    || normalizeMinecraftUsername(current.minecraftUsername).toLowerCase() !== minecraftUsername.toLowerCase()
-  ) {
-    return { skipped: true, reason: 'player identity changed before launcher update confirmation' };
-  }
-  const reportedLauncherVersions = [...new Set([
-    ...(Array.isArray(current.reportedLauncherVersions) ? current.reportedLauncherVersions : []),
-    version
-  ].map((item) => String(item || '').trim()).filter(Boolean))].slice(-20);
-  await writeJsonFile(identityPath(), {
-    ...current,
-    reportedLauncherVersions,
-    lastReportedLauncherVersion: version,
-    launcherVersionReportedAt: new Date().toISOString()
+  let recorded = false;
+  await updateIdentity(current => {
+    if (String(current.installId || '').trim() !== installId
+        || normalizeMinecraftUsername(current.minecraftUsername).toLowerCase() !== minecraftUsername.toLowerCase()) return current;
+    const reportedLauncherVersions = [...new Set([
+      ...(Array.isArray(current.reportedLauncherVersions) ? current.reportedLauncherVersions : []), version
+    ].map(item => String(item || '').trim()).filter(Boolean))].slice(-20);
+    recorded = true;
+    return { ...current, reportedLauncherVersions, lastReportedLauncherVersion: version,
+      launcherVersionReportedAt: new Date().toISOString() };
   });
-  return { ok: true, version, recorded: true };
+  return recorded ? { ok: true, version, recorded: true }
+    : { skipped: true, reason: 'player identity changed before launcher update confirmation' };
 }
 
 function queueCurrentLauncherVersionReport(config = {}, identity = {}) {
@@ -6051,8 +5855,18 @@ function minecraftLaunchResultForRenderer(result = {}) {
   };
 }
 
+function shouldRefreshAccountStatus(config, identity) {
+  const detected = normalizeMinecraftUsername(identity.minecraftLauncherDetectedUsername);
+  const saved = normalizeMinecraftUsername(identity.minecraftUsername);
+  const detectedUuid = normalizeMinecraftUuid(identity.minecraftLauncherDetectedUuid);
+  const savedUuid = normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID);
+  if (detected && detected.toLowerCase() === saved.toLowerCase() && detectedUuid && savedUuid && detectedUuid !== savedUuid) return false;
+  return Boolean((detected && (detected.toLowerCase() !== saved.toLowerCase() || (detectedUuid && !savedUuid)))
+    || remoteRegistrationNeedsRefresh(config, identity));
+}
+
 async function identityForStatus(launcherConfig, prepared, allowProtectedStorage, options = {}) {
-  const identity = await identityPayload(launcherConfig, {
+  const identity = await accountStatusRefresh.read(launcherConfig, {
     allowProtectedStorage,
     forceAccountSync: options.forceAccountSync === true
   });
@@ -12275,133 +12089,16 @@ function remoteAdminLoginTimeoutMs() {
   return REMOTE_ADMIN_LOGIN_TIMEOUT_MS;
 }
 
-async function remoteAdminLogin(config, username = '', password = '') {
-  const suppliedUsername = String(username || '').trim();
-  const suppliedPassword = String(password || '');
-  const credentials = suppliedUsername && suppliedPassword
-    ? null
-    : await loadDeveloperCredentials();
-  const loginUsername = String(suppliedUsername || credentials?.username || '').trim();
-  const loginPassword = String(suppliedPassword || credentials?.password || '');
-  if (!loginUsername || !loginPassword) {
-    return { ok: false, error: 'Developer credentials are not configured on this machine' };
-  }
-  const base = remoteAdminBaseUrl(config);
-  if (!base) {
-    return { ok: false, error: 'Developer admin URL is not configured' };
-  }
-  const url = new URL('admin/login', base.endsWith('/') ? base : `${base}/`);
-  const timeoutMs = remoteAdminLoginTimeoutMs();
-  let response = null;
-  try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: loginUsername, password: loginPassword }),
-      signal: globalThis.AbortSignal?.timeout?.(timeoutMs)
-    });
-  } catch (error) {
-    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
-    return {
-      ok: false,
-      error: timedOut
-        ? `Worker admin login timed out after ${timeoutMs} ms`
-        : `Worker admin login request failed: ${error.message || error}`
-    };
-  }
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    return { ok: false, error: body.error || `${response.status} ${response.statusText}` };
-  }
-  const token = String(body.token || '');
-  const expiresAt = Date.parse(body.expiresAt || '');
-  const responseFields = Object.keys(body || {}).sort().slice(0, 8).join(', ') || 'none';
-  if (!token) {
-    return {
-      ok: false,
-      expiresAt: body.expiresAt || '',
-      error: `Worker admin login response from ${url.pathname} did not include a token (response fields: ${responseFields}). Check the Worker API base URL.`
-    };
-  }
-  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + 30_000) {
-    return {
-      ok: false,
-      expiresAt: body.expiresAt || '',
-      error: `Worker admin login response from ${url.pathname} did not include a valid future expiresAt value.`
-    };
-  }
-  adminToken = token;
-  adminTokenExpiresAt = expiresAt;
-  adminTokenBaseUrl = base;
-  return { ok: true, token, baseUrl: base, expiresAt: body.expiresAt, error: '' };
+function remoteAdminLogin(config, username = '', password = '') {
+  return developerAdminService.login(config, username, password);
 }
 
-async function ensureRemoteAdminToken(config, { username = '', password = '', force = false } = {}) {
-  const base = remoteAdminBaseUrl(config);
-  if (!base) throw new Error('Worker admin login failed: Developer admin URL is not configured');
-  if (!force && adminToken && adminTokenBaseUrl === base && adminTokenExpiresAt > Date.now() + 30_000) {
-    return adminToken;
-  }
-  if (force) clearRemoteAdminToken(base);
-  const running = adminLoginPromises.get(base);
-  if (running) return running;
-  const loginPromise = (async () => {
-      const result = await remoteAdminLogin(config, username, password);
-      if (!result.ok) {
-        throw new Error(`Worker admin login failed: ${result.error}`);
-      }
-      return result.token;
-    })().finally(() => {
-      if (adminLoginPromises.get(base) === loginPromise) adminLoginPromises.delete(base);
-    });
-  adminLoginPromises.set(base, loginPromise);
-  return loginPromise;
+function ensureRemoteAdminToken(config, options = {}) {
+  return developerAdminService.ensure(config, options);
 }
 
-async function adminFetch(config, route, options = {}) {
-  assertDeveloperAuthenticated();
-  const base = remoteAdminBaseUrl(config);
-  if (!base) {
-    throw new Error('Developer admin URL is not configured');
-  }
-  const loginRoute = route.replace(/^\/+/, '').startsWith('admin/login');
-  let requestToken = loginRoute ? '' : await ensureRemoteAdminToken(config);
-  const url = new URL(route.replace(/^\/+/, ''), base.endsWith('/') ? base : `${base}/`);
-  const fetchWithToken = async (token = '') => {
-    const headers = { ...(options.headers || {}) };
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    const response = await fetch(url, {
-      ...options,
-      headers,
-      signal: options.signal || globalThis.AbortSignal?.timeout?.(30_000)
-    });
-    const body = await response.json().catch(() => ({}));
-    return { response, body };
-  };
-  let { response, body } = await fetchWithToken(requestToken);
-  if (response.status === 401 && !loginRoute) {
-    clearRemoteAdminToken(base, requestToken);
-    requestToken = await ensureRemoteAdminToken(config);
-    ({ response, body } = await fetchWithToken(requestToken));
-  }
-  if (!response.ok) {
-    const normalizedRoute = route.replace(/^\/+/, '').split('?')[0];
-    const playerDataRoute = new Set([
-      'admin/launcher-downloads',
-      'admin/player-records',
-      'admin/launcher-updates',
-      'admin/session-reports',
-      'admin/player-ipv4-groups',
-      'admin/access-decisions'
-    ]);
-    if (response.status === 404 && playerDataRoute.has(normalizedRoute)) {
-      throw new Error('The configured Worker is missing the player-data API. Deploy the current AHT Worker before loading Player Data.');
-    }
-    throw new Error(body.error || `${response.status} ${response.statusText}`);
-  }
-  return body;
+function adminFetch(config, route, options = {}) {
+  return developerAdminService.fetch(config, route, options);
 }
 
 function minecraftLaunchEnv() {
@@ -16080,7 +15777,7 @@ ipcMain.handle('dev:login', async (_event, { username, password }) => {
     if (!remote?.ok) {
       try {
         await ensureRemoteAdminToken(config, { username: normalizedUsername, password: suppliedPassword, force: true });
-        remote = { ok: true, expiresAt: new Date(adminTokenExpiresAt).toISOString(), error: '' };
+        remote = { ok: true, expiresAt: new Date(developerAdminService.expiresAt()).toISOString(), error: '' };
       } catch (error) {
         remote = { ok: false, expiresAt: '', error: error.message || String(error) };
         console.warn(`Worker admin login failed after local developer login: ${remote.error}`);

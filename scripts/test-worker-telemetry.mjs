@@ -1,8 +1,7 @@
 import crypto from 'node:crypto';
-import worker, {
-  LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH,
-  LauncherStateHub
-} from '../cloudflare/curseforge-proxy-worker.js';
+import { memoryR2Etag, memoryR2Put } from './helpers/memory-r2.mjs';
+import worker, { LauncherStateHub } from '../cloudflare/curseforge-proxy-worker.js';
+import { LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH } from '../cloudflare/launcher-download-policy.js';
 import { launcherTelemetryPlatform, sendLauncherEvent } from '../src/syncClient.js';
 import {
   TEST_LAUNCHER_ATTESTATION_PRIVATE_KEY_PKCS8,
@@ -98,8 +97,8 @@ const env = {
     }
   },
   AHT_DATA: {
-    async put(key, value) {
-      objects.set(key, value);
+    async put(key, value, options) {
+      return memoryR2Put(objects, key, value, options);
     },
     async list({ prefix, limit = 1000, cursor = '' }) {
       const matches = [...objects.keys()]
@@ -120,6 +119,7 @@ const env = {
       const bytes = new TextEncoder().encode(value);
       return {
         size: bytes.length,
+        etag: memoryR2Etag(value),
         body: bytes,
         httpMetadata: { contentType: key.endsWith('.json') ? 'application/json' : 'application/octet-stream' },
         async json() { return JSON.parse(value); }

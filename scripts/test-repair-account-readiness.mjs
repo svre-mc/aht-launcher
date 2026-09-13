@@ -4,6 +4,8 @@ import vm from 'node:vm';
 import test from 'node:test';
 import * as runtimeRepair from '../src/runtimeRepair.js';
 import path from 'node:path';
+import { createAccountRegistrationCoordinator } from '../src/accountRegistrationCoordinator.js';
+import { accountWarningState, sameAccountSnapshot } from '../src/accountIdentityState.js';
 
 const main = fs.readFileSync(process.env.AHT_TEST_MAIN_SOURCE || new URL('../desktop/main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 test('public account warnings stay concise while local diagnostics remain available', () => {
@@ -142,7 +144,6 @@ for (const cancel of [false, true]) {
       usernameRegistrationMode: 'minecraft-launcher' };
     const entry = { state: 'ready', launcherConfig: config, identity, latest: {}, installed: {} };
     const calls = [];
-    const pending = new Map();
     let releaseBackground;
     let releaseRecovery;
     const backgroundFailure = Object.assign(new Error('AHT could not verify Minecraft account ownership using the available session data. Session diagnostics: {"matchedAccounts":1,"directCandidates":0,"protectedCaches":1,"protectedCandidates":0,"joinAttempts":0}'), { code: 'MINECRAFT_SESSION_REQUIRED' });
@@ -152,6 +153,8 @@ for (const cancel of [false, true]) {
       inspectMinecraftLauncherAuth: async () => ({ preferredUsername: 'FixturePlayer', preferredMinecraftUuid: identity.minecraftUuid }),
       loadIdentity: async () => ({ ...identity }), identityPath: () => '/fixture/identity.json',
       writeJsonFile: async (_file, value) => { identity = { ...value }; },
+      updateIdentity: async update => { identity = { ...await update({ ...identity }) }; return { ...identity }; },
+      accountWarningState, sameAccountSnapshot,
       loadDeviceCredential: async () => ({ deviceId: 'fixture-device', publicKey: 'fixture-public' }),
       publicDeviceIdentity: async () => ({}), launcherVersion: () => 'fixture',
       isDeveloperMode: () => false, developerAdminSessionAllowed: () => false,
@@ -160,7 +163,6 @@ for (const cancel of [false, true]) {
       workerServiceBaseUrl: value => value || '',
       isLauncherProofRegistrationError: error => error.code === 'UNREGISTERED',
       isUsernameUnavailableError: () => false,
-      remoteRegistrationRefreshes: pending, remoteRegistrationsCompletedThisSession: new Map(),
       launchPreparationCache: new Map([['stable', entry]]),
       LAUNCH_PREPARATION_PROOF_MIN_VALIDITY_MS: 1000,
       releaseTarget: id => ({ id }),
@@ -187,12 +189,18 @@ for (const cancel of [false, true]) {
       }
     });
     vm.runInContext([
+      mainDeclaration('function recordAccountSyncWarning(', '\nfunction developerClientBypassAllowed('),
       mainDeclaration('async function identityPayload(', '\nfunction normalizeMinecraftUsername('),
       mainDeclaration('function normalizeMinecraftUsername(', '\nasync function registerMinecraftUsernameInFlight('),
       mainDeclaration('async function registerMinecraftUsernameInFlight(', '\nfunction accountRecoveryCredentialPath('),
       mainDeclaration('async function writeRegisteredLauncherProof(', '\nasync function writeSerializedRegisteredLauncherProof('),
       mainDeclaration('async function refreshPreparedLauncherProof(', '\nfunction scheduleLaunchPreparationProofRefresh(')
     ].join('\n'), context);
+    context.accountRegistrationCoordinator = createAccountRegistrationCoordinator({
+      loadIdentity: context.loadIdentity, register: context.registerMinecraftUsername,
+      normalizeUsername: context.normalizeMinecraftUsername, normalizeUuid: context.normalizeMinecraftUuid,
+      baseUrl: context.remoteRegistrationBaseUrl, matches: context.remoteRegistrationSatisfiesRequest
+    });
     context.writeSerializedRegisteredLauncherProof = options => context.writeRegisteredLauncherProof(options);
     const background = context.identityPayload(config);
     await new Promise(resolve => setImmediate(resolve));
@@ -214,7 +222,7 @@ for (const cancel of [false, true]) {
     assert.equal(entry.launcherProof, undefined, 'Recovery UI is not proof of account ownership');
     releaseRecovery();
     const result = await outcome;
-    assert.equal(pending.size, 0);
+    assert.equal(context.accountRegistrationCoordinator.pendingCount(), 0);
     if (cancel) {
       assert.equal(result.error.code, 'MINECRAFT_RECOVERY_CANCELLED');
       assert(!calls.includes('authorized'));

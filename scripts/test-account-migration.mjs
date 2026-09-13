@@ -10,6 +10,7 @@ import { recoverLegacyMinecraftAccount } from '../cloudflare/minecraft-account-r
 import { proveMinecraftAccountOwnership } from '../src/minecraftAccountRecovery.js';
 import { readWindowsMinecraftSession, readWindowsMinecraftSessions } from '../src/windowsMinecraftSession.js';
 import { createDeviceAssertion, createDeviceCredential } from '../src/deviceIdentity.js';
+import { createLauncherIdentityStore } from '../src/launcherIdentityStore.js';
 
 const username = 'LegacyRig';
 const minecraftUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -19,8 +20,12 @@ const key = 'accounts/usernames/legacyrig.json';
 const original = { username, installId: 'old-install', appVersion: '0.1.48', createdAt: '2026-07-01T00:00:00Z', previousInstallIds: [] };
 const records = new Map([[key, structuredClone(original)]]);
 const env = { AHT_REQUIRE_DEVICE_ATTESTATION: 'true', AHT_BLOCK_LIKELY_VPN: 'false', AHT_DATA: {
-  get: async key => records.has(key) ? { json: async () => structuredClone(records.get(key)) } : null,
-  put: async (key, value) => records.set(key, JSON.parse(value)),
+  get: async key => records.has(key) ? { etag: createHash('sha256').update(JSON.stringify(records.get(key))).digest('hex'), json: async () => structuredClone(records.get(key)) } : null,
+  put: async (key, value, options = {}) => {
+    if (options.onlyIf?.etagMatches && (!records.has(key) || createHash('sha256').update(JSON.stringify(records.get(key))).digest('hex') !== options.onlyIf.etagMatches)) return null;
+    if (options.onlyIf?.etagDoesNotMatch === '*' && records.has(key)) return null;
+    records.set(key, JSON.parse(value)); return { etag: createHash('sha256').update(value).digest('hex') };
+  },
   delete: async key => records.delete(key),
   list: async ({ prefix = '' } = {}) => ({ objects: [...records.keys()].filter(key => key.startsWith(prefix)).map(key => ({ key })), truncated: false })
 } };
@@ -221,15 +226,22 @@ try {
     app: { getPath: () => root }, normalizeMinecraftUsername: value => value || '',
     writeJsonFile: async (_file, value) => { await new Promise(resolve => setTimeout(resolve, 5)); diskIdentity = value; writes++; }
   });
-  const identityCode = source.slice(source.indexOf('let identityLoadInFlight ='), source.indexOf('function developerClientBypassAllowed()'));
-  vm.runInContext(identityCode, context);
+  const identityStore = createLauncherIdentityStore({
+    file: context.identityPath, legacyFiles: () => [], createId: randomUUID,
+    readJson: async () => {
+      if (!diskIdentity) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      return structuredClone(diskIdentity);
+    },
+    writeJson: context.writeJsonFile
+  });
+  context.loadIdentity = () => identityStore.read();
   const identities = await Promise.all(Array.from({ length: 20 }, () => context.loadIdentity()));
   assert.equal(new Set(identities.map(identity => identity.installId)).size, 1);
   assert.equal(writes, 1, 'concurrent startup must not create competing installation IDs');
   const start = source.indexOf('async function refreshRemoteMinecraftRegistration(');
   const refreshCode = source.slice(start, source.indexOf('\n}\n', start) + 3);
   Object.assign(context, { remoteRegistrationNeedsRefresh: () => true, remoteRegistrationKey: () => 'key',
-    remoteRegistrationRefreshes: new Map([['key', Promise.resolve({ ok: true, username })]]),
+    registerMinecraftUsernameInFlight: async () => ({ ok: true, username }),
     loadIdentity: async () => ({ installId: 'durable', minecraftUsername: username }) });
   vm.runInContext(refreshCode, context);
   assert.equal((await context.refreshRemoteMinecraftRegistration({}, { minecraftUsername: username })).installId, 'durable',

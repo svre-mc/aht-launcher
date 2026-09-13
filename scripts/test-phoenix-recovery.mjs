@@ -63,7 +63,10 @@ try {
   assert.equal((await getStatus()).valid, true);
   let streamCancelled = false;
   const progress = [];
-  await assert.rejects(installPhoenixAntiCheat({ ...options, descriptor, timeoutMs: 35, onProgress: p => progress.push(p),
+  const nextFile = 'Phoenix-Anti-cheat-Windows-x64-1.1.3.exe';
+  const nextRelease = { ...descriptor, version: '1.1.3', fileName: nextFile,
+    path: `launcher/anticheat/win32-x64/${nextFile}`, url: `https://aht.test/launcher/anticheat/win32-x64/${nextFile}` };
+  await assert.rejects(installPhoenixAntiCheat({ ...options, descriptor: nextRelease, timeoutMs: 35, onProgress: p => progress.push(p),
     fetchImpl: async () => new Response(new ReadableStream({ cancel() { streamCancelled = true; } })) }), /timed out/i);
   assert.equal(streamCancelled, true);
   assert(!progress.some(p => p.percent === 100));

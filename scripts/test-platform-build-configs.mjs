@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { launcherPackageVersionForRelease } from '../src/launcherVersion.js';
+import { LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH } from '../cloudflare/launcher-download-policy.js';
 import { AHT_SERVICE_ORIGIN, isBrandedAhtServiceUrl, migrateLegacyAhtServiceUrl } from '../src/ahtServiceUrl.js';
 
 const require = createRequire(import.meta.url);
@@ -22,13 +23,15 @@ const benderFontFiles = ['Bender-Regular.otf', 'Bender-Light.otf', 'Bender-Bold.
   .map((name) => new URL(`../desktop/renderer/assets/fonts/${name}`, import.meta.url));
 const externalLinkIcon = readText(new URL('../desktop/renderer/icons/external-link.svg', import.meta.url));
 const desktopMain = readText(new URL('../desktop/main.js', import.meta.url));
+const developerAdminSource = readText(new URL('../src/developerAdminService.js', import.meta.url));
 const installerSource = readText(new URL('../src/installer.js', import.meta.url));
 const localChangesSource = readText(new URL('../src/localChanges.js', import.meta.url));
 const socialLinksSource = readText(new URL('../src/socialLinks.js', import.meta.url));
 const r2DirectUploadSource = readText(new URL('../src/r2DirectUpload.js', import.meta.url));
 const launcherProofSource = readText(new URL('../src/launcherProof.js', import.meta.url));
 const launchDiagnosticsSource = readText(new URL('../src/launchDiagnostics.js', import.meta.url));
-const nativeGuardSource = readText(new URL('../src/nativeGuard.js', import.meta.url));
+const nativeGuardSource = ['nativeGuard', 'nativeGuardTransport', 'nativeGuardSessions', 'phoenixInstallation']
+  .map(name => readText(new URL(`../src/${name}.js`, import.meta.url))).join('\n');
 const nativeGuardExecutableSource = readText(new URL('../native-guard/Guard.cs', import.meta.url));
 const nativeGuardNotice = readText(new URL('../native-guard/NOTICE.txt', import.meta.url));
 const nativeGuardBuildSource = readText(new URL('../scripts/build-native-guard.mjs', import.meta.url));
@@ -318,7 +321,7 @@ assert(
   workerSource.includes('const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;')
   && workerSource.includes('const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;')
   && workerSource.includes('const LAUNCHER_INSTALLER_DOWNLOAD_RETRY_GRACE_MS = 10 * 60 * 1000;')
-  && workerSource.includes("LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH = '2026-09-04-privacy-reset-1'")
+  && LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH === '2026-09-04-privacy-reset-1'
   && workerSource.includes("const LAUNCHER_INSTALLER_ID_COOKIE = '__Host-AHT-Download-ID';")
   && workerSource.includes('launcherInstallerPersonIdentity')
   && workerSource.includes("kind: 'anonymous-cookie'")
@@ -356,9 +359,9 @@ assert(
   'Production Worker deployment and Developer cloud setup must return only the branded AHT service origin; loopback is permitted only under explicit test hooks.'
 );
 assert(desktopMain.includes('preferredMinecraftUuid') && desktopMain.includes('minecraftUuid: detectedMinecraftUuid') && desktopMain.includes("type: 'launcher_update_completed'") && desktopMain.includes('result?.launcherUpdateRecorded'), 'Regular launcher identity must capture the active Minecraft UUID and record each confirmed launcher version through the dedicated update contract without exposing an internal storage key.');
-assert(workerSource.includes('recovered && !legacyRecovery?.verified && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)') && desktopMain.includes('launcherVersionTelemetryInFlight.delete(key)') && desktopMain.includes('launcherVersionWasReported(latestIdentity, version)'), 'Account recovery must require the stored Minecraft UUID, and transient launcher-update telemetry failures must be retryable without duplicating a version already persisted by an earlier request.');
+assert(workerSource.includes('recovered && !ownershipRecovery?.verified && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)') && desktopMain.includes('launcherVersionTelemetryInFlight.delete(key)') && desktopMain.includes('launcherVersionWasReported(latestIdentity, version)'), 'Account recovery must require the stored Minecraft UUID, and transient launcher-update telemetry failures must be retryable without duplicating a version already persisted by an earlier request.');
 assert(desktopMain.includes('remoteRegistrationConfirmedAt') && desktopMain.includes('remoteRegistrationNeedsRefresh') && desktopMain.includes('registerMinecraftUsernameInFlight') && desktopMain.includes('Player data sync unavailable:'), 'Player identities saved before a Worker/API outage must retry remote registration once and preserve a clear sync warning without deleting the local identity.');
-assert(desktopMain.includes('The configured Worker is missing the player-data API. Deploy the current AHT Worker before loading Player Data.'), 'Developer Player Data must identify a stale Worker deployment instead of presenting an empty/incomplete history.');
+assert(developerAdminSource.includes('The configured Worker is missing the player-data API. Deploy the current AHT Worker before loading Player Data.'), 'Developer Player Data must identify a stale Worker deployment instead of presenting an empty/incomplete history.');
 assert(rendererApp.includes('loadAllPlayerDataPages') && rendererApp.includes('window.aht.devLauncherDownloads(payload)') && rendererApp.includes('window.aht.devPlayerRecords(payload)') && rendererApp.includes('window.aht.devLauncherUpdates(payload)') && rendererApp.includes('Player data pagination returned a repeated cursor.'), 'Developer Player Data must safely page through installer downloads, canonical players, and launcher updates.');
 assert(rendererHtml.includes('id="playerDownloadsTab"') && rendererHtml.includes('id="playerRecordsTab"') && rendererHtml.includes('id="playerLauncherUpdatesTab"') && !rendererHtml.includes('Selected Download') && !rendererHtml.includes('Raw data') && !rendererApp.includes('JSON.stringify(item, null, 2)'), 'Player Data must use compact Downloads/Players/Launcher Updates tabs without a raw selected-record panel.');
 assert(rendererHtml.includes('<span>Date</span><span>User</span><span>IP</span><span>MC UUID</span><span>Platform</span>') && rendererHtml.includes('<span>Last Seen</span><span>User</span><span>IP</span><span>Network</span><span>Device</span><span>MC UUID</span><span>Access</span><span>Action</span>') && rendererApp.includes('if (platform.includes("win")) return "Windows"') && rendererApp.includes('return "Mac";') && rendererApp.includes('return "Linux";'), 'Player Data must show IPv4 or IPv6, device/network/access fields, verified identity fields, and short Windows, macOS, and Linux platform names.');
@@ -737,7 +740,15 @@ assert(nativeGuardSource.includes("redirect: 'error'") && nativeGuardSource.incl
 assert(nativeGuardSource.includes('export async function probeNativeGuard') && desktopMain.includes('queuePhoenixDetectionMonitor') && desktopMain.includes("new URL('api/session/report'") && workerSource.includes('async function verifiedPhoenixProbe') && workerSource.includes("confidence: 'confirmed-memory-code-mismatch'") && privacyText.includes('exact AHT game process name and process ID') && privacyText.includes('does not send memory contents'), 'Phoenix flags must be probe-signed, Play-session authenticated, privacy-disclosed, and submitted without unrelated process enumeration or memory contents.');
 assert(nativeGuardExecutableSource.includes('probeSessionKey=B64(RandomBytes(32))') && nativeGuardExecutableSource.includes('Same(parts[0],probeSessionKey)') && nativeGuardSource.includes('`${expected.sessionKey}|INFO`') && nativeGuardSource.includes('`${live.sessionKey}|${nonce}|${live.gamePid}`'), 'Launcher-to-Phoenix loopback management must use an unpredictable, memory-only session key.');
 assert(nativeGuardExecutableSource.includes('string visibleDetail=diagnostics?detail:""') && nativeGuardExecutableSource.includes('visibleModules=diagnostics?checkedModules:measured?1:0') && nativeGuardExecutableSource.includes('Answer(nonce,pid,diagnostics)'), 'The target-bound game challenge must expose only a signed state with normalized coverage; exact findings are restricted to the authenticated launcher channel.');
-assert(nativeGuardSource.includes("Symbol.for('aht.phoenix.runtime-state.v1')") && nativeGuardSource.includes("path.join(directory, '.aht-launcher', 'native-guard.json')") && nativeGuardSource.includes('fs.rm(stateFile, { force: true })') && !nativeGuardSource.includes('JSON.parse(await fs.readFile(stateFile') && !nativeGuardSource.includes('fs.writeFile(`${stateFile}.tmp`'), 'Phoenix live descriptors must be reused only in process memory, while exact legacy descriptor files are removed and never rewritten.');
+assert(nativeGuardSource.includes("Symbol.for('aht.phoenix.runtime-state.v2')")
+  && nativeGuardSource.includes("path.join(directory, '.aht-launcher')")
+  && nativeGuardSource.includes('fs.lstat(metadataDirectory)')
+  && nativeGuardSource.includes('if (!metadata.isDirectory() || metadata.isSymbolicLink()) return;')
+  && nativeGuardSource.includes("path.join(metadataDirectory, 'native-guard.json')")
+  && nativeGuardSource.includes('fs.rm(stateFile, { force: true })')
+  && !nativeGuardSource.includes('JSON.parse(await fs.readFile(stateFile')
+  && !nativeGuardSource.includes('fs.writeFile(`${stateFile}.tmp`'),
+  'Phoenix live descriptors must remain process-local; exact legacy cleanup must skip redirected metadata parents.');
 assert(!persistedNativeGuardSource.includes('sessionKey') && !persistedNativeGuardSource.includes('guardPid') && !persistedNativeGuardSource.includes('gamePid') && !persistedNativeGuardSource.includes('modulus') && !persistedNativeGuardSource.includes('exponent'), 'Launcher proof files must never persist the Phoenix management key, PIDs, or signing material.');
 assert(!phoenixMonitorSource.includes('console.') && !desktopMain.includes('api/phoenix/detections') && !workerSource.includes("'/admin/phoenix-detections'") && workerSource.includes("'/admin/session-reports'") && workerSource.includes("privateJson({ ok: true }, 200, origin)") && workerSource.includes("privateJson({ error: 'Session report rejected.' }"), 'Player monitoring must remain log-silent and all external report routes, failures, and acknowledgements must stay generic.');
 assert(!/(?:jvm\.dll|lwjgl|code offset|file hash|kernel|user mode|Windows service|startup item|injection|process list|memory content|absolute path|interference|verified state|technical evidence|matching AHT game)/i.test(phoenixConsentMarkup) && !/(?:jvm\.dll|lwjgl|code offset|file hash)/i.test(nativeGuardNotice) && nativeGuardBuildSource.includes("'/optimize+'") && nativeGuardBuildSource.includes("'/debug-'") && !rendererApp.includes('module: "jvm.dll"'), 'Packaged consent must stay professional and implementation-neutral, native notices must not disclose internal matching rules, and the standalone release must omit debug metadata.');
@@ -976,7 +987,7 @@ assert(
 );
 assert(releaseWorkflow.includes('Enforce immutable launcher versions') && releaseWorkflow.includes('check-launcher-release-immutability.mjs') && !releaseWorkflow.includes('--clobber'), 'Public launcher releases must reject an existing version and never clobber release assets.');
 assert(releaseWorkflow.includes('Read current launcher manifest from authenticated R2') && releaseWorkflow.includes('r2 object get "$AHT_R2_BUCKET/launcher/latest.json"') && releaseWorkflow.includes('--live-manifest ci-current-launcher/latest.json'), 'Launcher release immutability must read the current manifest through authenticated R2 instead of depending on the public Worker route from CI.');
-assert(packageJson.dependencies?.['adm-zip'] === '^0.6.0' && packageJson.devDependencies?.electron === '^42.10.1', 'Launcher ZIP/runtime and Electron dependencies must stay on the audited security baselines.');
+assert(packageJson.dependencies?.['adm-zip'] === '^0.6.1' && packageJson.devDependencies?.electron === '^42.10.1', 'Launcher ZIP/runtime and Electron dependencies must stay on the audited security baselines (ZIP destination-link fix included).');
 assert(releaseWorkflow.includes('"scripts/validate-launcher-update-manifest.mjs"'), 'GitHub workflow path triggers must include the generated-manifest validator.');
 assert(!releaseWorkflow.includes('launcher_version') && !releaseWorkflow.includes('set-package-version.mjs'), 'GitHub launcher workflow must not expose or apply a manual launcher version override.');
 assert(!githubActionsSource.includes('launcher_version') && !desktopMain.includes('launcherVersion: version'), 'Developer launcher update dispatch must let GitHub Actions read package.json from the selected branch.');
@@ -1153,8 +1164,8 @@ assert(
     && !publicDeviceIdentitySource.includes('loadDeviceCredential(')
     && !publicDeviceIdentitySource.includes('decryptDeveloperSecret(')
     && identityPayloadSource.includes('const allowProtectedStorage = options.allowProtectedStorage !== false;')
-    && identityPayloadSource.includes('allowProtectedStorage\n      && detectedUsername')
-    && identityPayloadSource.includes('if (allowProtectedStorage && !accountSyncAttemptFailed) {\n    nextIdentity = await refreshRemoteMinecraftRegistration')
+    && identityPayloadSource.includes('allowProtectedStorage\n      && allowRemoteSync\n      && detectedUsername')
+    && identityPayloadSource.includes('if (allowProtectedStorage && allowRemoteSync && !accountSyncAttemptFailed) {\n    nextIdentity = await refreshRemoteMinecraftRegistration')
     && getStatusSource.includes("? process.platform !== 'darwin'")
     && getStatusSource.includes('usePreparedPrerequisites ? prepared : null,\n    allowProtectedStorage,\n    options')
     && identityForStatusSource.includes('allowProtectedStorage,\n    forceAccountSync: options.forceAccountSync === true')

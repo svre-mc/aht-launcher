@@ -1,4 +1,5 @@
-import { isLegacyMinecraftAccount, recoverLegacyMinecraftAccount } from './minecraft-account-recovery.js';
+import { isLegacyMinecraftAccount, recoverMinecraftAccount } from './minecraft-account-recovery.js';
+import { LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH } from './launcher-download-policy.js';
 
 const CURSEFORGE_BASE = 'https://api.curseforge.com/v1';
 const RELEASE_PATHS = new Set([
@@ -49,7 +50,6 @@ const LAUNCHER_DOWNLOAD_KEYS = new Set([
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT = 7;
 const LAUNCHER_INSTALLER_DOWNLOAD_WINDOW_MS = 24 * 60 * 60 * 1000;
 const LAUNCHER_INSTALLER_DOWNLOAD_RETRY_GRACE_MS = 10 * 60 * 1000;
-export const LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH = '2026-09-04-privacy-reset-1';
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_PATH = '/launcher-installer-download-limit';
 const LAUNCHER_INSTALLER_DOWNLOAD_LIMIT_INTERNAL_HEADER = 'X-AHT-Launcher-Installer-Limit-Internal';
 const LAUNCHER_INSTALLER_ID_COOKIE = '__Host-AHT-Download-ID';
@@ -1916,6 +1916,13 @@ async function registerUser(request, env, origin) {
     return json({ error: 'Minecraft UUID does not match this registered player.' }, 409, origin);
   }
   const installChanged = Boolean(existingRecord && existingRecord.installId && existingRecord.installId !== installId);
+  const existingDeviceId = normalizedAccessValue('device', existingRecord?.deviceId);
+  const incomingDeviceId = device.ok ? device.deviceId : '';
+  // A legacy installation ID is an identifier, not proof of account ownership.
+  // Adding the first device binding is recovery even when that ID is unchanged.
+  const initialDeviceBinding = Boolean(existingRecord && !existingDeviceId && incomingDeviceId);
+  const bindingChanged = installChanged || initialDeviceBinding
+    || Boolean(existingDeviceId && incomingDeviceId && existingDeviceId !== incomingDeviceId);
   const recoveryRequested = Boolean(body.recoverExistingUsername && body.minecraftAccountMatched);
   const storedRecoveryVerifier = cleanString(existingRecord?.accountRecoveryVerifier || '', 80);
   const secureRecoveryMatched = Boolean(
@@ -1923,25 +1930,26 @@ async function registerUser(request, env, origin) {
     && accountRecoveryVerifier
     && await secureStringEqual(storedRecoveryVerifier, accountRecoveryVerifier)
   );
-  let legacyRecovery = null;
-  if (installChanged && recoveryRequested && !secureRecoveryMatched
-      && isLegacyMinecraftAccount(existingRecord) && device.ok && accountRecoveryVerifier) {
+  let ownershipRecovery = null;
+  if (bindingChanged && recoveryRequested && !secureRecoveryMatched
+      && (isLegacyMinecraftAccount(existingRecord) || (existingMinecraftUuid && existingMinecraftUuid === minecraftUuid))
+      && device.ok && accountRecoveryVerifier) {
     if (!body.supportsMinecraftSessionRecovery) {
       return privateJson({ error: 'This older AHT account needs Minecraft ownership verification. Update AHT Launcher and sign in to Minecraft Launcher.', code: 'LEGACY_ACCOUNT_UPGRADE_REQUIRED' }, 409, origin);
     }
-    legacyRecovery = await recoverLegacyMinecraftAccount({ env, record: existingRecord, body,
+    ownershipRecovery = await recoverMinecraftAccount({ env, record: existingRecord, body,
       username, minecraftUuid, deviceId: device.deviceId, installId });
-    if (!legacyRecovery.verified) return privateJson(legacyRecovery, legacyRecovery.status, origin);
+    if (!ownershipRecovery.verified) return privateJson(ownershipRecovery, ownershipRecovery.status, origin);
   }
-  const recovered = Boolean(installChanged && recoveryRequested && (secureRecoveryMatched || legacyRecovery?.verified));
-  if (installChanged && recoveryRequested && !recovered) {
-    return json({ error: 'Secure launcher recovery could not be verified for this username.' }, 409, origin);
+  const recovered = Boolean(bindingChanged && recoveryRequested && (secureRecoveryMatched || ownershipRecovery?.verified));
+  if (bindingChanged && recoveryRequested && !recovered) {
+    return privateJson({ error: 'Secure launcher recovery could not be verified for this username.', code: 'ACCOUNT_RECOVERY_REQUIRED' }, 409, origin);
   }
-  if (recovered && !legacyRecovery?.verified && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)) {
+  if (recovered && !ownershipRecovery?.verified && (!existingMinecraftUuid || !minecraftUuid || existingMinecraftUuid !== minecraftUuid)) {
     return json({ error: 'Minecraft UUID is required and must match this registered player before launcher recovery.' }, 409, origin);
   }
-  if (installChanged && !recovered) {
-    return json({ error: 'That username is not available.' }, 409, origin);
+  if ((installChanged || initialDeviceBinding) && !recovered) {
+    return privateJson({ error: 'That username is not available.', code: 'ACCOUNT_RECOVERY_REQUIRED' }, 409, origin);
   }
   if (existing && !existingRecord) {
     return json({ error: 'That username is not available.' }, 409, origin);
@@ -1950,8 +1958,6 @@ async function registerUser(request, env, origin) {
   const now = new Date().toISOString();
   const clientIp = requestIpv4(request);
   const network = await requestNetworkAssessment(request, env, clientIp);
-  const existingDeviceId = normalizedAccessValue('device', existingRecord?.deviceId);
-  const incomingDeviceId = device.ok ? device.deviceId : '';
   if (existingDeviceId && !incomingDeviceId) {
     return privateJson({ error: 'This registered player requires device verification.', code: 'DEVICE_ATTESTATION_REQUIRED' }, 403, origin);
   }
@@ -1999,7 +2005,7 @@ async function registerUser(request, env, origin) {
     createdAt: existingRecord?.createdAt || now,
     updatedAt: now,
     recoveredAt: recovered ? now : existingRecord?.recoveredAt || '',
-    recoveryReason: legacyRecovery?.verified ? 'mojang-verified-legacy-migration' : recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
+    recoveryReason: ownershipRecovery?.verified ? (isLegacyMinecraftAccount(existingRecord) ? 'mojang-verified-legacy-migration' : 'mojang-verified-credential-recovery') : recovered ? cleanString(body.recoveryReason || 'launcher-account-match', 80) : existingRecord?.recoveryReason || '',
     previousInstallIds: recovered ? [...new Set([...previousInstallIds, existingRecord.installId].filter(Boolean))].slice(-10) : previousInstallIds,
     ipv4: clientIp.available ? clientIp.ipv4 : cleanString(existingRecord?.ipv4 || '', 80),
     ip: clientIp.available ? clientIp.ip : normalizedConnectionIp(existingRecord?.ip || existingRecord?.ipv4),
@@ -2014,12 +2020,22 @@ async function registerUser(request, env, origin) {
     colo: clientIp.available ? network.colo : cleanString(existingRecord?.colo || '', 16),
     network: clientIp.available ? network : (existingRecord?.network || network)
   };
-  await env.AHT_DATA.put(key, JSON.stringify(record), {
-    httpMetadata: { contentType: 'application/json' }
+  if (existing && !existing.etag) {
+    return privateJson({ error: 'Account sync is temporarily unavailable. Retry.', code: 'ACCOUNT_STORAGE_UNAVAILABLE' }, 503, origin);
+  }
+  if (ownershipRecovery?.verified && ownershipRecovery.expiresAt <= Date.now()) {
+    return privateJson({ error: 'Account verification expired. Retry account sync.', code: 'MINECRAFT_OWNERSHIP_EXPIRED' }, 409, origin);
+  }
+  const committed = await env.AHT_DATA.put(key, JSON.stringify(record), {
+    httpMetadata: { contentType: 'application/json' },
+    onlyIf: existing ? { etagMatches: existing.etag } : { etagDoesNotMatch: '*' }
   });
+  if (committed === null) {
+    return privateJson({ error: 'The account changed during verification. Retry account sync.', code: 'ACCOUNT_REGISTRATION_CHANGED' }, 409, origin);
+  }
   await indexAccountIpv4(env, record);
   await indexAccountIdentity(env, record);
-  if (legacyRecovery?.verified) await env.AHT_DATA.delete(legacyRecovery.key);
+  if (ownershipRecovery?.verified) await env.AHT_DATA.delete(ownershipRecovery.key);
   await notifyLauncherServerState(env, recovered ? 'account-recovered' : 'account-registered');
   return privateJson({
     ok: true,

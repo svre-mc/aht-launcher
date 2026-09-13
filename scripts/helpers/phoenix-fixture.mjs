@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PHOENIX_ANTI_CHEAT_CONSENT_VERSION } from '../../src/nativeGuard.js';
+import { readPhoenixBuildSource, phoenixSourceHash } from '../phoenix-release-artifact.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -12,11 +13,14 @@ function sha256(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
-function loadDevelopmentPackage(expectedVersion) {
+async function loadDevelopmentPackage(expectedVersion) {
   const packageDir = path.join(repositoryRoot, 'build', 'native-guard');
   const manifestPath = path.join(packageDir, 'manifest.json');
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const receipt = JSON.parse(await fsp.readFile(path.join(packageDir, 'build-receipt.json'), 'utf8'));
+    if (receipt.version !== expectedVersion || receipt.sha256 !== manifest.sha256
+        || receipt.sourceSha256 !== phoenixSourceHash(await readPhoenixBuildSource(repositoryRoot))) return null;
     const binaryPath = path.join(packageDir, String(manifest.file || ''));
     const bytes = fs.readFileSync(binaryPath);
     if (manifest.product !== 'phoenix-anticheat'
@@ -35,14 +39,14 @@ export async function installPhoenixTestFixture(userData) {
   if (process.platform !== 'win32') return null;
   const packageMetadata = JSON.parse(await fsp.readFile(path.join(repositoryRoot, 'package.json'), 'utf8'));
   const version = String(packageMetadata.phoenixAntiCheatVersion || '').trim();
-  let developmentPackage = loadDevelopmentPackage(version);
+  let developmentPackage = await loadDevelopmentPackage(version);
   if (!developmentPackage) {
     execFileSync(process.execPath, [path.join(repositoryRoot, 'scripts', 'build-native-guard.mjs')], {
       cwd: repositoryRoot,
       stdio: 'pipe',
       windowsHide: true
     });
-    developmentPackage = loadDevelopmentPackage(version);
+    developmentPackage = await loadDevelopmentPackage(version);
   }
   if (!developmentPackage) throw new Error('Could not prepare the verified Phoenix Anti-cheat test fixture.');
 

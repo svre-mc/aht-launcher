@@ -3,6 +3,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { createDeviceAssertion, validateDeviceCredential } from './deviceIdentity.js';
 import { workerServiceBaseUrl } from './releaseTargets.js';
+import { requestServiceJson, serviceResponseError } from './serviceTransport.js';
 import { pathExists, readJsonFile, removeFileIfExists, writeJsonFile } from './utils.js';
 
 export const LAUNCHER_PROOF_PROTOCOL = 'aht-launcher-attestation-v2';
@@ -356,18 +357,17 @@ async function requestWorkerProof({ config = {}, payload, fetchImpl = globalThis
   if (recoverySecret) {
     headers['X-AHT-Launcher-Recovery'] = recoverySecret;
   }
-  const response = await fetchImpl(url, {
+  const response = await requestServiceJson(url, {
+    fetchImpl,
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
-    signal: globalThis.AbortSignal?.timeout?.(15_000)
+    timeoutMs: 15_000,
+    maxBytes: 32_768
   });
-  const body = await response.json().catch(() => ({}));
-  if (JSON.stringify(body).length > 32_768) {
-    throw workerProofContractError('Worker launcher proof response exceeded the 32 KiB size limit.');
-  }
+  const body = response.body;
   if (!response.ok) {
-    throw new Error(body.error || `${response.status} ${response.statusText}`);
+    throw serviceResponseError(response);
   }
   if (!body?.token || !body?.header || !body?.payload || !body?.signature) {
     const responseFields = Object.keys(body || {}).sort().slice(0, 8).join(', ') || 'none';
@@ -462,17 +462,22 @@ export async function writeLauncherProof({ config = {}, identity = {}, latest = 
   }
   let proof = null;
   let remoteError = '';
+  let remoteFailure = null;
   try {
     proof = await requestWorkerProof({ config, payload, fetchImpl, authToken, recoverySecret });
   } catch (error) {
     if (error?.code === 'AHT_LAUNCHER_PROOF_RESPONSE_MISMATCH') throw error;
+    remoteFailure = error;
     remoteError = error.message || String(error);
   }
   if (!proof) {
     proof = unsignedProof(payload, remoteError);
   }
   if (!proof.trusted && config.launcherProof?.required === true) {
-    throw new Error(`Launcher proof signing failed: ${proof.error || 'the Worker signing endpoint did not return a trusted attestation'}`);
+    throw Object.assign(new Error(`Launcher proof signing failed: ${proof.error || 'the Worker signing endpoint did not return a trusted attestation'}`), {
+      code: remoteFailure?.code || 'AHT_LAUNCHER_PROOF_FAILED',
+      ...(remoteFailure?.status ? { status: remoteFailure.status } : {})
+    });
   }
 
   const persistedNativeGuard = identity.nativeGuard ? {

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
-import { phoenixSourceHash, reusePhoenixRelease } from './phoenix-release-artifact.mjs';
+import { phoenixSourceHash, reusePhoenixRelease, readPhoenixBuildSource, phoenixBuildSources } from './phoenix-release-artifact.mjs';
+import { fileURLToPath } from 'node:url';
 const source = 'fixture\nsource\n';
 const bytes = Buffer.from('published executable fixture');
 const pin = { version: '1.1.4', sourceSha256: phoenixSourceHash(source),
@@ -20,7 +21,8 @@ await assert.rejects(reusePhoenixRelease(pin, '1.1.4', source, async () => new R
 await assert.rejects(reusePhoenixRelease(pin, '1.1.4', source, async () => new Response(Buffer.alloc(bytes.length + 1))), /size mismatch/);
 console.log('PASS: immutable Phoenix reuse, normalized source pin, version advancement, fail-closed network/size/hash checks');
 const publishedPin = JSON.parse(await fs.readFile(new URL('../native-guard/release.json', import.meta.url), 'utf8'));
-const publishedSource = await fs.readFile(new URL('../native-guard/Guard.cs', import.meta.url), 'utf8');
+const publishedSource = await readPhoenixBuildSource(fileURLToPath(new URL('../', import.meta.url)));
+for (const file of phoenixBuildSources) assert(publishedSource.includes(`// source: ${file}\n`));
 const publishedArtifact = await fs.readFile(new URL(`../native-guard/releases/Phoenix-Anti-cheat-Windows-x64-${publishedPin.version}.exe`, import.meta.url));
 const buildVersion = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).phoenixAntiCheatVersion;
 assert.equal(publishedArtifact.length, publishedPin.size);
@@ -28,4 +30,4 @@ assert.equal(crypto.createHash('sha256').update(publishedArtifact).digest('hex')
 if (buildVersion === publishedPin.version) {
   assert.deepEqual(await reusePhoenixRelease(publishedPin, buildVersion, publishedSource, async () => new Response(publishedArtifact)), publishedArtifact);
 }
-console.log('PASS: repository artifact matches published source, size and SHA256 pins');
+console.log(`PASS: repository artifact size/hash pin; ${buildVersion === publishedPin.version ? 'complete source bundle pinned' : 'new source candidate requires its own pin before release'}`);

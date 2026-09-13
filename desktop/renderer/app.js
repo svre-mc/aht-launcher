@@ -4722,21 +4722,29 @@ function waitForUiDelay(delayMs) {
 }
 
 function waitForNextPaint() {
+  if (document.hidden) return Promise.resolve();
   return new Promise((resolve) => {
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
       window.clearTimeout(fallback);
+      document.removeEventListener("visibilitychange", onVisibility);
       resolve();
     };
+    const onVisibility = () => { if (document.hidden) finish(); };
     const fallback = window.setTimeout(finish, 80);
+    document.addEventListener("visibilitychange", onVisibility);
     window.requestAnimationFrame(finish);
   });
 }
 
 function animateSidebarOpacity(view, from, to, durationMs, easing = "ease-out") {
   if (!view) return Promise.resolve();
+  if (document.hidden) {
+    view.style.opacity = String(to);
+    return Promise.resolve();
+  }
   const startedAt = performance.now();
   const duration = Math.max(1, Number(durationMs) || 1);
   const start = Number(from);
@@ -4744,16 +4752,27 @@ function animateSidebarOpacity(view, from, to, durationMs, easing = "ease-out") 
   view.style.opacity = String(start);
   return new Promise((resolve) => {
     let timer = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      view.style.opacity = String(to);
+      if (timer !== null) window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      resolve();
+    };
+    const onVisibility = () => { if (document.hidden) finish(); };
     const tick = () => {
+      if (document.hidden) { finish(); return; }
       const progress = Math.min(1, Math.max(0, (performance.now() - startedAt) / duration));
       const eased = easing === "ease-in"
         ? progress * progress
         : 1 - ((1 - progress) ** 3);
       view.style.opacity = String(start + (distance * eased));
       if (progress < 1) return;
-      if (timer !== null) window.clearInterval(timer);
-      resolve();
+      finish();
     };
+    document.addEventListener("visibilitychange", onVisibility);
     timer = window.setInterval(tick, 16);
     tick();
   });
@@ -4826,7 +4845,7 @@ async function transitionSidebarSelection(tile) {
   sourceView?.classList.add("sidebar-view-leaving-ready");
 
   const exitGate = (async () => {
-    await waitForUiDelay(SIDEBAR_SWITCH_EXIT_DELAY_MS);
+    if (!document.hidden) await waitForUiDelay(SIDEBAR_SWITCH_EXIT_DELAY_MS);
     sourceView?.classList.add("sidebar-view-leaving");
     await animateSidebarOpacity(sourceView, 1, 0, SIDEBAR_SWITCH_EXIT_MS, "ease-in");
   })();
@@ -4923,11 +4942,12 @@ function preloadImageAsset(source, timeoutMs = STARTUP_NEWS_ART_TIMEOUT_MS) {
       resolve(Boolean(loaded));
     };
     const finishLoaded = () => {
-      if (typeof image.decode !== "function") {
-        finish(image.naturalWidth > 0);
-        return;
+      // load/complete proves the image bytes are available. Chromium can defer
+      // decoding in an occluded window; that promise is not a readiness gate.
+      if (image.naturalWidth > 0 && typeof image.decode === "function") {
+        void image.decode().catch(() => {});
       }
-      image.decode().then(() => finish(true), () => finish(image.naturalWidth > 0));
+      finish(image.naturalWidth > 0);
     };
     image.onload = finishLoaded;
     image.onerror = () => finish(false);
@@ -6642,6 +6662,18 @@ function renderAccountRecovery(state = {}) {
   } else if (!state.running && wasVisible) accountRecoveryReturnFocus?.focus?.();
 }
 window.aht.onAccountRecoveryState?.(renderAccountRecovery);
+let accountStatusRefreshPending = false;
+window.aht.onAccountChanged?.(async () => {
+  if (!currentStatus || accountStatusRefreshPending) return;
+  const pack = activeSidebarPack;
+  accountStatusRefreshPending = true;
+  try {
+    const status = await window.aht.getStatus(pack, { preferCache: true });
+    if (activeSidebarPack === pack) renderStatus(status);
+  } catch {
+    // The existing status/retry surface owns errors; background refresh is quiet.
+  } finally { accountStatusRefreshPending = false; }
+});
 window.aht.getAccountRecoveryState?.().then(renderAccountRecovery).catch(() => {});
 document.getElementById('accountRecoveryCancel')?.addEventListener('click', () => window.aht.cancelAccountRecovery());
 document.getElementById('accountRecoveryOverlay')?.addEventListener('keydown', event => {

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readWindowsMinecraftSessions } from './windowsMinecraftSession.js';
+import { readBoundedJsonResponse } from './serviceTransport.js';
 
 const uuid = value => String(value || '').replaceAll('-', '').toLowerCase();
 const JOIN_URL = 'https://sessionserver.mojang.com/session/minecraft/join';
@@ -8,7 +9,51 @@ const JOIN_URL = 'https://sessionserver.mojang.com/session/minecraft/join';
 // Credentials remain local and are submitted only to Mojang's fixed HTTPS
 // endpoint. They never enter identity state, diagnostics, or AHT requests.
 export async function proveMinecraftAccountOwnership({ roots, username, minecraftUuid,
-  serverId, expiresAt, interactiveRecovery, fetchImpl = fetch, readWindowsSession = readWindowsMinecraftSessions }) {
+  serverId, expiresAt, interactiveRecovery, fetchImpl = fetch, readWindowsSession = readWindowsMinecraftSessions,
+  signal, cacheTimeoutMs = 15_000 }) {
+  if (!/^[a-f0-9]{40}$/.test(String(serverId || '')) || !/^[a-f0-9]{32}$/.test(uuid(minecraftUuid))) {
+    throw new Error('Minecraft account verification returned an invalid challenge.');
+  }
+  if (!Number.isFinite(cacheTimeoutMs) || cacheTimeoutMs <= 0 || cacheTimeoutMs > 60_000) {
+    throw new TypeError('The cached-session recovery deadline is invalid.');
+  }
+  const cancelled = () => Object.assign(new Error('Account verification cancelled.'), { code: 'AHT_ACCOUNT_RECOVERY_CANCELLED' });
+  if (signal?.aborted) throw cancelled();
+  const abort = new AbortController();
+  let rejectBoundary;
+  const boundary = new Promise((_resolve, reject) => { rejectBoundary = reject; });
+  const stop = error => { abort.abort(error); rejectBoundary(error); };
+  const onCancel = () => stop(cancelled());
+  signal?.addEventListener('abort', onCancel, { once: true });
+  const timer = setTimeout(() => stop(Object.assign(new Error('Minecraft ownership verification is temporarily unavailable. Try account sync again shortly.'), {
+    code: 'MINECRAFT_OWNERSHIP_UNAVAILABLE'
+  })), cacheTimeoutMs);
+  const call = work => Promise.race([Promise.resolve().then(() => {
+    if (abort.signal.aborted) throw abort.signal.reason;
+    return work();
+  }), boundary]);
+  let failure;
+  try {
+    return await call(() => recoverCachedMinecraftSession({ roots, username, minecraftUuid, serverId,
+      signal: abort.signal,
+      fetchImpl: (url, request) => call(() => fetchImpl(url, { ...request, signal: abort.signal })),
+      readWindowsSession: session => call(() => readWindowsSession({ ...session, signal: abort.signal }))
+    }));
+  } catch (error) { failure = error; }
+  finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onCancel);
+    abort.abort();
+  }
+  if (signal?.aborted || failure?.code === 'AHT_ACCOUNT_RECOVERY_CANCELLED') throw cancelled();
+  // Cached sessions are only an optimization. An unreadable/stalled cache cannot
+  // consume the entire interactive challenge lifetime or reopen a cancelled flow.
+  if (interactiveRecovery) return interactiveRecovery({ username, minecraftUuid, serverId, expiresAt });
+  throw failure;
+}
+
+async function recoverCachedMinecraftSession({ roots, username, minecraftUuid,
+  serverId, fetchImpl, readWindowsSession, signal }) {
   if (!/^[a-f0-9]{40}$/.test(String(serverId || '')) || !/^[a-f0-9]{32}$/.test(uuid(minecraftUuid))) {
     throw new Error('Minecraft account verification returned an invalid challenge.');
   }
@@ -18,6 +63,7 @@ export async function proveMinecraftAccountOwnership({ roots, username, minecraf
     protectedCandidates: 0, joinAttempts: 0, joinRejected: 0, exchangeRejected: 0, profileMismatch: 0 };
   for (const root of [...new Set((roots || []).filter(Boolean).map(root => path.resolve(root)))]) {
     for (const name of ['launcher_accounts.json', 'launcher_accounts_microsoft_store.json', 'launcher_profiles.json']) {
+      if (signal.aborted) throw signal.reason;
       const file = await fs.readFile(path.join(root, name), 'utf8').then(JSON.parse).catch(() => null);
       for (const account of Object.values(file?.accounts || {})) {
         const profile = account?.minecraftProfile;
@@ -86,7 +132,7 @@ export async function proveMinecraftAccountOwnership({ roots, username, minecraf
         });
         if (response.status >= 500 || response.status === 429) throw new Error('Minecraft service is temporarily unavailable.');
         if (!response.ok) { diagnostics.exchangeRejected++; continue; }
-        const login = await response.json();
+        const login = await readBoundedJsonResponse(response, 65_536);
         if (typeof login.access_token !== 'string' || !login.access_token || login.access_token.length > 32_768) continue;
         const profileResponse = await fetchImpl('https://api.minecraftservices.com/minecraft/profile', {
           redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(15_000),
@@ -94,18 +140,12 @@ export async function proveMinecraftAccountOwnership({ roots, username, minecraf
         });
         if (profileResponse.status >= 500 || profileResponse.status === 429) throw new Error('Minecraft service is temporarily unavailable.');
         if (!profileResponse.ok) continue;
-        const profile = await profileResponse.json();
+        const profile = await readBoundedJsonResponse(profileResponse, 65_536);
         if (String(profile.name || '').toLowerCase() === username.toLowerCase() && uuid(profile.id) === uuid(minecraftUuid)) {
           if (await tryJoin(login.access_token)) return { verified: true };
         } else diagnostics.profileMismatch++;
       } catch { serviceUnavailable = true; }
     }
-  }
-  // Cached-session exchange/profile failures do not establish that the official
-  // launcher's fresh session cannot complete the challenge. Only explicit user
-  // actions supply this fallback; its result still needs Worker verification.
-  if (interactiveRecovery) {
-    return interactiveRecovery({ username, minecraftUuid, serverId, expiresAt });
   }
   if (serviceUnavailable) throw Object.assign(new Error('Minecraft ownership verification is temporarily unavailable. Try account sync again shortly.'), {
     code: 'MINECRAFT_OWNERSHIP_UNAVAILABLE'

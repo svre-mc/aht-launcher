@@ -7,6 +7,7 @@ const code=source.slice(begin,source.indexOf('\nfunction identityForRenderer(',b
 let identity={installId:'fixture'};
 let options;
 const context=vm.createContext({identityPayload:async (_config,value)=>{options=value;return {...identity};}});
+context.accountStatusRefresh = { read: context.identityPayload };
 vm.runInContext(code,context);
 const prepared={state:'ready',identity:{...identity},launcherProof:{usable:true},proofPreparedThisSession:true};
 identity={...identity,minecraftUsername:'LinuxPlayer',minecraftUuid:'12345678-1234-1234-1234-123456789abc'};

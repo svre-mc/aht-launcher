@@ -1,8 +1,8 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.26",
-  "ahtLauncherVersion": "0.2.26",
-  "phoenixAntiCheatVersion": "1.1.4",
+  "version": "0.2.27",
+  "ahtLauncherVersion": "0.2.27",
+  "phoenixAntiCheatVersion": "1.1.5",
   "private": true,
   "type": "module",
   "main": "desktop/main.js",
@@ -14,6 +14,8 @@
     "email": "launcher@aht.local"
   },
   "scripts": {
+    "test:backend": "node scripts/test-backend.mjs",
+    "test:worker-runtime": "node --test scripts/test-worker-runtime-recovery.mjs",
     "test:release-transition": "node scripts/test-launch-preparation-release-transition.mjs",
     "test:player-runtime-state": "node scripts/test-player-runtime-state.mjs",
     "test:asset-recovery": "node scripts/test-asset-recovery.mjs",
@@ -109,7 +111,7 @@
     "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
   },
   "dependencies": {
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "yauzl": "^3.4.0"
   },
   "devDependencies": {

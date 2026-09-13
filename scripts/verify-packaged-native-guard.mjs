@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { extractFile, listPackage } from '@electron/asar';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const resources = path.join(root, 'release-builds/windows/win-unpacked/resources');
+const resources = process.env.AHT_PACKAGED_RESOURCES || path.join(root, 'release-builds/windows/win-unpacked/resources');
 const asar = path.join(resources, 'app.asar');
 const packagedPaths = listPackage(asar);
 const packagedFile = (relativePath) => extractFile(asar, String(relativePath).split('/').join(path.sep));
@@ -44,7 +44,8 @@ assert(packagedRenderer.includes('ensurePhoenixAntiCheatBeforePlay'));
 assert(packagedFile('src/minecraftLauncherProfile.js').toString().includes('-XX:+DisableAttachMechanism'));
 assert(packagedMain.includes("new URL('api/session/report'") && !packagedMain.includes('api/phoenix/detections'));
 assert(!monitorSource.includes('console.'), 'Packaged player monitoring must not write probe or reporting details to launcher logs');
-assert(packagedNativeGuardManager.includes("Symbol.for('aht.phoenix.runtime-state.v1')"));
+assert(packagedNativeGuardManager.includes("from './nativeGuardSessions.js'"));
+assert(packagedFile('src/nativeGuardSessions.js').toString().includes("Symbol.for('aht.phoenix.runtime-state.v2')"));
 assert(!packagedNativeGuardManager.includes('JSON.parse(await fs.readFile(stateFile'));
 assert(!packagedNativeGuardManager.includes('fs.writeFile(`${stateFile}.tmp`'));
 for (const forbiddenField of ['sessionKey', 'guardPid', 'gamePid', 'modulus', 'exponent']) {

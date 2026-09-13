@@ -181,7 +181,8 @@ function connect(wsUrl) {
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
+    clearTimeout(timer);
     pending.delete(message.id);
     if (message.error) {
       reject(new Error(`${message.error.message}: ${message.error.data || ''}`.trim()));
@@ -195,14 +196,15 @@ function connect(wsUrl) {
         call(method, params = {}) {
           const id = nextId;
           nextId += 1;
-          socket.send(JSON.stringify({ id, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(id, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
               callReject(new Error(`CDP call timed out: ${method}`));
             }, 45000);
+            pending.set(id, { resolve: callResolve, reject: callReject, timer });
+            try { socket.send(JSON.stringify({ id, method, params })); }
+            catch (error) { clearTimeout(timer); pending.delete(id); callReject(error); }
           });
         },
         close() {
@@ -211,6 +213,13 @@ function connect(wsUrl) {
       });
     }, { once: true });
     socket.addEventListener('error', () => reject(new Error(`Failed to connect to ${wsUrl}`)), { once: true });
+    socket.addEventListener('close', () => {
+      for (const entry of pending.values()) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error('Electron debugger connection closed'));
+      }
+      pending.clear();
+    }, { once: true });
   });
 }
 
@@ -611,6 +620,11 @@ try {
   await client.call('Page.enable');
   await waitFor(client, "document.readyState === 'complete' && window.aht && !document.body.classList.contains('is-booting')", 'revealed player DOM');
   checkpoint('player DOM ready');
+  const coldStartupTimings = await evaluate(client, `({ visibility: document.visibilityState,
+    tasks: window.__ahtStartupTaskTimings,
+    resources: performance.getEntriesByType('resource').filter(item => item.duration > 1000)
+      .map(item => ({ name: new URL(item.name).pathname, durationMs: Math.round(item.duration), type: item.initiatorType })).slice(0, 12) })`);
+  console.log(JSON.stringify({ coldStartupTimings }));
   const usernameSurfaceAbsent = await evaluate(client, `
     !document.querySelector('#accountOverlay')
       && !document.querySelector('#minecraftUsernameInput')
@@ -994,6 +1008,7 @@ try {
       && status.launchPreparationState === 'ready'
       && status.config?.minecraftLauncher?.profileId === 'a-hard-time-ptb'
   )`, 'installed PTB tile readiness');
+  checkpoint('PTB selection ready');
   const ptbProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
     sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
   ));
@@ -1511,6 +1526,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     root,
+    coldStartupTimings,
     installedVersion: updateResult.result.installed.version,
     forgeInstallerUrl,
     profile: {

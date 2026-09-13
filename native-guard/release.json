@@ -1,7 +1,7 @@
 {
-  "version": "1.1.4",
-  "sourceSha256": "2323d371f5d230e48ba022457448c5e051b50845a68fb14af6e60507d2cef030",
-  "url": "https://api.ahardtime.net/launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.1.4.exe",
-  "sha256": "cc265c34c3c9b75cd91735959a9082dbf93e3bdebd55d636d2e68f3c845fb9c3",
-  "size": 25088
+  "version": "1.1.5",
+  "sourceSha256": "e6c589680219c4463c0c27e01390ed3225f4863d29ba2a597d8a20f0bb19a100",
+  "url": "https://api.ahardtime.net/launcher/anticheat/win32-x64/Phoenix-Anti-cheat-Windows-x64-1.1.5.exe",
+  "sha256": "a5df28970b5ed2860b37be1794fc021beaf43e252e788841d7f09c29cded9347",
+  "size": 27136
 }

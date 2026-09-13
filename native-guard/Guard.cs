@@ -17,7 +17,7 @@ using System.Reflection;
 [assembly: AssemblyDescription("Launch-scoped A Hard Time runtime integrity monitor")]
 [assembly: AssemblyCompany("A Hard Time")]
 [assembly: AssemblyProduct("Phoenix Anti-cheat")]
-[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.5.0")]
 internal static class Guard {
     const int MaxImage = 96 * 1024 * 1024;
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
@@ -27,6 +27,7 @@ internal static class Guard {
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength=16384, RecursionLimit=8 };
     static readonly object Gate = new object();
+    static readonly PhoenixProbeRateLimit ProbeRate = new PhoenixProbeRateLimit();
     static readonly RSACryptoServiceProvider Key = new RSACryptoServiceProvider(2048) { PersistKeyInCsp=false };
     static readonly DateTime Epoch = new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc);
     static string gameDir, expectedImage, keyHash, modulus, exponent, launcherSessionId, probeSessionKey, targetImage="";
@@ -44,9 +45,10 @@ internal static class Guard {
     static string B64(byte[] data) { return Convert.ToBase64String(data).TrimEnd('=').Replace('+','-').Replace('/','_'); }
     static string Hash(byte[] data) { using(var sha=SHA256.Create())return BitConverter.ToString(sha.ComputeHash(data)).Replace("-","").ToLowerInvariant(); }
     static string Text(object value) { return value==null?"":Convert.ToString(value); }
+    static string Serialize(object value) { return new JavaScriptSerializer { MaxJsonLength=16384, RecursionLimit=8 }.Serialize(value); }
     static byte[] RandomBytes(int count) { var data=new byte[count];using(var rng=RandomNumberGenerator.Create())rng.GetBytes(data);return data; }
     static bool Same(string left,string right) { byte[] a=Encoding.UTF8.GetBytes(left??""),b=Encoding.UTF8.GetBytes(right??"");int difference=a.Length^b.Length,max=Math.Max(a.Length,b.Length);for(int i=0;i<max;i++)difference|=(i<a.Length?a[i]:0)^(i<b.Length?b[i]:0);return difference==0; }
-    static string Info() { return Json.Serialize(new {protocol="AHT-GUARD-1",port=port,keyHash=keyHash,modulus=modulus,exponent=exponent,launcherPid=launcherPid,launcherSessionId=launcherSessionId,sessionKey=probeSessionKey,gamePid=targetPid,guardPid=Process.GetCurrentProcess().Id}); }
+    static string Info() { return Serialize(new {protocol="AHT-GUARD-1",port=port,keyHash=keyHash,modulus=modulus,exponent=exponent,launcherPid=launcherPid,launcherSessionId=launcherSessionId,sessionKey=probeSessionKey,gamePid=targetPid,guardPid=Process.GetCurrentProcess().Id}); }
     static string PathKey(string value) { return Path.GetFullPath(value).TrimEnd('\\','/').Replace('/','\\').ToLowerInvariant(); }
     static int ParentPid(int pid) {
         using(var query=new ManagementObjectSearcher("SELECT ParentProcessId FROM Win32_Process WHERE ProcessId="+pid))
@@ -184,7 +186,7 @@ internal static class Guard {
             if(modules==0)throw new InvalidDataException();
             mismatchStreak=differences.Count>0?mismatchStreak+1:0;
             string nextState=mismatchStreak>=2?"tampered":differences.Count>0?"pending":"clean";
-            string nextDetail=nextState=="tampered"?Json.Serialize(new {process=targetImage,processId=targetPid,findings=differences.ToArray()}):"";
+            string nextDetail=nextState=="tampered"?Serialize(new {process=targetImage,processId=targetPid,findings=differences.ToArray()}):"";
             lock(Gate) { state=nextState;checkedModules=modules;checkedBytes=bytes;detail=nextDetail;lastScan=Now();sequence++; }
         } catch(Exception) {
             mismatchStreak=0;lock(Gate){state="incomplete";detail="";checkedModules=modules;checkedBytes=bytes;lastScan=Now();sequence++;}
@@ -193,6 +195,7 @@ internal static class Guard {
     static string Answer(string nonce,int pid,bool diagnostics) {
         if(!System.Text.RegularExpressions.Regex.IsMatch(nonce??"",@"\A[a-f0-9]{48}\z"))throw new InvalidDataException();
         lock(Gate) {
+            if(stopping)throw new InvalidOperationException();
             if(targetPid==0 || targetPid!=pid || target==null || target.HasExited)throw new InvalidDataException();
             string status=lastScan==0?"pending":Now()-lastScan>6000?"incomplete":state;
             bool measured=status=="clean"||status=="tampered";
@@ -200,46 +203,32 @@ internal static class Guard {
             string visibleDetail=diagnostics?detail:"";
             string payload=String.Join("\n",new[]{"AHT-GUARD-1",nonce,keyHash,targetPid.ToString(),targetBirth.ToString(),sequence.ToString(),lastScan.ToString(),status,visibleModules.ToString(),visibleBytes.ToString(),B64(Encoding.UTF8.GetBytes(visibleDetail))});
             byte[] data=Encoding.UTF8.GetBytes(payload);
-            return Json.Serialize(new {payload=B64(data),signature=B64(Key.SignData(data,CryptoConfig.MapNameToOID("SHA256"))),modulus=modulus,exponent=exponent});
+            return Serialize(new {payload=B64(data),signature=B64(Key.SignData(data,CryptoConfig.MapNameToOID("SHA256"))),modulus=modulus,exponent=exponent});
         }
     }
-    static void Serve(TcpListener listener) {
-        // Serialize signing at a bounded rate without discarding a legitimate
-        // admission measurement when a launcher status probe arrives alongside it.
-        // The listener backlog and socket deadlines bound queued work.
-        var requestClock=Stopwatch.StartNew();long nextRequest=0;
-        while(!stopping) {
-            try {
-                if(!listener.Pending()){Thread.Sleep(50);continue;}
-                using(var client=listener.AcceptTcpClient()) {
-                    client.ReceiveTimeout=1500;client.SendTimeout=1500;
-                    using(var stream=client.GetStream()) {
-                        var line=ReadLine(stream,256);if(line==null)continue;
-                        string[] parts=line.Split('|');
-                        if(parts.Length==2 && Same(parts[0],probeSessionKey) && parts[1]=="INFO") {byte[] info=Encoding.UTF8.GetBytes(Info()+"\n");stream.Write(info,0,info.Length);continue;}
-                        string nonce="",pidText="";
-                        // Launcher management requests require the ephemeral in-memory key. The game-side
-                        // challenge is independently restricted to the one discovered AHT JVM and yields
-                        // only a signed measurement for that exact process.
-                        bool diagnostics=false;
-                        if(parts.Length==3 && Same(parts[0],probeSessionKey)){nonce=parts[1];pidText=parts[2];diagnostics=true;}
-                        else if(parts.Length==2){nonce=parts[0];pidText=parts[1];}
-                        else continue;
-                        int pid;if(!Int32.TryParse(pidText,out pid)||pid<=0)continue;
-                        // Invalid local requests must not consume the valid game's slot.
-                        if(!System.Text.RegularExpressions.Regex.IsMatch(nonce??"",@"\A[a-f0-9]{48}\z") || targetPid==0 || targetPid!=pid)continue;
-                        int delay=(int)Math.Max(0,Math.Min(100,nextRequest-requestClock.ElapsedMilliseconds));
-                        if(delay>0)Thread.Sleep(delay);
-                        if(stopping)continue;
-                        nextRequest=requestClock.ElapsedMilliseconds+100;
-                        byte[] response=Encoding.UTF8.GetBytes(Answer(nonce,pid,diagnostics)+"\n");stream.Write(response,0,response.Length);
-                    }
-                }
-            }catch { /* A malformed local request is not a clean measurement or an accusation. */ }
+    static string HandleProbeRequest(string line) {
+        if(stopping)return null;
+        string[] parts=line.Split('|');
+        if(parts.Length==2 && Same(parts[0],probeSessionKey) && parts[1]=="INFO") {
+            lock(Gate) { if(stopping)return null; return Info(); }
         }
+        string nonce="",pidText="";
+        bool diagnostics=false;
+        // Management authentication and independently discovered game binding
+        // remain separate from transport. No client can select another process.
+        if(parts.Length==3 && Same(parts[0],probeSessionKey)) {
+            nonce=parts[1];pidText=parts[2];diagnostics=true;
+        } else if(parts.Length==2) { nonce=parts[0];pidText=parts[1]; }
+        else return null;
+        int pid;
+        if(!Int32.TryParse(pidText,out pid)||pid<=0)return null;
+        if(!System.Text.RegularExpressions.Regex.IsMatch(nonce??"",@"\A[a-f0-9]{48}\z") || targetPid==0 || targetPid!=pid)return null;
+        ProbeRate.Wait();
+        if(stopping)return null;
+        return Answer(nonce,pid,diagnostics);
     }
     public static int Main() {
-        TcpListener listener=null;
+        PhoenixProbeServer listener=null;
         try {
             started=Now();var config=Json.Deserialize<Dictionary<string,object>>(ReadLine(Console.OpenStandardInput(),8192));
             gameDir=PathKey(Text(config["gameDir"]));expectedImage=config.ContainsKey("javaPath")&&Text(config["javaPath"]).Length>0?PathKey(Text(config["javaPath"])):"";
@@ -250,9 +239,8 @@ internal static class Guard {
             launcher=Process.GetProcessById(launcherPid);if(launcher.SessionId!=OwnSession||launcher.HasExited)throw new InvalidDataException();
             probeSessionKey=B64(RandomBytes(32));
             var key=Key.ExportParameters(false);modulus=B64(key.Modulus);exponent=B64(key.Exponent);keyHash=Hash(Encoding.UTF8.GetBytes(modulus+"."+exponent));
-            listener=new TcpListener(IPAddress.Loopback,0);listener.Start(4);port=((IPEndPoint)listener.LocalEndpoint).Port;
+            listener=new PhoenixProbeServer(HandleProbeRequest);port=listener.Port;
             Console.WriteLine(Info());Console.Out.Flush();
-            var server=new Thread(()=>Serve(listener));server.IsBackground=true;server.Start();
             while(!stopping) {
                 if(target!=null && target.HasExited)break;
                 if(targetPid==0 && Now()-started>30*60*1000)break;
@@ -265,6 +253,6 @@ internal static class Guard {
             }
             return 0;
         } catch(Exception) {Console.Error.WriteLine("PHOENIX_UNAVAILABLE");return 1;}
-        finally {stopping=true;if(listener!=null)listener.Stop();if(handle!=IntPtr.Zero)CloseHandle(handle);if(target!=null)target.Dispose();if(launcher!=null)launcher.Dispose();Key.Dispose();}
+        finally {stopping=true;if(listener!=null)listener.Dispose();lock(Gate){if(handle!=IntPtr.Zero)CloseHandle(handle);if(target!=null)target.Dispose();if(launcher!=null)launcher.Dispose();Key.Dispose();}}
     }
 }

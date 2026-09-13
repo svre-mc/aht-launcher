@@ -33,12 +33,13 @@ try {
 } catch { }
 `;
 
-export function readWindowsMinecraftSessions({ file, remoteId, platform = process.platform }) {
+export function readWindowsMinecraftSessions({ file, remoteId, platform = process.platform, signal }) {
   if (platform !== 'win32' || !file || !remoteId) return Promise.resolve([]);
+  if (signal?.aborted) return Promise.resolve([]);
   return new Promise(resolve => {
     const executable = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
     const child = execFile(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(DECRYPT, 'utf16le').toString('base64')],
-      { windowsHide: true, timeout: 10_000, maxBuffer: 128 * 1024, encoding: 'utf8' }, (error, stdout) => {
+      { windowsHide: true, timeout: 10_000, signal, maxBuffer: 128 * 1024, encoding: 'utf8' }, (error, stdout) => {
         if (error) return resolve([]);
         try {
           const value = JSON.parse(stdout);

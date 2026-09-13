@@ -81,11 +81,11 @@ async function helper(args, name = username) {
     'net.ahardtime.recovery.TestDriver', endpoint, ...args.map(arg => placeholders[arg] || arg)], { windowsHide: true, timeout: 10000 });
   assert.equal(output.stdout + output.stderr, '', 'Helper must not print credentials or upstream errors.');
 }
-async function assertClean() {
+async function assertClean(expectDeferredJournal = false) {
   const value = JSON.parse(await fs.readFile(profilesFile, 'utf8'));
   assert.deepEqual(value, originalProfiles);
   assert.equal(recovery.state().running, false);
-  assert.equal(await fs.stat(journalPath).then(() => true).catch(() => false), false);
+  assert.equal(await fs.stat(journalPath).then(() => true).catch(() => false), expectDeferredJournal);
 }
 try {
   // No credential cache exists: the official launcher supplies the live session instead.
@@ -147,8 +147,9 @@ try {
   await fs.mkdir(path.join(mc, 'versions', staleId), { recursive: true });
   await fs.writeFile(path.join(mc, 'versions', staleId, `${staleId}.json`), JSON.stringify({ id: staleId, mainClass: 'net.ahardtime.recovery.Main' }));
   await fs.writeFile(journalPath, JSON.stringify({ id: staleId, roots: [{ root: mc, previousSelection: 'aht' }, { root: 'C:/', previousSelection: '' }] }));
-  assert.equal(await recovery.cleanup({ config, journalPath }), true);
-  await assertClean();
+  assert.equal(await recovery.cleanup({ config, journalPath }), false, 'An unconfigured root remains journaled but is never followed');
+  await assertClean(true);
+  assert.deepEqual(JSON.parse(await fs.readFile(journalPath, 'utf8')).roots, [{ root: 'C:/', previousSelection: '' }]);
   assert.equal(await fs.stat(path.join(mc, 'versions', staleId)).then(() => true).catch(() => false), false);
   assert(!JSON.stringify(states).includes(challenge) && !JSON.stringify(states).includes('synthetic-recovery-session'));
   console.log(JSON.stringify({ ok: true, helperJava: 8, noCachedCredentials: true, actualJavaCallback: true,

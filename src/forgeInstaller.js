@@ -734,7 +734,7 @@ async function ensureManagedJava8Runtime(plan = {}, options = {}) {
   }
   if (!downloadPackage?.url) return '';
   await ensureDir(cacheDir);
-  const stagingRoot = path.join(cacheDir, `.adoptium-install-${process.pid}-${Date.now()}`);
+  const stagingRoot = await fs.mkdtemp(path.join(cacheDir, '.adoptium-install-'));
   const archivePath = path.join(stagingRoot, 'temurin-jre8.zip');
   const extractedRoot = path.join(stagingRoot, 'runtime');
   const installedRoot = path.join(cacheDir, 'adoptium-jre8-current');

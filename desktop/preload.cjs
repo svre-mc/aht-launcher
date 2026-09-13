@@ -16,6 +16,12 @@ const playerApi = {
     includeUpdateLogs: Boolean(options.includeUpdateLogs)
   }),
   retryAccountSync: (packKey = 'aht') => ipcRenderer.invoke('account:retrySync', { packKey }),
+  onAccountChanged: listener => {
+    if (typeof listener !== 'function') return () => {};
+    const handler = () => listener();
+    ipcRenderer.on('account:changed', handler);
+    return () => ipcRenderer.removeListener('account:changed', handler);
+  },
   getAccountRecoveryState: () => ipcRenderer.invoke('account:recoveryState'),
   cancelAccountRecovery: () => ipcRenderer.invoke('account:cancelRecovery'),
   onAccountRecoveryState: listener => {

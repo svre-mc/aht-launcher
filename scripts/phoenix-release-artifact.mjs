@@ -1,4 +1,12 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+export const phoenixBuildSources = Object.freeze(['Guard.cs', 'PhoenixProbeServer.cs']);
+export async function readPhoenixBuildSource(root) {
+  return (await Promise.all(phoenixBuildSources.map(async file =>
+    `// source: ${file}\n${await fs.readFile(path.join(root, 'native-guard', file), 'utf8')}`))).join('\n');
+}
 
 export const phoenixSourceHash = source => crypto.createHash('sha256').update(source.replaceAll('\r\n', '\n')).digest('hex');
 
