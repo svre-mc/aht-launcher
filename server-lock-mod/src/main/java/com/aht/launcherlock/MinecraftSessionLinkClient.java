@@ -75,6 +75,7 @@ final class MinecraftSessionLinkClient {
             connection.setConnectTimeout(5000);
             connection.setReadTimeout(5000);
             connection.setRequestMethod("POST");
+            connection.setRequestProperty("User-Agent", "AHT-Server/" + PackVersionLock.VERSION);
             connection.setRequestProperty("Authorization", "Bearer " + config.token);
             connection.setRequestProperty("Content-Type", "application/json");
             connection.setFixedLengthStreamingMode(body.length);
