@@ -44,6 +44,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_INVENTORY_ACCESS_KEY_ID: ${{ secrets.R2_INVENTORY_ACCESS_KEY_ID }}
+      R2_INVENTORY_SECRET_ACCESS_KEY: ${{ secrets.R2_INVENTORY_SECRET_ACCESS_KEY }}
       AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
       INPUT_RELEASE_TARGET: ${{ inputs.release_target }}
       INPUT_VERSION: ${{ inputs.version }}
