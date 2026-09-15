@@ -1,6 +1,7 @@
 const developerOnlySourceFiles = [
   'src/releaseBuilder.js',
   'src/clientModpackZip.js',
+  'src/modpackPublication.js',
   'src/serverTransfer.js',
   'src/githubActions.js',
   'src/githubModpackRelease.js',

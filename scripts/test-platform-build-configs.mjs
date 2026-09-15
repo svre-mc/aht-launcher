@@ -844,7 +844,7 @@ assert(!packageJson.build?.files?.includes('config/**/*'), 'Legacy package build
 assert(!packageJson.build?.files?.includes('cloudflare/**/*'), 'Legacy package build config must not package Cloudflare Worker source.');
 assert(!packageJson.build?.files?.some((item) => String(item).startsWith('server-lock-mod/')), 'Legacy package build config must not package server-lock-mod artifacts.');
 assert(!packageJson.build?.asarUnpack?.some((item) => String(item).startsWith('server-lock-mod/')), 'Legacy package build config must not unpack server-lock-mod artifacts.');
-assert(developerOnlySourceFiles.length === 9, 'Regular player package developer-only source files must include the R2 storage/rollback helpers.');
+assert(developerOnlySourceFiles.length === 10 && developerOnlySourceFiles.includes('src/modpackPublication.js'), 'Regular player packages must exclude the publisher and R2 storage/rollback helpers.');
 for (const relativePath of developerOnlySourceFiles) {
   const exclusion = `!${relativePath}`;
   assert(configs.windows.files?.includes(exclusion), `Windows regular player package must exclude ${relativePath}.`);
