@@ -9773,7 +9773,10 @@ async function writePlayerDefaults(payload = {}) {
 }
 
 async function verifyRemoteHead(url, expectedSize = null) {
-  const response = await fetch(cacheBustUrl(url), { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(20_000) });
+  const response = await fetch(cacheBustUrl(url), {
+    method: 'HEAD', cache: 'no-store', headers: { 'Accept-Encoding': 'identity' },
+    signal: AbortSignal.timeout(20_000)
+  });
   if (!response.ok) {
     throw new Error(`HEAD ${url} failed: ${response.status} ${response.statusText}`);
   }
@@ -9891,7 +9894,7 @@ async function verifyRemoteReleaseArtifacts({ publicLatestUrl, latest }) {
   for (const ref of [latest.zip, latest.clientManifest, latest.delta].filter(Boolean)) {
     const checked = await verifyRemoteHead(resolveSource(latestUrl, ref.url || ref.path), ref.size);
     if (!checked.contentLength || Number(checked.contentLength) !== ref.size) {
-      throw new Error('Public release download size could not be verified. The player feed was not changed.');
+      throw new Error(`Public release download size could not be verified for ${ref.path}. The player feed was not changed.`);
     }
   }
 }

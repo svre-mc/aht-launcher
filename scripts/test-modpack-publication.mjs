@@ -69,6 +69,10 @@ test('public verification uses real HTTP HEAD and rejects unavailable or unknown
   const server = http.createServer((request, response) => {
     assert.equal(request.method, 'HEAD');
     if (mode === 'ready') response.setHeader('Content-Length', '3');
+    if (mode === 'compressed-manifest') {
+      if (request.url.endsWith('.json') && request.headers['accept-encoding'] !== 'identity') response.setHeader('Content-Encoding', 'br');
+      else response.setHeader('Content-Length', '3');
+    }
     if (mode === 'missing') response.statusCode = 404;
     response.end();
   });
@@ -80,8 +84,11 @@ test('public verification uses real HTTP HEAD and rejects unavailable or unknown
     resolveSource: (base, ref) => new URL(ref, base).href });
   vm.runInContext(main.slice(main.indexOf('async function verifyRemoteHead('), main.indexOf('\nasync function verifyRemoteRelease('))
     + main.slice(main.indexOf('async function verifyRemoteReleaseArtifacts('), main.indexOf('\nfunction cleanR2AccountId(')), context);
-  const verify = () => context.verifyRemoteReleaseArtifacts({ publicLatestUrl: `${endpoint}/latest.json`, latest: { zip: { path: 'packs/ready.zip', size: 3 } } });
+  const verify = () => context.verifyRemoteReleaseArtifacts({ publicLatestUrl: `${endpoint}/latest.json`, latest: {
+    zip: { path: 'packs/ready.zip', size: 3 }, clientManifest: { path: 'manifests/ready.json', size: 3 }
+  } });
   await verify();
+  mode = 'compressed-manifest'; await verify();
   mode = 'unknown-size'; await assert.rejects(verify(), /size could not be verified/);
   mode = 'missing'; await assert.rejects(verify(), /404/);
 });
