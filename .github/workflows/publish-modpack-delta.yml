@@ -44,8 +44,6 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_INVENTORY_ACCESS_KEY_ID: ${{ secrets.R2_INVENTORY_ACCESS_KEY_ID }}
-      R2_INVENTORY_SECRET_ACCESS_KEY: ${{ secrets.R2_INVENTORY_SECRET_ACCESS_KEY }}
       AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
       INPUT_RELEASE_TARGET: ${{ inputs.release_target }}
       INPUT_VERSION: ${{ inputs.version }}
@@ -119,4 +117,7 @@ jobs:
           --candidate-id "$INPUT_CANDIDATE_ID"
 
       - name: Check storage and publish rebuilt ZIP and private result
+        env:
+          R2_INVENTORY_ACCESS_KEY_ID: ${{ secrets.R2_INVENTORY_ACCESS_KEY_ID }}
+          R2_INVENTORY_SECRET_ACCESS_KEY: ${{ secrets.R2_INVENTORY_SECRET_ACCESS_KEY }}
         run: node scripts/upload-rebuilt-modpack.mjs rebuild-plan.json rebuild-result.json
