@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import AdmZip from 'adm-zip';
 import yauzl from 'yauzl';
 import yazl from 'yazl';
+import { validateContentTweakerResources } from './contentTweakerResources.js';
 import { isVersionLockJarPath, versionLockClientPath, VERSION_LOCK_JAR_PATTERN } from './versionLockJar.js';
 import {
   artifactUrl,
@@ -555,22 +556,27 @@ function safeClientZipRelPath(entryName = '', rootPrefix = '') {
   return relPath;
 }
 
-async function inspectFullClientArtifact(filePath, { required = true } = {}) {
+async function inspectFullClientArtifact(filePath, { required = true, validateResources = false } = {}) {
   const metadataRecord = await readClientPackMetadataFromFile(filePath);
   if (!metadataRecord) {
     if (!required) return null;
     throw new Error(`${CLIENT_PACK_METADATA_ENTRY} missing from full client ZIP.`);
   }
   const entries = [];
-  await forEachZipEntry(filePath, async (entry) => {
+  const scripts = new Map();
+  await forEachZipEntry(filePath, async (entry, zipFile) => {
     if (!zipEntryIsFile(entry)) {
       return;
     }
     const relPath = safeClientZipRelPath(entry.fileName, metadataRecord.rootPrefix);
     if (relPath) {
       entries.push(relPath);
+      if (validateResources && relPath.startsWith('scripts/') && relPath.endsWith('.zs')) {
+        scripts.set(relPath, (await readZipEntryBuffer(zipFile, entry)).toString('utf8'));
+      }
     }
   });
+  if (validateResources) await validateContentTweakerResources(entries, file => scripts.get(file));
   const modEntries = entries.filter((entry) => entry.toLowerCase().startsWith('mods/') && /\.(jar|zip)$/i.test(entry));
   return {
     ...metadataRecord,
@@ -1383,7 +1389,7 @@ export async function buildRelease(options) {
     throw new Error('--out is required');
   }
 
-  const clientPackInspection = await inspectFullClientArtifact(packZip, { required: false });
+  const clientPackInspection = await inspectFullClientArtifact(packZip, { required: false, validateResources: true });
   if (clientPackInspection) {
     return buildFullClientRelease({
       packZip,

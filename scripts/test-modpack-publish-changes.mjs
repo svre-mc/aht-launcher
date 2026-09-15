@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import vm from 'node:vm';
+import { projectR2Storage } from '../src/r2StorageBudget.js';
 import AdmZip from 'adm-zip';
 import { createClientModpackZip } from '../src/clientModpackZip.js';
 import { buildRelease } from '../src/releaseBuilder.js';
@@ -10,6 +12,21 @@ import { modpackGithubReleasePlan, publishModpackGithubRelease } from '../src/gi
 import { CLIENT_DELTA_METADATA_ENTRY } from '../src/clientPackFormat.js';
 import { rebuildModpackFromDelta, REMOTE_REBUILD_SCHEMA } from './rebuild-modpack-from-delta.mjs';
 import { remoteModpackRebuildPlan } from './remote-modpack-rebuild-plan.mjs';
+
+test('a verified completed rebuild resumes within budget without reserving the stored ZIP twice', async () => {
+  const main = await fs.readFile(new URL('../desktop/main.js',import.meta.url),'utf8');
+  const start=main.indexOf('function modpackResumeStorageUploads('), end=main.indexOf('\nfunction launcherUpdateRootUrl(',start);
+  const plan=vm.runInNewContext(main.slice(start,end)+';modpackResumeStorageUploads', {Buffer,releaseTargetObjectKey:key=>key});
+  const input={localLatest:{zip:{path:'packs/aht-2.8.655.zip'}},target:{id:'stable'},canonicalLatestKey:'latest.json',fullZipSize:1231062007,
+    incremental:{candidateKey:'staging/candidate.json',resultKey:'staging/result.json',candidateLatest:{version:'2.8.655'}}};
+  const first=plan(input);
+  assert.equal(projectR2Storage({storedBytes:6076487584,multipartBytes:0,uploads:first}).allowed,true);
+  assert.equal(projectR2Storage({storedBytes:7309449126,multipartBytes:0,uploads:first}).allowed,false);
+  const resumed=plan({...input,incremental:{...input.incremental,verifiedZipSha256:'a'.repeat(64)}});
+  assert.equal(projectR2Storage({storedBytes:7309449126,multipartBytes:0,uploads:resumed}).allowed,true);
+  assert(resumed.some(item=>item.key==='latest.json'));
+  assert(!resumed.some(item=>item.key===input.localLatest.zip.path || item.key===input.incremental.resultKey));
+});
 
 test('publish uses the live baseline; GitHub contains changes only and reuses identical assets', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-publish-changes-'));

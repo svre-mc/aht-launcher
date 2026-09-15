@@ -78,7 +78,7 @@ assert.doesNotThrow(() => planR2Retention({ inventory: inventory(), manifests: r
 const plan = planR2Retention({ inventory: inventory(), manifests: manifests(), baseUrl });
 const deleted = new Set(plan.deleteObjects.map((item) => item.key));
 assert(deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-0.1.85.exe'));
-assert(deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-9.9.9.exe'));
+assert(!deleted.has('launcher/files/win32-x64/AHT-Launcher-Windows-10-11-9.9.9.exe'), 'Uncommitted future releases must survive retention between uploads.');
 assert(deleted.has('launcher/files/linux-x64/AHT-Launcher-Ubuntu-x64-0.1.18.AppImage'));
 assert(deleted.has('client-zips/a-hard-time-2.8.534.zip'));
 assert(deleted.has('packs/a-hard-time-dregora-2.8.532.zip'));

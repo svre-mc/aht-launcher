@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { headR2ObjectDirect, uploadR2ObjectDirect } from '../src/r2DirectUpload.js';
+import { headR2ObjectDirect, uploadR2ObjectDirect, uploadR2JsonDirect, preflightR2Uploads } from '../src/r2DirectUpload.js';
 
 const [planFile, resultFile] = process.argv.slice(2);
 const plan = JSON.parse(await fs.readFile(planFile, 'utf8'));
@@ -25,6 +25,11 @@ const options = {
 };
 const before = await headR2ObjectDirect(options);
 if (before.exists && (before.sha256 !== sha256 || before.size !== stat.size)) throw new Error('Immutable ZIP already exists with different content');
+if (!process.env.INPUT_RESULT_KEY || process.env.INPUT_RESULT_KEY !== plan.resultKey) throw new Error('Private result key does not match the verified rebuild plan');
+await preflightR2Uploads({ ...options, uploads: [
+  ...(!before.exists ? [{ key: plan.zipKey, size: stat.size }] : []),
+  { key: plan.resultKey, size: Buffer.byteLength(JSON.stringify(result)) }
+] });
 if (!before.exists) {
   let last = -10;
   await uploadR2ObjectDirect({ ...options, file, sha256, contentType: 'application/zip', onProgress: p => {
@@ -33,4 +38,5 @@ if (!before.exists) {
 }
 const after = await headR2ObjectDirect(options);
 if (after.sha256 !== sha256 || after.size !== stat.size) throw new Error('R2 ZIP readback did not match the verified rebuild');
+await uploadR2JsonDirect({ ...options, key: plan.resultKey, value: result });
 console.log(JSON.stringify({ verified: true, key: plan.zipKey, sha256, size: stat.size, method: 'direct-multipart' }));

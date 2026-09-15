@@ -346,6 +346,18 @@ const ptbLatest = {
   }
 };
 let latest = legacyLatest;
+const nextZip = new AdmZip(packBuffer);
+nextZip.addFile('mods/new-release-only.jar', Buffer.from('next release bytes'));
+const nextMetadata = JSON.parse(nextZip.readAsText('aht-client-pack.json'));
+nextZip.addFile('aht-client-pack.json', Buffer.from(JSON.stringify({ ...nextMetadata, version: '7.7.8' })));
+const nextZipBytes = nextZip.toBuffer();
+const nextManifestBody = JSON.stringify({ ...clientManifest, version: '7.7.8', files: [...clientManifest.files,
+  { path: 'mods/new-release-only.jar', size: Buffer.byteLength('next release bytes'), sha256: sha256('next release bytes') }] });
+const nextPublishedRelease = { ...fullClientLatest, version: '7.7.8',
+  zip: { ...fullClientLatest.zip, url: `${workerEndpoint}/packs/next.zip`, sha256: sha256(nextZipBytes), size: nextZipBytes.length },
+  clientManifest: { ...fullClientLatest.clientManifest, url: `${workerEndpoint}/next-client-manifest.json`,
+    sha256: sha256(nextManifestBody), size: Buffer.byteLength(nextManifestBody) } };
+let publishDuringPackDownload = false;
 const packRequests = [];
 const registrationRequests = [];
 const proofRequests = [];
@@ -467,6 +479,9 @@ const server = http.createServer((request, response) => {
     response.end(JSON.stringify(ptbLatest));
     return;
   }
+  if (url.pathname === '/next-client-manifest.json') {
+    response.setHeader('Content-Type', 'application/json'); response.end(nextManifestBody); return;
+  }
   if (url.pathname === '/client-manifest.json' || url.pathname === '/ptb/client-manifest.json') {
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -475,9 +490,10 @@ const server = http.createServer((request, response) => {
   }
   if (url.pathname.startsWith('/packs/')) {
     packRequests.push(url.pathname);
+    if (publishDuringPackDownload) { latest = nextPublishedRelease; publishDuringPackDownload = false; }
     response.statusCode = 200;
     response.setHeader('Content-Type', 'application/zip');
-    response.end(packBuffer);
+    response.end(url.pathname === '/packs/next.zip' ? nextZipBytes : packBuffer);
     return;
   }
   if (url.pathname === '/api/users/register') {
@@ -669,6 +685,7 @@ try {
   }
 
   latest = fullClientLatest;
+  publishDuringPackDownload = true;
   registeredUsers.clear();
   const before = await waitFor(client, `
     window.aht.getStatus().then((status) => status.latest?.version === '7.7.7' && !status.updateBlockedReason ? status : false)
@@ -716,6 +733,9 @@ try {
   if (!updateResult.ok || updateResult.result?.installed?.version !== '7.7.7') {
     throw new Error(`Fresh player update failed: ${JSON.stringify(updateResult)}`);
   }
+  if (latest.version !== '7.7.8' || publishDuringPackDownload) throw new Error('The publication/install overlap was not exercised.');
+  checkpoint('Install completed selected 7.7.7 while 7.7.8 was published during its download');
+  latest = fullClientLatest;
   const droppedPreparation = await waitFor(client, `window.aht.getStatus().then((status) =>
     status.installed?.version === '7.7.7'
       && status.launchPreparationState === 'missing'
@@ -788,6 +808,12 @@ try {
   await evaluate(client, 'refresh().then(() => true)');
   await waitFor(client, `!updatePoll && !lastUpdateState?.running`, 'completed install UI before runtime repair');
   accountVerificationBlocked = true;
+  // Repair must recover an unreadable key even when an earlier Play cached it,
+  // and restore an already-consented helper before claiming completion.
+  const damagedDeviceFile = path.join(userData, 'device-identity.json');
+  const damagedDeviceBytes = '{unreadable-device-fixture';
+  fs.writeFileSync(damagedDeviceFile, damagedDeviceBytes);
+  if (phoenixFixtureBinaryPath) fs.writeFileSync(phoenixFixtureBinaryPath, 'damaged helper fixture');
   const blockedRepair = await evaluate(client, `window.aht.startUpdate({ forceRepair: true, runtimeOnly: true })
     .then(() => ({ ok: true }))
     .catch(error => ({ ok: false, message: String(error?.message || error) }))`);
@@ -795,6 +821,15 @@ try {
   if (!blockedRepair.ok || blockedRepairState.running || blockedRepairState.error || !blockedRepairState.lastResult?.ok) {
     throw new Error(`Local Repair was blocked by remote authorization: ${JSON.stringify({ blockedRepair, blockedRepairState })}`);
   }
+  const repairedDevice = JSON.parse(fs.readFileSync(damagedDeviceFile, 'utf8'));
+  if (!repairedDevice.previousIdentityBackup || fs.readFileSync(repairedDevice.previousIdentityBackup, 'utf8') !== damagedDeviceBytes) {
+    throw new Error('Repair did not preserve the unreadable device identity before recovery.');
+  }
+  const repairedPhoenix = await evaluate(client, 'window.aht.getPhoenixAntiCheatStatus()');
+  if (process.platform === 'win32' && (!repairedPhoenix.valid || !repairedPhoenix.consented)) {
+    throw new Error('Repair reported success without restoring the consented Phoenix installation.');
+  }
+  checkpoint('Repair restored the damaged local key and Phoenix installation');
   await evaluate(client, 'refresh().then(() => true)');
   const unresolvedAccount = await evaluate(client, 'window.aht.getStatus()');
   if (unresolvedAccount.identity?.minecraftUsernameSyncWarning) {
@@ -815,6 +850,25 @@ try {
     throw new Error('Repair button did not restore complete Minecraft base metadata.');
   }
   checkpoint('clean modpack runtime repair passed without pack download');
+
+  // A clean scan is only a hint: damage found by the backend's second scan must
+  // be repaired in this same click, including unexpected protected content.
+  await waitFor(client, '!updatePoll && !lastUpdateState?.running', 'runtime Repair UI completion');
+  fs.writeFileSync(preservedModFile, 'damaged after first scan');
+  const extraRepairFile = path.join(instanceDir, 'scripts/unapproved.zs');
+  fs.mkdirSync(path.dirname(extraRepairFile), { recursive: true });
+  fs.writeFileSync(extraRepairFile, 'unapproved fixture');
+  const escalatedRepair = await evaluate(client, 'window.aht.startUpdate({ forceRepair: true, runtimeOnly: true })');
+  if (!escalatedRepair.ok || escalatedRepair.runtimeOnly || fs.existsSync(extraRepairFile)) {
+    throw new Error('Runtime Repair did not complete the newly discovered file repair in one attempt.');
+  }
+  const repairedScan = await evaluate(client, "window.aht.scanFiles('aht')");
+  if (!repairedScan.valid || repairedScan.counts.corrupted) throw new Error('Full Repair left damaged managed files.');
+  await evaluate(client, 'refresh().then(() => true)');
+  await waitFor(client, '!updatePoll && !lastUpdateState?.running', 'escalated Repair UI completion');
+  const repairScreenshot = await client.call('Page.captureScreenshot', { format: 'png' });
+  await fsp.writeFile(path.join(root, 'repair-complete.png'), Buffer.from(repairScreenshot.data, 'base64'));
+  checkpoint('One-click Repair escalated to full file recovery and reverified the result');
 
   const stableProfileId = 'a-hard-time-dregora';
   for (const rootDir of [mcRoot, syncedMcRoot]) {

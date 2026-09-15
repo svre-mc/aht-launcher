@@ -159,8 +159,11 @@ export async function findRecentWorkflowRun({
   url.searchParams.set('event', 'workflow_dispatch');
   url.searchParams.set('branch', cleanBranch);
   url.searchParams.set('per_page', '10');
+  // A lookup immediately before dispatch may be cached as an empty list for
+  // GitHub's 60-second max-age. Discovery after dispatch must revalidate it.
   const response = await fetchImpl(url, {
-    headers: githubHeaders(token)
+    headers: { ...githubHeaders(token), 'Cache-Control': 'no-cache' },
+    cache: 'no-store'
   });
   const parsed = await readGithubJson(response, 'GitHub workflow run lookup');
   const sinceMs = Date.parse(since) || 0;

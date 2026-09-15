@@ -1,10 +1,36 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
+import { withR2StorageBudget } from './r2StorageBudget.js';
+import { commitModpackPublication, immutableModpackObject } from './modpackPublication.js';
+import { releaseTargetObjectKey } from './releaseTargets.js';
+
+export async function preflightR2Uploads({ uploads, bucket, ...credentials }) {
+  return withR2StorageBudget({ credentials, bucket, uploads });
+}
 
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024;
 const DEFAULT_QUEUE_SIZE = 8;
+
+function budgetedFileStream(file, expectedSize, expectedSha256 = '') {
+  // ContentLength is not a byte limit for the SDK's multipart reader. Stop
+  // before yielding a chunk that would exceed the size admitted by preflight.
+  return Readable.from((async function* () {
+    let total = 0;
+    const digest = expectedSha256 ? createHash('sha256') : null;
+    for await (const chunk of fs.createReadStream(file)) {
+      total += chunk.length;
+      if (total > expectedSize) throw new Error('Upload file changed after the storage preflight.');
+      digest?.update(chunk);
+      yield chunk;
+    }
+    if (total !== expectedSize) throw new Error('Upload file changed after the storage preflight.');
+    if (digest && digest.digest('hex') !== expectedSha256.toLowerCase()) throw new Error('Upload content changed after verification.');
+  })(), { objectMode: false });
+}
 
 export function cleanR2AccountId(value = '') {
   const raw = String(value || '').trim();
@@ -124,6 +150,8 @@ export async function uploadR2ObjectDirect({
   accountId,
   accessKeyId,
   secretAccessKey,
+  inventoryAccessKeyId,
+  inventorySecretAccessKey,
   bucket,
   key,
   file,
@@ -136,6 +164,7 @@ export async function uploadR2ObjectDirect({
 } = {}) {
   assertDirectR2Credentials({ accountId, accessKeyId, secretAccessKey });
   const stat = await fsp.stat(file);
+  if (!stat.isFile()) throw new Error('R2 upload must contain a regular file.');
   const startedAt = Date.now();
   const endpoint = r2Endpoint(accountId);
   const client = r2Client({ accountId, accessKeyId, secretAccessKey });
@@ -143,47 +172,80 @@ export async function uploadR2ObjectDirect({
     ...metadata,
     ...(sha256 ? { 'aht-sha256': String(sha256).toLowerCase() } : {})
   };
-  const upload = new Upload({
-    client,
-    queueSize,
-    partSize,
-    leavePartsOnError: false,
-    params: {
-      Bucket: bucket,
-      Key: key,
-      Body: fs.createReadStream(file),
-      ContentType: contentType,
-      ...(Object.keys(uploadMetadata).length ? { Metadata: uploadMetadata } : {})
+  return withR2StorageBudget({ credentials: { accountId, accessKeyId, secretAccessKey, inventoryAccessKeyId, inventorySecretAccessKey }, bucket,
+    uploads: [{ key, size: stat.size }] }, async () => {
+    const current = await fsp.stat(file);
+    if (!current.isFile() || current.size !== stat.size) throw new Error('Upload file changed after the storage preflight.');
+    if (immutableModpackObject(key)) {
+      if (!/^[a-f0-9]{64}$/i.test(sha256)) throw new Error('Versioned modpack uploads require a verified SHA256.');
+      const existing = await headR2ObjectDirect({ accountId, accessKeyId, secretAccessKey, bucket, key });
+      if (existing.exists) {
+        if (existing.size !== stat.size || existing.sha256.toLowerCase() !== sha256.toLowerCase()) {
+          throw new Error(`Immutable release artifact already exists with different bytes: ${key}. Use a new release version.`);
+        }
+        return { method: 'direct-skip', bucket, key, size: stat.size, skipped: true };
+      }
     }
-  });
-  upload.on('httpUploadProgress', (event = {}) => {
-    const loaded = Number(event.loaded || 0);
-    const total = Number(event.total || stat.size || 0);
-    const elapsedSeconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
-    onProgress?.({
-      loaded,
-      total,
-      percent: total ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
-      speedBytesPerSecond: Math.round(loaded / elapsedSeconds),
-      part: event.part || null
+    const body = budgetedFileStream(file, stat.size, sha256);
+    const upload = new Upload({
+      client,
+      queueSize,
+      partSize,
+      leavePartsOnError: false,
+      params: {
+        Bucket: bucket,
+        Key: key,
+        Body: body,
+        ContentLength: stat.size,
+        StorageClass: 'STANDARD',
+        ContentType: contentType,
+        ...(Object.keys(uploadMetadata).length ? { Metadata: uploadMetadata } : {})
+      }
     });
-  });
-  await upload.done();
-  return {
-    method: 'direct-multipart',
-    endpoint,
-    bucket,
-    key,
-    size: stat.size,
-    partSize,
-    queueSize
-  };
+    upload.on('httpUploadProgress', (event = {}) => {
+      const loaded = Number(event.loaded || 0);
+      const total = Number(event.total || stat.size || 0);
+      const elapsedSeconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
+      onProgress?.({
+        loaded,
+        total,
+        percent: total ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+        speedBytesPerSecond: Math.round(loaded / elapsedSeconds),
+        part: event.part || null
+      });
+    });
+    try { await upload.done(); } finally { body.destroy(); }
+    return {
+      method: 'direct-multipart',
+      endpoint,
+      bucket,
+      key,
+      size: stat.size,
+      partSize,
+      queueSize
+    };
+  }).finally(() => client.destroy());
+}
+
+export async function commitR2ModpackRelease({ bucket, target, latest, baseline, verifyPublic, ...credentials }) {
+  const key = releaseTargetObjectKey('latest.json', target);
+  const body = JSON.stringify(latest);
+  return withR2StorageBudget({ credentials, bucket, uploads: [{ key, size: Buffer.byteLength(body) }] }, () =>
+    commitModpackPublication({ latest, baseline, target, verifyPublic,
+      readFeed: async () => (await getR2JsonDirect({ ...credentials, bucket, key })).value,
+      head: artifactKey => headR2ObjectDirect({ ...credentials, bucket, key: artifactKey }),
+      writeFeed: value => uploadR2JsonDirect({ ...credentials, bucket, key, value,
+        sha256: createHash('sha256').update(body).digest('hex'),
+        metadata: { 'aht-uploaded-by': 'aht-launcher', 'aht-release-target': target } })
+    }));
 }
 
 export async function uploadR2JsonDirect({
   accountId,
   accessKeyId,
   secretAccessKey,
+  inventoryAccessKeyId,
+  inventorySecretAccessKey,
   bucket,
   key,
   value,
@@ -201,19 +263,24 @@ export async function uploadR2JsonDirect({
     ...metadata,
     ...(sha256 ? { 'aht-sha256': String(sha256).toLowerCase() } : {})
   };
-  await client.send(new PutObjectCommand({
-    Bucket: bucket,
-    Key: key,
-    Body: body,
-    ContentType: 'application/json; charset=utf-8',
-    CacheControl: 'public, max-age=60, must-revalidate',
-    ...(Object.keys(uploadMetadata).length ? { Metadata: uploadMetadata } : {})
-  }));
-  return {
-    method: 'direct-put-json',
-    endpoint: r2Endpoint(accountId),
-    bucket,
-    key,
-    size
-  };
+  return withR2StorageBudget({ credentials: { accountId, accessKeyId, secretAccessKey, inventoryAccessKeyId, inventorySecretAccessKey }, bucket,
+    uploads: [{ key, size }] }, async () => {
+    await client.send(new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentLength: size,
+      StorageClass: 'STANDARD',
+      ContentType: 'application/json; charset=utf-8',
+      CacheControl: 'public, max-age=60, must-revalidate',
+      ...(Object.keys(uploadMetadata).length ? { Metadata: uploadMetadata } : {})
+    }));
+    return {
+      method: 'direct-put-json',
+      endpoint: r2Endpoint(accountId),
+      bucket,
+      key,
+      size
+    };
+  }).finally(() => client.destroy());
 }

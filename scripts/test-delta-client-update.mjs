@@ -203,6 +203,27 @@ try {
   const repairedIntegrity = await scanManagedIntegrity(instanceDir);
   assert(repairedIntegrity.counts.corrupted === 0, `full repair did not restore every managed file: ${JSON.stringify(repairedIntegrity)}`);
 
+  // A client which skipped the delta's source release must fetch the full
+  // package, including fixes inherited from that skipped release (667 -> 669).
+  const installedPath = path.join(instanceDir, '.aht-launcher', 'installed.json');
+  const beforeGap = await readJsonFile(installedPath);
+  await fs.writeFile(installedPath, JSON.stringify({ ...beforeGap, version: '2.8.099' }));
+  await fs.rm(path.join(instanceDir, 'mods', 'add.jar'));
+  const gapLatestPath = path.join(outDir, 'latest-gap.json');
+  await fs.writeFile(gapLatestPath, JSON.stringify({
+    ...releaseV2.latest,
+    delta: { ...releaseV2.latest.delta, path: 'must-not-fetch.zip', url: 'must-not-fetch.zip' }
+  }));
+  const gapLogs = [];
+  const gapInstall = await installPack({ latestSource: gapLatestPath, instanceDir,
+    logger: { log(line) { gapLogs.push(String(line)); } } });
+  assert(gapInstall.cleanInstall === true && gapInstall.deltaApplied !== true,
+    'a client older than the delta baseline must install the full verified package');
+  assert(await pathExists(path.join(instanceDir, 'mods', 'add.jar')),
+    'the full package must restore fixes inherited from the skipped release');
+  assert(!gapLogs.some(line => line.includes('Fetching delta')),
+    'an ineligible delta must not be downloaded');
+
   const fallbackLatestPath = path.join(outDir, 'latest-fallback.json');
   await fs.writeFile(fallbackLatestPath, `${JSON.stringify({
     ...releaseV2.latest,

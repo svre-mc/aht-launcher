@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: aht-modpack-rebuild-${{ inputs.release_target }}
+  group: aht-r2-storage-writers
   cancel-in-progress: false
 
 jobs:
@@ -63,7 +63,10 @@ jobs:
       - name: Install publisher dependencies
         run: npm ci --ignore-scripts
 
-      - name: Require Cloudflare publisher credentials
+      - name: Test R2 storage guard
+        run: npm run test:r2-storage-budget && node --test scripts/test-modpack-publication.mjs
+
+      - name: Validate Cloudflare publisher credentials
         shell: bash
         run: |
           test -n "$CLOUDFLARE_API_TOKEN"
@@ -113,14 +116,5 @@ jobs:
           --result rebuild-result.json
           --candidate-id "$INPUT_CANDIDATE_ID"
 
-      - name: Upload rebuilt immutable ZIP
+      - name: Check storage and publish rebuilt ZIP and private result
         run: node scripts/upload-rebuilt-modpack.mjs rebuild-plan.json rebuild-result.json
-
-      - name: Publish private verified result for commit
-        shell: bash
-        run: >-
-          npx --yes wrangler@4.124.0 r2 object put
-          "$AHT_R2_BUCKET/$INPUT_RESULT_KEY"
-          --file=rebuild-result.json
-          --content-type=application/json
-          --remote

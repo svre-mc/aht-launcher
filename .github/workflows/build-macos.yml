@@ -178,7 +178,7 @@ jobs:
       - name: Test interactive account recovery and authenticated Play
         env:
           AHT_RECOVERY_JAVA_HOME: ${{ env.JAVA_HOME }}
-        run: node --test scripts/test-repair-account-readiness.mjs && node scripts/test-interactive-account-recovery.mjs && node scripts/test-play-proof-isolation.mjs
+        run: node --test scripts/test-repair-account-readiness.mjs scripts/test-repair-play.mjs && node scripts/test-interactive-account-recovery.mjs && node scripts/test-play-proof-isolation.mjs
 
       - name: Test overlapping Phoenix launcher and game measurements
         if: matrix.id == 'windows'

@@ -1604,7 +1604,12 @@ export async function installPack(options) {
     throw new Error('--instance is required');
   }
 
-  const latest = await readJsonFromSource(latestSource);
+  // The caller may have selected this verified feed before the download began.
+  // Keep its immutable artifact references for this whole install even if the
+  // public pointer advances while another release is being published.
+  const latest = options.latestRelease
+    ? structuredClone(options.latestRelease)
+    : await readJsonFromSource(latestSource);
   if (!dryRun && isFullClientZipRelease(latest)) {
     await recoverInterruptedCleanInstall(instanceDir, logger);
   }

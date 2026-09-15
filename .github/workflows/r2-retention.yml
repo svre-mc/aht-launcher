@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: aht-r2-retention
+  group: aht-r2-storage-writers
   cancel-in-progress: false
 
 jobs:
@@ -20,6 +20,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       AHT_R2_BUCKET: ${{ vars.AHT_R2_BUCKET || 'ahtlauncher' }}
       AHT_RELEASE_BASE_URL: https://api.ahardtime.net
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +30,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Install retention dependencies
+        run: npm ci --ignore-scripts
 
       - name: Test retention planner
         run: node scripts/test-r2-retention.mjs

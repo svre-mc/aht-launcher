@@ -86,6 +86,12 @@ const run = await findRecentWorkflowRun({
   fetchImpl
 });
 assert(run?.id === 123, 'workflow run lookup failed');
+const freshRun = await findRecentWorkflowRun({ token:'test-token', runNameIncludes:'exact-candidate',
+  fetchImpl:async (_url, options) => Response.json({ workflow_runs:
+    options.cache === 'no-store' && options.headers['Cache-Control'] === 'no-cache'
+      ? [{id:456,display_title:'Rebuild stable (exact-candidate)',created_at:new Date().toISOString(),status:'in_progress'}]
+      : [] }) });
+assert(freshRun?.id === 456, 'post-dispatch discovery reused a cached empty run list');
 
 const runStatus = await readGithubWorkflowRun({
   repo: 'svre-mc/aht-launcher',

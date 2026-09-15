@@ -57,7 +57,7 @@ import {
   preflightJava8Runtime
 } from '../src/forgeInstaller.js';
 import { ensureBundledJava8 } from '../src/bundledJava8.js';
-import { prepareRuntimeOnlyRepair, verifyRepairedJava } from '../src/runtimeRepair.js';
+import { prepareRuntimeOnlyRepair, verifyRepairedJava, repairPhoenixInstallation } from '../src/runtimeRepair.js';
 import { createMinecraftInteractiveRecovery } from '../src/minecraftInteractiveRecovery.js';
 import { createAccountRegistrationCoordinator } from '../src/accountRegistrationCoordinator.js';
 import { createLauncherIdentityStore } from '../src/launcherIdentityStore.js';
@@ -2137,6 +2137,8 @@ async function loadDeveloperSecrets() {
   const r2Account = stored.secrets?.r2AccountId || {};
   const r2AccessKey = stored.secrets?.r2AccessKeyId || {};
   const r2SecretKey = stored.secrets?.r2SecretAccessKey || {};
+  const inventoryFields = ['r2InventoryAccessKeyId', 'r2InventorySecretAccessKey'];
+  const inventorySecrets = {};
   let curseforgeApiKey = '';
   let serverSshPassword = '';
   let launcherProofSecret = '';
@@ -2146,6 +2148,10 @@ async function loadDeveloperSecrets() {
   let r2AccessKeyId = '';
   let r2SecretAccessKey = '';
   let warning = '';
+  for (const key of inventoryFields) {
+    try { inventorySecrets[key] = decryptDeveloperSecret(stored.secrets?.[key] || {}); }
+    catch (error) { warning = warning || error.message; }
+  }
   try {
     curseforgeApiKey = decryptDeveloperSecret(curseforge);
   } catch (error) {
@@ -2187,7 +2193,7 @@ async function loadDeveloperSecrets() {
     warning = warning || error.message;
   }
   return {
-    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || socialServer.value || github.value || r2Account.value || r2AccessKey.value || r2SecretKey.value),
+    saved: Boolean(curseforge.value || serverSsh.value || launcherProof.value || socialServer.value || github.value || r2Account.value || r2AccessKey.value || r2SecretKey.value || inventorySecrets.r2InventoryAccessKeyId),
     encrypted: Boolean(
       (curseforge.value ? curseforge.encrypted : true)
       && (serverSsh.value ? serverSsh.encrypted : true)
@@ -2196,6 +2202,7 @@ async function loadDeveloperSecrets() {
       && (github.value ? github.encrypted : true)
       && (r2AccessKey.value ? r2AccessKey.encrypted : true)
       && (r2SecretKey.value ? r2SecretKey.encrypted : true)
+      && inventoryFields.every(key => !stored.secrets?.[key]?.value || stored.secrets[key].encrypted)
     ),
     encryptionAvailable: encrypted,
     warning,
@@ -2206,7 +2213,8 @@ async function loadDeveloperSecrets() {
     githubToken,
     r2AccountId,
     r2AccessKeyId,
-    r2SecretAccessKey
+    r2SecretAccessKey,
+    ...inventorySecrets
   };
 }
 function saveDeveloperSecretField(next, secrets, key) {
@@ -2304,6 +2312,8 @@ async function saveDeveloperSecrets(secrets = {}) {
   saveDeveloperSecretField(next, secrets, 'r2AccountId');
   saveDeveloperSecretField(next, secrets, 'r2AccessKeyId');
   saveDeveloperSecretField(next, secrets, 'r2SecretAccessKey');
+  saveDeveloperSecretField(next, secrets, 'r2InventoryAccessKeyId');
+  saveDeveloperSecretField(next, secrets, 'r2InventorySecretAccessKey');
   await writeDeveloperSecretVaultSnapshot(next);
   await writeJsonFile(developerSecretsPath(), next);
   const usedEncryption = Object.entries(next.secrets).every(([key, item]) => key === 'r2AccountId' || !item?.value || item.encrypted);
@@ -3349,6 +3359,8 @@ async function saveConfig(nextConfig) {
   delete merged.developer.githubToken;
   delete merged.developer.r2AccessKeyId;
   delete merged.developer.r2SecretAccessKey;
+  delete merged.developer.r2InventoryAccessKeyId;
+  delete merged.developer.r2InventorySecretAccessKey;
   await writeJsonFile(configPath(), configForStorage(merged));
   if (!merged.minecraftLauncher.closeLauncherWhenGameStarts) {
     closeOnGameStartWatchGeneration += 1;
@@ -6193,6 +6205,11 @@ async function runUpdate(forceRepair = false, options = {}) {
   try {
     config = configForPack(await loadConfig(), target.id);
     launcherConfig = await minecraftLauncherRuntimeConfig(config);
+    if (forceRepair && !isDeveloperMode()) {
+      updateState.progress = { phase: 'Repairing local identity', percent: 3 };
+      deviceCredentialPromise = null;
+      await loadDeviceCredential({ allowRepair: true });
+    }
     identity = await identityPayload(launcherConfig);
     if (!config.latestUrl) {
       throw new Error('latestUrl is not configured');
@@ -6206,12 +6223,9 @@ async function runUpdate(forceRepair = false, options = {}) {
       type: forceRepair ? 'repair_started' : 'install_started',
       version: null
     }).catch((error) => appendOperationLine(updateState, `Sync warning: ${error.message}`));
-    const result = options.runtimeOnly ? await prepareRuntimeOnlyRepair({
-      instanceDir: config.instanceDir,
-      latest: latestBeforeInstall,
-      scan: () => scanCurrentManagedIntegrity(config, latestBeforeInstall)
-    }) : await installPack({
+    const repairPack = () => installPack({
       latestSource: config.latestUrl,
+      latestRelease: latestBeforeInstall,
       instanceDir: config.instanceDir,
       managedStatePath: managedStatePath(config),
       cfProxyBaseUrl: config.curseforge?.proxyBaseUrl || '',
@@ -6223,12 +6237,18 @@ async function runUpdate(forceRepair = false, options = {}) {
       },
       logger: { log: (line) => appendOperationLine(updateState, line) }
     });
+    const result = options.runtimeOnly ? await prepareRuntimeOnlyRepair({
+      instanceDir: config.instanceDir,
+      latest: latestBeforeInstall,
+      scan: () => scanCurrentManagedIntegrity(config, latestBeforeInstall),
+      repair: repairPack
+    }) : await repairPack();
     let latestAfterInstall = null;
     let preparedLauncherProof = null;
     let preparedMinecraftProfile = null;
     let preparedMinecraftAssets = null;
     try {
-      latestAfterInstall = options.runtimeOnly ? latestBeforeInstall : await readLatest(config);
+      latestAfterInstall = latestBeforeInstall;
       if (useBundledJava8()) {
         updateState.progress = { phase: 'Checking bundled Temurin 8', percent: 94 };
         const java = await java8RuntimeStatus(launcherConfig, {
@@ -6273,9 +6293,11 @@ async function runUpdate(forceRepair = false, options = {}) {
       ? { ...storedIntegrity, source: 'developer-update-bypass', developerClientBypass: true }
       : storedIntegrity;
     if (forceRepair && !isDeveloperMode()) {
-      updateState.progress = { ...(updateState.progress || {}), phase: 'Finishing repair', percent: 99 };
-      deviceCredentialPromise = null;
-      await loadDeviceCredential({ allowRepair: true });
+      updateState.progress = { ...(updateState.progress || {}), phase: 'Checking Phoenix Anti-cheat', percent: 99 };
+      await repairPhoenixInstallation({
+        getStatus: currentPhoenixAntiCheatStatus,
+        install: acceptedAt => installCurrentPhoenixAntiCheat(mainWindow?.webContents, acceptedAt)
+      });
       identity = await identityPayload(launcherConfig);
     }
     try {
@@ -6292,7 +6314,7 @@ async function runUpdate(forceRepair = false, options = {}) {
         minecraftAssets: preparedMinecraftAssets
       });
     } catch (error) {
-      if (error?.code !== 'AHT_MINECRAFT_NOT_INSTALLED') throw error;
+      if (forceRepair || error?.code !== 'AHT_MINECRAFT_NOT_INSTALLED') throw error;
       result.launchPreparationDeferred = true;
       result.launchBlockedReason = 'Minecraft Launcher is required to play.';
       blockedLaunchPreparation(target, error, {
@@ -9751,7 +9773,7 @@ async function writePlayerDefaults(payload = {}) {
 }
 
 async function verifyRemoteHead(url, expectedSize = null) {
-  const response = await fetch(cacheBustUrl(url), { method: 'HEAD', cache: 'no-store' });
+  const response = await fetch(cacheBustUrl(url), { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(20_000) });
   if (!response.ok) {
     throw new Error(`HEAD ${url} failed: ${response.status} ${response.statusText}`);
   }
@@ -9840,20 +9862,38 @@ async function verifyRemoteRelease({ publicLatestUrl, localLatest }) {
   };
 }
 
-async function uploadR2Object({ bucket, rel, file, wranglerCwd, onOutput = null }) {
-  return spawnLogged(wranglerCommand(), wranglerArgs([
-    'r2',
-    'object',
-    'put',
-    `${bucket}/${rel}`,
-    `--file=${file}`,
-    `--content-type=${contentType(file)}`,
-    '--remote'
-  ]), {
-    cwd: wranglerCwd,
-    timeoutMs: 30 * 60_000,
-    onOutput
+async function uploadR2Object({ bucket, rel, file, wranglerCwd, credentials, onOutput = null }) {
+  const { withR2StorageBudget } = await importDeveloperModule('../src/r2StorageBudget.js');
+  const stat = await fs.stat(file);
+  if (!stat.isFile()) throw new Error('R2 upload must contain a regular file.');
+  return withR2StorageBudget({ credentials, bucket, uploads: [{ key: rel, size: stat.size }] }, async () => {
+    const current = await fs.stat(file);
+    if (!current.isFile() || current.size !== stat.size) throw new Error('Upload file changed after the storage preflight.');
+    return spawnLogged(wranglerCommand(), wranglerArgs([
+      'r2',
+      'object',
+      'put',
+      `${bucket}/${rel}`,
+      `--file=${file}`,
+      `--content-type=${contentType(file)}`,
+      '--remote'
+    ]), {
+      cwd: wranglerCwd,
+      timeoutMs: 30 * 60_000,
+      onOutput
+    });
   });
+}
+
+async function verifyRemoteReleaseArtifacts({ publicLatestUrl, latest }) {
+  const latestUrl = latestUrlFromWorkerInput(publicLatestUrl);
+  if (!latestUrl) throw new Error('Public player feed URL is invalid.');
+  for (const ref of [latest.zip, latest.clientManifest, latest.delta].filter(Boolean)) {
+    const checked = await verifyRemoteHead(resolveSource(latestUrl, ref.url || ref.path), ref.size);
+    if (!checked.contentLength || Number(checked.contentLength) !== ref.size) {
+      throw new Error('Public release download size could not be verified. The player feed was not changed.');
+    }
+  }
 }
 
 function cleanR2AccountId(value = '') {
@@ -9887,6 +9927,8 @@ function missingDirectR2CredentialLabels(credentials = {}) {
 
 function r2DirectCredentials({ payload = {}, config = {}, secrets = {} } = {}) {
   return {
+    inventoryAccessKeyId: String(secrets.r2InventoryAccessKeyId || process.env.R2_INVENTORY_ACCESS_KEY_ID || '').trim(),
+    inventorySecretAccessKey: String(secrets.r2InventorySecretAccessKey || process.env.R2_INVENTORY_SECRET_ACCESS_KEY || '').trim(),
     accountId: cleanR2AccountId(
       payload.r2AccountId
       || secrets.r2AccountId
@@ -10245,6 +10287,17 @@ function validateRemoteRebuildResult(result = {}, candidate = {}, keys = {}, tar
     throw new Error('Remote changed-files rebuild returned inconsistent latest.json metadata.');
   }
   return latest;
+}
+
+function modpackResumeStorageUploads({ localLatest, incremental, canonicalLatestKey, target, fullZipSize }) {
+  const remaining = [
+    { key: incremental.candidateKey, size: Buffer.byteLength(JSON.stringify(incremental.candidateLatest)) + 256 * 1024 },
+    { key: canonicalLatestKey, size: 256 * 1024 }
+  ];
+  if (!incremental.verifiedZipSha256) remaining.push(
+    { key: releaseTargetObjectKey(localLatest.zip.path, target.id), size: fullZipSize },
+    { key: incremental.resultKey, size: 256 * 1024 });
+  return remaining;
 }
 
 function launcherUpdateRootUrl(publicLatestUrl, config = {}) {
@@ -10797,6 +10850,11 @@ async function syncLauncherUpdate(payload = {}) {
     ...uploads,
     { rel: 'launcher/latest.json', file: manifestPath, label: 'launcher/latest.json', size: (await fs.stat(manifestPath)).size }
   ];
+  const storageSecrets = await loadDeveloperSecrets().catch(() => ({}));
+  const storageCredentials = await resolveR2DirectCredentials({ payload, config, secrets: storageSecrets });
+  const r2Storage = await loadR2DirectUploadModule();
+  await r2Storage.preflightR2Uploads({ ...storageCredentials, bucket,
+    uploads: await Promise.all(files.map(async item => ({ key: item.rel, size: (await fs.stat(item.file)).size }))) });
   const wranglerCwd = wranglerWorkDir();
   await ensureDir(wranglerCwd);
   const uploaded = [];
@@ -10819,6 +10877,7 @@ async function syncLauncherUpdate(payload = {}) {
       appendOperationLine(uploadState, `Uploading ${item.rel} (${item.size || (await fs.stat(item.file)).size} bytes)`);
       const output = await uploadR2Object({
         bucket,
+        credentials: storageCredentials,
         rel: item.rel,
         file: item.file,
         wranglerCwd,
@@ -10874,6 +10933,7 @@ async function syncR2(payload = {}) {
   const secrets = await loadDeveloperSecrets().catch(() => ({}));
   const directCredentials = await resolveR2DirectCredentials({ payload, config, secrets });
   const fastUpload = directR2CredentialsReady(directCredentials);
+  if (!fastUpload) throw new Error('R2 upload blocked: account-wide R2 access keys are required to check projected storage and unfinished uploads. Configure the R2 access keys before publishing.');
   const missingFastUpload = missingDirectR2CredentialLabels(directCredentials);
   const r2Direct = fastUpload ? await loadR2DirectUploadModule() : null;
   const canonicalLatestKey = releaseTargetObjectKey('latest.json', target.id);
@@ -10947,7 +11007,7 @@ async function syncR2(payload = {}) {
   const listedFiles = await listFiles(outDir);
   const withheldPaths = incremental
     ? new Set(['latest.json', normalizeRelPath(localLatest.zip?.path || '')])
-    : new Set();
+    : new Set(['latest.json']);
   const files = listedFiles.filter((file) => {
     const rel = path.relative(outDir, file).replaceAll(path.sep, '/');
     return isPublishableReleasePath(rel) && !withheldPaths.has(rel);
@@ -10968,6 +11028,28 @@ async function syncR2(payload = {}) {
     fileStats.set(file, stat);
     totalBytes += stat.size;
   }
+  const storageUploads = files.map(file => ({
+    key: releaseTargetObjectKey(path.relative(outDir, file).replaceAll(path.sep, '/'), target.id),
+    size: fileStats.get(file).size
+  }));
+  if (incremental) {
+    const existingResult = await r2Direct.getR2JsonDirect({ ...directCredentials, bucket, key: incremental.resultKey });
+    if (existingResult.exists) {
+      const verified = validateRemoteRebuildResult(existingResult.value, incremental.candidateLatest, incremental, target);
+      const artifact = await r2Direct.headR2ObjectDirect({ ...directCredentials, bucket,
+        key: releaseTargetObjectKey(verified.zip.path, target.id) });
+      if (!artifact.exists || artifact.size !== verified.zip.size
+          || String(artifact.sha256 || '').toLowerCase() !== String(verified.zip.sha256).toLowerCase()) {
+        throw new Error('Existing remote rebuild did not pass immutable size/hash readback. No player feed was changed.');
+      }
+      incremental.verifiedZipSha256 = verified.zip.sha256;
+    }
+    storageUploads.push(...modpackResumeStorageUploads({ localLatest, incremental, canonicalLatestKey, target,
+      fullZipSize: (await fs.stat(path.join(outDir, localLatest.zip.path))).size }));
+  } else {
+    storageUploads.push({ key: canonicalLatestKey, size: Buffer.byteLength(JSON.stringify(localLatest)) });
+  }
+  await r2Direct.preflightR2Uploads({ ...directCredentials, bucket, uploads: storageUploads });
   let excludedBytes = 0;
   for (const file of excludedFiles) {
     excludedBytes += (await fs.stat(file)).size;
@@ -10976,7 +11058,6 @@ async function syncR2(payload = {}) {
   if (!fastUpload && totalBytes >= largeUploadThreshold && !payload.allowSlowWranglerUpload) {
     throw new Error(`Fast R2 upload credentials are required for large releases (${formatBytes(totalBytes)}). Missing ${missingFastUpload.join(', ')}. Add the R2 Account ID, Access Key ID, and Secret Access Key in Release Builder.`);
   }
-  const npx = fastUpload ? '' : wranglerCommand();
   const wranglerCwd = fastUpload ? '' : wranglerWorkDir();
   if (!fastUpload) {
     await ensureDir(wranglerCwd);
@@ -11093,17 +11174,7 @@ async function syncR2(payload = {}) {
         if (rel.endsWith('.zip')) {
           appendOperationLine(uploadState, 'Large ZIP upload is running through Wrangler; add R2 access keys for byte progress and faster multipart upload.');
         }
-        const output = await spawnLogged(npx, wranglerArgs([
-          'r2',
-          'object',
-          'put',
-          `${bucket}/${objectKey}`,
-          `--file=${file}`,
-          `--content-type=${contentType(file)}`,
-          '--remote'
-        ]), {
-          cwd: wranglerCwd,
-          timeoutMs: 30 * 60_000,
+        const output = await uploadR2Object({ bucket, rel: objectKey, file, wranglerCwd, credentials: directCredentials,
           onOutput: (text) => {
             const compact = String(text || '').trim();
             if (compact) {
@@ -11132,6 +11203,7 @@ async function syncR2(payload = {}) {
       appendOperationLine(uploadState, latestUpload?.skipped ? `Remote current ${objectKey}` : `Uploaded ${objectKey}`);
       trimUploadLines();
     }
+    let finalLatest = localLatest;
     if (incremental) {
       const candidateBody = `${JSON.stringify(incremental.candidateLatest, null, 2)}\n`;
       const candidateSha256 = crypto.createHash('sha256').update(candidateBody).digest('hex');
@@ -11157,7 +11229,11 @@ async function syncR2(payload = {}) {
         bucket,
         key: incremental.resultKey
       });
-      let finalLatest = null;
+      finalLatest = null;
+      if (incremental.verifiedZipSha256 && (!resultRead.exists
+          || String(resultRead.value?.latest?.zip?.sha256 || resultRead.value?.zip?.sha256 || '').toLowerCase() !== String(incremental.verifiedZipSha256).toLowerCase())) {
+        throw new Error('Verified remote rebuild changed during resume. No new rebuild was dispatched and no player feed was changed.');
+      }
       if (resultRead.exists) {
         finalLatest = validateRemoteRebuildResult(resultRead.value, incremental.candidateLatest, incremental, target);
         appendOperationLine(uploadState, 'Reused the already verified remote full-ZIP rebuild from the interrupted publish.');
@@ -11192,7 +11268,7 @@ async function syncR2(payload = {}) {
               result_key: incremental.resultKey
             }
           });
-          const runDeadline = Date.now() + 30_000;
+          const runDeadline = Date.now() + 90_000;
           run = null;
           while (!run && Date.now() < runDeadline) {
             await sleep(2_000);
@@ -11233,65 +11309,20 @@ async function syncR2(payload = {}) {
         finalLatest = validateRemoteRebuildResult(resultRead.value, incremental.candidateLatest, incremental, target);
       }
 
-      const rebuiltZipKey = releaseTargetObjectKey(finalLatest.zip.path, target.id);
-      const rebuiltZip = await r2Direct.headR2ObjectDirect({
-        ...directCredentials,
-        bucket,
-        key: rebuiltZipKey
-      });
-      if (!rebuiltZip.exists || Number(rebuiltZip.size || 0) !== Number(finalLatest.zip.size || 0)) {
-        throw new Error('Remote rebuilt full ZIP did not pass the final size readback. No player feed was changed.');
-      }
-
-      const liveBeforeCommit = await r2Direct.getR2JsonDirect({
-        ...directCredentials,
-        bucket,
-        key: canonicalLatestKey
-      });
-      const current = liveBeforeCommit.value || {};
-      const baseline = incremental.baselineLatest;
-      if (!liveBeforeCommit.exists
-          || String(current.packId || '') !== String(baseline.packId || '')
-          || String(current.channel || '') !== String(baseline.channel || '')
-          || String(current.version || '') !== String(baseline.version || '')
-          || String(current.zip?.sha256 || '').toLowerCase() !== String(baseline.zip?.sha256 || '').toLowerCase()) {
-        throw new Error(`Remote ${target.name} changed while this release was rebuilding. Rebuild from the new live version; no pointer was overwritten.`);
-      }
-
-      const finalBody = `${JSON.stringify(finalLatest, null, 2)}\n`;
-      const finalSha256 = crypto.createHash('sha256').update(finalBody).digest('hex');
-      uploadState.current = canonicalLatestKey;
-      appendOperationLine(uploadState, `Committing ${canonicalLatestKey} after the remote artifact readback.`);
-      await r2Direct.uploadR2JsonDirect({
-        ...directCredentials,
-        bucket,
-        key: canonicalLatestKey,
-        value: finalBody,
-        sha256: finalSha256,
-        metadata: { 'aht-uploaded-by': 'aht-launcher', 'aht-release-target': target.id }
-      });
-      const committed = await r2Direct.getR2JsonDirect({
-        ...directCredentials,
-        bucket,
-        key: canonicalLatestKey
-      });
-      if (!committed.exists || !releaseIdentityMatches(committed.value, finalLatest)
-          || String(committed.value?.zip?.sha256 || '').toLowerCase() !== String(finalLatest.zip.sha256).toLowerCase()) {
-        throw new Error(`Remote ${target.name} pointer readback did not match the committed release.`);
-      }
-      localLatest = finalLatest;
-      await writeJsonFile(localLatestPath, finalLatest);
-      if (validation.latest) validation.latest = finalLatest;
-      uploaded.push({
-        path: canonicalLatestKey,
-        localPath: 'latest.json',
-        output: `committed ${canonicalLatestKey}`,
-        method: 'direct-put-json',
-        size: Buffer.byteLength(finalBody)
-      });
-      uploadState.completed = uploaded.length;
-      appendOperationLine(uploadState, `Committed ${target.name} ${finalLatest.version}; closing earlier would have left the live pointer unchanged.`);
     }
+    uploadState.current = canonicalLatestKey;
+    appendOperationLine(uploadState, `Verifying every ${target.name} download before committing the player feed.`);
+    await r2Direct.commitR2ModpackRelease({
+      ...directCredentials, bucket, target: target.id, latest: finalLatest, baseline: liveLatest,
+      verifyPublic: () => verifyRemoteReleaseArtifacts({ publicLatestUrl: targetLatestUrl, latest: finalLatest })
+    });
+    localLatest = finalLatest;
+    await writeJsonFile(localLatestPath, finalLatest);
+    if (validation.latest) validation.latest = finalLatest;
+    uploaded.push({ path: canonicalLatestKey, localPath: 'latest.json', output: `committed ${canonicalLatestKey}`,
+      method: 'direct-put-json', size: Buffer.byteLength(JSON.stringify(finalLatest)) });
+    uploadState.completed = uploaded.length;
+    appendOperationLine(uploadState, `Committed ${target.name} ${finalLatest.version}; closing earlier would have left the live pointer unchanged.`);
     const verification = await verifyRemoteRelease({ publicLatestUrl: targetLatestUrl, localLatest });
     uploadState.verification = verification;
     appendOperationLine(uploadState, `Verified player feed ${verification.publicLatestUrl}`);

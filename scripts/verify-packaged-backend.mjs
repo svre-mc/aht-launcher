@@ -24,7 +24,7 @@ const packagedZipVersion = JSON.parse(extractFile(asar, ['node_modules', 'adm-zi
 const expectedZipVersion = JSON.parse(await fs.readFile(path.join(root, 'package-lock.json'), 'utf8')).packages['node_modules/adm-zip'].version;
 assert.equal(packagedZipVersion, expectedZipVersion, 'Packaged archive dependency differs from the tested lockfile');
 for (const forbidden of ['releaseBuilder.js', 'serverTransfer.js', 'githubActions.js', 'r2DirectUpload.js',
-  'r2StorageBudget.js', 'r2RollbackArchive.js', 'Guard.cs', 'PhoenixProbeServer.cs']) {
+  'r2StorageBudget.js', 'r2RollbackArchive.js', 'modpackPublication.js', 'Guard.cs', 'PhoenixProbeServer.cs']) {
   assert(!files.some(file => file.endsWith(`/${forbidden}`) || file.endsWith(`\\${forbidden}`)), `Private/build source packaged: ${forbidden}`);
 }
 console.log(JSON.stringify({ passed: true, exactBackendModules: modules.length, archiveDependency: packagedZipVersion, privateBuildSourcesExcluded: true }));

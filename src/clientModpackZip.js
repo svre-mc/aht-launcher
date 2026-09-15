@@ -9,6 +9,7 @@ import {
   isManagedClientPackPath
 } from './clientPackFormat.js';
 import { ensureDir, hashFile, pathExists, readJsonFile, slugify } from './utils.js';
+import { validateContentTweakerResources } from './contentTweakerResources.js';
 
 export { CLIENT_PACK_FORMAT, CLIENT_PACK_METADATA_ENTRY } from './clientPackFormat.js';
 export const CLIENT_PACK_DIRS = [
@@ -148,6 +149,13 @@ export async function createClientModpackZip(options = {}) {
   if (!version) {
     throw new Error('Pack version is required to create a client ZIP.');
   }
+  const contentFiles = [];
+  for (const dir of ['scripts', 'resources']) {
+    const root = path.join(sourceDir, dir);
+    if (!(await pathExists(root))) continue;
+    for await (const file of walkFiles(root)) contentFiles.push(`${dir}/${normalizeZipPath(file)}`);
+  }
+  await validateContentTweakerResources(contentFiles, file => fs.readFile(path.join(sourceDir, file), 'utf8'));
   const name = String(options.name || 'A Hard Time').trim() || 'A Hard Time';
   const packId = slugify(options.packId || name);
   const outDir = path.resolve(String(options.outDir || path.join(sourceDir, '.aht-launcher', 'client-zips')));

@@ -18,29 +18,35 @@ test('public account warnings stay concise while local diagnostics remain availa
   assert.equal(context.identityForRenderer(identity).minecraftUsernameSyncWarning, identity.minecraftUsernameSyncWarning);
 });
 const updateSource = main.slice(main.indexOf('async function runUpdate('), main.indexOf('\nfunction defaultLauncherInstallerArgs'));
-function updateHarness({ warning = '', developer = false, confirmed = true, keyFailure = false } = {}) {
+function updateHarness({ warning = '', developer = false, confirmed = true, keyFailure = false,
+  unreadableKey = false, phoenixBroken = false, launcherMissing = false, publishDuringInstall = false } = {}) {
   const calls = [];
+  let feedReads = 0;
   const target = { id: 'stable', sidebarKey: 'stable' };
   const config = { instanceDir: '/fixture/stable', latestUrl: 'https://fixture.invalid/latest.json', launcherProof: { enabled: true } };
   const identity = { minecraftUsername: 'FixturePlayer', minecraftUuid: '12345678-1234-4234-9234-123456789abc', minecraftUsernameSyncWarning: warning };
   const context = vm.createContext({
-    ...runtimeRepair, deviceCredentialPromise: null, loadDeviceCredential: async options => { assert.equal(options.allowRepair, true); calls.push('key-repair'); if (keyFailure) throw new Error('Local key unavailable'); }, updateState: {}, releaseTarget: () => target,
+    ...runtimeRepair, deviceCredentialPromise: null, loadDeviceCredential: async options => { assert.equal(options.allowRepair, true); calls.push('key-repair'); if (keyFailure) throw new Error('Local key unavailable'); unreadableKey = false; }, updateState: {}, releaseTarget: () => target,
     invalidateLaunchPreparation: () => calls.push('invalidate'),
     createOperationState: kind => ({ kind, running: true }), appendOperationLine() {},
     configForPack: value => value, loadConfig: async () => config,
     minecraftLauncherRuntimeConfig: async value => value,
     identityPayload: async (_config, options) => { calls.push(options?.forceAccountSync ? 'account-revalidate' : 'identity'); return identity; },
+    currentPhoenixAntiCheatStatus: async () => ({ required: true, valid: !phoenixBroken, consented: true, consentAcceptedAt: '2026-09-01T00:00:00Z' }),
+    installCurrentPhoenixAntiCheat: async () => { calls.push('phoenix-repair'); phoenixBroken = false; },
+    mainWindow: null,
     remoteRegistrationSatisfiesRequest: () => confirmed,
-    readLatest: async () => ({ packId: 'fixture', version: '1' }), developerClientBypassAllowed: () => developer,
+    readLatest: async () => ({ packId: 'fixture', version: publishDuringInstall && ++feedReads > 1 ? '2' : '1' }), developerClientBypassAllowed: () => developer,
     isDeveloperMode: () => developer, requirePlayerFullClientRelease() {}, migrateInstanceSecurityState: async () => {},
-    sendLauncherEvent: async (_config, _identity, value) => calls.push(value.type),
+    sendLauncherEvent: async (_config, _identity, value) => { if (unreadableKey) calls.push('unrepaired-key-event'); calls.push(value.type); },
     prepareRuntimeOnlyRepair: async () => ({ installed: { version: '1' }, runtimeOnly: true }),
-    installPack: async () => ({ installed: { version: '1' } }), managedStatePath: () => '',
+    installPack: async () => ({ installed: { packId: 'fixture', version: '1' } }), managedStatePath: () => '',
     useBundledJava8: () => false, process: { env: {} },
-    repairMinecraftRuntime: async () => ({ profile: {}, minecraftAssets: {} }),
+    repairMinecraftRuntime: async ({ latest, installed }) => { assert.equal(latest.version, installed.version, 'Runtime setup switched to a release published during this install'); return { profile: {}, minecraftAssets: {} }; },
     scanCurrentManagedIntegrity: async () => ({ valid: true, counts: { managed: 10, corrupted: 0 } }),
     writeIntegrityState: async (_config, value) => value,
-    publishCompletedUpdatePreparation: async value => { calls.push('ready'); assert.equal(value.launcherProof, null); },
+    publishCompletedUpdatePreparation: async value => { if (launcherMissing) throw Object.assign(new Error('Minecraft Launcher is required to play.'), { code: 'AHT_MINECRAFT_NOT_INSTALLED' }); calls.push('ready'); assert.equal(value.launcherProof, null); },
+    blockedLaunchPreparation() {}, java8RuntimeStatus: async () => ({}),
     completeOperationState: state => { state.running = false; calls.push('complete'); },
     failOperationState: state => { state.running = false; calls.push('failed'); }
   });
@@ -48,6 +54,40 @@ function updateHarness({ warning = '', developer = false, confirmed = true, keyF
   return { calls, run: (repair = true, runtimeOnly = false) => context.runUpdate(repair, { runtimeOnly }),
     setWarning: value => { identity.minecraftUsernameSyncWarning = value; } };
 }
+
+test('Repair recovers its local key before identity and signed telemetry work', async () => {
+  const h = updateHarness({ unreadableKey: true });
+  await h.run();
+  assert(h.calls.indexOf('key-repair') < h.calls.indexOf('identity'));
+  assert(!h.calls.includes('unrepaired-key-event'));
+  assert(h.calls.includes('repair_completed'));
+});
+
+test('Install and Repair finish the selected release when publication occurs during download', async () => {
+  for (const repair of [false, true]) {
+    const h = updateHarness({ publishDuringInstall: true });
+    await h.run(repair);
+    assert(h.calls.includes('complete'));
+    assert(!h.calls.includes('failed'));
+  }
+});
+
+test('Repair restores a damaged consented Phoenix installation before success', async () => {
+  const h = updateHarness({ phoenixBroken: true });
+  await h.run();
+  assert(h.calls.includes('phoenix-repair'));
+  assert(h.calls.indexOf('phoenix-repair') < h.calls.indexOf('ready'));
+});
+
+test('Repair cannot report completion when Minecraft Launcher is absent', async () => {
+  const h = updateHarness({ launcherMissing: true });
+  await assert.rejects(h.run(), /Minecraft Launcher is required/);
+  assert(!h.calls.includes('repair_completed'));
+  assert(h.calls.includes('repair_failed'));
+  const ordinary = updateHarness({ launcherMissing: true });
+  await ordinary.run(false);
+  assert(ordinary.calls.includes('install_completed'));
+});
 
 test('Repair restores local readiness even when historical account recovery is unavailable', async () => {
   for (const runtimeOnly of [false, true]) {
@@ -63,7 +103,7 @@ test('a local key failure still fails Repair; update and developer paths remain 
   const h = updateHarness({ keyFailure: true });
   await assert.rejects(h.run(), /Local key unavailable/);
   assert(!h.calls.includes('ready'));
-  assert(h.calls.includes('repair_failed'));
+  assert(h.calls.includes('failed'), 'Local failure must set a terminal failed state even before an identity is available for telemetry');
   const ordinary = updateHarness({ confirmed: false });
   await ordinary.run(false);
   assert(ordinary.calls.includes('complete'));

@@ -180,7 +180,7 @@ function markOldVersions({ objects, currentVersion, rollbackHint = '', protected
       if (failOnUnknown) throw new Error(`Refusing to classify versionless managed object ${object.key}.`);
       continue;
     }
-    if (!retainedVersions.has(version)) deletions.set(object.key, { ...object, reason });
+    if (!retainedVersions.has(version) && compareVersions(version, currentVersion) < 0) deletions.set(object.key, { ...object, reason });
   }
   return selectedRollbackVersion;
 }
@@ -217,7 +217,7 @@ export function planR2Retention({
     if (protectedKeys.has(object.key)) continue;
     const version = versionFromKey(object.key);
     if (!version) throw new Error(`Refusing to classify versionless launcher object ${object.key}.`);
-    if (!launcherRetainedVersions.has(version)) {
+    if (!launcherRetainedVersions.has(version) && compareVersions(version, launcherVersion) < 0) {
       deletions.set(object.key, { ...object, reason: 'launcher-older-than-rollback-window' });
     }
   }
@@ -229,7 +229,7 @@ export function planR2Retention({
     if (protectedKeys.has(object.key)) continue;
     const version = versionFromKey(object.key);
     if (!version) throw new Error(`Refusing to classify versionless Phoenix Anti-cheat object ${object.key}.`);
-    if (!antiCheatRetainedVersions.has(version)) {
+    if (!antiCheatRetainedVersions.has(version) && compareVersions(version, antiCheatVersion) < 0) {
       deletions.set(object.key, { ...object, reason: 'phoenix-anticheat-older-than-rollback-window' });
     }
   }
@@ -406,7 +406,18 @@ function retentionSummary(plan, bucket, planHash, applied) {
   };
 }
 
-export async function runRetention({
+export async function runRetention(options) {
+  if (!options.apply) return runRetentionUnlocked(options);
+  const { createR2StorageClient, withR2StorageLock } = await import('../src/r2StorageBudget.js');
+  const client = options.storageClient || createR2StorageClient({ accountId: options.accountId });
+  try {
+    return await withR2StorageLock(client, () => runRetentionUnlocked(options));
+  } finally {
+    if (!options.storageClient) client.destroy();
+  }
+}
+
+async function runRetentionUnlocked({
   accountId,
   bucket = DEFAULT_BUCKET,
   token,
