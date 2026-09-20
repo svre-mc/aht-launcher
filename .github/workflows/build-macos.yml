@@ -168,7 +168,7 @@ jobs:
 
       - name: Test Windows uninstall choices and update delivery
         if: matrix.id == 'windows'
-        run: node scripts/test-windows-uninstall.mjs && node scripts/test-windows-update-uninstaller.mjs && node scripts/test-launcher-update-staging.mjs
+        run: node scripts/test-windows-installer-extraction.mjs && node scripts/test-windows-uninstall.mjs && node scripts/test-windows-update-uninstaller.mjs && node scripts/test-launcher-update-staging.mjs
 
       - name: Test updater handoff and refreshed account state
         run: node scripts/test-launcher-restart-state.mjs && node scripts/test-live-account-status.mjs && node scripts/test-mod-director-icon.mjs
@@ -186,6 +186,13 @@ jobs:
 
       - name: Build ${{ matrix.label }} launcher
         run: npm run ${{ matrix.build_script }}
+
+      - name: Test actual Windows installer, installed files, startup and uninstall
+        if: matrix.id == 'windows'
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').ahtLauncherVersion || require('./package.json').version"
+          ./scripts/test-windows-installer.ps1 -Installer "release-builds/windows/AHT-Launcher-Windows-10-11-$version.exe" -UpdateZip "release-builds/windows/AHT-Launcher-Windows-10-11-$version.zip" -ExpectedVersion $version -EvidenceDirectory "$env:RUNNER_TEMP/aht-installer-evidence"
 
       - name: Verify separated Windows Phoenix Anti-cheat
         if: matrix.id == 'windows'

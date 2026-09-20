@@ -25,6 +25,9 @@ Var AhtCreateDesktopShortcut
 
 ; Function bodies must follow electron-builder's plugin-directory declarations.
 !macro customHeader
+; Override the bundle's incorrectly classified ANSI ZIP plugin after all default
+; plugin directories are registered and before installUtil expands extraction.
+!addplugindir /x86-unicode "${BUILD_RESOURCES_DIR}\nsis-unicode-zip"
 Function AhtShortcutOptionsPageCreate
   ${If} ${Silent}
     Abort
