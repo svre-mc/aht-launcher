@@ -1,4 +1,8 @@
 const $ = (id) => document.querySelector(id);
+// Repair builds advance the updater identity while retaining the public release.
+function launcherReleaseLabel(value = "") {
+  return String(value).replace(/-repair\.[1-9]\d*$/, "");
+}
 const launchParams = new URLSearchParams(window.location.search);
 const bootDeveloperMode = launchParams.get("mode") === "developer";
 const LOG_TEXT_LIMIT = 24_000;
@@ -3234,7 +3238,7 @@ function renderLauncherUpdateOverlay(status = currentStatus, state = lastLaunche
   const visualStateChanged = visualState !== lastLauncherUpdateVisualState;
   lastLauncherUpdateVisualState = visualState;
   if (els.launcherUpdateDialog) els.launcherUpdateDialog.dataset.state = visualState;
-  if (els.launcherUpdateVersion) els.launcherUpdateVersion.textContent = latest ? `· v${latest}` : "";
+  if (els.launcherUpdateVersion) els.launcherUpdateVersion.textContent = latest ? `· v${launcherReleaseLabel(latest)}` : "";
   els.launcherUpdateTitle.textContent = failed
     ? restartReady ? "Restart interrupted" : "Update paused"
     : restarting ? "Restarting launcher"
@@ -4473,7 +4477,7 @@ function renderStatus(status) {
   developerAuthenticated = Boolean(status.developerAuthenticated);
   applyDeveloperGate(status);
   const latestVersion = status.latest?.version || "-";
-  const launcherVersion = (status.appVersion ? `Launcher v${status.appVersion}` : "Launcher v-")
+  const launcherVersion = (status.appVersion ? `Launcher v${launcherReleaseLabel(status.appVersion)}` : "Launcher v-")
     + (status.buildLabel ? ` · ${status.buildLabel}` : "");
   const developerBypass = Boolean(status.developerClientBypass || status.developerMode);
   const installedVersion = status.installed?.version || null;

@@ -26,11 +26,13 @@ function isObject(value) {
 }
 
 function releaseVersionParts(value = '') {
-  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value || '').trim());
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-repair\.([1-9]\d*))?$/.exec(String(value || '').trim());
   if (!match) {
-    throw new Error(`Launcher release version must be numeric major.minor.patch: ${value || 'missing'}`);
+    throw new Error(`Launcher release version must be major.minor.patch with an optional -repair.N build revision: ${value || 'missing'}`);
   }
-  return match.slice(1).map((part) => Number(part));
+  const parts = match.slice(1).map((part) => Number(part || 0));
+  if (parts.some((part) => !Number.isSafeInteger(part))) throw new Error('Launcher version components must be safe integers.');
+  return parts;
 }
 
 export function compareLauncherReleaseVersions(left = '', right = '') {

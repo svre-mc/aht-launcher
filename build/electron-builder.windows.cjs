@@ -7,6 +7,9 @@ const playerConfig = regularPlayerConfig({
   });
 module.exports = {
   ...playerConfig,
+  // Use electron-builder's pinned, checksum-verified NSIS 3.12 toolset.
+  // The legacy default is NSIS 3.0.4.1; keep application/runtime bytes intact.
+  toolsets: { nsis: '1.2.1' },
   // Hash/size/version only. Phoenix itself remains a separate consented download.
   files: [...playerConfig.files, { from: 'build/native-guard', to: 'config/phoenix', filter: ['manifest.json'] }],
   beforePack: async () => {
@@ -15,6 +18,7 @@ module.exports = {
     await import('../scripts/test-windows-update-bootstrap.mjs');
   },
   afterAllArtifactBuild: require('./windows-update-uninstaller.cjs'),
+  afterSign: require('./windows-release-identity.cjs'),
   extraResources: [{ from: 'build/runtime/java', to: 'java', filter: ['*.zip', 'NOTICE.txt'] }],
   win: {
     target: [

@@ -26,6 +26,8 @@ Var AhtDataPageInitialized
   UninstPage custom un.AhtDataPageCreate un.AhtDataPageLeave
 !macroend
 
+; Defer plugin calls until the standard template has registered its plugins.
+!macro customHeader
 Function un.AhtCheckDataRoot
   StrCpy $AhtDataSafe 0
   Push $0
@@ -169,6 +171,8 @@ Function un.AhtRemoveDataTree
   Pop $1
   Pop $0
 FunctionEnd
+
+!macroend
 
 !macro customUnInstall
   ${IfNot} ${Silent}

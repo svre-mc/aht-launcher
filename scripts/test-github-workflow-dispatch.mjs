@@ -8,6 +8,41 @@ import {
   waitForGithubWorkflowRun,
   triggerLauncherReleaseWorkflow
 } from '../src/githubActions.js';
+import nodeAssert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import AdmZip from 'adm-zip';
+import { verifyReviewedBuildProvenance, verifyReviewedWindowsArtifacts } from './verify-reviewed-launcher-artifacts.mjs';
+
+const reviewedRun = { status: 'completed', conclusion: 'success', head_sha: 'reviewed-commit', repository: { full_name: 'owner/launcher' }, path: '.github/workflows/build-macos.yml' };
+verifyReviewedBuildProvenance(reviewedRun, 'reviewed-commit', 'owner/launcher');
+for (const change of [{ status: 'in_progress' }, { conclusion: 'failure' }, { head_sha: 'other-commit' }, { repository: { full_name: 'other/launcher' } }, { path: 'other.yml' }]) {
+  nodeAssert.throws(() => verifyReviewedBuildProvenance({ ...reviewedRun, ...change }, 'reviewed-commit', 'owner/launcher'));
+}
+const reviewRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-reviewed-artifacts-'));
+try {
+  const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  const zip = new AdmZip();
+  const uninstaller = Buffer.from('fixture-uninstaller'), appAsar = Buffer.from('fixture-app');
+  zip.addFile('Uninstall A Hard Time Launcher Windows.exe', uninstaller);
+  zip.addFile('resources/app.asar', appAsar);
+  const zipBytes = zip.toBuffer(), exeBytes = Buffer.from('fixture-installer');
+  const base = path.join(reviewRoot, 'AHT-Launcher-Windows-10-11-0.2.30-repair.1');
+  await fs.writeFile(`${base}.exe`, exeBytes); await fs.writeFile(`${base}.zip`, zipBytes);
+  const pins = { installer: hash(exeBytes), updateZip: hash(zipBytes), uninstaller: hash(uninstaller), appAsar: hash(appAsar) };
+  nodeAssert.equal((await verifyReviewedWindowsArtifacts(reviewRoot, '0.2.30-repair.1', pins)).verified, true);
+  for (const key of Object.keys(pins)) {
+    await nodeAssert.rejects(verifyReviewedWindowsArtifacts(reviewRoot, '0.2.30-repair.1', { ...pins, [key]: '0'.repeat(64) }));
+  }
+  await fs.writeFile(`${base}.exe`, 'changed-after-review');
+  await nodeAssert.rejects(verifyReviewedWindowsArtifacts(reviewRoot, '0.2.30-repair.1', pins));
+} finally {
+  nodeAssert.equal(path.dirname(reviewRoot), path.resolve(os.tmpdir()));
+  nodeAssert(path.basename(reviewRoot).startsWith('aht-reviewed-artifacts-'));
+  await fs.rm(reviewRoot, { recursive: true, force: true });
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);

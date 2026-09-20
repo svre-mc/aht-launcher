@@ -57,6 +57,16 @@ const validation = validateLauncherUpdateManifest(manifest, {
 assert(validation.ok, `generated launcher manifest failed reusable validation: ${validation.errors.join('; ')}`);
 assert(compareLauncherReleaseVersions('7.8.10', '7.8.9') === 1, 'launcher version comparison must be numeric, not lexical');
 assert(compareLauncherReleaseVersions('7.8.9', '7.8.9') === 0, 'equal launcher versions must compare equal');
+assert(compareLauncherReleaseVersions('7.8.9-repair.1', '7.8.9') === 1, 'repair builds must advance within the same public version');
+assert(compareLauncherReleaseVersions('7.8.9-repair.2', '7.8.9-repair.1') === 1, 'repair builds must advance numerically');
+assert(compareLauncherReleaseVersions('7.8.10', '7.8.9-repair.99') === 1, 'the next release must supersede all older repairs');
+assertLauncherReleaseAdvance({ ...manifest, version: '7.8.9-repair.1' }, manifest);
+for (const version of ['7.8.9', '7.8.9-repair.1']) {
+  let rejected = false;
+  try { assertLauncherReleaseAdvance({ ...manifest, version }, { ...manifest, version: '7.8.9-repair.1' }); }
+  catch { rejected = true; }
+  assert(rejected, 'a repair must not allow rollback or replacement of the same immutable build');
+}
 assertLauncherReleaseAdvance({ ...manifest, version: '7.8.10' }, manifest);
 for (const change of [{ sha256: 'f'.repeat(64) }, { size: manifest.antiCheat.size + 1 }]) {
   let rejected = false;

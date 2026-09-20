@@ -1563,7 +1563,7 @@ assert(configs.linux.directories?.output === 'release-builds/linux', 'Linux outp
 const linuxTargets = configs.linux.linux?.target || [];
 assert(linuxTargets.some((target) => target.target === 'AppImage' && target.arch?.includes('x64')), 'Linux launcher must build an x64 AppImage.');
 assert(linuxTargets.some((target) => target.target === 'deb' && target.arch?.includes('x64')), 'Linux launcher must retain the hidden x64 DEB compatibility bridge.');
-assert(/^\d+\.\d+\.\d+$/.test(launcherReleaseVersion), 'Public launcher version must use numeric major.minor.patch notation.');
+assert(/^\d+\.\d+\.\d+(?:-repair\.[1-9]\d*)?$/.test(launcherReleaseVersion), 'Launcher identity must use major.minor.patch with an optional repair build revision.');
 assert(packageJson.version === launcherPackageVersionForRelease(launcherReleaseVersion), 'Internal npm package version must be the valid SemVer form of the public launcher version.');
 assert(configs.linux.linux?.category === 'Game' && configs.linux.linux?.artifactName === `AHT-Launcher-Linux-x64-${launcherReleaseVersion}.\${ext}`, 'Linux package metadata and artifact naming are not stable.');
 assert(Object.values(configs).every((config) => config.extraMetadata?.ahtLauncherVersion === launcherReleaseVersion), 'Every packaged launcher must carry the public launcher version.');

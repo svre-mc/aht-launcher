@@ -18,6 +18,19 @@ on:
         required: true
         type: boolean
         default: true
+      build_only:
+        description: "Build artifacts for review without publishing"
+        required: false
+        type: boolean
+        default: false
+      artifact_run_id:
+        description: "Publish the reviewed artifacts from this successful build-only run"
+        required: false
+        type: string
+      reviewed_windows_artifacts:
+        description: "JSON SHA256 pins for the reviewed installer, updateZip, uninstaller and appAsar"
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -46,6 +59,7 @@ on:
       - "scripts/test-worker-runtime-recovery.mjs"
       - "scripts/test-worker-entrypoint.mjs"
       - "scripts/check-launcher-release-immutability.mjs"
+      - "scripts/verify-reviewed-launcher-artifacts.mjs"
       - "scripts/upload-r2-plan.mjs"
       - "src/r2StorageBudget.js"
       - "src/r2RollbackArchive.js"
@@ -58,11 +72,12 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build-launcher:
     name: Build ${{ matrix.label }}
-    if: github.event_name == 'push' || inputs.validation_only != true
+    if: (github.event_name == 'push' || inputs.validation_only != true) && inputs.artifact_run_id == ''
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -797,7 +812,7 @@ jobs:
       run:
         shell: bash
     needs: build-launcher
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && inputs.validation_only != true
+    if: always() && !cancelled() && inputs.validation_only != true && inputs.build_only != true && (needs.build-launcher.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.artifact_run_id != ''))
     env:
       GH_TOKEN: ${{ github.token }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -834,6 +849,15 @@ jobs:
           pattern: aht-launcher-*
           merge-multiple: true
           path: ci-artifacts
+          run-id: ${{ inputs.artifact_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify reviewed build provenance and exact Windows bytes
+        if: inputs.artifact_run_id != ''
+        env:
+          AHT_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          AHT_REVIEWED_WINDOWS_ARTIFACTS: ${{ inputs.reviewed_windows_artifacts }}
+        run: node scripts/verify-reviewed-launcher-artifacts.mjs --artifacts ci-artifacts
 
       - name: Resolve launcher version
         id: launcher

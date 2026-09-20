@@ -204,7 +204,7 @@ dataObjects.set('accounts/usernames/newrig.json', {
   accountRecoveryVerifier: createHash('sha256').update(newRecoverySecret).digest('hex')
 });
 const newDevice = createDeviceCredential();
-function newRigProofBody() {
+function newRigProofBody(launcherVersion = '0.1.87') {
   const body = {
     protocol: 'aht-launcher-attestation-v2',
     launchId: randomUUID(),
@@ -212,8 +212,8 @@ function newRigProofBody() {
     minecraftUuid: newMinecraftUuid,
     installId: newInstallId,
     packId: 'a-hard-time-dregora',
-    appVersion: '0.1.87',
-    launcherVersion: '0.1.87',
+    appVersion: launcherVersion,
+    launcherVersion,
     installedVersion: '2.9.0',
     instanceDirHash: 'new-rig-test-instance',
     deviceId: newDevice.deviceId,
@@ -225,14 +225,14 @@ function newRigProofBody() {
   });
   return body;
 }
-async function issueNewRigProof() {
+async function issueNewRigProof(launcherVersion = '0.1.87') {
   const response = await worker.fetch(new Request('https://worker.test/api/launcher-proof', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-AHT-Launcher-Recovery': newRecoverySecret
     },
-    body: JSON.stringify(newRigProofBody())
+    body: JSON.stringify(newRigProofBody(launcherVersion))
   }), env, {});
   return { response, body: await response.json() };
 }
@@ -253,6 +253,17 @@ const publicKeyBody = await publicKeyResponse.json();
 assert.equal(publicKeyResponse.status, 200);
 assert.equal(publicKeyBody.sha256, firstPayload.attestationKeySha256);
 
+releaseObjects.set('launcher/latest.json', {
+  etag: 'etag-0.2.30-repair.1',
+  body: { schemaVersion: 1, product: 'aht-launcher', required: true, version: '0.2.30-repair.1' }
+});
+assert.equal((await refresh('required-repair-build')).status, 200);
+assert.equal(decodeAndVerifyState(storageObjects.get('signedLauncherServerState')).necessaryLauncherVersion, '0.2.30-repair.1');
+const supersededBuild = await issueNewRigProof('0.2.30');
+assert.equal(supersededBuild.response.status, 426, 'the original build must require the repair');
+assert.equal(supersededBuild.body.code, 'LAUNCHER_UPDATE_REQUIRED');
+assert.equal((await issueNewRigProof('0.2.30-repair.1')).response.status, 200, 'the repaired build must remain authorized');
+
 console.log(JSON.stringify({
   ok: true,
   initialVersion: firstPayload.necessaryLauncherVersion,
@@ -263,5 +274,6 @@ console.log(JSON.stringify({
   duplicateQueueDeliveryDeduplicated: true,
   clientVersionTrustedWithoutSignature: false,
   rawPlayerIdentifiersInServerState: false,
+  requiredRepairRejectsOriginalAndAcceptsPatchedBuild: true,
   revision: storageObjects.get('signedLauncherServerState').revision
 }, null, 2));

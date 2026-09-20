@@ -32,25 +32,25 @@ class UninstallUi {
         return 0;
       }
       IntPtr window=IntPtr.Zero, check=IntPtr.Zero;
+      bool explanation=false;
       var until=DateTime.UtcNow.AddSeconds(20);
-      while(DateTime.UtcNow<until && check==IntPtr.Zero) {
+      while(DateTime.UtcNow<until && (check==IntPtr.Zero||!explanation)) {
+        window=IntPtr.Zero; check=IntPtr.Zero; explanation=false;
         EnumWindows((h,p)=>{if(IsWindowVisible(h)&&Text(h).Contains(a[0]))window=h;return true;},IntPtr.Zero);
-        if(window!=IntPtr.Zero) EnumChildWindows(window,(h,p)=>{if(Text(h)=="Remove AHT modpacks and game data")check=h;return true;},IntPtr.Zero);
-        if(check==IntPtr.Zero)Thread.Sleep(100);
+        if(window!=IntPtr.Zero) EnumChildWindows(window,(h,p)=>{var text=Text(h);if(text=="Remove AHT modpacks and game data")check=h;if(text.Contains("Permanently deletes")&&text.Contains("saved worlds"))explanation=true;return true;},IntPtr.Zero);
+        if(check==IntPtr.Zero||!explanation)Thread.Sleep(100);
       }
       if(check==IntPtr.Zero)throw new Exception("Uninstall options page not found");
+      if(!explanation)throw new Exception("Data-removal explanation was not shown");
       ShowWindow(window,9);
       Thread.Sleep(300);
-      bool explanation=false;
-      EnumChildWindows(window,(h,p)=>{if(Text(h).Contains("Permanently deletes")&&Text(h).Contains("saved worlds"))explanation=true;return true;},IntPtr.Zero);
-      if(!explanation)throw new Exception("Data-removal explanation was not shown");
       if(a[1]=="inspect") {
         EnumChildWindows(window,(h,p)=>{Rect rr;GetWindowRect(h,out rr);Console.WriteLine("visible="+IsWindowVisible(h)+" enabled="+IsWindowEnabled(h)+" rect="+rr.L+","+rr.T+","+rr.R+","+rr.B+" text="+Text(h));return true;},IntPtr.Zero);
         return 0;
       }
       bool enabled=IsWindowEnabled(check);
       int state=SendMessage(check,0xF0,IntPtr.Zero,IntPtr.Zero).ToInt32();
-      if(state!=(a[2]=="1"?1:0)||enabled!=(a[3]=="1"))throw new Exception("Unexpected default checkbox state");
+      if(state!=(a[2]=="1"?1:0)||enabled!=(a[3]=="1"))throw new Exception("Unexpected default checkbox state: checked="+state+", enabled="+enabled+", expected="+a[2]+"/"+a[3]);
       if(a.Length>4) {
         SetForegroundWindow(window);
         Thread.Sleep(200);

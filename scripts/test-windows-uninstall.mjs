@@ -11,7 +11,13 @@ const run = promisify(execFile);
 if (process.platform !== 'win32') { console.log('SKIP: Windows uninstaller runtime'); process.exit(0); }
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-uninstall-test-'));
-const compiler = await require('app-builder-lib/out/toolsets/windows').getMakeNsisPath();
+const windowsConfig = require('../build/electron-builder.windows.cjs');
+const compilerBundle = await require('app-builder-lib/out/toolsets/windows').getMakeNsisPath(windowsConfig.toolsets?.nsis);
+// The modern bundle's .cmd entry point sets NSISDIR. Invoke its documented
+// executable directly so fixture paths remain arguments, never shell text.
+const compiler = compilerBundle.path.endsWith('.cmd')
+  ? { path: path.join(path.dirname(compilerBundle.path), 'windows', 'makensis.exe'), env: { NSISDIR: path.join(path.dirname(compilerBundle.path), 'windows') } }
+  : compilerBundle;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const rows = [];
 const nsis = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
@@ -57,6 +63,7 @@ Var FixtureUpdating
 ${scenario === 'back' ? 'UninstPage custom un.FixtureSecondPage' : ''}
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro customHeader
 Function un.FixtureSecondPage
   nsDialogs::Create 1018
   Pop $0

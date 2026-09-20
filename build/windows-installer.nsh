@@ -1,3 +1,8 @@
+!ifdef BUILD_UNINSTALLER
+; Keep the small standalone uninstaller and its plugin data directly inspectable.
+; The much larger application payload remains in the normal compressed ZIP.
+SetCompress off
+!endif
 !include nsDialogs.nsh
 !include LogicLib.nsh
 
@@ -18,6 +23,8 @@ Var AhtCreateDesktopShortcut
   Page custom AhtShortcutOptionsPageCreate AhtShortcutOptionsPageLeave
 !macroend
 
+; Function bodies must follow electron-builder's plugin-directory declarations.
+!macro customHeader
 Function AhtShortcutOptionsPageCreate
   ${If} ${Silent}
     Abort
@@ -40,6 +47,7 @@ FunctionEnd
 Function AhtShortcutOptionsPageLeave
   ${NSD_GetState} $AhtDesktopShortcutCheckbox $AhtCreateDesktopShortcut
 FunctionEnd
+!macroend
 
 !macro customInstall
   ${If} $AhtCreateDesktopShortcut != ${BST_CHECKED}
