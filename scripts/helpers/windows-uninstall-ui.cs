@@ -50,7 +50,10 @@ class UninstallUi {
       }
       bool enabled=IsWindowEnabled(check);
       int state=SendMessage(check,0xF0,IntPtr.Zero,IntPtr.Zero).ToInt32();
-      if(state!=(a[2]=="1"?1:0)||enabled!=(a[3]=="1"))throw new Exception("Unexpected default checkbox state: checked="+state+", enabled="+enabled+", expected="+a[2]+"/"+a[3]);
+      if(state!=(a[2]=="1"?1:0)||enabled!=(a[3]=="1")) {
+        EnumChildWindows(window,(h,p)=>{Console.Error.WriteLine("control visible="+IsWindowVisible(h)+" enabled="+IsWindowEnabled(h)+" checked="+SendMessage(h,0xF0,IntPtr.Zero,IntPtr.Zero)+" text="+Text(h));return true;},IntPtr.Zero);
+        throw new Exception("Unexpected default checkbox state: checked="+state+", enabled="+enabled+", expected="+a[2]+"/"+a[3]);
+      }
       if(a.Length>4) {
         SetForegroundWindow(window);
         Thread.Sleep(200);

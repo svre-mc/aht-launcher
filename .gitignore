@@ -3,6 +3,7 @@ build/runtime/
 build/native-guard/
 build/native-guard-test/
 build/windows-update-uninstaller.exe
+build/nsis-unicode-zip/
 cloudflare/build/
 .codex/
 build/codex-*
