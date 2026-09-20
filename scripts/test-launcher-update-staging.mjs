@@ -90,6 +90,24 @@ try {
   });
   assert(validation.ok && validation.fileCount === staged.receipt.fileCount, 'valid staged launcher was not accepted');
 
+  const upgradedArchive = path.join(root, 'with-new-uninstaller.zip');
+  const upgradedDir = path.join(root, '.aht-launcher-update-7.8.9-new-uninstaller');
+  await writeZip(upgradedArchive, {
+    [targetExeName]: 'new-launcher',
+    'resources/app.asar': 'new-app-asar',
+    'Uninstall A Hard Time Launcher Windows.exe': 'new-uninstaller'
+  });
+  const upgraded = await stageWindowsLauncherUpdate({ archivePath: upgradedArchive, installDir,
+    stagingDir: upgradedDir, extractRoot: path.join(root, 'extract-new-uninstaller'), targetExeName,
+    expectedVersion: '7.8.9', archiveSha256: 'b'.repeat(64), readProductVersion: async () => '7.8.9.0' });
+  assert(await fs.readFile(path.join(upgradedDir, 'Uninstall A Hard Time Launcher Windows.exe'), 'utf8') === 'new-uninstaller',
+    'The old installed uninstaller overwrote the released replacement.');
+  await fs.writeFile(path.join(upgradedDir, 'Uninstall A Hard Time Launcher Windows.exe'), 'tampered-uninstaller');
+  let uninstallerRejected = false;
+  try { await validateStagedWindowsLauncherUpdate({ stagingDir: upgradedDir, receipt: upgraded.receipt, expectedVersion: '7.8.9' }); }
+  catch { uninstallerRejected = true; }
+  assert(uninstallerRejected, 'Modified replacement uninstaller was accepted.');
+
   await fs.writeFile(path.join(stagingDir, 'resources', 'app.asar'), 'tampered');
   let tamperRejected = false;
   try {

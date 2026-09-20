@@ -9,7 +9,12 @@ module.exports = {
   ...playerConfig,
   // Hash/size/version only. Phoenix itself remains a separate consented download.
   files: [...playerConfig.files, { from: 'build/native-guard', to: 'config/phoenix', filter: ['manifest.json'] }],
-  beforePack: async () => { await import('../scripts/prepare-bundled-java.mjs'); },
+  beforePack: async () => {
+    await require('node:fs/promises').rm(require('node:path').join(__dirname, 'windows-update-uninstaller.exe'), { force: true });
+    await import('../scripts/prepare-bundled-java.mjs');
+    await import('../scripts/test-windows-update-bootstrap.mjs');
+  },
+  afterAllArtifactBuild: require('./windows-update-uninstaller.cjs'),
   extraResources: [{ from: 'build/runtime/java', to: 'java', filter: ['*.zip', 'NOTICE.txt'] }],
   win: {
     target: [

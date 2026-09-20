@@ -18,6 +18,8 @@ const packageJson = JSON.parse(await fs.readFile(path.join(repoRoot, 'package.js
 const expectedVersion = String(packageJson.ahtLauncherVersion || packageJson.version || '').trim();
 const transactionMode = String(process.env.AHT_TRANSACTION_MODE || 'version-upgrade').trim().toLowerCase();
 const sameVersionDeveloperReinstall = transactionMode === 'same-version-developer-reinstall';
+const expectRollback = transactionMode === 'rollback-player';
+const sameVersionReinstall = sameVersionDeveloperReinstall || transactionMode === 'same-version-player-reinstall' || expectRollback;
 const targetExeName = 'A Hard Time Launcher Windows.exe';
 const installedDir = path.resolve(process.env.AHT_TRANSACTION_INSTALLED_DIR
   || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'A Hard Time Launcher Windows'));
@@ -194,11 +196,11 @@ try {
   const oldExeSha256 = await sha256File(oldExePath);
   const oldUninstallerPath = path.join(installDir, 'Uninstall A Hard Time Launcher Windows.exe');
   const oldUninstallerSha256 = await sha256File(oldUninstallerPath);
-  if (!oldVersion || (sameVersionDeveloperReinstall
+  if (!oldVersion || (sameVersionReinstall
     ? !versionMatches(oldVersion, expectedVersion)
     : versionMatches(oldVersion, expectedVersion))) {
-    throw new Error(sameVersionDeveloperReinstall
-      ? `Developer reinstall transaction requires the same launcher version; found ${oldVersion || 'unknown'}, expected ${expectedVersion}.`
+    throw new Error(sameVersionReinstall
+      ? `Reinstall transaction requires the same launcher version; found ${oldVersion || 'unknown'}, expected ${expectedVersion}.`
       : `Transaction smoke requires an older installed launcher; found ${oldVersion || 'unknown'}.`);
   }
 
@@ -297,14 +299,7 @@ try {
 
   const helperStartedAt = Date.now();
   await execFileAsync(powershellPath, [
-    '-NoProfile',
-    '-NonInteractive',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-WindowStyle',
-    'Hidden',
-    '-File',
-    bootstrapPath,
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-WindowStyle', 'Hidden', '-File', bootstrapPath,
     '-HelperPath',
     helperPath,
     '-PayloadPath',
@@ -320,6 +315,17 @@ try {
   });
 
   logText = await waitForText(logPath, (text) => text.toLowerCase().includes(`ready to quit nonce=${nonce}`.toLowerCase()), 'verified ready-to-quit handoff');
+  if (expectRollback) {
+    logText = await waitForText(logPath, text => text.includes('Restored and reopened the previous launcher.'), 'rollback restoration');
+    if (!logText.includes('Updated launcher exited before startup acknowledgement with code 7')) throw new Error('Rollback did not follow the intentional startup failure.');
+    if (await sha256File(oldExePath) !== oldExeSha256) throw new Error('Rollback did not restore the exact old executable.');
+    if (await sha256File(sentinelPath) !== sentinelSha256) throw new Error('Rollback changed user data.');
+    if (await sha256File(oldUninstallerPath) !== oldUninstallerSha256) throw new Error('Rollback changed the uninstaller.');
+    // This fixture uses the same version: the reopened old launcher may consume
+    // and clear pending failure state immediately because that version is present.
+    if (await fs.stat(backupDir).catch(() => null)) throw new Error('Rollback backup was not restored.');
+    console.log(JSON.stringify({ok:true,transactionMode,restoredOldExecutable:true,userDataPreserved:true,uninstallerPreserved:true}));
+  } else {
   const readyLine = logText.split(/\r?\n/).find((line) => line.toLowerCase().includes(`ready to quit nonce=${nonce}`.toLowerCase()));
   const readyAt = Date.parse(String(readyLine || '').split(' ')[0]);
   const ack = await waitForJson(ackPath, 'updated launcher window acknowledgement');
@@ -344,8 +350,9 @@ try {
   if (await fs.stat(pendingPath).catch(() => null)) throw new Error('Pending update was not cleared after acknowledged startup.');
   if (await fs.stat(pendingFailurePath).catch(() => null)) throw new Error('Update helper wrote an unexpected failure marker.');
   if (await sha256File(sentinelPath) !== sentinelSha256) throw new Error('User-data identity sentinel changed during update.');
-  if (await sha256File(path.join(installDir, 'Uninstall A Hard Time Launcher Windows.exe')) !== oldUninstallerSha256) {
-    throw new Error('Installer-owned uninstaller was not preserved byte-for-byte.');
+  const expectedUninstaller = staged.receipt.files.find(entry => entry.path === 'Uninstall A Hard Time Launcher Windows.exe');
+  if (await sha256File(path.join(installDir, 'Uninstall A Hard Time Launcher Windows.exe')) !== expectedUninstaller?.sha256) {
+    throw new Error('Installed uninstaller does not match the verified update receipt.');
   }
   const helperSource = await fs.readFile(helperPath, 'utf8');
   const bootstrapSource = await fs.readFile(bootstrapPath, 'utf8');
@@ -379,11 +386,13 @@ try {
     closeToWindowReadyMs,
     updatedProcessId: ack.processId,
     visibleWindow: windowProof,
-    uninstallerPreserved: true,
+    uninstallerMatchesReceipt: true,
+    uninstallerUpdated: expectedUninstaller.sha256 !== oldUninstallerSha256,
     userDataPreserved: true,
     noCmdHandoff: true,
     backupCleanup
   }, null, 2));
+  }
 } catch (error) {
   logText = logText || await fs.readFile(logPath, 'utf8').catch(() => '');
   throw new Error(`${error.message || String(error)}${logText ? `\nHelper log:\n${logText}` : ''}`);

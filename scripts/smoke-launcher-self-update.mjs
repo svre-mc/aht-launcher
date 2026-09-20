@@ -593,7 +593,7 @@ try {
       }
     }
     const bootstrapText = fs.readFileSync(prepared.bootstrapScriptPath, 'utf8');
-    if (!bootstrapText.includes('CreateNoWindow = $true') || !bootstrapText.includes('ExpectedHelperSha256') || /cmd\.exe|\.cmd\b/i.test(bootstrapText)) {
+    if (!bootstrapText.includes('Start-Process -FilePath $powerShell') || !bootstrapText.includes('-WindowStyle Hidden -PassThru') || !bootstrapText.includes('ExpectedHelperSha256') || /cmd\.exe|\.cmd\b/i.test(bootstrapText)) {
       throw new Error(`Windows launcher update bootstrap is not independent and hidden: ${bootstrapText}`);
     }
   }

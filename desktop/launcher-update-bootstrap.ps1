@@ -98,7 +98,7 @@ $innerArguments = @(
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy',
-    'Bypass',
+    'RemoteSigned',
     '-WindowStyle',
     'Hidden',
     '-File',
@@ -110,13 +110,7 @@ $innerArguments = @(
     '-ExpectedHelperSha256',
     (Get-NormalizedSha256 $ExpectedHelperSha256 'Helper hash')
 )
-$startInfo = New-Object System.Diagnostics.ProcessStartInfo
-$startInfo.FileName = $powerShell
-$startInfo.Arguments = (($innerArguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument ([string] $_) }) -join ' ')
-$startInfo.WorkingDirectory = Split-Path -Parent $helperItem.FullName
-$startInfo.UseShellExecute = $false
-$startInfo.CreateNoWindow = $true
-$startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-$process = [System.Diagnostics.Process]::Start($startInfo)
+$arguments = (($innerArguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument ([string] $_) }) -join ' ')
+$process = Start-Process -FilePath $powerShell -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $helperItem.FullName) -WindowStyle Hidden -PassThru
 if ($null -eq $process) { throw 'Windows could not start the independent launcher update helper.' }
 Write-Output ('Started hidden launcher update helper PID ' + $process.Id)

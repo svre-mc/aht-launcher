@@ -33,6 +33,10 @@ on:
       - "server-lock-mod/build/libs/aht-version-lock-*.jar"
       - "src/**"
       - "scripts/prepare-launcher-update.mjs"
+      - "scripts/test-windows-update-bootstrap.mjs"
+      - "scripts/test-windows-uninstall.mjs"
+      - "scripts/helpers/windows-uninstall-ui.cs"
+      - "scripts/test-windows-update-uninstaller.mjs"
       - "scripts/build-native-guard.mjs"
       - "scripts/phoenix-release-artifact.mjs"
       - "scripts/test-phoenix-release-artifact.mjs"
@@ -146,6 +150,10 @@ jobs:
           node node_modules/electron/install.js
           node scripts/test-desktop-http.mjs
           node scripts/test-phoenix-native-http-cache.cjs
+
+      - name: Test Windows uninstall choices and update delivery
+        if: matrix.id == 'windows'
+        run: node scripts/test-windows-uninstall.mjs && node scripts/test-windows-update-uninstaller.mjs && node scripts/test-launcher-update-staging.mjs
 
       - name: Test updater handoff and refreshed account state
         run: node scripts/test-launcher-restart-state.mjs && node scripts/test-live-account-status.mjs && node scripts/test-mod-director-icon.mjs

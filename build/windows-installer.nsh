@@ -2,6 +2,11 @@
 !include LogicLib.nsh
 
 !ifndef BUILD_UNINSTALLER
+; Retain the exact generated (and, when configured, signed) uninstaller for the
+; ZIP updater. electron-builder deletes its temporary copy after this compile.
+!ifdef UNINSTALLER_OUT_FILE
+  !system 'node "${BUILD_RESOURCES_DIR}\windows-update-uninstaller.cjs" "${UNINSTALLER_OUT_FILE}"' = 0
+!endif
 Var AhtDesktopShortcutCheckbox
 Var AhtCreateDesktopShortcut
 
@@ -50,6 +55,5 @@ FunctionEnd
   ${EndIf}
 !macroend
 !else
-!macro customUnInstall
-!macroend
+!include "${BUILD_RESOURCES_DIR}\windows-uninstall-data.nsh"
 !endif

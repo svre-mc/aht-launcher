@@ -2,6 +2,7 @@ node_modules/
 build/runtime/
 build/native-guard/
 build/native-guard-test/
+build/windows-update-uninstaller.exe
 cloudflare/build/
 .codex/
 build/codex-*

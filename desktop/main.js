@@ -7540,7 +7540,7 @@ function windowsPowerShellHandoffArgs(helper = {}) {
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy',
-    'Bypass',
+    'RemoteSigned',
     '-WindowStyle',
     'Hidden',
     '-File',
