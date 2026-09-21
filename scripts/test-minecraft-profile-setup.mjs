@@ -91,7 +91,7 @@ test('actual Repair button enters backend recovery even if an independent scan w
   assert.deepEqual(calls, [{ repair: true, runtimeOnly: true, packKey: 'ptb' }]);
 });
 test('actual Play resolves account setup before protected verification and Phoenix; cancellation stops Play', async () => {
-  const main = await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8');
+  const main = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
   const start = main.indexOf("  if (!isDeveloperMode()) {\n    prepared.identity = await runLaunchStep(attempt, 'minecraft-account-setup'");
   const end = main.indexOf('  attempt.finalHotIntegrity =', start);
   assert(start > 0 && end > start);
@@ -112,7 +112,7 @@ test('actual Play resolves account setup before protected verification and Phoen
 });
 
 test('actual setup adapter cannot accept a cached AHT account after Minecraft profile metadata disappears', async () => {
-  const main = await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8');
+  const main = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
   const start = main.indexOf('async function ensurePlayerMinecraftProfile(');
   let opens = 0;
   const context = vm.createContext({ isDeveloperMode: () => false, minecraftProfileSetup: createMinecraftProfileSetup(),

@@ -70,7 +70,10 @@ test('a stuck launcher handoff cannot hold recovery open after cancellation', as
   await opened;
   recovery.cancel();
   let timer;
-  const observed = await Promise.race([result, new Promise(resolve => { timer = setTimeout(() => resolve('stuck'), 150); })]);
+  // Include real profile/journal cleanup on loaded CI filesystems. The handoff
+  // stays unresolved until after this assertion's observation, so a wait on that
+  // handoff still fails; this is a cancellation bound, not a 150 ms disk SLA.
+  const observed = await Promise.race([result, new Promise(resolve => { timer = setTimeout(() => resolve('stuck'), 1000); })]);
   clearTimeout(timer);
   release();
   await result;

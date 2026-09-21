@@ -41,7 +41,7 @@ test('network retry is explicit and bounded, with no elevation for outages or se
   }
 });
 test('writable locked folders, outside paths and linked paths never trigger permission grants', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-repair-permissions-'));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'aht-repair-permissions-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const error = file => Object.assign(new Error('access denied'), { code: 'EPERM', path: file });
   assert.equal(await repairPermissionTarget(error(root), [root]), null);
