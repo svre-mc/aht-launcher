@@ -817,20 +817,18 @@ try {
   await evaluate(client, `window.__profileRepair = window.aht.startUpdate({ forceRepair: true, runtimeOnly: true })
     .then(() => ({ ok: true }))
     .catch(error => ({ ok: false, message: String(error?.message || error) })); true`);
-  await waitFor(client, `!document.querySelector('#accountRecoveryOverlay').hidden
-    && /Select your Minecraft account/.test(document.querySelector('#accountRecoveryTitle').textContent)`, 'missing-profile Repair account setup');
-  if (process.env.AHT_SMOKE_SCREENSHOT_DIR) {
-    await fsp.mkdir(process.env.AHT_SMOKE_SCREENSHOT_DIR, { recursive: true });
-    const shot = await client.call('Page.captureScreenshot', { format: 'png' });
-    await fsp.writeFile(path.join(process.env.AHT_SMOKE_SCREENSHOT_DIR, 'repair-account-setup.png'), Buffer.from(shot.data, 'base64'));
+  const blockedRepair = await evaluate(client, 'window.__profileRepair');
+  if (proofRequests.length) throw new Error('Repair issued Play authorization.');
+  if (await evaluate(client, `!document.querySelector('#accountRecoveryOverlay').hidden`)
+      || fs.existsSync(fakeLauncherMarker)) {
+    throw new Error('File Repair opened account selection or Minecraft Launcher without needing a login.');
   }
-  if (proofRequests.length) throw new Error('Repair issued Play authorization while waiting for account setup.');
+  checkpoint('Repair completed with no Minecraft profile metadata, login prompt or game handoff');
+  // Subsequent Play fixtures have an existing Minecraft session, independently
+  // of Repair. Repair must not wait for this file to appear.
   await writeJson(path.join(mcRoot, 'launcher_accounts.json'), { activeAccountLocalId: 'fixture', accounts: {
     fixture: { minecraftProfile: { name: 'FreshPlayer', id: recoveryUuid.replaceAll('-', '') } }
   } });
-  const blockedRepair = await evaluate(client, 'window.__profileRepair');
-  await waitFor(client, `document.querySelector('#accountRecoveryOverlay').hidden`, 'account setup closed after profile detection');
-  checkpoint('Repair opened Minecraft account setup and resumed automatically without credentials or Play proof');
   const blockedRepairState = await evaluate(client, 'window.aht.getUpdateState()');
   if (!blockedRepair.ok || blockedRepairState.running || blockedRepairState.error || !blockedRepairState.lastResult?.ok) {
     throw new Error(`Local Repair was blocked by remote authorization: ${JSON.stringify({ blockedRepair, blockedRepairState })}`);
@@ -1393,7 +1391,7 @@ try {
     await waitForLauncherCalls(warmSetupHandoffsBefore + 1);
     await evaluate(client, `document.querySelector('#accountRecoveryCancel').click(); true`);
     const cancelled = await evaluate(client, 'window.__ahtWarmPlay');
-    if (cancelled.ok || !/setup was cancelled/i.test(cancelled.message) || proofRequests.length !== proofsBeforeSetup) {
+    if (cancelled.ok || !/cancelled/i.test(cancelled.message) || proofRequests.length !== proofsBeforeSetup) {
       throw new Error('Cancelled Play setup issued authorization or lost its actionable message.');
     }
     await evaluate(client, `window.__ahtWarmPlay = window.aht.play()

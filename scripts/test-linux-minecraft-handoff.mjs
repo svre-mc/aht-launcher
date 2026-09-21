@@ -20,6 +20,7 @@ const fakeFs = {
 const home = '/home/Test Player';
 const root = `${home}/Documents/curseforge/minecraft/Install`;
 let handedOff = null;
+let curseForgeDirect = false;
 const context = vm.createContext({
   process: { platform: 'linux', env: {} }, path: path.posix,
   app: { getPath: (key) => key === 'downloads' ? `${home}/Downloads` : home },
@@ -27,6 +28,7 @@ const context = vm.createContext({
   isLinuxMinecraftLauncherExecutable: (file) => isLinuxMinecraftLauncherExecutable(file, fakeFs),
   commandOnPath: () => '', existingLaunchCwd: async (value) => value,
   trustedMinecraftOpenCommandAllowed: () => false,
+  selectedCurseForgeStorageFile: async () => curseForgeDirect ? '/fixture/CurseForge/storage.json' : '',
   spawnDetachedGui: async (command, args, cwd) => { handedOff = { command, args: [...args], cwd }; return { ok: true }; },
   minecraftLaunchEnv: () => ({}), platformKey: () => 'linux'
 });
@@ -56,6 +58,14 @@ assert.equal(route.executablePath, chosen, 'Explicit executable selection must w
 available.set(chosen, 'noexec');
 await assert.rejects(context.resolveMinecraftLauncherRoute({ minecraftLauncher: { rootDir: root, executablePath: chosen } }), /selected Minecraft Launcher cannot run/);
 assert.equal(await isLinuxMinecraftLauncherExecutable(`${home}/minecraft.tar.gz`, fakeFs), false);
+curseForgeDirect = true;
+route = await context.resolveMinecraftLauncherRoute({ minecraftLauncher: { rootDir: root, javaPath: '/fixture/java' } });
+assert.equal(route.kind, 'curseforge-session');
+assert.equal(route.executablePath, '/fixture/java');
+assert.equal(route.rootDir, root);
+assert.deepEqual([...route.args], []);
+curseForgeDirect = false;
+assert.equal((await context.resolveMinecraftLauncherRoute(config)).executablePath, bundled);
 
 if (process.platform === 'linux') {
   const fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-linux-handoff-'));

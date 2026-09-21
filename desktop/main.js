@@ -61,6 +61,8 @@ import { prepareRuntimeOnlyRepair, verifyRepairedJava, repairPhoenixInstallation
 import { recoverRepairFailure } from '../src/repairRecovery.js';
 import { createMinecraftInteractiveRecovery } from '../src/minecraftInteractiveRecovery.js';
 import { createMinecraftProfileSetup, minecraftProfileReady, minecraftProfileRequiredError } from '../src/minecraftProfileSetup.js';
+import { createCurseForgeMinecraftSessions, curseForgeSessionError } from '../src/curseforgeMinecraftSession.js';
+import { prepareMinecraftDirectLaunch, launchMinecraftDirect } from '../src/minecraftDirectLaunch.js';
 import { createAccountRegistrationCoordinator } from '../src/accountRegistrationCoordinator.js';
 import { createLauncherIdentityStore } from '../src/launcherIdentityStore.js';
 import { accountWarningState, registeredAccountState, sameAccountSnapshot } from '../src/accountIdentityState.js';
@@ -343,6 +345,7 @@ const minecraftInteractiveRecovery = createMinecraftInteractiveRecovery({
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('account:recoveryState', state);
   }
 });
+const curseForgeMinecraftSessions = createCurseForgeMinecraftSessions();
 const minecraftProfileSetup = createMinecraftProfileSetup({
   onState: state => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('account:recoveryState', state);
@@ -736,10 +739,14 @@ function playerPublicErrorMessage(error = null, channel = '') {
   if (channel === 'update:start' && /fetch failed|network request failed|network connection|socket hang up|ENOTFOUND|ECONNRESET|ETIMEDOUT/i.test(message)) {
     return 'The repair or update could not connect. Check your internet connection and retry.';
   }
+  if (code.startsWith('CURSEFORGE_SESSION_')) {
+    return curseForgeSessionError(code.slice('CURSEFORGE_SESSION_'.length)).message;
+  }
+  if (code === 'MINECRAFT_DIRECT_RUNTIME') return 'The Minecraft launch runtime is incomplete or damaged. Run Repair, then retry Play.';
   if (code.startsWith('MINECRAFT_PROFILE_') || /Minecraft account setup|Select your Java Edition account in the Minecraft Launcher opened by AHT/i.test(message)) {
     return /cancelled/i.test(message)
-      ? 'Minecraft account setup was cancelled. Retry Play or Repair to finish.'
-      : 'Select your Java Edition account in the Minecraft Launcher opened by AHT. A CurseForge app login may be separate. Then retry Play or Repair.';
+      ? 'Reading the Minecraft session was cancelled. Click Play to retry.'
+      : 'AHT could not read the existing Minecraft profile. Open the Minecraft launcher you normally use, then retry Play.';
   }
   if (/Select [A-Za-z0-9_]{3,16} in Minecraft Launcher, then retry account sync/.test(message)) {
     return 'Select the matching Minecraft account, then retry account sync.';
@@ -4069,10 +4076,22 @@ async function acceptLauncherLegal(payload = {}) {
   return { ok: true, acceptedAt: record.acceptedAt };
 }
 
-async function minecraftSessionIdentityPayload(config = null) {
+async function selectedCurseForgeStorageFile(config = null) {
+  const minecraft = config?.minecraftLauncher || {};
+  if (!minecraft.runtimeCurseForgeRoot && !isCurseForgeMinecraftRoot(minecraft.rootDir || '')) return '';
+  for (const file of curseForgeStorageFileCandidates()) {
+    if (await curseForgeMinecraftSessions.mode(file).catch(() => false)) return file;
+  }
+  return '';
+}
+
+async function minecraftSessionIdentityPayload(config = null, options = {}) {
   const expected = await loadIdentity();
-  let selected = {};
-  if (config?.minecraftLauncher?.rootDir && config.minecraftLauncher.autoImportAccount !== false) {
+  let selected = options.selectedProfile || {};
+  const curseForgeFile = options.selectedProfile ? '' : await selectedCurseForgeStorageFile(config);
+  if (curseForgeFile) {
+    selected = { ...await curseForgeMinecraftSessions.inspect(curseForgeFile), provider: 'curseforge' };
+  } else if (!options.selectedProfile && config?.minecraftLauncher?.rootDir && config.minecraftLauncher.autoImportAccount !== false) {
     const auth = await inspectMinecraftLauncherAuth(config.minecraftLauncher.rootDir, {
       extraRoots: [...(config.minecraftLauncher.syncRoots || []), ...(config.minecraftLauncher.syncDefaultRoots === false ? [] : minecraftRootCandidates(process.platform, {
         ...process.env, HOME: process.env.HOME || app.getPath('home'), USERPROFILE: process.env.USERPROFILE || app.getPath('home')
@@ -4085,12 +4104,20 @@ async function minecraftSessionIdentityPayload(config = null) {
     : await updateIdentity(identity => selectedMinecraftSessionState(identity, expected, selected), { expectedInstallId: expected.installId });
   return { ...current, ...await publicDeviceIdentity(),
     minecraftLauncherDetectedUsername: selected.username || '',
-    minecraftLauncherDetectedUuid: selected.minecraftUuid || '', identityAuthority: MINECRAFT_SESSION_AUTHORITY,
+    minecraftLauncherDetectedUuid: selected.minecraftUuid || '', minecraftSessionProvider: selected.provider || 'mojang', identityAuthority: MINECRAFT_SESSION_AUTHORITY,
     appVersion: launcherVersion(), platform: process.platform, arch: process.arch };
 }
 
 async function ensurePlayerMinecraftProfile(config) {
   if (isDeveloperMode()) return identityPayload(config);
+  const curseForgeFile = await selectedCurseForgeStorageFile(config);
+  if (curseForgeFile) {
+    const session = await curseForgeMinecraftSessions.acquire(curseForgeFile);
+    // Only public profile fields cross the identity/proof/UI boundary.
+    return minecraftSessionIdentityPayload(config, { selectedProfile: {
+      username: session.username, minecraftUuid: session.minecraftUuid, provider: 'curseforge'
+    } });
+  }
   let opened = false;
   try { return await minecraftProfileSetup.run({
     readIdentity: async () => {
@@ -5944,6 +5971,7 @@ function minecraftLaunchResultForRenderer(result = {}) {
     activationMode: String(result.activationMode || ''),
     activationConfirmed: Boolean(result.activationConfirmed),
     gameStartConfirmed: Boolean(result.gameStartConfirmed),
+    gameProcessStarted: Boolean(result.gameProcessStarted),
     visibilityConfirmed: Boolean(result.visibilityConfirmed)
   };
 }
@@ -6313,16 +6341,19 @@ async function runUpdate(forceRepair = false, options = {}) {
       const profile = repairedRuntime.profile;
       result.minecraftProfile = profile;
       preparedMinecraftProfile = profile;
+      if (await selectedCurseForgeStorageFile(launcherConfig)) {
+        await prepareMinecraftDirectLaunch({ profile, repairNatives: forceRepair,
+          nativeBase: path.join(app.getPath('userData'), 'runtime', 'minecraft-natives') });
+      }
       // Play authorization is intentionally launch-scoped. Updating the pack
       // must never start Phoenix Anti-cheat or leave a reusable Play token.
       result.launcherProof = null;
     } catch (error) {
       throw new Error(`Minecraft Launcher setup failed: ${error.message}`, { cause: error });
     }
-    if (forceRepair && !isDeveloperMode()) {
-      updateState.progress = { ...(updateState.progress || {}), phase: 'Checking Minecraft account setup', percent: 97 };
-      identity = await ensurePlayerMinecraftProfile(launcherConfig);
-    }
+    // Repair restores local files and runtime. A launcher that owns the player's
+    // existing login need not expose its account metadata here; authentication
+    // belongs to Play, and must never block file repair or trigger a new login.
     updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };
     const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall, {
       onProgress: (progress) => {
@@ -12453,6 +12484,11 @@ async function resolveMinecraftLauncherRoute(config = {}) {
     };
   }
 
+  if (await selectedCurseForgeStorageFile(config)) {
+    return { kind: 'curseforge-session', executablePath: config.minecraftLauncher?.javaPath || '', cwd,
+      rootDir: cwd, args: [] };
+  }
+
   if (process.platform === 'win32') {
     const preferredCurseForgeRoot = String(config.minecraftLauncher?.runtimeCurseForgeRoot || '').trim();
     const usingCurseForgeRoot = Boolean(
@@ -15423,6 +15459,12 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       'The selected Java Edition profile is available; Minecraft authenticates it when the game connects.');
     if (launchPreparationCache.get(key) !== prepared) throw new Error('Launcher setup changed during Minecraft account selection. Click Play again.');
   }
+  // The provider can be switched while AHT is open. Never send a CurseForge
+  // account to Mojang's launcher (or launch a different cached account).
+  const useCurseForgeSession = prepared.identity.minecraftSessionProvider === 'curseforge';
+  if (useCurseForgeSession !== (prepared.launcherRoute.kind === 'curseforge-session')) {
+    prepared.launcherRoute = await resolveMinecraftLauncherRoute(prepared.launcherConfig);
+  }
   const finalManagedIntegrity = await runLaunchStep(
     attempt,
     'protected-client-integrity',
@@ -15481,6 +15523,11 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
       });
     }
   }
+  const directLaunchPlan = useCurseForgeSession ? await runLaunchStep(attempt,
+    'curseforge-runtime', 'Prepare the existing CurseForge Minecraft session launch',
+    () => prepareMinecraftDirectLaunch({ profile: prepared.minecraftProfile,
+      nativeBase: path.join(app.getPath('userData'), 'runtime', 'minecraft-natives') }),
+    'The AHT Minecraft and Forge runtime is ready.') : null;
   const nativeGuard = await runLaunchStep(
     attempt,
     'phoenix-anticheat',
@@ -15546,24 +15593,29 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   if (prepared.minecraftProfile?.selectionPrepared === false) {
     prepared.minecraftProfile = await selectPreparedMinecraftLauncherProfile(prepared.minecraftProfile);
   }
-  const launcherOpening = openMinecraftLauncher(prepared.launcherConfig, {
-    route: prepared.launcherRoute,
-    attempt
-  }).then(
+  const launcherOpening = (directLaunchPlan ? (async () => {
+    const file = await selectedCurseForgeStorageFile(prepared.launcherConfig);
+    if (!file) throw curseForgeSessionError('CHANGED');
+    const session = await curseForgeMinecraftSessions.acquire(file);
+    return launchMinecraftDirect({ plan: directLaunchPlan, session,
+      expectedIdentity: prepared.identity, env: minecraftLaunchEnv() });
+  })() : openMinecraftLauncher(prepared.launcherConfig, {
+    route: prepared.launcherRoute, attempt
+  })).then(
     (value) => ({ ok: true, value }),
     (error) => ({ ok: false, error })
   );
   const launchResult = await runLaunchStep(
     attempt,
     'open-launcher',
-    'Open and verify the Minecraft Launcher window',
+    directLaunchPlan ? 'Start Minecraft using the existing CurseForge session' : 'Open and verify the Minecraft Launcher window',
     async () => {
       const result = await launcherOpening;
       if (!result.ok) throw result.error;
       return result.value;
     },
     (value) => {
-      if (value?.gameStartConfirmed) {
+      if (value?.gameStartConfirmed || value?.gameProcessStarted) {
         return 'The configured A Hard Time game process started successfully.';
       }
       const processId = value?.processPid || value?.pid || 0;
@@ -15583,8 +15635,8 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     attempt,
     'minecraftLauncher',
     'PASS',
-    launchResult?.gameStartConfirmed
-      ? 'Minecraft started the configured A Hard Time instance.'
+    launchResult?.gameStartConfirmed || launchResult?.gameProcessStarted
+      ? 'The game process started for the configured A Hard Time instance; world readiness is separate.'
       : 'A visible, responsive Minecraft Launcher window was confirmed.'
   );
   return {

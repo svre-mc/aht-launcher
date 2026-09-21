@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.33",
-  "ahtLauncherVersion": "0.2.33",
+  "version": "0.2.34",
+  "ahtLauncherVersion": "0.2.34",
   "phoenixAntiCheatVersion": "1.1.5",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
   },
   "scripts": {
     "test:backend": "node scripts/test-backend.mjs",
-    "test:repair-play": "node --test scripts/test-repair-play.mjs scripts/test-repair-account-readiness.mjs scripts/test-minecraft-profile-setup.mjs scripts/test-repair-recovery.mjs",
+    "test:repair-play": "node --test scripts/test-repair-play.mjs scripts/test-repair-account-readiness.mjs scripts/test-minecraft-profile-setup.mjs scripts/test-repair-recovery.mjs scripts/test-curseforge-minecraft-session.mjs scripts/test-minecraft-direct-launch.mjs",
     "test:worker-runtime": "node --test scripts/test-worker-runtime-recovery.mjs scripts/test-worker-minecraft-session.mjs",
     "test:release-transition": "node scripts/test-launch-preparation-release-transition.mjs",
     "test:player-runtime-state": "node scripts/test-player-runtime-state.mjs",

@@ -12,6 +12,29 @@ const declaration = (start, end) => {
   assert(offset >= 0 && finish > offset);
   return main.slice(offset, finish);
 };
+
+test('CurseForge session routing follows the selected root and both provider settings', async () => {
+  let direct = false;
+  let reads = 0;
+  const context = vm.createContext({
+    isCurseForgeMinecraftRoot: root => root === '/cf/minecraft/Install',
+    curseForgeStorageFileCandidates: () => ['/missing', '/cf/storage.json'],
+    curseForgeMinecraftSessions: { mode: async file => {
+      reads++;
+      if (file === '/missing') throw new Error('not installed');
+      return direct;
+    } }
+  });
+  vm.runInContext(declaration('async function selectedCurseForgeStorageFile(', '\nasync function minecraftSessionIdentityPayload('), context);
+  const config = { minecraftLauncher: { rootDir: '/cf/minecraft/Install' } };
+  assert.equal(await context.selectedCurseForgeStorageFile(config), '');
+  direct = true;
+  assert.equal(await context.selectedCurseForgeStorageFile(config), '/cf/storage.json');
+  assert.equal(await context.selectedCurseForgeStorageFile({ minecraftLauncher: { rootDir: '/custom', runtimeCurseForgeRoot: '/cf/custom' } }), '/cf/storage.json');
+  reads = 0;
+  assert.equal(await context.selectedCurseForgeStorageFile({ minecraftLauncher: { rootDir: '/official' } }), '');
+  assert.equal(reads, 0, 'An unrelated selected launcher must not read CurseForge accounts');
+});
 test('actual player status and Play never enter AHT recovery or decrypt its secret', async () => {
   let identity = { installId: 'fixture', minecraftUsernameSyncWarning: 'legacy account unavailable' };
   let proofCalls = 0;
@@ -19,7 +42,7 @@ test('actual player status and Play never enter AHT recovery or decrypt its secr
   const config = { minecraftLauncher: { rootDir: '/minecraft' } };
   const forbidden = () => { throw new Error('Standalone account recovery is forbidden in player Play/status.'); };
   const context = vm.createContext({ process, MINECRAFT_SESSION_AUTHORITY, selectedMinecraftSessionState, sameAccountSnapshot, minecraftProfileReady, minecraftProfileRequiredError,
-    isDeveloperMode: () => false, loadIdentity: async () => ({ ...identity }),
+    isDeveloperMode: () => false, selectedCurseForgeStorageFile: async () => '', loadIdentity: async () => ({ ...identity }),
     updateIdentity: async update => (identity = update(identity)), publicDeviceIdentity: async () => ({}),
     app: { getPath: () => '/fixture' }, minecraftRootCandidates: () => [], samePath: (a,b) => a === b,
     inspectMinecraftLauncherAuth: async () => ({ preferredUsername: 'FixturePlayer', preferredMinecraftUuid: uuid }),

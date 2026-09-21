@@ -97,7 +97,7 @@ test('actual Play resolves account setup before protected verification and Phoen
   assert(start > 0 && end > start);
   for (const cancel of [false, true]) {
     const calls = [];
-    const prepared = { launcherConfig: {} };
+    const prepared = { launcherConfig: {}, launcherRoute: { kind: 'custom' } };
     const context = vm.createContext({ prepared, key: 'stable', target: {}, attempt: {}, isDeveloperMode: () => false,
       launchPreparationCache: new Map([['stable', prepared]]),
       runLaunchStep: async (_a, _key, _title, action) => action(),
@@ -115,7 +115,7 @@ test('actual setup adapter cannot accept a cached AHT account after Minecraft pr
   const main = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
   const start = main.indexOf('async function ensurePlayerMinecraftProfile(');
   let opens = 0;
-  const context = vm.createContext({ isDeveloperMode: () => false, minecraftProfileSetup: createMinecraftProfileSetup(),
+  const context = vm.createContext({ isDeveloperMode: () => false, selectedCurseForgeStorageFile: async () => '', minecraftProfileSetup: createMinecraftProfileSetup(),
     minecraftSessionIdentityPayload: async () => opens ? { ...profile, minecraftLauncherDetectedUsername: profile.minecraftUsername,
       minecraftLauncherDetectedUuid: profile.minecraftUuid } : { ...profile, minecraftLauncherDetectedUsername: '', minecraftLauncherDetectedUuid: '' },
     openMinecraftLauncher: async () => { opens++; }, restoreMainWindowAfterMinecraftHandoffFailure() {} });
@@ -123,4 +123,22 @@ test('actual setup adapter cannot accept a cached AHT account after Minecraft pr
   const identity = await context.ensurePlayerMinecraftProfile({ minecraftLauncher: {} });
   assert.equal(opens, 1);
   assert.equal(identity.minecraftUsername, profile.minecraftUsername);
+});
+
+test('actual Play adapter reuses CurseForge login without opening Mojang or exposing tokens in identity', async () => {
+  const main = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
+  const start = main.indexOf('async function ensurePlayerMinecraftProfile(');
+  const context = vm.createContext({ isDeveloperMode: () => false,
+    selectedCurseForgeStorageFile: async () => '/fixture/cf/storage.json',
+    curseForgeMinecraftSessions: { acquire: async () => ({ username: profile.minecraftUsername,
+      minecraftUuid: profile.minecraftUuid, accessToken: 'private-fixture-token' }) },
+    minecraftSessionIdentityPayload: async (_config, { selectedProfile }) => {
+      assert(!JSON.stringify(selectedProfile).includes('private'));
+      assert.deepEqual(Object.keys(selectedProfile).sort(), ['minecraftUuid', 'provider', 'username']);
+      assert.equal(selectedProfile.provider, 'curseforge'); return profile;
+    },
+    minecraftProfileSetup: { run: () => assert.fail('Existing CurseForge login opened account setup') },
+    openMinecraftLauncher: () => assert.fail('Existing CurseForge login opened Mojang launcher') });
+  vm.runInContext(main.slice(start, main.indexOf('\nasync function identityPayload(', start)), context);
+  assert.equal(await context.ensurePlayerMinecraftProfile({ minecraftLauncher: {} }), profile);
 });

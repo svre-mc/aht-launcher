@@ -39,18 +39,20 @@ test('public account warnings stay concise while local diagnostics remain availa
 const updateSource = main.slice(main.indexOf('async function runUpdate('), main.indexOf('\nfunction defaultLauncherInstallerArgs'));
 function updateHarness({ warning = '', developer = false, confirmed = true, keyFailure = false,
   unreadableKey = false, phoenixBroken = false, launcherMissing = false, publishDuringInstall = false,
-  missingProfile = false, setupCancelled = false, installFailures = [], recoveryResults = [] } = {}) {
+  missingProfile = false, setupCancelled = false, curseForgeDirect = false, installFailures = [], recoveryResults = [] } = {}) {
   const calls = [];
   let feedReads = 0;
   const target = { id: 'stable', sidebarKey: 'stable' };
   const config = { instanceDir: '/fixture/stable', latestUrl: 'https://fixture.invalid/latest.json', launcherProof: { enabled: true } };
-  const identity = { minecraftUsername: 'FixturePlayer', minecraftUuid: '12345678-1234-4234-9234-123456789abc', minecraftUsernameSyncWarning: warning };
+  const identity = { minecraftUsername: missingProfile ? '' : 'FixturePlayer', minecraftUuid: missingProfile ? '' : '12345678-1234-4234-9234-123456789abc', minecraftUsernameSyncWarning: warning };
   const context = vm.createContext({
     ...runtimeRepair, deviceCredentialPromise: null, loadDeviceCredential: async options => { assert.equal(options.allowRepair, true); calls.push('key-repair'); if (keyFailure) throw new Error('Local key unavailable'); unreadableKey = false; }, updateState: {}, releaseTarget: () => target,
     invalidateLaunchPreparation: () => calls.push('invalidate'),
     createOperationState: kind => ({ kind, running: true }), appendOperationLine() {},
     configForPack: value => value, loadConfig: async () => config,
     minecraftLauncherRuntimeConfig: async value => value,
+    selectedCurseForgeStorageFile: async () => curseForgeDirect ? '/fixture/cf/storage.json' : '',
+    prepareMinecraftDirectLaunch: async () => { calls.push('direct-runtime'); },
     identityPayload: async (_config, options) => { calls.push(options?.forceAccountSync ? 'account-revalidate' : 'identity'); return identity; },
     ensurePlayerMinecraftProfile: async () => {
       if (missingProfile) {
@@ -121,15 +123,16 @@ test('actual Repair retries after permission recovery and still fails if the rep
   assert(!blocked.calls.includes('repair_completed'));
 });
 
-test('Repair resolves missing Minecraft profile metadata before claiming completion', async () => {
-  const h = updateHarness({ missingProfile: true });
-  await h.run();
-  assert(h.calls.includes('account-setup'));
-  assert(h.calls.indexOf('account-setup') < h.calls.indexOf('repair_completed'));
-  const cancelled = updateHarness({ missingProfile: true, setupCancelled: true });
-  await assert.rejects(cancelled.run(), /setup was cancelled/);
-  assert(!cancelled.calls.includes('repair_completed'));
-  assert(cancelled.calls.includes('repair_failed'));
+test('Repair restores files without account selection when another launcher owns the login', async () => {
+  for (const runtimeOnly of [false, true]) {
+    const h = updateHarness({ missingProfile: true, setupCancelled: true, phoenixBroken: true, curseForgeDirect: true });
+    await h.run(true, runtimeOnly);
+    assert(!h.calls.includes('account-setup'), 'File repair must not open an account-selection or sign-in flow');
+    assert(h.calls.includes('phoenix-repair'));
+    assert(h.calls.includes('direct-runtime'));
+    assert(h.calls.includes('repair_completed'));
+    assert(!h.calls.includes('repair_failed'));
+  }
 });
 
 test('Repair cannot report completion when Minecraft Launcher is absent', async () => {
@@ -166,21 +169,25 @@ test('a local key failure still fails Repair; update and developer paths remain 
   assert(developer.calls.includes('complete'));
 });
 
-test('failed Play authorization never opens Minecraft Launcher; successful proof opens once', async () => {
+test('both launch modes require a fresh trusted proof before starting Minecraft', async () => {
   const play = main.slice(main.indexOf("ipcMain.handle('play:start'"));
   const start = play.indexOf('  const nativeGuard = await runLaunchStep(');
   const end = play.indexOf('  if (nativeGuard) {\n    // A successful installation/startup check');
   assert(start >= 0 && end > start, 'Missing Play handoff boundaries');
   const section = play.slice(start, end);
   assert(section.includes('const launchResult = await runLaunchStep('));
-  for (const fail of [true, false]) {
+  for (const direct of [false, true]) for (const fail of [true, false]) {
     const calls = [];
     const prepared = { launcherConfig: {}, identity: {}, latest: {}, installed: {}, proofPreparedThisSession: false };
     const context = vm.createContext({
-      prepared, attempt: {}, key: 'stable', launchPreparationCache: new Map([['stable', prepared]]),
+      prepared, directLaunchPlan: direct ? {} : null, attempt: {}, key: 'stable', launchPreparationCache: new Map([['stable', prepared]]),
       launchNativeGuards: new Map(), launcherNativeGuard: async () => null,
       runLaunchStep: async (_attempt, key, _label, action) => { calls.push(key); return action(); },
-      openMinecraftLauncher: async () => { calls.push('opened'); return { visibilityConfirmed: true }; },
+      openMinecraftLauncher: async () => { assert(!direct); calls.push('opened'); return { visibilityConfirmed: true }; },
+      selectedCurseForgeStorageFile: async () => '/fixture/cf/storage.json',
+      curseForgeMinecraftSessions: { acquire: async () => { calls.push('session'); return {}; } },
+      minecraftLaunchEnv: () => ({}),
+      launchMinecraftDirect: async () => { assert(direct); calls.push('opened'); return { gameProcessStarted: true }; },
       refreshPreparedLauncherProof: async () => {
         if (fail) throw new Error('Minecraft session unavailable');
         calls.push('signed'); return { usable: true, trusted: true, payload: { launchId: 'fixture' } };
@@ -191,6 +198,7 @@ test('failed Play authorization never opens Minecraft Launcher; successful proof
     if (fail) {
       await assert.rejects(context.scenario(), /Minecraft session unavailable/);
       assert(!calls.includes('opened'), 'Authentication failure opened Minecraft without usable proof');
+      assert(!calls.includes('session'), 'Failed proof proceeded to direct session handoff');
     } else {
       await context.scenario();
       assert.equal(calls.filter(value => value === 'opened').length, 1);

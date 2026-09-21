@@ -33,7 +33,7 @@ let proofError = '';
 const cache = new Map();
 const context = vm.createContext({
   process: { platform: 'linux', env: {} }, path,
-  isDeveloperMode: () => false, selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY, minecraftProfileRequiredError,
+  isDeveloperMode: () => false, selectedCurseForgeStorageFile: async () => '', selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY, minecraftProfileRequiredError,
   app: { getPath: () => directory }, launcherProofStorageDir: (value) => value,
   trustedMinecraftOpenCommandAllowed: () => false, defaultMinecraftRoot: () => nativeRoot,
   firstExistingCurseForgeMinecraftRoot: () => { throw new Error('Linux must not auto-select a CurseForge root'); },

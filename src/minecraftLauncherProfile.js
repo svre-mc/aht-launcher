@@ -521,7 +521,7 @@ export function minecraftLibraryAllowed(library = {}, options = {}) {
   return allowed;
 }
 
-function minecraftNativeClassifier(library = {}, { platform = process.platform, arch = process.arch } = {}) {
+export function minecraftNativeClassifier(library = {}, { platform = process.platform, arch = process.arch } = {}) {
   const template = String(library?.natives?.[minecraftLibraryOsName(platform)] || '').trim();
   if (!template) return '';
   const archToken = /(?:64|x64|amd64|aarch64|arm64)/i.test(String(arch || '')) ? '64' : '32';
@@ -742,6 +742,18 @@ async function ensureMinecraftBaseFile({ file = '', descriptor = null, label = '
   return { file, downloaded: true };
 }
 
+export async function ensureMinecraftLoggingConfiguration(rootDir, versionJson, logger = null) {
+  const logging = versionJson?.logging?.client;
+  if (!logging) return null;
+  if (logging.type !== 'log4j2-xml' || logging.argument !== '-Dlog4j.configurationFile=${path}'
+      || !safeMinecraftIdentifier(logging.file?.id) || !validMinecraftDownloadDescriptor(logging.file)) {
+    throw new Error('Minecraft logging configuration metadata is invalid.');
+  }
+  const file = safeJoin(path.join(rootDir, 'assets', 'log_configs'), logging.file.id);
+  await ensureMinecraftBaseFile({ file, descriptor: logging.file, label: 'Minecraft logging configuration', logger });
+  return file;
+}
+
 async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', manifestUrl = MOJANG_VERSION_MANIFEST_URL, fetchJsonImpl = fetchJson, logger = null, includeObjects = false, onProgress = null } = {}) {
   if (!rootDir || !minecraftVersion) {
     return { ok: false, skipped: true, reason: 'missing root or Minecraft version', rootDir, minecraftVersion };
@@ -772,6 +784,7 @@ async function ensureMinecraftRootAssets({ rootDir = '', minecraftVersion = '', 
     logger
   });
   if (clientResult.downloaded) actions.push(`downloaded ${clientJarPath}`);
+  await ensureMinecraftLoggingConfiguration(rootDir, versionJson, logger);
 
   const libraryDownloads = minecraftBaseLibraryDownloads(versionJson);
   let downloadedLibraryCount = 0;
@@ -864,6 +877,9 @@ export async function inspectMinecraftLauncherRuntime({ config = {}, latest = nu
         [indexFile, version.assetIndex],
         ...minecraftBaseLibraryDownloads(version).map((item) => [safeJoin(path.join(rootDir, 'libraries'), item.descriptor.path), item.descriptor])
       ];
+      if (version.logging?.client?.file) {
+        files.push([safeJoin(path.join(rootDir, 'assets', 'log_configs'), version.logging.client.file.id), version.logging.client.file]);
+      }
       for (const [file, descriptor] of files) {
         if (!(await inspectMinecraftBaseFile(file, descriptor)).ok) throw new Error(`Minecraft runtime file needs repair: ${path.basename(file)}`);
       }

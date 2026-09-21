@@ -7,7 +7,7 @@ export function minecraftProfileReady(identity = {}) {
 }
 
 export function minecraftProfileRequiredError() {
-  return Object.assign(new Error('Select your Java Edition account in the Minecraft Launcher opened by AHT. A CurseForge app login may be separate. Then retry Play or Repair.'),
+  return Object.assign(new Error('AHT could not read the existing Minecraft profile. Open the Minecraft launcher you normally use, then retry Play.'),
     { code: 'MINECRAFT_PROFILE_REQUIRED' });
 }
 
@@ -32,15 +32,15 @@ export function createMinecraftProfileSetup({ onState = () => {} } = {}) {
       let timer;
       let rejectCancelled;
       const cancelled = new Promise((_, reject) => { rejectCancelled = reject; });
-      const abort = () => rejectCancelled(Object.assign(new Error('Minecraft account setup was cancelled. Retry Play or Repair to finish.'), { code: 'MINECRAFT_PROFILE_SETUP_CANCELLED' }));
+      const abort = () => rejectCancelled(Object.assign(new Error('Reading the Minecraft session was cancelled. Click Play to retry.'), { code: 'MINECRAFT_PROFILE_SETUP_CANCELLED' }));
       signal.addEventListener('abort', abort, { once: true });
       const bounded = work => Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return work(); }), cancelled]);
       timer = setTimeout(() => rejectCancelled(minecraftProfileRequiredError()), timeoutMs);
       try {
         let identity = await bounded(readIdentity);
         if (minecraftProfileReady(identity)) return identity;
-        publish({ running: true, title: 'Select your Minecraft account', phase: 'waiting',
-          message: 'AHT is opening Minecraft Launcher. Select your Java Edition account there, or sign in if asked. A CurseForge app login may be separate. Leave that launcher open; AHT will continue automatically.' });
+        publish({ running: true, title: 'Finding your Minecraft session', phase: 'waiting',
+          message: 'AHT is opening your Minecraft Launcher to read its existing account selection. Leave it open; AHT will continue automatically when the profile is available.' });
         await bounded(openLauncher);
         while (true) {
           identity = await bounded(readIdentity);
