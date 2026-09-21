@@ -139,7 +139,7 @@ jobs:
         run: npm run test:worker-runtime
 
       - name: Test join-fix publication and player-state update regressions
-        run: npm run test:version-lock-release && npm run test:delta-update && npm run test:player-runtime-state && npm run test:managed-security
+        run: npm run test:version-lock-release && npm run test:delta-update && npm run test:player-runtime-state && npm run test:managed-security && node --test scripts/test-repair-account-readiness.mjs
 
       - name: Test modified-client Play and Repair
         run: node --test scripts/test-modified-client-repair.mjs

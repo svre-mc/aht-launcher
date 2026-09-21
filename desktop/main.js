@@ -758,6 +758,9 @@ function playerPublicErrorMessage(error = null, channel = '') {
   if (/is not installed|Install the pack before playing/i.test(message)) {
     return 'Install the modpack before playing.';
   }
+  if (code === 'AHT_INSTALL_IN_USE' || /Windows could not replace the game folder/.test(message)) {
+    return 'Windows could not replace the game folder. Close Minecraft and apps using the game folder, then retry.';
+  }
   if (channel === 'update:start' || /(?:download|429|Too Many Requests)/i.test(message)) {
     return 'Download failed.';
   }
@@ -5634,6 +5637,7 @@ function updateResultForRenderer(result = null) {
 function updateStateForRenderer(state = {}) {
   if (isDeveloperMode()) return state;
   const kind = state.kind === 'repair' ? 'repair' : 'install';
+  const publicError = state.error ? playerPublicErrorMessage(state.error, 'update:start') : null;
   const progress = state.progress ? {
     phase: publicUpdatePhase(state.progress.phase, kind),
     completed: Math.max(0, Number(state.progress.completed || 0)),
@@ -5652,7 +5656,7 @@ function updateStateForRenderer(state = {}) {
     completedAt: state.completedAt || null,
     lines: [],
     lastResult: updateResultForRenderer(state.lastResult),
-    error: state.error ? (kind === 'repair' ? 'Repair failed.' : 'Download failed.') : null,
+    error: kind === 'repair' && publicError === 'Download failed.' ? 'Repair failed.' : publicError,
     progress
   };
 }

@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import AdmZip from 'adm-zip';
 import { createClientModpackZip } from '../src/clientModpackZip.js';
 import {
@@ -29,6 +31,29 @@ async function removeFile(root, relativePath) {
 
 async function fileText(root, relativePath) {
   return fs.readFile(path.join(root, ...relativePath.split('/')), 'utf8');
+}
+
+async function lockWindowsFile(file) {
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "$stream=[IO.File]::Open($env:AHT_LOCK_FIXTURE,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); try { [Console]::WriteLine('locked'); [Console]::ReadLine() | Out-Null } finally { $stream.Dispose() }"
+  ], { windowsHide: true, env: { ...process.env, AHT_LOCK_FIXTURE: file }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const exited = once(child, 'exit');
+  let errors = '';
+  child.stderr.on('data', chunk => { errors += chunk; });
+  try {
+    const [ready] = await Promise.race([
+      once(child.stdout, 'data'),
+      exited.then(() => { throw new Error(`Lock helper exited: ${errors}`); }),
+      new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Lock helper timed out')), 10000); timer.unref(); })
+    ]);
+    assert(String(ready).includes('locked'), 'Windows file lock was not acquired');
+  } catch (error) {
+    child.kill();
+    await exited.catch(() => {});
+    throw error;
+  }
+  let release;
+  return () => release ||= (async () => { child.stdin.end('\n'); await exited; })();
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-delta-client-update-'));
@@ -139,17 +164,78 @@ try {
   assert(!deltaEntries.has('resources/unchanged.bin'), 'unchanged large resource should not be transferred');
   assert(deltaEntries.has('options.txt') && deltaEntries.has('optionsof.txt'), 'game settings must be available when the player opts to replace them');
 
+  if (process.platform === 'win32') {
+    const unlock = await lockWindowsFile(path.join(instanceDir, 'mods', 'change.jar'));
+    const blockedLogs = [];
+    let blockedError;
+    try {
+      await installPack({ latestSource: path.join(outDir, 'latest.json'), instanceDir,
+        logger: { log(line) { blockedLogs.push(String(line)); } } });
+    } catch (error) {
+      blockedError = error;
+    } finally {
+      await unlock();
+    }
+    assert(blockedError?.code === 'AHT_INSTALL_IN_USE', `Locked installation was not identified: ${blockedError?.code}: ${blockedError?.message}`);
+    assert(!blockedLogs.some(line => line.includes('falling back') || line.startsWith('Fetching pack')),
+      'a blocked directory replacement must not download the full package');
+    assert((await readJsonFile(path.join(instanceDir, '.aht-launcher', 'installed.json'))).version === '2.8.100',
+      'blocked replacement advanced installed metadata');
+    assert(await fileText(instanceDir, 'mods/change.jar') === 'change-v1', 'blocked replacement changed the original mod');
+    assert(await fileText(instanceDir, 'saves/Player World/level.dat') === 'world data', 'blocked replacement changed the save');
+  }
+
+  // A failure after the old directory was moved must restore it and stop. A
+  // second archive must not hide the failed commit or overwrite that rollback.
+  const originalRename = fs.rename;
+  const rollbackLogs = [];
+  let rollbackError;
+  fs.rename = async (from, to) => {
+    if (String(from).includes('.aht-staging-') && path.resolve(to) === path.resolve(instanceDir)) {
+      throw Object.assign(new Error('Fixture staged activation failed'), { code: 'EIO' });
+    }
+    return originalRename(from, to);
+  };
+  try {
+    await installPack({ latestSource: path.join(outDir, 'latest.json'), instanceDir,
+      logger: { log(line) { rollbackLogs.push(String(line)); } } });
+  } catch (error) {
+    rollbackError = error;
+  } finally {
+    fs.rename = originalRename;
+  }
+  assert(rollbackError?.code === 'EIO', 'staged activation failure was swallowed');
+  assert(!rollbackLogs.some(line => line.includes('falling back')), 'failed staged activation triggered a full fallback');
+  assert((await readJsonFile(path.join(instanceDir, '.aht-launcher', 'installed.json'))).version === '2.8.100', 'rollback did not restore old metadata');
+  assert(await fileText(instanceDir, 'mods/change.jar') === 'change-v1', 'rollback did not restore old mod');
+  assert(await fileText(instanceDir, 'saves/Player World/level.dat') === 'world data', 'rollback did not restore player save');
+
   const progress = [];
   const logs = [];
-  const installV2 = await installPack({
-    latestSource: path.join(outDir, 'latest.json'),
-    instanceDir,
-    replaceGameSettings: false,
-    onProgress: (event) => progress.push(event),
-    logger: { log(line) { logs.push(String(line)); } }
-  });
+  const unlockTransient = process.platform === 'win32'
+    ? await lockWindowsFile(path.join(instanceDir, 'mods', 'change.jar')) : null;
+  let releaseTimer;
+  let installV2;
+  try {
+    installV2 = await installPack({
+      latestSource: path.join(outDir, 'latest.json'),
+      instanceDir,
+      replaceGameSettings: false,
+      onProgress: (event) => {
+        progress.push(event);
+        if (unlockTransient && event.phase === 'Replacing install' && !releaseTimer) {
+          releaseTimer = setTimeout(() => unlockTransient(), 250);
+        }
+      },
+      logger: { log(line) { logs.push(String(line)); } }
+    });
+  } finally {
+    clearTimeout(releaseTimer);
+    await unlockTransient?.();
+  }
+  if (unlockTransient) assert(logs.some(line => line.includes('retrying the same staged update')), 'transient Windows lock did not exercise commit retry');
   assert(installV2.deltaApplied === true, `version 2 did not use its eligible delta: ${JSON.stringify({ installV2, logs })}`);
-  assert(progress.some((event) => event.phase === 'Downloading changed files'), 'delta download progress was not reported');
+  assert(progress.some((event) => ['Downloading changed files', 'Verifying cached update'].includes(event.phase)), 'delta download/cache verification progress was not reported');
   assert(progress.some((event) => event.phase === 'Removing retired files'), 'delta deletion progress was not reported');
   assert(progress.some((event) => event.phase === 'Applying changed files'), 'delta application progress was not reported');
   assert(!progress.some((event) => event.phase === 'Downloading pack'), 'eligible delta update downloaded the full pack');

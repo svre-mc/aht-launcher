@@ -5,6 +5,24 @@ import test from 'node:test';
 import * as runtimeRepair from '../src/runtimeRepair.js';
 
 const main = fs.readFileSync(process.env.AHT_TEST_MAIN_SOURCE || new URL('../desktop/main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+test('folder replacement errors are actionable and do not expose local paths', () => {
+  const publicError = main.slice(main.indexOf('function playerPublicErrorMessage('), main.indexOf('\nfunction errorForRenderer('));
+  let developer = false;
+  const context = vm.createContext({ isDeveloperMode: () => developer });
+  vm.runInContext(publicError, context);
+  const error = { code: 'AHT_INSTALL_IN_USE', message: "Windows could not replace the game folder. EPERM rename C:\\private\\instance" };
+  const expected = 'Windows could not replace the game folder. Close Minecraft and apps using the game folder, then retry.';
+  assert.equal(context.playerPublicErrorMessage(error, 'update:start'), expected);
+  assert.equal(context.playerPublicErrorMessage(error.message, 'update:start'), expected);
+  assert.equal(context.playerPublicErrorMessage(new Error('Download failed'), 'update:start'), 'Download failed.');
+  context.updateResultForRenderer = () => null;
+  vm.runInContext(main.slice(main.indexOf('function updateStateForRenderer('), main.indexOf('\nfunction launcherUpdateForRenderer(')), context);
+  assert.equal(context.updateStateForRenderer({ error: error.message }).error, expected);
+  assert.equal(context.updateStateForRenderer({ kind: 'repair', error: error.message }).error, expected);
+  assert.equal(context.updateStateForRenderer({ kind: 'repair', error: 'network failed' }).error, 'Repair failed.');
+  developer = true;
+  assert.equal(context.playerPublicErrorMessage(error, 'update:start'), error.message);
+});
 test('public account warnings stay concise while local diagnostics remain available', () => {
   const publicError = main.slice(main.indexOf('function playerPublicErrorMessage('), main.indexOf('\nfunction errorForRenderer('));
   const publicIdentity = main.slice(main.indexOf('function identityForRenderer('), main.indexOf('\nfunction minecraftLauncherHandoffForRenderer('));

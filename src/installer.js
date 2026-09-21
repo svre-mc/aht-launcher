@@ -621,6 +621,25 @@ async function removeBackupAfterSuccessfulSwap(backupDir, { logger = console, si
   }
 }
 
+async function renameInstallDirectory(source, destination, logger) {
+  const retryDelays = [100, 200, 400, 800, 1000];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(source, destination);
+      return;
+    } catch (error) {
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
+      if (attempt === retryDelays.length) {
+        const blocked = new Error(`Windows could not replace the game folder. Close Minecraft and apps using the game folder, then retry. ${error.message}`, { cause: error });
+        blocked.code = 'AHT_INSTALL_IN_USE';
+        throw blocked;
+      }
+      if (attempt === 0) logger?.log?.('Windows temporarily blocked the game folder replacement; retrying the same staged update.');
+      await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+    }
+  }
+}
+
 async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) {
   const resolvedInstanceDir = assertSafeInstanceRoot(instanceDir);
   const resolvedStagingDir = path.resolve(stagingDir);
@@ -632,15 +651,18 @@ async function replaceInstallWithStaging(instanceDir, stagingDir, options = {}) 
   await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
   try {
     if (await pathExists(resolvedInstanceDir)) {
-      await fs.rename(resolvedInstanceDir, backupDir);
+      await renameInstallDirectory(resolvedInstanceDir, backupDir, options.logger);
       oldInstallMoved = true;
     }
-    await fs.rename(resolvedStagingDir, resolvedInstanceDir);
+    await renameInstallDirectory(resolvedStagingDir, resolvedInstanceDir, options.logger);
     stagedInstallActive = true;
   } catch (error) {
     if (oldInstallMoved && !stagedInstallActive && !(await pathExists(resolvedInstanceDir)) && await pathExists(backupDir)) {
-      await fs.rename(backupDir, resolvedInstanceDir).catch(() => {});
+      await renameInstallDirectory(backupDir, resolvedInstanceDir, options.logger).catch(() => {});
     }
+    // Another archive cannot repair a local commit failure. In particular, do
+    // not turn a locked folder into a redundant full-package download.
+    error.installCommitFailed = true;
     throw error;
   }
 
@@ -1732,6 +1754,7 @@ export async function installPack(options) {
         onProgress
       });
     } catch (error) {
+      if (error?.installCommitFailed) throw error;
       logger.log(`Delta update could not be applied; falling back to the full verified package. ${error?.message || error}`);
       if (onProgress) {
         onProgress({
