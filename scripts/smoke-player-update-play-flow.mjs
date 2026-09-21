@@ -48,7 +48,8 @@ const ptbLauncherProofPath = launcherProofPath(ptbInstanceDir, 'player', {
 const smokeExe = process.env.AHT_SMOKE_EXE || '';
 // Ownership diagnostics still require successful handoff, but are not a host
 // performance benchmark. The default full suite retains its original budgets.
-const accountRecoveryFocus = process.env.AHT_SMOKE_FOCUS === 'account-recovery';
+const profileSetupFocus = process.env.AHT_SMOKE_FOCUS === 'profile-setup';
+const accountRecoveryFocus = profileSetupFocus || process.env.AHT_SMOKE_FOCUS === 'account-recovery';
 const electronBin = smokeExe || (process.platform === 'win32'
   ? path.resolve('node_modules', 'electron', 'dist', 'electron.exe')
   : path.resolve('node_modules', '.bin', 'electron'));
@@ -379,6 +380,7 @@ execFileSync(path.join(recoveryJavaHome, process.platform === 'win32' ? 'bin/jav
 const fakeLauncherScript = `
 const fs = require('fs'), path = require('path');
 fs.writeFileSync(process.argv[1], JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), disableRtss: process.env.DISABLE_RTSS_LAYER || '', disableObs: process.env.DISABLE_VULKAN_OBS_CAPTURE || '' }, null, 2));
+fs.appendFileSync(process.argv[1] + '.events', process.pid + '\\n');
 const profiles = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(mcRoot, 'launcher_profiles.json'))}, 'utf8'));
 const recovery = Object.entries(profiles.profiles || {}).find(([id]) => /^aht-account-recovery-[a-f0-9]{24}$/.test(id));
 if (recovery && fs.existsSync(${JSON.stringify(recoveryModePath)}) && JSON.parse(fs.readFileSync(${JSON.stringify(recoveryModePath)}, 'utf8')).mode === 'auto') {
@@ -432,14 +434,12 @@ await writeJson(defaultsPath, {
 await writeJson(path.join(userData, 'identity.json'), {
   installId: 'fresh-player-install',
   createdAt: new Date().toISOString(),
-  minecraftUsername: 'FreshPlayer',
-  minecraftUuid: recoveryUuid,
+  minecraftUsername: '',
+  minecraftUuid: '',
   usernameRegisteredAt: new Date().toISOString(),
   usernameRegistrationMode: 'minecraft-launcher'
 });
-await writeJson(path.join(mcRoot, 'launcher_accounts.json'), { activeAccountLocalId: 'fixture', accounts: {
-  fixture: { minecraftProfile: { name: 'FreshPlayer', id: recoveryUuid.replaceAll('-', '') } }
-} });
+await writeJson(path.join(mcRoot, 'launcher_accounts.json'), { accounts: {} });
 const fixtureDeviceCredential = createDeviceCredential();
 await writeJson(path.join(userData, 'device-identity.json'), {
   schemaVersion: fixtureDeviceCredential.schemaVersion,
@@ -814,9 +814,23 @@ try {
   const damagedDeviceBytes = '{unreadable-device-fixture';
   fs.writeFileSync(damagedDeviceFile, damagedDeviceBytes);
   if (phoenixFixtureBinaryPath) fs.writeFileSync(phoenixFixtureBinaryPath, 'damaged helper fixture');
-  const blockedRepair = await evaluate(client, `window.aht.startUpdate({ forceRepair: true, runtimeOnly: true })
+  await evaluate(client, `window.__profileRepair = window.aht.startUpdate({ forceRepair: true, runtimeOnly: true })
     .then(() => ({ ok: true }))
-    .catch(error => ({ ok: false, message: String(error?.message || error) }))`);
+    .catch(error => ({ ok: false, message: String(error?.message || error) })); true`);
+  await waitFor(client, `!document.querySelector('#accountRecoveryOverlay').hidden
+    && /Select your Minecraft account/.test(document.querySelector('#accountRecoveryTitle').textContent)`, 'missing-profile Repair account setup');
+  if (process.env.AHT_SMOKE_SCREENSHOT_DIR) {
+    await fsp.mkdir(process.env.AHT_SMOKE_SCREENSHOT_DIR, { recursive: true });
+    const shot = await client.call('Page.captureScreenshot', { format: 'png' });
+    await fsp.writeFile(path.join(process.env.AHT_SMOKE_SCREENSHOT_DIR, 'repair-account-setup.png'), Buffer.from(shot.data, 'base64'));
+  }
+  if (proofRequests.length) throw new Error('Repair issued Play authorization while waiting for account setup.');
+  await writeJson(path.join(mcRoot, 'launcher_accounts.json'), { activeAccountLocalId: 'fixture', accounts: {
+    fixture: { minecraftProfile: { name: 'FreshPlayer', id: recoveryUuid.replaceAll('-', '') } }
+  } });
+  const blockedRepair = await evaluate(client, 'window.__profileRepair');
+  await waitFor(client, `document.querySelector('#accountRecoveryOverlay').hidden`, 'account setup closed after profile detection');
+  checkpoint('Repair opened Minecraft account setup and resumed automatically without credentials or Play proof');
   const blockedRepairState = await evaluate(client, 'window.aht.getUpdateState()');
   if (!blockedRepair.ok || blockedRepairState.running || blockedRepairState.error || !blockedRepairState.lastResult?.ok) {
     throw new Error(`Local Repair was blocked by remote authorization: ${JSON.stringify({ blockedRepair, blockedRepairState })}`);
@@ -854,6 +868,20 @@ try {
   // A clean scan is only a hint: damage found by the backend's second scan must
   // be repaired in this same click, including unexpected protected content.
   await waitFor(client, '!updatePoll && !lastUpdateState?.running', 'runtime Repair UI completion');
+  if (profileSetupFocus) {
+    await fsp.rm(path.join(instanceDir, '.aht-launcher', 'installed.json'));
+    await evaluate(client, 'refresh().then(() => true)');
+    const canRepair = await evaluate(client, `document.querySelector('#scanButton').getAttribute('aria-disabled') !== 'true'`);
+    if (!canRepair) throw new Error('Missing installation metadata disabled Repair.');
+    await evaluate(client, `document.querySelector('#scanButton').click(); true`);
+    await waitFor(client, `window.aht.getUpdateState().then(state => {
+      if (state.error) throw new Error(state.error);
+      return !state.running && state.lastResult?.installed?.version === '7.7.7' && !state.lastResult?.runtimeOnly;
+    })`, 'Repair button reconstructs missing installation metadata', 180);
+    if (!fs.existsSync(path.join(instanceDir, '.aht-launcher', 'installed.json'))) throw new Error('Repair did not restore installation metadata.');
+    checkpoint('Actual Repair button recovered missing installation metadata');
+    await waitFor(client, '!updatePoll && !lastUpdateState?.running', 'full Repair UI completion');
+  }
   fs.writeFileSync(preservedModFile, 'damaged after first scan');
   const extraRepairFile = path.join(instanceDir, 'scripts/unapproved.zs');
   fs.mkdirSync(path.dirname(extraRepairFile), { recursive: true });
@@ -1288,6 +1316,12 @@ try {
     sha256: sha256(fs.readFileSync(warmPreparationCachePath)),
     mtimeMs: fs.statSync(warmPreparationCachePath).mtimeMs
   };
+  if (profileSetupFocus) {
+    const identityFile = path.join(userData, 'identity.json');
+    const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+    await writeJson(identityFile, { ...identity, minecraftUsername: '', minecraftUuid: '', minecraftLauncherDetectedUsername: '' });
+    await writeJson(path.join(mcRoot, 'launcher_accounts.json'), { accounts: {} });
+  }
   const warmSpawnedAt = Date.now();
   warmChild = spawnPlayerLauncher(warmDebugPort);
   const warmTarget = await waitForTarget(warmDebugEndpoint);
@@ -1342,10 +1376,35 @@ try {
   const warmProfilesBeforePlay = [mcRoot, syncedMcRoot].map((rootDir) => (
     sha256(fs.readFileSync(path.join(rootDir, 'launcher_profiles.json')))
   ));
+  const launcherCallCount = () => fs.existsSync(fakeLauncherMarker + '.events')
+    ? fs.readFileSync(fakeLauncherMarker + '.events', 'utf8').trim().split('\n').length : 0;
+  const waitForLauncherCalls = async count => {
+    for (let attempt = 0; attempt < 80 && launcherCallCount() < count; attempt++) await sleep(25);
+    if (launcherCallCount() < count) throw new Error('Account setup launcher handoff did not execute.');
+  };
+  const warmSetupHandoffsBefore = launcherCallCount();
   const warmPlayStartedAt = Date.now();
   await evaluate(client, `window.__ahtWarmPlay = window.aht.play()
     .then((result) => ({ ok: true, result }))
     .catch((error) => ({ ok: false, message: String(error?.message || error || '') })); true`);
+  if (profileSetupFocus) {
+    const proofsBeforeSetup = proofRequests.length;
+    await waitFor(client, `!document.querySelector('#accountRecoveryOverlay').hidden`, 'Play missing-profile setup');
+    await waitForLauncherCalls(warmSetupHandoffsBefore + 1);
+    await evaluate(client, `document.querySelector('#accountRecoveryCancel').click(); true`);
+    const cancelled = await evaluate(client, 'window.__ahtWarmPlay');
+    if (cancelled.ok || !/setup was cancelled/i.test(cancelled.message) || proofRequests.length !== proofsBeforeSetup) {
+      throw new Error('Cancelled Play setup issued authorization or lost its actionable message.');
+    }
+    await evaluate(client, `window.__ahtWarmPlay = window.aht.play()
+      .then(result => ({ ok: true, result })).catch(error => ({ ok: false, message: String(error?.message || error) })); true`);
+    await waitFor(client, `!document.querySelector('#accountRecoveryOverlay').hidden`, 'Play setup retry');
+    await waitForLauncherCalls(warmSetupHandoffsBefore + 2);
+    await writeJson(path.join(mcRoot, 'launcher_accounts.json'), { activeAccountLocalId: 'fixture', accounts: {
+      fixture: { minecraftProfile: { name: 'FreshPlayer', id: recoveryUuid.replaceAll('-', '') } }
+    } });
+    checkpoint('Actual Play account setup cancellation and retry exercised');
+  }
   for (let attempt = 0; attempt < 40 && !fs.existsSync(fakeLauncherMarker); attempt += 1) await sleep(25);
   const warmPlayHandoffMs = Date.now() - warmPlayStartedAt;
   if (!accountRecoveryFocus && (!fs.existsSync(fakeLauncherMarker) || warmPlayHandoffMs >= 500)) {
@@ -1362,6 +1421,7 @@ try {
   if (warmProfilesAfterPlay.some((hash, index) => hash !== warmProfilesBeforePlay[index])) {
     throw new Error('Warm Play rewrote launcher metadata instead of reusing initialization state.');
   }
+  if (profileSetupFocus) await waitForLauncherCalls(warmSetupHandoffsBefore + 3);
   accountVerificationBlocked = true;
   const markerBeforeBlockedPlay = fs.statSync(fakeLauncherMarker).mtimeMs;
   const blockedPlay = await evaluate(client, `window.aht.play()

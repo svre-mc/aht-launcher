@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
+import path from 'node:path';
 import * as runtimeRepair from '../src/runtimeRepair.js';
 
 const main = fs.readFileSync(process.env.AHT_TEST_MAIN_SOURCE || new URL('../desktop/main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -37,7 +38,8 @@ test('public account warnings stay concise while local diagnostics remain availa
 });
 const updateSource = main.slice(main.indexOf('async function runUpdate('), main.indexOf('\nfunction defaultLauncherInstallerArgs'));
 function updateHarness({ warning = '', developer = false, confirmed = true, keyFailure = false,
-  unreadableKey = false, phoenixBroken = false, launcherMissing = false, publishDuringInstall = false } = {}) {
+  unreadableKey = false, phoenixBroken = false, launcherMissing = false, publishDuringInstall = false,
+  missingProfile = false, setupCancelled = false, installFailures = [], recoveryResults = [] } = {}) {
   const calls = [];
   let feedReads = 0;
   const target = { id: 'stable', sidebarKey: 'stable' };
@@ -50,15 +52,25 @@ function updateHarness({ warning = '', developer = false, confirmed = true, keyF
     configForPack: value => value, loadConfig: async () => config,
     minecraftLauncherRuntimeConfig: async value => value,
     identityPayload: async (_config, options) => { calls.push(options?.forceAccountSync ? 'account-revalidate' : 'identity'); return identity; },
+    ensurePlayerMinecraftProfile: async () => {
+      if (missingProfile) {
+        calls.push('account-setup');
+        if (setupCancelled) throw Object.assign(new Error('Minecraft account setup was cancelled. Run Repair again to finish.'), { code: 'MINECRAFT_PROFILE_SETUP_CANCELLED' });
+      }
+      return identity;
+    },
     currentPhoenixAntiCheatStatus: async () => ({ required: true, valid: !phoenixBroken, consented: true, consentAcceptedAt: '2026-09-01T00:00:00Z' }),
     installCurrentPhoenixAntiCheat: async () => { calls.push('phoenix-repair'); phoenixBroken = false; },
-    mainWindow: null,
+    mainWindow: null, path, samePath: (a, b) => a === b, defaultPlayerInstanceDir: () => '/fixture/stable', app: { getPath: () => '/fixture/userData' }, recoverRepairFailure: async options => {
+      calls.push(options.permissionAttempted ? 'permission-already-tried' : 'recovery-check');
+      return recoveryResults.shift() || null;
+    },
     remoteRegistrationSatisfiesRequest: () => confirmed,
     readLatest: async () => ({ packId: 'fixture', version: publishDuringInstall && ++feedReads > 1 ? '2' : '1' }), developerClientBypassAllowed: () => developer,
     isDeveloperMode: () => developer, requirePlayerFullClientRelease() {}, migrateInstanceSecurityState: async () => {},
     sendLauncherEvent: async (_config, _identity, value) => { if (unreadableKey) calls.push('unrepaired-key-event'); calls.push(value.type); },
     prepareRuntimeOnlyRepair: async () => ({ installed: { version: '1' }, runtimeOnly: true }),
-    installPack: async () => ({ installed: { packId: 'fixture', version: '1' } }), managedStatePath: () => '',
+    installPack: async () => { calls.push('install'); const error = installFailures.shift(); if (error) throw error; return { installed: { packId: 'fixture', version: '1' } }; }, managedStatePath: () => '',
     useBundledJava8: () => false, process: { env: {} },
     repairMinecraftRuntime: async ({ latest, installed }) => { assert.equal(latest.version, installed.version, 'Runtime setup switched to a release published during this install'); return { profile: {}, minecraftAssets: {} }; },
     scanCurrentManagedIntegrity: async () => ({ valid: true, counts: { managed: 10, corrupted: 0 } }),
@@ -95,6 +107,29 @@ test('Repair restores a damaged consented Phoenix installation before success', 
   await h.run();
   assert(h.calls.includes('phoenix-repair'));
   assert(h.calls.indexOf('phoenix-repair') < h.calls.indexOf('ready'));
+});
+
+test('actual Repair retries after permission recovery and still fails if the repaired access is insufficient', async () => {
+  const denied = () => Object.assign(new Error('fixture denied'), { code: 'EACCES' });
+  const recovered = updateHarness({ installFailures: [denied()], recoveryResults: ['permission'] });
+  await recovered.run();
+  assert.equal(recovered.calls.filter(value => value === 'install').length, 2);
+  assert.equal(recovered.calls.filter(value => value === 'repair_completed').length, 1);
+  const blocked = updateHarness({ installFailures: [denied(), denied()], recoveryResults: ['permission'] });
+  await assert.rejects(blocked.run(), /fixture denied/);
+  assert(blocked.calls.includes('permission-already-tried'));
+  assert(!blocked.calls.includes('repair_completed'));
+});
+
+test('Repair resolves missing Minecraft profile metadata before claiming completion', async () => {
+  const h = updateHarness({ missingProfile: true });
+  await h.run();
+  assert(h.calls.includes('account-setup'));
+  assert(h.calls.indexOf('account-setup') < h.calls.indexOf('repair_completed'));
+  const cancelled = updateHarness({ missingProfile: true, setupCancelled: true });
+  await assert.rejects(cancelled.run(), /setup was cancelled/);
+  assert(!cancelled.calls.includes('repair_completed'));
+  assert(cancelled.calls.includes('repair_failed'));
 });
 
 test('Repair cannot report completion when Minecraft Launcher is absent', async () => {

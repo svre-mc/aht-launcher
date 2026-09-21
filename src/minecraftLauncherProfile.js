@@ -375,7 +375,8 @@ export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
     'launcher_accounts_microsoft_store.json',
     'launcher_msa_credentials.bin',
     'launcher_msa_credentials_microsoft_store.bin',
-    'launcher_profiles.json'
+    'launcher_profiles.json',
+    'launcher_profiles_microsoft_store.json'
   ];
   const files = [];
   const usernames = [];
@@ -407,7 +408,7 @@ export async function inspectMinecraftLauncherAuth(rootDir = '', options = {}) {
             );
           }
         } catch {}
-      } else if (name === 'launcher_profiles.json') {
+      } else if (name.startsWith('launcher_profiles')) {
         try {
           const profiles = await readJsonFile(file);
           const accountItems = orderedLegacyProfilesAccounts(profiles);

@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import { inspectMinecraftLauncherAuth, ensureMinecraftLauncherProfile } from '../src/minecraftLauncherProfile.js';
 import { accountWarningState, sameAccountSnapshot } from '../src/accountIdentityState.js';
 import { selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY } from '../src/minecraftSessionIdentity.js';
+import { minecraftProfileRequiredError } from '../src/minecraftProfileSetup.js';
 
 const source = await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8');
 function declaration(start, end) {
@@ -32,7 +33,7 @@ let proofError = '';
 const cache = new Map();
 const context = vm.createContext({
   process: { platform: 'linux', env: {} }, path,
-  isDeveloperMode: () => false, selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY,
+  isDeveloperMode: () => false, selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY, minecraftProfileRequiredError,
   app: { getPath: () => directory }, launcherProofStorageDir: (value) => value,
   trustedMinecraftOpenCommandAllowed: () => false, defaultMinecraftRoot: () => nativeRoot,
   firstExistingCurseForgeMinecraftRoot: () => { throw new Error('Linux must not auto-select a CurseForge root'); },
@@ -93,5 +94,5 @@ await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), /Cli
 assert.equal(signedIdentity, null, 'Installation-proof rejection must still fail Play');
 proofError = '';
 registrationError = ''; config.minecraftLauncher.autoImportAccount = false; savedIdentity = { installId: 'fixture-install' };
-await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), /Sign in to your Minecraft account/);
+await assert.rejects(context.refreshPreparedLauncherProof('stable', entry), { code: 'MINECRAFT_PROFILE_REQUIRED' });
 console.log('PASS: Linux root/profile selection, legacy-registration-independent Play and fail-closed client authorization.');

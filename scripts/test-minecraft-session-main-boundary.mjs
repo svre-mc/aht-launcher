@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import { selectedMinecraftSessionState, MINECRAFT_SESSION_AUTHORITY } from '../src/minecraftSessionIdentity.js';
 import { sameAccountSnapshot } from '../src/accountIdentityState.js';
+import { minecraftProfileReady, minecraftProfileRequiredError } from '../src/minecraftProfileSetup.js';
 
 const main = (await fs.readFile(new URL('../desktop/main.js', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const declaration = (start, end) => {
@@ -17,7 +18,7 @@ test('actual player status and Play never enter AHT recovery or decrypt its secr
   const uuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
   const config = { minecraftLauncher: { rootDir: '/minecraft' } };
   const forbidden = () => { throw new Error('Standalone account recovery is forbidden in player Play/status.'); };
-  const context = vm.createContext({ process, MINECRAFT_SESSION_AUTHORITY, selectedMinecraftSessionState, sameAccountSnapshot,
+  const context = vm.createContext({ process, MINECRAFT_SESSION_AUTHORITY, selectedMinecraftSessionState, sameAccountSnapshot, minecraftProfileReady, minecraftProfileRequiredError,
     isDeveloperMode: () => false, loadIdentity: async () => ({ ...identity }),
     updateIdentity: async update => (identity = update(identity)), publicDeviceIdentity: async () => ({}),
     app: { getPath: () => '/fixture' }, minecraftRootCandidates: () => [], samePath: (a,b) => a === b,

@@ -270,6 +270,14 @@ export function diagnoseLaunchFailure(attempt) {
   const step = failedStep(attempt);
   const key = step?.key || '';
   const message = `${step?.detail || ''} ${attempt?.error?.message || ''}`;
+  if (key === 'minecraft-account-setup' || String(attempt?.error?.code || '').startsWith('MINECRAFT_PROFILE_')
+      || /Sign in to your Minecraft account in Minecraft Launcher/i.test(message)) {
+    return {
+      cause: 'AHT could not read a selected Java Edition profile from Minecraft Launcher. A CurseForge app login may be separate.',
+      actions: ['Use Play or Repair to open the Minecraft Launcher used by AHT, then select your Java Edition account there.',
+        'Leave Minecraft Launcher open so AHT can finish automatically. Reinstalling the modpack does not sign in to Minecraft.']
+    };
+  }
   if (key === 'load-config') {
     return {
       cause: 'The launcher settings could not be read.',

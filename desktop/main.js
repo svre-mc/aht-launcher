@@ -58,7 +58,9 @@ import {
 } from '../src/forgeInstaller.js';
 import { ensureBundledJava8 } from '../src/bundledJava8.js';
 import { prepareRuntimeOnlyRepair, verifyRepairedJava, repairPhoenixInstallation } from '../src/runtimeRepair.js';
+import { recoverRepairFailure } from '../src/repairRecovery.js';
 import { createMinecraftInteractiveRecovery } from '../src/minecraftInteractiveRecovery.js';
+import { createMinecraftProfileSetup, minecraftProfileReady, minecraftProfileRequiredError } from '../src/minecraftProfileSetup.js';
 import { createAccountRegistrationCoordinator } from '../src/accountRegistrationCoordinator.js';
 import { createLauncherIdentityStore } from '../src/launcherIdentityStore.js';
 import { accountWarningState, registeredAccountState, sameAccountSnapshot } from '../src/accountIdentityState.js';
@@ -337,6 +339,11 @@ function loadR2DirectUploadModule() {
 }
 let mainWindow = null;
 const minecraftInteractiveRecovery = createMinecraftInteractiveRecovery({
+  onState: state => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('account:recoveryState', state);
+  }
+});
+const minecraftProfileSetup = createMinecraftProfileSetup({
   onState: state => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('account:recoveryState', state);
   }
@@ -723,6 +730,17 @@ function playerPublicErrorMessage(error = null, channel = '') {
   const message = String(error?.message || error || 'The launcher could not complete this action.').trim();
   if (isDeveloperMode()) return message;
   const code = String(error?.code || '');
+  if (code === 'AHT_REPAIR_PERMISSION_REQUIRED' || /Windows (?:permission was not granted|could not restore access to the repair folder)/i.test(message)) {
+    return 'Windows permission is required to finish Repair. Retry Repair and allow the Windows prompt, or choose a writable installation folder.';
+  }
+  if (channel === 'update:start' && /fetch failed|network request failed|network connection|socket hang up|ENOTFOUND|ECONNRESET|ETIMEDOUT/i.test(message)) {
+    return 'The repair or update could not connect. Check your internet connection and retry.';
+  }
+  if (code.startsWith('MINECRAFT_PROFILE_') || /Minecraft account setup|Select your Java Edition account in the Minecraft Launcher opened by AHT/i.test(message)) {
+    return /cancelled/i.test(message)
+      ? 'Minecraft account setup was cancelled. Retry Play or Repair to finish.'
+      : 'Select your Java Edition account in the Minecraft Launcher opened by AHT. A CurseForge app login may be separate. Then retry Play or Repair.';
+  }
   if (/Select [A-Za-z0-9_]{3,16} in Minecraft Launcher, then retry account sync/.test(message)) {
     return 'Select the matching Minecraft account, then retry account sync.';
   }
@@ -3879,9 +3897,7 @@ async function writeRegisteredLauncherProof({ config = {}, identity = {}, latest
   }), { requireNativeGuard: Boolean(nativeGuard) });
   const username = normalizeMinecraftUsername(identity.minecraftUsername || config.sync?.playerLabel || '');
   if (!isDeveloperMode()) {
-    if (!/^[A-Za-z0-9_]{3,16}$/.test(username) || !normalizeMinecraftUuid(identity.minecraftUuid || identity.minecraftUUID)) {
-      throw Object.assign(new Error('Select your account in Minecraft Launcher, then click Play again.'), { code: 'MINECRAFT_PROFILE_REQUIRED' });
-    }
+    if (!minecraftProfileReady(identity)) throw minecraftProfileRequiredError();
     const proof = await writeLauncherProofWithDeveloperAuth({
       config, identity: { ...proofIdentity, identityAuthority: MINECRAFT_SESSION_AUTHORITY },
       latest, installed, deviceCredential, nativeGuard
@@ -4058,9 +4074,9 @@ async function minecraftSessionIdentityPayload(config = null) {
   let selected = {};
   if (config?.minecraftLauncher?.rootDir && config.minecraftLauncher.autoImportAccount !== false) {
     const auth = await inspectMinecraftLauncherAuth(config.minecraftLauncher.rootDir, {
-      extraRoots: [...(config.minecraftLauncher.syncRoots || []), ...minecraftRootCandidates(process.platform, {
+      extraRoots: [...(config.minecraftLauncher.syncRoots || []), ...(config.minecraftLauncher.syncDefaultRoots === false ? [] : minecraftRootCandidates(process.platform, {
         ...process.env, HOME: process.env.HOME || app.getPath('home'), USERPROFILE: process.env.USERPROFILE || app.getPath('home')
-      })].filter(root => !samePath(root, config.minecraftLauncher.rootDir))
+      }))].filter(root => !samePath(root, config.minecraftLauncher.rootDir))
     });
     selected = { username: normalizeMinecraftUsername(auth.preferredUsername), minecraftUuid: normalizeMinecraftUuid(auth.preferredMinecraftUuid) };
   }
@@ -4068,8 +4084,28 @@ async function minecraftSessionIdentityPayload(config = null) {
   const current = JSON.stringify(proposed) === JSON.stringify(expected) ? expected
     : await updateIdentity(identity => selectedMinecraftSessionState(identity, expected, selected), { expectedInstallId: expected.installId });
   return { ...current, ...await publicDeviceIdentity(),
+    minecraftLauncherDetectedUsername: selected.username || '',
     minecraftLauncherDetectedUuid: selected.minecraftUuid || '', identityAuthority: MINECRAFT_SESSION_AUTHORITY,
     appVersion: launcherVersion(), platform: process.platform, arch: process.arch };
+}
+
+async function ensurePlayerMinecraftProfile(config) {
+  if (isDeveloperMode()) return identityPayload(config);
+  let opened = false;
+  try { return await minecraftProfileSetup.run({
+    readIdentity: async () => {
+      const identity = await minecraftSessionIdentityPayload({ ...config,
+        minecraftLauncher: { ...config.minecraftLauncher, autoImportAccount: true } });
+      // A historical AHT identity cannot substitute for a currently selected
+      // launcher profile after logout, deletion or an account switch.
+      return { ...identity, minecraftUsername: identity.minecraftLauncherDetectedUsername,
+        minecraftUuid: identity.minecraftLauncherDetectedUuid };
+    },
+    // No game/proof/ownership recovery is started by this account-selection handoff.
+    openLauncher: () => { opened = true; return openMinecraftLauncher(config); }
+  }); } finally {
+    if (opened) restoreMainWindowAfterMinecraftHandoffFailure();
+  }
 }
 
 async function identityPayload(config = null, options = {}) {
@@ -6281,7 +6317,11 @@ async function runUpdate(forceRepair = false, options = {}) {
       // must never start Phoenix Anti-cheat or leave a reusable Play token.
       result.launcherProof = null;
     } catch (error) {
-      throw new Error(`Minecraft Launcher setup failed: ${error.message}`);
+      throw new Error(`Minecraft Launcher setup failed: ${error.message}`, { cause: error });
+    }
+    if (forceRepair && !isDeveloperMode()) {
+      updateState.progress = { ...(updateState.progress || {}), phase: 'Checking Minecraft account setup', percent: 97 };
+      identity = await ensurePlayerMinecraftProfile(launcherConfig);
     }
     updateState.progress = { ...(updateState.progress || {}), phase: 'Verifying installed files', percent: 98 };
     const integrity = await scanCurrentManagedIntegrity(config, latestAfterInstall, {
@@ -6350,6 +6390,32 @@ async function runUpdate(forceRepair = false, options = {}) {
     completeOperationState(updateState, result, 'Complete');
     return result;
   } catch (error) {
+    if (forceRepair && config && !isDeveloperMode()) {
+      try {
+        const recovery = await recoverRepairFailure({
+          error, roots: [config.instanceDir, app.getPath('userData'), launcherConfig?.minecraftLauncher?.rootDir,
+            samePath(path.dirname(config.instanceDir), path.dirname(defaultPlayerInstanceDir())) ? path.dirname(defaultPlayerInstanceDir()) : null],
+          permissionAttempted: options.permissionRecoveryAttempted === true,
+          networkAttempted: options.networkRecoveryAttempted === true,
+          ask: async kind => {
+            const permission = kind === 'permission';
+            const prompt = { type: 'warning', title: permission ? 'Allow Windows to repair folder access?' : 'Repair needs a network connection',
+              message: permission ? 'Windows denied access to files needed by Repair.' : 'AHT could not download or verify the files needed by Repair.',
+              detail: permission ? 'Allow repair to open the Windows administrator prompt. It will restore your Windows account’s access to the affected game or runtime folder, then retry Repair.'
+                : 'Check your internet connection and any firewall prompt for A Hard Time Launcher, then retry. Administrator access cannot fix an unavailable download service.',
+              buttons: [permission ? 'Allow repair' : 'Retry', 'Cancel'], defaultId: 0, cancelId: 1, noLink: true };
+            const result = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, prompt) : await dialog.showMessageBox(prompt);
+            return result.response === 0;
+          }
+        });
+        if (recovery) {
+          updateState.running = false;
+          return runUpdate(true, { ...options,
+            permissionRecoveryAttempted: options.permissionRecoveryAttempted || recovery === 'permission',
+            networkRecoveryAttempted: options.networkRecoveryAttempted || recovery === 'network' });
+        }
+      } catch (recoveryError) { error = recoveryError; }
+    }
     failOperationState(updateState, error, forceRepair ? 'Repair failed' : 'Update failed');
     if (config && identity) {
       await sendLauncherEvent(config, identity, {
@@ -13051,8 +13117,8 @@ ipcMain.handle('account:retrySync', async (_event, payload = {}) => getStatus(
   payload?.packKey || payload || 'stable',
   { preferCache: true, includeUpdateLogs: false, forceAccountSync: true, allowProtectedStorage: true }
 ));
-ipcMain.handle('account:recoveryState', () => minecraftInteractiveRecovery.state());
-ipcMain.handle('account:cancelRecovery', () => { minecraftInteractiveRecovery.cancel(); return { ok: true }; });
+ipcMain.handle('account:recoveryState', () => minecraftProfileSetup.state().running ? minecraftProfileSetup.state() : minecraftInteractiveRecovery.state());
+ipcMain.handle('account:cancelRecovery', () => { minecraftProfileSetup.cancel(); minecraftInteractiveRecovery.cancel(); return { ok: true }; });
 ipcMain.handle('news:refresh', async (_event, payload = {}) => refreshNewsStatus(payload?.packKey || payload || 'stable'));
 // Launcher updates must not wait for pack preparation or the optional News feed.
 ipcMain.handle('launcher:checkUpdate', async () => launcherUpdateForRenderer(await checkLauncherUpdateNow()));
@@ -14428,8 +14494,7 @@ async function refreshPreparedLauncherProof(key, expectedEntry, nativeGuard = nu
       throw new Error(current.identity.minecraftUsernameSyncWarning);
     }
     if (!/^[A-Za-z0-9_]{3,16}$/.test(String(current.identity?.minecraftUsername || ''))) {
-      throw new Error(current.identity?.minecraftUsernameSyncWarning
-        || 'Sign in to your Minecraft account in Minecraft Launcher, then return to A Hard Time and click Play again.');
+      throw minecraftProfileRequiredError();
     }
     const launcherProof = await writeSerializedRegisteredLauncherProof({
       config: current.launcherConfig,
@@ -15352,6 +15417,12 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
     },
     (value) => `${value.launcherKind} and Java 8 paths were reused from initialization.`
   );
+  if (!isDeveloperMode()) {
+    prepared.identity = await runLaunchStep(attempt, 'minecraft-account-setup', 'Read the selected Minecraft account',
+      async () => ensurePlayerMinecraftProfile(prepared.launcherConfig),
+      'The selected Java Edition profile is available; Minecraft authenticates it when the game connects.');
+    if (launchPreparationCache.get(key) !== prepared) throw new Error('Launcher setup changed during Minecraft account selection. Click Play again.');
+  }
   const finalManagedIntegrity = await runLaunchStep(
     attempt,
     'protected-client-integrity',

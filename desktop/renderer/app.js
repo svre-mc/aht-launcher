@@ -4583,7 +4583,7 @@ function renderStatus(status) {
 
   const updateRunning = Boolean(lastUpdateState?.running);
   const launcherUpdateRequired = Boolean(status.launcherUpdate?.updateRequired);
-  setUnavailable(els.scanButton, launcherUpdateRequired || !status.installed || updateRunning);
+  setUnavailable(els.scanButton, launcherUpdateRequired || updateRunning);
   renderPrimaryAction(status);
   if (shouldShowUpdateProgress(lastUpdateState)) {
     setProgress(true, estimateProgress(lastUpdateState), updateProgressLabel(lastUpdateState));
@@ -5590,57 +5590,13 @@ async function installPhoenixAntiCheatFromPrompt() {
 async function scanFilesForRepair() {
   const requestedPackKey = activeSidebarPack;
   if (updatePoll || lastUpdateState?.running) {
-    showToast("Install already running", "Wait for the current install to finish before scanning.", "info");
+    showToast("Install already running", "Wait for the current install to finish before repairing.", "info");
     return;
   }
   window.clearTimeout(scanProgressHideTimer);
-  setUnavailable(els.scanButton, true);
-  setUnavailable(els.playButton, true);
-  setBadge("Scanning", "warn");
-  setProgress(true, 8, "Scanning files");
-  setLog("");
-  let scanCompleted = false;
-  try {
-    const scan = await window.aht.scanFiles(requestedPackKey);
-    scanCompleted = true;
-    lastIntegrityScan = scan;
-    setLog(formatIntegrityScan(scan));
-    const corrupted = scan?.counts?.corrupted || 0;
-    if (!scan?.counts?.managed) {
-      els.diffSummary.textContent = "Not installed";
-      setProgress(true, 100, "Scan unavailable");
-      restoreStatusBadge();
-      clearScanProgressSoon();
-      showToast("Scan unavailable", "Install the pack before scanning files.", "warn");
-    } else if (corrupted) {
-      els.diffSummary.textContent = `${corrupted} corrupted`;
-      setProgress(true, 100, "Repair needed");
-      setBadge("Repair needed", "warn");
-      clearScanProgressSoon();
-      showRepairPrompt(scan);
-      els.repairPromptRepairButton.dataset.packKey = requestedPackKey;
-    } else {
-      setLog(`${formatIntegrityScan(scan)}\nChecking Java, Minecraft, Forge, and assets...`);
-      await startUpdate(true, { runtimeOnly: true, packKey: requestedPackKey });
-    }
-  } catch (error) {
-    const message = cleanErrorMessage(error);
-    setProgress(true, 100, "Scan failed");
-    setBadge("Scan failed", "bad");
-    clearScanProgressSoon(2200);
-    setLog(message);
-    showToast("Scan failed", message, "error");
-  } finally {
-    setUnavailable(els.scanButton, Boolean(updatePoll || lastUpdateState?.running));
-    if (currentStatus) {
-      renderPrimaryAction(currentStatus);
-    }
-    if (scanCompleted) {
-      const scanLog = currentLogText();
-      await refresh();
-      if (scanLog) setLog(scanLog);
-    }
-  }
+  // The backend owns scanning and escalation. A preliminary UI scan must not
+  // prevent Repair from recovering missing/corrupt installation metadata.
+  await startUpdate(true, { runtimeOnly: true, packKey: requestedPackKey });
 }
 
 async function openFolderPath(target = "", label = "Folder") {
@@ -6659,6 +6615,10 @@ function renderAccountRecovery(state = {}) {
   if (!overlay) return;
   const wasVisible = !overlay.hidden;
   overlay.hidden = !state.running;
+  document.getElementById('accountRecoveryTitle').textContent = state.title || 'Verify your Minecraft account';
+  document.getElementById('accountRecoveryDetail').textContent = state.title
+    ? 'Your Microsoft sign-in stays in Minecraft Launcher.'
+    : 'This verifies your account only. It does not start the modpack or join the server.';
   document.getElementById('accountRecoveryMessage').textContent = state.message || '';
   if (state.running && !wasVisible) {
     accountRecoveryReturnFocus = document.activeElement;

@@ -128,7 +128,7 @@ async function installBundledJava8({ cacheDir, archivePath = bundledJava8Archive
     } catch { recovered = false; }
     const advice = ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
       ? ' Close Minecraft and Minecraft Launcher, then click Repair again.' : '';
-    throw new Error(`AHT could not prepare its Temurin 8 runtime: ${error.message}${advice}${recovered ? '' : ` Recovery files remain in ${staging}.`}`);
+    throw new Error(`AHT could not prepare its Temurin 8 runtime: ${error.message}${advice}${recovered ? '' : ` Recovery files remain in ${staging}.`}`, { cause: error });
   } finally {
     if (recovered) await fs.rm(staging, { recursive: true, force: true });
   }

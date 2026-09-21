@@ -538,7 +538,7 @@ export async function downloadToFile(source, dest, options = {}) {
       await fs.rm(tmp, { force: true }).catch(() => {});
       if (error?.retryable === false || attempt >= attempts) {
         const reason = error?.message || String(error);
-        throw new Error(`Download failed after ${attempt} attempt${attempt === 1 ? '' : 's'} from ${sourceToDisplay(source)}: ${reason}`);
+        throw new Error(`Download failed after ${attempt} attempt${attempt === 1 ? '' : 's'} from ${sourceToDisplay(source)}: ${reason}`, { cause: error });
       }
       if (options.logger?.log) {
         options.logger.log(`Download attempt ${attempt} failed from ${sourceToDisplay(source)}; retrying. ${error?.message || error}`);

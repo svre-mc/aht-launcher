@@ -13,7 +13,8 @@ export const backendTests = Object.freeze([
   'phoenix-install-lifecycle', 'phoenix-recovery', 'phoenix-monitor', 'phoenix-monitor-boundary',
   'native-guard-deadlines', 'sidebar-hidden-readiness', 'developer-admin-service', 'developer-service-boundary',
   'java-archive-boundary', 'account-retry-credential-cache', 'bounded-json-portability', 'worker-entrypoint',
-  'minecraft-session-identity', 'minecraft-session-main-boundary'
+  'minecraft-session-identity', 'minecraft-session-main-boundary',
+  'minecraft-profile-setup', 'repair-recovery'
 ]);
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
