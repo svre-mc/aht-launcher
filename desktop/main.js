@@ -72,6 +72,8 @@ import { registerMinecraftAccount } from '../src/minecraftRegistrationService.js
 import { requestServiceJson } from '../src/serviceTransport.js';
 import { createDeveloperAdminService } from '../src/developerAdminService.js';
 import { createPhoenixDetectionMonitor } from '../src/phoenixMonitor.js';
+import { startGameIncidentWorker } from '../src/gameIncidentMonitor.js';
+import { correlateIncidents } from '../src/gameIncidentContract.js';
 import { createLauncherProofTransactions } from '../src/launcherProofTransactions.js';
 import { cleanJavaEnvironment } from '../src/javaEnvironment.js';
 import {
@@ -133,6 +135,7 @@ import {
   setLaunchRequirement,
   writeLaunchReport
 } from '../src/launchDiagnostics.js';
+import { minecraftLatestLogSection } from '../src/supportGameLog.js';
 import {
   preparedRuntimeSnapshotCoversFiles,
   verifyPreparedRuntimeSnapshot
@@ -1306,7 +1309,7 @@ async function buildErrorDiagnosticReport(payload = {}) {
     ''
   ];
   const text = lines.join('\r\n');
-  const instanceDir = config?.instanceDir || configForPack(defaultConfig(), target.id).instanceDir;
+  const instanceDir = configForPack(config || defaultConfig(), target.id).instanceDir;
   const reportPath = latestLaunchReportPath(instanceDir);
   try {
     await fs.mkdir(path.dirname(reportPath), { recursive: true });
@@ -1324,7 +1327,7 @@ function escapedRegExp(value = '') {
 function supportSafeReportText(report = {}) {
   let text = String(report.text || '')
     .split(/\r?\n/)
-    .map((line) => sanitizeDiagnosticText(line, 4_000))
+    .map((line) => `${line.match(/^[ \t]*/)?.[0] || ''}${sanitizeDiagnosticText(line, 4_000)}`)
     .join('\r\n');
   const knownPaths = [
     [report.instanceDir, '<AHT-install>'],
@@ -1361,7 +1364,8 @@ async function writeSupportReportFile(report = {}) {
     ? path.dirname(path.resolve(report.path))
     : path.join(app.getPath('userData'), 'support');
   const file = path.join(directory, 'AHT Error Report.txt');
-  const text = supportSafeReportText(report);
+  const latestLog = await minecraftLatestLogSection(report.instanceDir);
+  const text = supportSafeReportText({ ...report, text: `${report.text || ''}${latestLog}` });
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(file, text, 'utf8');
   return { file, text };
@@ -15593,6 +15597,17 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   if (prepared.minecraftProfile?.selectionPrepared === false) {
     prepared.minecraftProfile = await selectPreparedMinecraftLauncherProfile(prepared.minecraftProfile);
   }
+  let incidentWorker;
+  try {
+    if (!isDeveloperMode() && prepared.launcherProof?.token && prepared.launcherProof?.payload?.launchId) {
+      const base = prepared.launcherConfig.launcherProof?.baseUrl || prepared.launcherConfig.sync?.baseUrl;
+      incidentWorker = startGameIncidentWorker({ instanceDir: prepared.launcherConfig.instanceDir,
+        launchId: prepared.launcherProof.payload.launchId, token: prepared.launcherProof.token,
+        endpoint: new URL('/api/diagnostics/incidents', base).toString() },
+        { script: path.join(app.getAppPath(), 'desktop/game-diagnostics-worker.mjs'),
+          onError: code => recordErrorDiagnostic('game:diagnostics', new Error(code)) });
+    }
+  } catch { recordErrorDiagnostic('game:diagnostics', new Error('Diagnostic observer unavailable.')); }
   const launcherOpening = (directLaunchPlan ? (async () => {
     const file = await selectedCurseForgeStorageFile(prepared.launcherConfig);
     if (!file) throw curseForgeSessionError('CHANGED');
@@ -15602,8 +15617,13 @@ ipcMain.handle('play:start', launchDiagnosticIpc(async (_event, payload = {}, at
   })() : openMinecraftLauncher(prepared.launcherConfig, {
     route: prepared.launcherRoute, attempt
   })).then(
-    (value) => ({ ok: true, value }),
-    (error) => ({ ok: false, error })
+    (value) => {
+      if (value?.gameProcessStarted && value.processPid && incidentWorker?.connected) {
+        incidentWorker.send({ launchId: prepared.launcherProof.payload.launchId, gamePid: value.processPid }, () => {});
+      }
+      return { ok: true, value };
+    },
+    (error) => { incidentWorker?.kill(); return { ok: false, error }; }
   );
   const launchResult = await runLaunchStep(
     attempt,
@@ -15990,6 +16010,22 @@ ipcMain.handle('dev:login', async (_event, { username, password }) => {
 });
 ipcMain.handle('dev:summary', async () => adminFetch(await loadConfig(), 'admin/summary'));
 ipcMain.handle('dev:events', async (_event, limit = 50) => adminFetch(await loadConfig(), `admin/events?limit=${limit}`));
+ipcMain.handle('dev:gameIncidents', diagnosticIpc('dev:gameIncidents', async (_event, payload = {}) => {
+  assertDeveloperAuthenticated();
+  const player = String(payload.player || '').trim();
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(player)) throw new Error('Enter a Minecraft player name.');
+  const config = await loadConfig(); const records = []; let cursor = '';
+  const controller = new AbortController(); const deadline = setTimeout(() => controller.abort(), 15000);
+  try {
+    for (let page = 0; page < 4; page++) {
+      const params = new URLSearchParams({ player, ...(cursor ? { cursor } : {}) });
+      const result = await adminFetch(config, `admin/diagnostics/incidents?${params}`, { signal: controller.signal });
+      records.push(...(Array.isArray(result.records) ? result.records : [])); cursor = result.cursor || '';
+      if (!cursor) break;
+    }
+    return { ...correlateIncidents(records), coveragePartial: Boolean(cursor) };
+  } finally { clearTimeout(deadline); }
+}));
 ipcMain.handle('dev:launcherDownloads', async (_event, payload = {}) => {
   assertDeveloperAuthenticated();
   const limit = Math.max(1, Math.min(Number(payload.limit || 250), 250));

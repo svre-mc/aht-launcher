@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.34",
-  "ahtLauncherVersion": "0.2.34",
+  "version": "0.2.35",
+  "ahtLauncherVersion": "0.2.35",
   "phoenixAntiCheatVersion": "1.1.5",
   "private": true,
   "type": "module",
@@ -108,9 +108,10 @@
     "pack": "electron-builder --dir",
     "test:launcher-proof": "node scripts/test-launcher-proof.mjs",
     "test:launcher-proof-update-stability": "node scripts/test-launcher-proof-update-stability.mjs",
-    "test:launch-diagnostics": "node scripts/test-launch-diagnostics.mjs",
+    "test:launch-diagnostics": "node scripts/test-launch-diagnostics.mjs && node scripts/test-support-game-log.mjs",
     "test:launch-preparation-snapshot": "node scripts/test-launch-preparation-managed-snapshot.mjs",
-    "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs"
+    "test:developer-modpack-zip": "node scripts/smoke-developer-modpack-zip-ui.mjs",
+    "test:game-incidents": "node --test scripts/test-game-incidents.mjs && node scripts/test-game-incidents-workerd.mjs"
   },
   "dependencies": {
     "adm-zip": "^0.6.1",

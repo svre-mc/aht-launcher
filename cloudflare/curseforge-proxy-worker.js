@@ -1,6 +1,7 @@
 import { isLegacyMinecraftAccount, recoverMinecraftAccount } from './minecraft-account-recovery.js';
 import { LAUNCHER_INSTALLER_DOWNLOAD_POLICY_EPOCH } from './launcher-download-policy.js';
 import { MINECRAFT_SESSION_AUTHORITY, sessionAccountLinked, bindAuthenticatedMinecraftSession } from './minecraft-session-authority.js';
+import { gameIncidentEndpoint, storeIncident } from './game-incidents.js';
 
 const CURSEFORGE_BASE = 'https://api.curseforge.com/v1';
 const RELEASE_PATHS = new Set([
@@ -2575,6 +2576,11 @@ async function linkAuthenticatedMinecraftSession(request, env, origin) {
       });
     }
   }
+  try {
+    await storeIncident(env.AHT_DATA, proof, 'backend', { id: crypto.randomUUID(),
+      launchId: proof.launchId, connectionId: proof.launchId, kind: 'connected', reasonCode: 'unknown',
+      occurredAt: new Date().toISOString() });
+  } catch { console.warn('AHT authenticated admission diagnostic could not be stored.'); }
   return new Response(null, { status: 204, headers: { 'Cache-Control': 'private, no-store' } });
 }
 
@@ -4159,6 +4165,18 @@ export default {
       if (brandedRedirect) return brandedRedirect;
       if (url.pathname === LAUNCHER_SERVER_STATE_PATH) {
         return await launcherServerStateWebSocket(request, env, origin);
+      }
+      // Private server diagnostics must resolve before the public server/* artifact namespace.
+      if (['/api/diagnostics/incidents', '/server/diagnostics/incidents', '/admin/diagnostics/incidents'].includes(url.pathname)) {
+        return await gameIncidentEndpoint(request, env, origin, {
+          privateJson, readBody, verifyProof: verifyLauncherProofRequest,
+          rateLimit: enforcePlayerApiRateLimit, adminAuthorized: verifyToken,
+          serverAuthorized: async (value, bindings) => {
+            const configured = String(bindings.AHT_LAUNCHER_STATE_SERVER_TOKEN || '');
+            const supplied = (value.headers.get('Authorization') || '').replace(/^Bearer /, '');
+            return configured.length >= 32 && supplied.length <= 512 && await secureStringEqual(supplied, configured);
+          }
+        });
       }
       if (request.method === 'GET' || request.method === 'HEAD') {
         const releaseResponse = await serveReleaseObject(request, env, origin, context);

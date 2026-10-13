@@ -897,6 +897,11 @@ const els = {
   playerSusPanel: $("#playerSusPanel"),
   playerLauncherUpdatesPanel: $("#playerLauncherUpdatesPanel"),
   playerAccessPanel: $("#playerAccessPanel"),
+  playerDiagnosticsPanel: $("#playerDiagnosticsPanel"),
+  incidentPlayerInput: $("#incidentPlayerInput"),
+  loadIncidentsButton: $("#loadIncidentsButton"),
+  incidentReportStatus: $("#incidentReportStatus"),
+  incidentReportList: $("#incidentReportList"),
   playerDownloadsList: $("#playerDownloadsList"),
   playerRecordsList: $("#playerRecordsList"),
   playerSusList: $("#playerSusList"),
@@ -3783,13 +3788,48 @@ function playerDataFailureSummary(results = []) {
 }
 
 function activatePlayerDataView(view = "downloads") {
-  activePlayerDataView = ["downloads", "players", "sus", "updates", "access"].includes(view) ? view : "downloads";
+  activePlayerDataView = ["downloads", "players", "sus", "updates", "access", "diagnostics"].includes(view) ? view : "downloads";
   els.playerDataTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.playerDataView === activePlayerDataView));
   if (els.playerDownloadsPanel) els.playerDownloadsPanel.hidden = activePlayerDataView !== "downloads";
   if (els.playerRecordsPanel) els.playerRecordsPanel.hidden = activePlayerDataView !== "players";
   if (els.playerSusPanel) els.playerSusPanel.hidden = activePlayerDataView !== "sus";
   if (els.playerLauncherUpdatesPanel) els.playerLauncherUpdatesPanel.hidden = activePlayerDataView !== "updates";
   if (els.playerAccessPanel) els.playerAccessPanel.hidden = activePlayerDataView !== "access";
+  if (els.playerDiagnosticsPanel) els.playerDiagnosticsPanel.hidden = activePlayerDataView !== "diagnostics";
+}
+
+let gameIncidentQueryPending = false;
+async function loadGameIncidents() {
+  if (gameIncidentQueryPending) return;
+  const player = els.incidentPlayerInput?.value.trim() || '';
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(player)) {
+    els.incidentReportStatus.textContent = 'Enter a Minecraft player name.'; return;
+  }
+  gameIncidentQueryPending = true;
+  setUnavailable(els.loadIncidentsButton, true);
+  els.incidentPlayerInput.disabled = true;
+  els.incidentReportStatus.textContent = 'Checking recent incidents…';
+  els.incidentReportList.replaceChildren();
+  try {
+    const report = await window.aht.devGameIncidents({ player });
+    const incidents = Array.isArray(report.incidents) ? report.incidents : [];
+    els.incidentReportStatus.textContent = incidents.length
+      ? `${incidents.length} recent incident${incidents.length === 1 ? '' : 's'}${report.coveragePartial ? ' — partial history' : ''}.`
+      : 'No recent incident evidence is available for this player.';
+    for (const incident of incidents) {
+      const card = document.createElement('details'); card.className = 'release-check-card'; card.style.display = 'block'; card.style.marginBottom = '12px';
+      const summary = document.createElement('summary');
+      summary.style.cursor = 'pointer';
+      summary.textContent = `${new Date(incident.occurredAt).toLocaleString()} — ${incident.diagnosis.code.replaceAll('_', ' ')} (${incident.diagnosis.confidence.replaceAll('-', ' ')})${incident.missingSources.length ? ` — missing ${incident.missingSources.join(', ')}` : ''}`;
+      const explanation = document.createElement('p'); explanation.textContent = incident.diagnosis.explanation;
+      const coverage = document.createElement('p');
+      coverage.textContent = `Evidence: ${incident.diagnosis.confidence.replaceAll('-', ' ')}. Missing: ${incident.missingSources.join(', ') || 'none'}.`;
+      const data = document.createElement('pre'); data.style.whiteSpace = 'pre-wrap'; data.style.overflowWrap = 'anywhere';
+      data.textContent = JSON.stringify(incident.events, null, 2);
+      card.append(summary, explanation, coverage, data); els.incidentReportList.append(card);
+    }
+  } catch (error) { els.incidentReportStatus.textContent = error.message || 'Incident history is unavailable.'; }
+  finally { gameIncidentQueryPending = false; els.incidentPlayerInput.disabled = false; setUnavailable(els.loadIncidentsButton, false); }
 }
 
 async function loadAllPlayerDataPages(fetchPage, property) {
@@ -6100,6 +6140,8 @@ if (els.loadDashboardButton) {
 els.playerDataTabs.forEach((tab) => {
   tab.addEventListener("click", () => activatePlayerDataView(tab.dataset.playerDataView));
 });
+els.loadIncidentsButton?.addEventListener('click', loadGameIncidents);
+els.incidentPlayerInput?.addEventListener('keydown', event => { if (event.key === 'Enter') void loadGameIncidents(); });
 if (els.accessDecisionClose) {
   els.accessDecisionClose.addEventListener("click", () => {
     els.accessDecisionDialog?.close();

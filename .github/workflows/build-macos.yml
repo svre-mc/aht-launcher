@@ -156,6 +156,13 @@ jobs:
       - name: Test professional launch diagnostics
         run: npm run test:launch-diagnostics
 
+      - name: Test private correlated game incidents in local workerd
+        run: npm run test:game-incidents
+
+      - name: Test selected game logs on the real Windows file clipboard
+        if: matrix.id == 'windows'
+        run: node scripts/smoke-copied-game-log.mjs
+
       - name: Test Linux launcher discovery and profile selection
         run: node scripts/test-linux-minecraft-handoff.mjs && node scripts/test-linux-account-startup.mjs && npm run test:profile
 

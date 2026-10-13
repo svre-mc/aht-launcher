@@ -116,6 +116,7 @@ const developerApi = {
   devLogin: (payload) => ipcRenderer.invoke('dev:login', payload),
   devSummary: () => ipcRenderer.invoke('dev:summary'),
   devEvents: (limit) => ipcRenderer.invoke('dev:events', limit),
+  devGameIncidents: (payload) => ipcRenderer.invoke('dev:gameIncidents', payload || {}),
   devLauncherDownloads: (payload) => ipcRenderer.invoke('dev:launcherDownloads', payload || {}),
   devPlayerIpv4Groups: () => ipcRenderer.invoke('dev:playerIpv4Groups'),
   devPlayerRecords: (payload) => ipcRenderer.invoke('dev:playerRecords', payload || {}),

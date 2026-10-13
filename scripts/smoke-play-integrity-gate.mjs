@@ -169,7 +169,7 @@ function connect(wsUrl) {
             setTimeout(() => {
               if (!pending.has(id)) return;
               pending.delete(id);
-              callReject(new Error(`CDP call timed out: ${method}`));
+              callReject(new Error(`CDP call timed out: ${method}: ${String(params.expression || '').slice(0, 250)}`));
             }, 30000);
           });
         },
@@ -614,6 +614,9 @@ try {
   if (firstFailureText.trimStart().startsWith('{') || firstFailureText.includes('process.versions')) {
     throw new Error('Failed Play report regressed to a raw diagnostic dump.');
   }
+  const gameLogPath = path.join(instanceDir, 'logs', 'latest.log');
+  const gameLogFixture = '[INFO] stable latest-log fixture\n[ERROR] copied packet failure\n  at fixture.Packet.read(Packet.java:54)\naccessToken=private-copy-fixture-token\n';
+  await fsp.writeFile(gameLogPath, gameLogFixture);
   const copiedFailure = await evaluate(client, `
     window.aht.copyErrorReport({ title: 'Launch failed', context: 'play:start', packKey: 'stable' })
   `);
@@ -622,6 +625,11 @@ try {
     throw new Error(`Failed Play report was not copied from the saved attempt: ${JSON.stringify(copiedFailure)}`);
   }
   const supportFailureText = fs.readFileSync(copiedFailure.filePath, 'utf8');
+  if (!supportFailureText.includes('MINECRAFT LATEST.LOG') || !supportFailureText.includes('copied packet failure')
+      || !supportFailureText.includes('fixture.Packet.read') || supportFailureText.includes('private-copy-fixture-token')
+      || fs.readFileSync(gameLogPath, 'utf8') !== gameLogFixture) {
+    throw new Error('Copied launch report did not include the selected game log with credential redaction and source preservation.');
+  }
   if (
     !supportFailureText.includes('A HARD TIME LAUNCH REPORT')
     || supportFailureText.includes(instanceDir)
@@ -635,6 +643,14 @@ try {
     if (clipboardFiles.length !== 1 || path.resolve(clipboardFiles[0]) !== path.resolve(copiedFailure.filePath)) {
       throw new Error(`Copy error log did not place AHT Error Report.txt on the Windows file clipboard: ${JSON.stringify({ clipboardFiles, copiedFailure })}`);
     }
+  }
+
+  await fsp.mkdir(path.join(isolatedPtbInstanceDir, 'logs'), { recursive: true });
+  await fsp.writeFile(path.join(isolatedPtbInstanceDir, 'logs', 'latest.log'), '[ERROR] PTB selected-log fixture\n');
+  const copiedPtb = await evaluate(client, `window.aht.copyErrorReport({ title: 'Fixture error', context: 'renderer-toast', packKey: 'ptb' })`);
+  const ptbSupportText = fs.readFileSync(copiedPtb.filePath, 'utf8');
+  if (!ptbSupportText.includes('PTB selected-log fixture') || ptbSupportText.includes('stable latest-log fixture')) {
+    throw new Error('Generic PTB error copy used another instance latest.log.');
   }
 
   const failureClickStarted = await evaluate(client, `(() => {

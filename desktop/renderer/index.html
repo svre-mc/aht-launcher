@@ -549,6 +549,7 @@
                   <button id="playerSusTab" class="player-data-tab" type="button" data-player-data-view="sus">Sus</button>
                   <button id="playerLauncherUpdatesTab" class="player-data-tab" type="button" data-player-data-view="updates">Launcher Updates</button>
                   <button id="playerAccessTab" class="player-data-tab" type="button" data-player-data-view="access">Access Control</button>
+                  <button class="player-data-tab" type="button" data-player-data-view="diagnostics">Diagnostics</button>
                 </nav>
               </div>
               <button id="loadDashboardButton" class="button compact" type="button"><span class="button-icon icon-activity" aria-hidden="true"></span>Reload</button>
@@ -568,6 +569,14 @@
               <div id="playerRecordsList" class="events data-events player-download-table">
                 <div class="empty-state">No players found.</div>
               </div>
+            </div>
+            <div id="playerDiagnosticsPanel" class="player-data-panel" hidden>
+              <div class="dev-fields">
+                <label>Player <input id="incidentPlayerInput" type="text" maxlength="16" placeholder="Minecraft name"></label>
+                <button id="loadIncidentsButton" class="button compact" type="button">Check incidents</button>
+              </div>
+              <p id="incidentReportStatus" class="player-data-note">Enter a player to see recent disconnect evidence and missing observations.</p>
+              <div id="incidentReportList"></div>
             </div>
             <div id="playerSusPanel" class="player-data-panel" hidden>
               <p class="player-data-note">Confirmed Phoenix code-integrity flags only. Process evidence is limited to the matching A Hard Time Java session; unrelated running processes are never listed.</p>

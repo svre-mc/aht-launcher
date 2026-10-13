@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { minecraftLatestLogSection } from '../src/supportGameLog.js';
+import { sanitizeDiagnosticText } from '../src/launchDiagnostics.js';
+
+const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-support-game-log-'));
+try {
+  const stable = path.join(root, 'stable'), ptb = path.join(root, 'ptb');
+  for (const instance of [stable, ptb]) await fs.mkdir(path.join(instance, 'logs'), { recursive: true });
+  const file = path.join(stable, 'logs/latest.log');
+  const original = '[INFO] session start\n[ERROR] packet failed\n  at example.Packet.read(Packet.java:54)\naccessToken=private-fixture-token\n';
+  await fs.writeFile(file, original);
+  await fs.writeFile(path.join(ptb, 'logs/latest.log'), '[INFO] PTB fixture only\n');
+  let section = await minecraftLatestLogSection(stable);
+  assert.match(section, /Included complete log snapshot/);
+  assert(section.includes(original));
+  assert(!section.includes('PTB fixture'));
+  const safe = section.split(/\r?\n/).map(line => sanitizeDiagnosticText(line, 4000)).join('\n');
+  assert(!safe.includes('private-fixture-token'));
+  assert.match(safe, /example.Packet.read/);
+  await fs.appendFile(file, '[ERROR] newly appended failure\n');
+  assert.match(await minecraftLatestLogSection(stable), /newly appended failure/);
+  assert.match(await minecraftLatestLogSection(ptb), /PTB fixture only/);
+  section = await minecraftLatestLogSection(stable, { maxBytes: 65 });
+  assert.match(section, /older content omitted/);
+  assert(!section.includes('session start'));
+  assert.match(section, /newly appended failure/);
+  assert.equal(await fs.readFile(file, 'utf8'), original + '[ERROR] newly appended failure\n');
+  await fs.unlink(file);
+  assert.match(await minecraftLatestLogSection(stable), /No latest.log exists/);
+  await fs.writeFile(file, '');
+  assert.match(await minecraftLatestLogSection(stable), /Log exists but is empty/);
+  await fs.unlink(file);
+  await fs.mkdir(file);
+  assert.match(await minecraftLatestLogSection(stable), /not a regular file/);
+  await fs.rmdir(file);
+  await fs.rmdir(path.join(stable, 'logs'));
+  await fs.symlink(path.join(ptb, 'logs'), path.join(stable, 'logs'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.match(await minecraftLatestLogSection(stable), /redirected log paths are excluded/);
+  console.log('PASS: copied support log selection, fresh reads, bounded tail, missing/empty/invalid logs, containment, source preservation and credential redaction.');
+} finally { await fs.rm(root, { recursive: true, force: true }); }

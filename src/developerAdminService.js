@@ -107,7 +107,7 @@ export function createDeveloperAdminService({ baseUrl, loadCredentials, assertAu
     }
     if (!response.ok) {
       const playerDataRoutes = new Set(['admin/launcher-downloads', 'admin/player-records', 'admin/launcher-updates',
-        'admin/session-reports', 'admin/player-ipv4-groups', 'admin/access-decisions']);
+        'admin/session-reports', 'admin/player-ipv4-groups', 'admin/access-decisions', 'admin/diagnostics/incidents']);
       if (response.status === 404 && playerDataRoutes.has(relative.split('?')[0])) {
         throw error('The configured Worker is missing the player-data API. Deploy the current AHT Worker before loading Player Data.', 'AHT_ADMIN_API_MISSING');
       }
