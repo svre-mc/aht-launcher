@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aht-copied-game-log-'));
 const userData = path.join(root, 'profile'), stable = path.join(root, 'stable'), ptb = path.join(root, 'ptb');
-let child, socket, startupOutput = '';
+let child, socket, startupError, startupOutput = '';
 const service = http.createServer((_request, response) => { response.setHeader('Content-Type', 'application/json'); response.end('{"logs":[],"counts":{},"players":[]}'); });
 await new Promise(resolve => service.listen(0, '127.0.0.1', resolve));
 const probe = http.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
@@ -43,8 +43,10 @@ try {
       APPDATA: path.join(root, 'appData'), LOCALAPPDATA: path.join(root, 'localAppData'),
       HOME: root, USERPROFILE: root, SystemDrive: root, AHT_DEVELOPER_VAULT_DIR: path.join(root, 'vault') } });
   for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { startupOutput = (startupOutput + data.toString()).slice(-2000); });
+  child.once('error', error => { startupError = error; });
   const deadline = Date.now() + 30000; let target;
   while (!target && Date.now() < deadline) {
+    if (startupError) throw startupError;
     const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(r => r.json()).catch(() => []);
     target = targets.find(t => t.type === 'page' && t.webSocketDebuggerUrl); if (!target) await sleep(150);
   }

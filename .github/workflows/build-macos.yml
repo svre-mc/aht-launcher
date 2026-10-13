@@ -159,10 +159,6 @@ jobs:
       - name: Test private correlated game incidents in local workerd
         run: npm run test:game-incidents
 
-      - name: Test selected game logs on the real Windows file clipboard
-        if: matrix.id == 'windows'
-        run: node scripts/smoke-copied-game-log.mjs
-
       - name: Test Linux launcher discovery and profile selection
         run: node scripts/test-linux-minecraft-handoff.mjs && node scripts/test-linux-account-startup.mjs && npm run test:profile
 
@@ -172,6 +168,10 @@ jobs:
           node node_modules/electron/install.js
           node scripts/test-desktop-http.mjs
           node scripts/test-phoenix-native-http-cache.cjs
+
+      - name: Test selected game logs on the real Windows file clipboard
+        if: matrix.id == 'windows'
+        run: node scripts/smoke-copied-game-log.mjs
 
       - name: Test Windows uninstall choices and update delivery
         if: matrix.id == 'windows'
