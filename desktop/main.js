@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, net, powerSaveBlocker, safeStorage, shell } from 'electron';
 import { installDesktopHttp } from '../src/desktopHttp.js';
+import { downloadLauncherUpdate } from '../src/launcherUpdateDownload.js';
 import { spawn } from 'node:child_process';
 import { linuxMinecraftLauncherPaths, isLinuxMinecraftLauncherExecutable } from '../src/linuxMinecraftLauncher.js';
 import { ensureModDirectorIcon } from '../src/modDirectorIcon.js';
@@ -174,7 +175,6 @@ import {
 
 import {
   ensureDir,
-  downloadToFile,
   hashFile,
   isFileUrl,
   isHttpUrl,
@@ -8683,7 +8683,8 @@ async function runLauncherUpdate() {
       await ensureNormalLocalReinstallDirectory(downloadDir);
       await assertNormalPhysicalPath(downloadDir, 'directory');
     }
-    await downloadToFile(source, target, {
+    await downloadLauncherUpdate(source, target, {
+      logger: { log: (line) => appendOperationLine(launcherUpdateState, line) },
       onProgress: (progress) => {
         setLauncherUpdateProgress(byteOperationProgress('Downloading launcher', fileName, progress, 0, 72));
       }

@@ -1,7 +1,7 @@
 {
   "name": "aht-launcher",
-  "version": "0.2.35",
-  "ahtLauncherVersion": "0.2.35",
+  "version": "0.2.36",
+  "ahtLauncherVersion": "0.2.36",
   "phoenixAntiCheatVersion": "1.1.5",
   "private": true,
   "type": "module",
@@ -78,7 +78,7 @@
     "test:delta-update": "node scripts/test-delta-client-update.mjs",
     "test:modpack-publish-changes": "node --test scripts/test-modpack-publish-changes.mjs scripts/test-modpack-publication.mjs && node scripts/test-interrupted-publish-transaction.mjs",
     "test:cache-extra-integrity": "node scripts/smoke-cache-extra-integrity.mjs",
-    "test:download-retry": "node scripts/test-download-retry.mjs",
+    "test:download-retry": "node scripts/test-download-retry.mjs && node scripts/test-launcher-update-download.mjs",
     "test:resourcepack-placement": "node scripts/test-resourcepack-placement.mjs",
     "test:resourcepack-keyed-cache": "node scripts/test-resourcepack-keyed-cache.mjs",
     "test:release-builder-default-outdir": "node scripts/test-release-builder-default-outdir.mjs",

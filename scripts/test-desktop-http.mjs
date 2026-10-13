@@ -27,6 +27,7 @@ if (process.versions.electron) {
     assert.equal((await fetchJson('http://aht-network-fixture.invalid/feed')).version, 'fixture');
     await session.defaultSession.setProxy({ mode: 'direct' });
     await import('./test-download-retry.mjs');
+    await import('./test-launcher-update-download.mjs');
     if (process.env.AHT_TEST_LIVE_HTTP === '1') {
       assert.equal((await fetchJson('https://api.ahardtime.net/latest.json')).packId, 'a-hard-time-dregora');
       const update = await fetchJson('https://api.ahardtime.net/launcher/latest.json');
