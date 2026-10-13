@@ -178,9 +178,13 @@ test('both launch modes require a fresh trusted proof before starting Minecraft'
   assert(section.includes('const launchResult = await runLaunchStep('));
   for (const direct of [false, true]) for (const fail of [true, false]) {
     const calls = [];
-    const prepared = { launcherConfig: {}, identity: {}, latest: {}, installed: {}, proofPreparedThisSession: false };
+    const prepared = { launcherConfig: { launcherProof: { baseUrl: 'https://fixture.invalid' } }, identity: {}, latest: {}, installed: {}, proofPreparedThisSession: false };
     const context = vm.createContext({
       prepared, directLaunchPlan: direct ? {} : null, attempt: {}, key: 'stable', launchPreparationCache: new Map([['stable', prepared]]),
+      isDeveloperMode: () => false,
+      recordErrorDiagnostic: () => calls.push('optional-observer-failed'),
+      URL, path: { join: (...parts) => parts.join('/') }, app: { getAppPath: () => '/fixture' },
+      startGameIncidentWorker: () => { calls.push('observer-start'); throw new Error('Fixture reporter unavailable'); },
       launchNativeGuards: new Map(), launcherNativeGuard: async () => null,
       runLaunchStep: async (_attempt, key, _label, action) => { calls.push(key); return action(); },
       openMinecraftLauncher: async () => { assert(!direct); calls.push('opened'); return { visibilityConfirmed: true }; },
@@ -190,7 +194,7 @@ test('both launch modes require a fresh trusted proof before starting Minecraft'
       launchMinecraftDirect: async () => { assert(direct); calls.push('opened'); return { gameProcessStarted: true }; },
       refreshPreparedLauncherProof: async () => {
         if (fail) throw new Error('Minecraft session unavailable');
-        calls.push('signed'); return { usable: true, trusted: true, payload: { launchId: 'fixture' } };
+        calls.push('signed'); return { usable: true, trusted: true, token: 'fixture-only-proof', payload: { launchId: 'fixture' } };
       },
       retainActiveLauncherProof() {}, queuePhoenixDetectionMonitor() {}
     });
@@ -199,10 +203,12 @@ test('both launch modes require a fresh trusted proof before starting Minecraft'
       await assert.rejects(context.scenario(), /Minecraft session unavailable/);
       assert(!calls.includes('opened'), 'Authentication failure opened Minecraft without usable proof');
       assert(!calls.includes('session'), 'Failed proof proceeded to direct session handoff');
+      assert(!calls.includes('observer-start'), 'Failed proof started incident reporting');
     } else {
       await context.scenario();
       assert.equal(calls.filter(value => value === 'opened').length, 1);
       assert(calls.indexOf('signed') < calls.indexOf('opened'));
+      assert(calls.includes('observer-start') && calls.includes('optional-observer-failed'), 'Optional reporting failure was not contained');
     }
   }
 });
